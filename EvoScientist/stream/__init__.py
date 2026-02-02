@@ -6,6 +6,9 @@ Provides:
 - ToolCallTracker: Incremental JSON parsing for tool parameters
 - ToolResultFormatter: Content-aware result formatting with Rich
 - Utility functions and constants
+- SubAgentState / StreamState: Stream state tracking
+- stream_agent_events: Async event generator
+- Display functions: Rich rendering for streaming and final output
 """
 
 from .emitter import StreamEventEmitter, StreamEvent
@@ -24,6 +27,15 @@ from .utils import (
     count_lines,
     truncate_with_line_hint,
     get_status_symbol,
+)
+from .state import SubAgentState, StreamState, _parse_todo_items, _build_todo_stats
+from .events import stream_agent_events
+from .display import (
+    console,
+    formatter,
+    format_tool_result_compact,
+    create_streaming_display,
+    display_final_results,
 )
 
 __all__ = [
@@ -50,4 +62,17 @@ __all__ = [
     "count_lines",
     "truncate_with_line_hint",
     "get_status_symbol",
+    # State
+    "SubAgentState",
+    "StreamState",
+    "_parse_todo_items",
+    "_build_todo_stats",
+    # Events
+    "stream_agent_events",
+    # Display
+    "console",
+    "formatter",
+    "format_tool_result_compact",
+    "create_streaming_display",
+    "display_final_results",
 ]
