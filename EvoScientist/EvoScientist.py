@@ -18,9 +18,10 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend, CompositeBackend
-from langchain.chat_models import init_chat_model
 
 from .backends import CustomSandboxBackend, MergedReadOnlyBackend
+from .config import get_effective_config, apply_config_to_env
+from .llm import get_chat_model
 from .middleware import create_skills_middleware, create_memory_middleware
 from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
 from .utils import load_subagents
@@ -36,12 +37,16 @@ from .paths import (
 # Configuration
 # =============================================================================
 
+# Load configuration from file/env/defaults
+_config = get_effective_config()
+apply_config_to_env(_config)
+
 # Backend mode: "sandbox" (with execute) or "filesystem" (read/write only)
 BACKEND_MODE = "sandbox"
 
-# Research limits
-MAX_CONCURRENT = 3  # Max parallel sub-agents
-MAX_ITERATIONS = 3  # Max delegation rounds
+# Research limits (from config)
+MAX_CONCURRENT = _config.max_concurrent
+MAX_ITERATIONS = _config.max_iterations
 
 # Workspace settings
 ensure_dirs()
@@ -64,10 +69,10 @@ SYSTEM_PROMPT = get_system_prompt(
     max_iterations=MAX_ITERATIONS,
 )
 
-# Initialize chat model
-chat_model = init_chat_model(
-    model="claude-sonnet-4-5-20250929",
-    model_provider="anthropic",
+# Initialize chat model using the LLM module (respects config settings)
+chat_model = get_chat_model(
+    model=_config.model,
+    provider=_config.provider,
     # thinking={"type": "enabled", "budget_tokens": 2000},
 )
 

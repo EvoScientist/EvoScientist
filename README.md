@@ -28,6 +28,7 @@
 
 
 ## 📖 Contents
+- [🤖 Supported Models](#-supported-models)
 - [⛏️ Installation](#️-installation)
 - [🔑 API Key Configuration](#-api-key-configuration)
 - [⚡ Quick Start](#-quick-start)
@@ -39,6 +40,24 @@
 - [📚 Acknowledgments](#-acknowledgments)
 - [📦 Codebase Contributors](#-codebase-contributors)
 - [📜 License](#-license)
+
+## 🤖 Supported Models
+
+| Provider | Short Name | Model ID |
+|----------|-----------|----------|
+| Anthropic | `claude-sonnet-4-5` | `claude-sonnet-4-5-20250929` |
+| Anthropic | `claude-opus-4-5` | `claude-opus-4-5-20251101` |
+| Anthropic | `claude-3-5-sonnet` | `claude-3-5-sonnet-20241022` |
+| Anthropic | `claude-3-5-haiku` | `claude-3-5-haiku-20241022` |
+| OpenAI | `gpt-4o` | `gpt-4o` |
+| OpenAI | `gpt-4o-mini` | `gpt-4o-mini` |
+| OpenAI | `o1` | `o1` |
+| OpenAI | `o1-mini` | `o1-mini` |
+| NVIDIA | `glm4.7` | `z-ai/glm4.7` |
+| NVIDIA | `deepseek-v3.1` | `deepseek-ai/deepseek-v3.1-terminus` |
+| NVIDIA | `nemotron-nano` | `nvidia/nemotron-3-nano-30b-a3b` |
+
+You can also use any full model ID directly — the provider will be inferred automatically.
 
 ## ⛏️ Installation
 
@@ -77,18 +96,30 @@ uv pip install -e .
 
 ## 🔑 API Key Configuration
 
-EvoScientist requires API keys for LLM inference and web search. You can configure them in two ways:
+EvoScientist requires API keys for LLM inference and web search. You can configure them in three ways:
 
-### Option A: Environment Variables (Global)
+### Option A: Interactive Setup Wizard (Recommended)
+
+```Shell
+EvoSci onboard
+```
+
+The wizard guides you through selecting a provider, entering API keys, choosing a model, and configuring workspace settings. Keys are validated automatically.
+
+### Option B: Environment Variables (Global)
 
 Set keys directly in your terminal session. Add these to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist across sessions:
 
 ```Shell
 export ANTHROPIC_API_KEY="your_anthropic_api_key_here"
 export TAVILY_API_KEY="your_tavily_api_key_here"
+
+# Optional: OpenAI or NVIDIA provider
+export OPENAI_API_KEY="your_openai_api_key_here"
+export NVIDIA_API_KEY="your_nvidia_api_key_here"
 ```
 
-### Option B: `.env` File (Project-level)
+### Option C: `.env` File (Project-level)
 
 Create a `.env` file in the project root. This keeps keys scoped to the project and out of your shell history:
 
@@ -108,7 +139,9 @@ TAVILY_API_KEY=your_tavily_api_key_here
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude ([console.anthropic.com](https://console.anthropic.com/)) |
+| `ANTHROPIC_API_KEY` | For Anthropic | Anthropic API key for Claude ([console.anthropic.com](https://console.anthropic.com/)) |
+| `OPENAI_API_KEY` | For OpenAI | OpenAI API key for GPT models ([platform.openai.com](https://platform.openai.com/)) |
+| `NVIDIA_API_KEY` | For NVIDIA | NVIDIA API key for NIM models ([build.nvidia.com](https://build.nvidia.com/)) |
 | `TAVILY_API_KEY` | Yes | Tavily API key for web search ([app.tavily.com](https://app.tavily.com/)) |
 
 ## ⚡ Quick Start
@@ -128,10 +161,24 @@ EvoSci # or EvoScientist
 **Optional arguments:**
 
 ```
+--mode <mode>      Workspace mode: 'daemon' (persistent) or 'run' (isolated per-session)
 --workdir <path>   Override workspace directory for this session
 --use-cwd          Use current working directory as workspace
 --thread-id <id>   Resume a conversation thread
 --no-thinking      Disable thinking display
+-p, --prompt <q>   Single-shot mode: execute query and exit
+```
+
+**Configuration commands:**
+
+```Shell
+EvoSci onboard                # Interactive setup wizard
+EvoSci onboard --skip-validation  # Skip API key validation
+EvoSci config                 # List all configuration values
+EvoSci config get <key>       # Get a single value
+EvoSci config set <key> <val> # Set a single value
+EvoSci config reset --yes     # Reset to defaults
+EvoSci config path            # Show config file path
 ```
 
 **Interactive Commands:**

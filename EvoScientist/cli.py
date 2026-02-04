@@ -10,6 +10,7 @@ Features:
 - Response panel (green) - shows final response
 - Thread ID support for multi-turn conversations
 - Interactive mode with prompt_toolkit
+- Configuration management (onboard, config commands)
 """
 
 import logging
@@ -25,6 +26,7 @@ from prompt_toolkit.history import FileHistory  # type: ignore[import-untyped]
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory  # type: ignore[import-untyped]
 from prompt_toolkit.formatted_text import HTML  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
+from rich.table import Table  # type: ignore[import-untyped]
 
 # Backward-compat re-exports (tests import these from EvoScientist.cli)
 from .stream.state import SubAgentState, StreamState, _parse_todo_items, _build_todo_stats  # noqa: F401
@@ -70,6 +72,8 @@ def print_banner(
     workspace_dir: str | None = None,
     memory_dir: str | None = None,
     mode: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
 ):
     """Print welcome banner with ASCII art logo, thread ID, workspace path, and mode."""
     for line, color in zip(EVOSCIENTIST_ASCII_LINES, _GRADIENT_COLORS):
@@ -84,9 +88,20 @@ def print_banner(
         trimmed = memory_dir.rstrip("/").rstrip("\\")
         info.append("\n  Memory dir: ", style="dim")
         info.append(_shorten_path(trimmed), style="cyan")
-    if mode:
-        info.append("\n  Mode: ", style="dim")
-        info.append(mode, style="magenta")
+    if model or provider or mode:
+        info.append("\n  ", style="dim")
+        parts = []
+        if model:
+            parts.append(("Model: ", model))
+        if provider:
+            parts.append(("Provider: ", provider))
+        if mode:
+            parts.append(("Mode: ", mode))
+        for i, (label, value) in enumerate(parts):
+            if i > 0:
+                info.append("  ", style="dim")
+            info.append(label, style="dim")
+            info.append(value, style="magenta")
     info.append("\n  Commands: ", style="dim")
     info.append("/exit", style="bold")
     info.append(", ", style="dim")
@@ -187,6 +202,8 @@ def cmd_interactive(
     workspace_dir: str | None = None,
     workspace_fixed: bool = False,
     mode: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -196,11 +213,13 @@ def cmd_interactive(
         workspace_dir: Per-session workspace directory path
         workspace_fixed: If True, /new keeps the same workspace directory
         mode: Workspace mode ('daemon' or 'run'), displayed in banner
+        model: Model name to display in banner
+        provider: LLM provider name to display in banner
     """
     thread_id = str(uuid.uuid4())
     from .EvoScientist import MEMORY_DIR
     memory_dir = MEMORY_DIR
-    print_banner(thread_id, workspace_dir, memory_dir, mode)
+    print_banner(thread_id, workspace_dir, memory_dir, mode, model, provider)
 
     history_file = str(os.path.expanduser("~/.EvoScientist_history"))
     session = PromptSession(
@@ -278,7 +297,13 @@ def cmd_interactive(
             console.print("\n[dim]Goodbye![/dim]")
             break
         except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
+            error_msg = str(e)
+            if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
+                console.print("[red]Error: API key not configured.[/red]")
+                console.print("[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]")
+                break
+            else:
+                console.print(f"[red]Error: {e}[/red]")
 
 
 def cmd_run(agent: Any, prompt: str, thread_id: str | None = None, show_thinking: bool = True, workspace_dir: str | None = None) -> None:
@@ -306,8 +331,14 @@ def cmd_run(agent: Any, prompt: str, thread_id: str | None = None, show_thinking
     try:
         _run_streaming(agent, prompt, thread_id, show_thinking, interactive=False)
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise
+        error_msg = str(e)
+        if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
+            console.print("[red]Error: API key not configured.[/red]")
+            console.print("[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]")
+            raise typer.Exit(1)
+        else:
+            console.print(f"[red]Error: {e}[/red]")
+            raise
 
 
 # =============================================================================
@@ -338,11 +369,147 @@ def _load_agent(workspace_dir: str | None = None):
 
 app = typer.Typer(no_args_is_help=False, add_completion=False)
 
+# Config subcommand group
+config_app = typer.Typer(help="Configuration management commands", invoke_without_command=True)
+app.add_typer(config_app, name="config")
+
+
+# =============================================================================
+# Onboard command
+# =============================================================================
+
+@app.command()
+def onboard(
+    skip_validation: bool = typer.Option(
+        False,
+        "--skip-validation",
+        help="Skip API key validation during setup"
+    ),
+):
+    """Interactive setup wizard for EvoScientist.
+
+    Guides you through configuring API keys, model selection,
+    workspace settings, and agent parameters.
+    """
+    from .onboard import run_onboard
+    run_onboard(skip_validation=skip_validation)
+
+
+# =============================================================================
+# Config commands
+# =============================================================================
+
+@config_app.callback(invoke_without_command=True)
+def config_callback(ctx: typer.Context):
+    """Configuration management commands."""
+    if ctx.invoked_subcommand is None:
+        config_list()
+
+
+@config_app.command("list")
+def config_list():
+    """List all configuration values."""
+    from .config import list_config, get_config_path
+
+    config_data = list_config()
+
+    table = Table(title="EvoScientist Configuration", show_header=True)
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value")
+
+    # Mask API keys
+    def format_value(key: str, value: Any) -> str:
+        if "api_key" in key and value:
+            return "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
+        if value == "":
+            return "[dim](not set)[/dim]"
+        return str(value)
+
+    for key, value in config_data.items():
+        table.add_row(key, format_value(key, value))
+
+    console.print(table)
+    console.print(f"\n[dim]Config file: {get_config_path()}[/dim]")
+
+
+@config_app.command("get")
+def config_get(key: str = typer.Argument(..., help="Configuration key to get")):
+    """Get a single configuration value."""
+    from .config import get_config_value
+
+    value = get_config_value(key)
+    if value is None:
+        console.print(f"[red]Unknown key: {key}[/red]")
+        raise typer.Exit(1)
+
+    # Mask API keys
+    if "api_key" in key and value:
+        display_value = "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
+    elif value == "":
+        display_value = "(not set)"
+    else:
+        display_value = str(value)
+
+    console.print(f"[cyan]{key}[/cyan]: {display_value}")
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Configuration key to set"),
+    value: str = typer.Argument(..., help="New value"),
+):
+    """Set a single configuration value."""
+    from .config import set_config_value
+
+    if set_config_value(key, value):
+        console.print(f"[green]Set {key}[/green]")
+    else:
+        console.print(f"[red]Invalid key: {key}[/red]")
+        raise typer.Exit(1)
+
+
+@config_app.command("reset")
+def config_reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Reset configuration to defaults."""
+    from .config import reset_config, get_config_path
+
+    config_path = get_config_path()
+
+    if not config_path.exists():
+        console.print("[yellow]No config file to reset.[/yellow]")
+        return
+
+    if not yes:
+        confirm = typer.confirm("Reset configuration to defaults?")
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    reset_config()
+    console.print("[green]Configuration reset to defaults.[/green]")
+
+
+@config_app.command("path")
+def config_path():
+    """Show the configuration file path."""
+    from .config import get_config_path
+
+    path = get_config_path()
+    exists = path.exists()
+    status = "[green]exists[/green]" if exists else "[dim]not created yet[/dim]"
+    console.print(f"{path} ({status})")
+
+
+# =============================================================================
+# Main callback (default behavior)
+# =============================================================================
 
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
-    prompt: Optional[str] = typer.Argument(None, help="Query to execute (single-shot mode)"),
+    prompt: Optional[str] = typer.Option(None, "-p", "--prompt", help="Query to execute (single-shot mode)"),
     thread_id: Optional[str] = typer.Option(None, "--thread-id", help="Thread ID for conversation persistence"),
     no_thinking: bool = typer.Option(False, "--no-thinking", help="Disable thinking display"),
     workdir: Optional[str] = typer.Option(None, "--workdir", help="Override workspace directory for this session"),
@@ -354,10 +521,30 @@ def _main_callback(
     ),
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI."""
-    from dotenv import load_dotenv  # type: ignore[import-untyped]
-    load_dotenv(override=True)
+    # If a subcommand was invoked, don't run the default behavior
+    if ctx.invoked_subcommand is not None:
+        return
 
-    show_thinking = not no_thinking
+    from dotenv import load_dotenv, find_dotenv  # type: ignore[import-untyped]
+    # find_dotenv() traverses up the directory tree to locate .env
+    load_dotenv(find_dotenv(), override=True)
+
+    # Load and apply configuration
+    from .config import get_effective_config, apply_config_to_env
+
+    # Build CLI overrides dict
+    cli_overrides = {}
+    if mode:
+        cli_overrides["default_mode"] = mode
+    if workdir:
+        cli_overrides["default_workdir"] = workdir
+    if no_thinking:
+        cli_overrides["show_thinking"] = False
+
+    config = get_effective_config(cli_overrides)
+    apply_config_to_env(config)
+
+    show_thinking = config.show_thinking if not no_thinking else False
 
     # Validate mutually exclusive options
     if workdir and use_cwd:
@@ -371,13 +558,11 @@ def _main_callback(
 
     ensure_dirs()
 
-    # Resolve effective mode (daemon is default)
-    default_mode = os.getenv("EVOSCIENTIST_DEFAULT_MODE", "daemon")
-    if default_mode not in ("run", "daemon"):
-        default_mode = "daemon"
+    # Resolve effective mode from config (CLI mode already applied via overrides)
     effective_mode: str | None = None  # None means explicit --workdir/--use-cwd was used
 
     # Resolve workspace directory for this session
+    # Priority: --use-cwd > --workdir > --mode (explicit) > default_workdir > default_mode
     if use_cwd:
         workspace_dir = os.getcwd()
         workspace_fixed = True
@@ -385,8 +570,35 @@ def _main_callback(
         workspace_dir = os.path.abspath(os.path.expanduser(workdir))
         os.makedirs(workspace_dir, exist_ok=True)
         workspace_fixed = True
+    elif mode:
+        # Explicit --mode overrides default_workdir
+        effective_mode = mode
+        workspace_root = config.default_workdir or str(default_workspace_dir())
+        workspace_root = os.path.abspath(os.path.expanduser(workspace_root))
+        if effective_mode == "run":
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            workspace_dir = os.path.join(workspace_root, "runs", session_id)
+            os.makedirs(workspace_dir, exist_ok=True)
+            workspace_fixed = False
+        else:  # daemon
+            workspace_dir = workspace_root
+            os.makedirs(workspace_dir, exist_ok=True)
+            workspace_fixed = True
+    elif config.default_workdir:
+        # Use configured default workdir with configured mode
+        workspace_root = os.path.abspath(os.path.expanduser(config.default_workdir))
+        effective_mode = config.default_mode
+        if effective_mode == "run":
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            workspace_dir = os.path.join(workspace_root, "runs", session_id)
+            os.makedirs(workspace_dir, exist_ok=True)
+            workspace_fixed = False
+        else:  # daemon
+            workspace_dir = workspace_root
+            os.makedirs(workspace_dir, exist_ok=True)
+            workspace_fixed = True
     else:
-        effective_mode = mode or default_mode
+        effective_mode = config.default_mode
         if effective_mode == "run":
             workspace_dir = _create_session_workspace()
             workspace_fixed = False
@@ -410,6 +622,8 @@ def _main_callback(
             workspace_dir=workspace_dir,
             workspace_fixed=workspace_fixed,
             mode=effective_mode,
+            model=config.model,
+            provider=config.provider,
         )
 
 
@@ -443,6 +657,9 @@ def _configure_logging():
 
 def main():
     """CLI entry point — delegates to the Typer app."""
+    import warnings
+    warnings.filterwarnings("ignore", message=".*not known to support tools.*")
+    warnings.filterwarnings("ignore", message=".*type is unknown and inference may fail.*")
     _configure_logging()
     app()
 
