@@ -76,6 +76,8 @@ class TestEvoScientistConfig:
         assert config.max_concurrent == 3
         assert config.max_iterations == 3
         assert config.show_thinking is True
+        assert config.imessage_enabled is False
+        assert config.imessage_allowed_senders == ""
 
     def test_custom_values(self):
         """Test that custom values can be set."""
@@ -240,6 +242,23 @@ class TestGetSetValues:
 
         set_config_value("max_concurrent", "5")
         assert get_config_value("max_concurrent") == 5
+
+    def test_set_imessage_enabled_coercion(self, temp_config_dir, clean_env):
+        """Test that imessage_enabled is coerced from string to bool."""
+        save_config(EvoScientistConfig())
+
+        set_config_value("imessage_enabled", "true")
+        assert get_config_value("imessage_enabled") is True
+
+        set_config_value("imessage_enabled", "false")
+        assert get_config_value("imessage_enabled") is False
+
+    def test_set_imessage_allowed_senders(self, temp_config_dir, clean_env):
+        """Test that imessage_allowed_senders stores comma-separated string."""
+        save_config(EvoScientistConfig())
+
+        set_config_value("imessage_allowed_senders", "+1234567890,+0987654321")
+        assert get_config_value("imessage_allowed_senders") == "+1234567890,+0987654321"
 
     def test_list_config(self, temp_config_dir, clean_env):
         """Test listing all config values."""

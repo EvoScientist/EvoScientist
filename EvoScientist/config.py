@@ -80,6 +80,10 @@ class EvoScientistConfig:
     # UI Settings
     show_thinking: bool = True
 
+    # Channel Settings
+    imessage_enabled: bool = False
+    imessage_allowed_senders: str = ""  # comma-separated, empty = allow all
+
 
 # =============================================================================
 # Config file operations

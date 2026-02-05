@@ -7,6 +7,8 @@ workspace settings, and agent parameters. Uses flow-style arrow-key selection UI
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import questionary
 from prompt_toolkit.styles import Style
@@ -51,7 +53,7 @@ CONFIRM_STYLE = Style.from_dict({
     "text": "",
 })
 
-STEPS = ["Provider", "API Key", "Model", "Tavily Key", "Workspace", "Parameters"]
+STEPS = ["Provider", "API Key", "Model", "Tavily Key", "Workspace", "Parameters", "Channels"]
 
 
 # =============================================================================
@@ -188,11 +190,15 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
         from google import genai
         client = genai.Client(api_key=api_key)
         # Make a minimal request to validate the key
-        list(client.models.list(config={"page_size": 1}))
+        pager = client.models.list(config={"page_size": 1})
+        next(iter(pager))  # fetch first model only
+        return True, "Valid"
+    except StopIteration:
+        # Empty result but request succeeded — key is valid
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
-        if "401" in error_str or "403" in error_str or "unauthorized" in error_str or "invalid" in error_str or "api key" in error_str:
+        if "400" in error_str or "401" in error_str or "403" in error_str or "unauthorized" in error_str or "invalid" in error_str or "api key" in error_str:
             return False, "Invalid API key"
         return False, f"Error: {e}"
 
@@ -611,6 +617,197 @@ def _step_parameters(config: EvoScientistConfig) -> tuple[int, int, bool]:
     return max_concurrent, max_iterations, show_thinking
 
 
+def validate_imessage() -> tuple[bool, str]:
+    """Validate iMessage environment by checking for the imsg CLI.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    # macOS only
+    if sys.platform != "darwin":
+        return False, "iMessage requires macOS"
+
+    from .channels.imessage.probe import find_cli
+
+    cli_path = find_cli()
+    if not cli_path:
+        return False, "not_installed"
+
+    # Check version
+    try:
+        result = subprocess.run(
+            [cli_path, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        version = result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        version = None
+
+    # Check RPC support
+    try:
+        result = subprocess.run(
+            [cli_path, "rpc", "--help"],
+            capture_output=True, text=True, timeout=5,
+        )
+        rpc_ok = result.returncode == 0
+    except Exception:
+        rpc_ok = False
+
+    if not rpc_ok:
+        return False, f"imsg found at {cli_path} but RPC not supported (update with: brew upgrade imsg)"
+
+    version_str = f" ({version})" if version else ""
+    return True, f"imsg{version_str} at {cli_path}"
+
+
+def _install_imsg() -> bool:
+    """Run brew install for imsg CLI.
+
+    Returns:
+        True if installation succeeded.
+    """
+    try:
+        proc = subprocess.run(
+            ["brew", "install", "steipete/tap/imsg"],
+            timeout=120,
+        )
+        return proc.returncode == 0
+    except FileNotFoundError:
+        console.print("  [red]✗ Homebrew not found[/red]")
+        console.print("  [dim]Install Homebrew first: https://brew.sh[/dim]")
+        return False
+    except subprocess.TimeoutExpired:
+        console.print("  [red]✗ Installation timed out[/red]")
+        return False
+    except Exception as e:
+        console.print(f"  [red]✗ Installation failed: {e}[/red]")
+        return False
+
+
+def _setup_imessage() -> bool:
+    """Guide the user through iMessage setup: install, validate, test.
+
+    Returns:
+        True if iMessage is ready to use.
+    """
+    # Step 1: Validate
+    console.print("  [dim]Checking iMessage environment...[/dim]")
+    valid, msg = validate_imessage()
+
+    if valid:
+        console.print(f"  [green]✓ {msg}[/green]")
+        return True
+
+    if msg == "iMessage requires macOS":
+        console.print(f"  [red]✗ {msg}[/red]")
+        return False
+
+    if msg == "not_installed":
+        console.print("  [yellow]✗ imsg CLI not installed[/yellow]")
+        console.print()
+
+        # Step 2: Offer to install
+        install = questionary.confirm(
+            "Install imsg via Homebrew? (brew install steipete/tap/imsg)",
+            default=True,
+            style=WIZARD_STYLE,
+            qmark="  ?",
+        ).ask()
+
+        if install is None:
+            raise KeyboardInterrupt()
+
+        if install:
+            console.print()
+            if _install_imsg():
+                console.print()
+                # Re-validate after install
+                valid, msg = validate_imessage()
+                if valid:
+                    console.print(f"  [green]✓ {msg}[/green]")
+                    return True
+                else:
+                    console.print(f"  [red]✗ {msg}[/red]")
+                    return False
+            else:
+                return False
+        else:
+            console.print("  [dim]Skipped. Install manually: brew install steipete/tap/imsg[/dim]")
+            return False
+    else:
+        # RPC not supported or other issue
+        console.print(f"  [red]✗ {msg}[/red]")
+        return False
+
+
+def _step_channels(config: EvoScientistConfig) -> tuple[bool, str]:
+    """Step 7: Select a channel to enable on startup.
+
+    Presents a single-select list with "Skip for now" as default.
+    Selecting a channel triggers validation and guided installation.
+
+    Args:
+        config: Current configuration.
+
+    Returns:
+        Tuple of (imessage_enabled, imessage_allowed_senders_csv).
+    """
+    # Determine default based on current config
+    default = "imessage" if config.imessage_enabled else "skip"
+
+    choices = [
+        Choice(title="Skip for now", value="skip"),
+        Choice(title="iMessage", value="imessage"),
+        # Future channels:
+        # Choice(title="Slack", value="slack"),
+        # Choice(title="Email", value="email"),
+    ]
+
+    selected = questionary.select(
+        "Select channel to enable on startup:",
+        choices=choices,
+        default=default,
+        style=WIZARD_STYLE,
+        use_indicator=True,
+    ).ask()
+
+    if selected is None:
+        raise KeyboardInterrupt()
+
+    if selected == "skip":
+        return False, ""
+
+    # iMessage selected — run guided setup
+    ready = _setup_imessage()
+
+    if not ready:
+        # Setup failed — ask if they want to enable anyway
+        console.print()
+        enable_anyway = questionary.confirm(
+            "Enable iMessage anyway? (will try to connect on startup)",
+            default=False,
+            style=WIZARD_STYLE,
+            qmark="  ?",
+        ).ask()
+        if enable_anyway is None:
+            raise KeyboardInterrupt()
+        if not enable_anyway:
+            return False, ""
+
+    # Ask for allowed senders (indented to align with ✓ status lines)
+    senders = questionary.text(
+        "Allowed senders (comma-separated, empty = all):",
+        default=config.imessage_allowed_senders,
+        style=WIZARD_STYLE,
+        qmark="  ?",
+    ).ask()
+
+    if senders is None:
+        raise KeyboardInterrupt()
+
+    return True, senders.strip()
+
+
 # =============================================================================
 # Progress Rendering (for tests and potential future use)
 # =============================================================================
@@ -726,6 +923,11 @@ def run_onboard(skip_validation: bool = False) -> bool:
         config.max_concurrent = max_concurrent
         config.max_iterations = max_iterations
         config.show_thinking = show_thinking
+
+        # Step 7: Channels
+        imessage_enabled, imessage_allowed_senders = _step_channels(config)
+        config.imessage_enabled = imessage_enabled
+        config.imessage_allowed_senders = imessage_allowed_senders
 
         # Confirm save
         console.print()

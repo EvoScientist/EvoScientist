@@ -29,6 +29,7 @@ from prompt_toolkit import PromptSession  # type: ignore[import-untyped]
 from prompt_toolkit.history import FileHistory  # type: ignore[import-untyped]
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory  # type: ignore[import-untyped]
 from prompt_toolkit.formatted_text import HTML  # type: ignore[import-untyped]
+from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 from rich.table import Table  # type: ignore[import-untyped]
 
@@ -234,8 +235,6 @@ def print_banner(
     info.append("/install-skill", style="bold")
     info.append(", ", style="dim")
     info.append("/uninstall-skill", style="bold")
-    info.append(", ", style="dim")
-    info.append("/channel", style="bold")
     console.print(info)
     console.print()
 
@@ -413,6 +412,69 @@ def _cmd_channel_stop() -> None:
 # CLI commands
 # =============================================================================
 
+def _print_channel_panel(channels: list[tuple[str, bool, str]]) -> None:
+    """Print a summary panel for active channels.
+
+    Args:
+        channels: List of (name, ok, detail) tuples.
+    """
+    lines: list[Text] = []
+    all_ok = True
+    for name, ok, detail in channels:
+        line = Text()
+        if ok:
+            line.append("● ", style="green")
+            line.append(name, style="bold")
+        else:
+            line.append("✗ ", style="yellow")
+            line.append(name, style="bold yellow")
+            all_ok = False
+        if detail:
+            line.append(f"  {detail}", style="dim")
+        lines.append(line)
+
+    body = Text("\n").join(lines)
+    border = "green" if all_ok else "yellow"
+    console.print(Panel(body, title="[bold]Channels[/bold]", border_style=border, expand=False))
+    console.print()
+
+
+def _auto_start_channel(agent: Any, thread_id: str, allowed_senders_csv: str) -> None:
+    """Start iMessage channel automatically from config.
+
+    Args:
+        agent: Compiled agent graph.
+        thread_id: Current thread ID.
+        allowed_senders_csv: Comma-separated allowed senders (empty = all).
+    """
+    try:
+        from .channels.imessage import IMessageConfig
+        from .channels.imessage.serve import IMessageServer
+
+        allowed: set[str] | None = None
+        if allowed_senders_csv.strip():
+            allowed = {s.strip() for s in allowed_senders_csv.split(",") if s.strip()}
+
+        config = IMessageConfig(allowed_senders=allowed if allowed else None)
+
+        _ChannelState.agent = agent
+        _ChannelState.thread_id = thread_id
+
+        server = IMessageServer(config, handler=_create_channel_handler())
+        _ChannelState.server = server
+        _ChannelState.thread = threading.Thread(
+            target=_run_channel_thread,
+            args=(server,),
+            daemon=True,
+        )
+        _ChannelState.thread.start()
+
+        detail = ", ".join(sorted(allowed)) if allowed else "all senders"
+        _print_channel_panel([("iMessage", True, detail)])
+    except Exception as e:
+        _print_channel_panel([("iMessage", False, str(e))])
+
+
 def cmd_interactive(
     agent: Any,
     show_thinking: bool = True,
@@ -421,6 +483,8 @@ def cmd_interactive(
     mode: str | None = None,
     model: str | None = None,
     provider: str | None = None,
+    imessage_enabled: bool = False,
+    imessage_allowed_senders: str = "",
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -432,6 +496,8 @@ def cmd_interactive(
         mode: Workspace mode ('daemon' or 'run'), displayed in banner
         model: Model name to display in banner
         provider: LLM provider name to display in banner
+        imessage_enabled: Whether to auto-start iMessage channel
+        imessage_allowed_senders: Comma-separated allowed senders
     """
     import nest_asyncio
     nest_asyncio.apply()
@@ -513,6 +579,10 @@ def cmd_interactive(
         """Async main loop with prompt_async and channel queue checking."""
         # Start background queue checker
         queue_task = asyncio.create_task(_check_channel_queue())
+
+        # Auto-start iMessage channel if enabled in config
+        if imessage_enabled and not _ChannelState.is_running():
+            _auto_start_channel(state["agent"], state["thread_id"], imessage_allowed_senders)
 
         try:
             _print_separator()
@@ -939,6 +1009,8 @@ def _main_callback(
             mode=effective_mode,
             model=config.model,
             provider=config.provider,
+            imessage_enabled=config.imessage_enabled,
+            imessage_allowed_senders=config.imessage_allowed_senders,
         )
 
 
