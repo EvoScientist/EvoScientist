@@ -197,7 +197,7 @@ def _cmd_uninstall_skill(name: str) -> None:
 def _cmd_channel(args: str) -> None:
     """Start iMessage channel server.
 
-    Usage: /channel [--allow SENDER] [--thinking] [--debounce SECONDS]
+    Usage: /channel [--allow SENDER] [--thinking]
     """
     import asyncio
     from .channels.imessage import IMessageConfig
@@ -206,16 +206,10 @@ def _cmd_channel(args: str) -> None:
     parts = args.split() if args else []
     allowed = set()
     send_thinking = "--thinking" in parts
-    debounce_window = 1.0
 
     for i, p in enumerate(parts):
         if p == "--allow" and i + 1 < len(parts):
             allowed.add(parts[i + 1])
-        elif p == "--debounce" and i + 1 < len(parts):
-            try:
-                debounce_window = float(parts[i + 1])
-            except ValueError:
-                pass
 
     config = IMessageConfig(
         allowed_senders=allowed if allowed else None,
@@ -226,11 +220,11 @@ def _cmd_channel(args: str) -> None:
         config,
         handler=None,
         send_thinking=send_thinking,
-        debounce_window=debounce_window,
     )
 
     on_thinking = server.send_thinking_message if send_thinking else None
-    handler = create_agent_handler(on_thinking=on_thinking)
+    on_todo = server.send_todo_message
+    handler = create_agent_handler(on_thinking=on_thinking, on_todo=on_todo)
     server.handler = handler
 
     console.print("[green]iMessage channel started[/green]")
@@ -240,7 +234,6 @@ def _cmd_channel(args: str) -> None:
         console.print("[dim]Allowing all senders[/dim]")
     if send_thinking:
         console.print("[dim]Thinking messages enabled[/dim]")
-    console.print(f"[dim]Message debounce: {debounce_window}s[/dim]")
     console.print("[dim]Press Ctrl+C to stop[/dim]\n")
 
     try:

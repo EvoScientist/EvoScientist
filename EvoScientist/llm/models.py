@@ -83,6 +83,10 @@ def get_chat_model(
             else:
                 provider = "anthropic"  # Default fallback
 
+    # Auto-enable thinking for Anthropic models
+    if provider == "anthropic" and "thinking" not in kwargs:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 2000}
+
     return init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
 

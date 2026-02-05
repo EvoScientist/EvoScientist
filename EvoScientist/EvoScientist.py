@@ -73,7 +73,6 @@ SYSTEM_PROMPT = get_system_prompt(
 chat_model = get_chat_model(
     model=_config.model,
     provider=_config.provider,
-    # thinking={"type": "enabled", "budget_tokens": 2000},
 )
 
 # Initialize workspace backend based on mode

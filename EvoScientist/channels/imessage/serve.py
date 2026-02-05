@@ -33,12 +33,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_agent_handler(on_thinking: Callable | None = None):
+def _format_todo_list(todos: list[dict]) -> str:
+    """Format todo items as a numbered list."""
+    lines = ["\U0001f4cb Todo List\n"]  # 📋
+    for i, item in enumerate(todos, 1):
+        content = item.get("content", "")
+        lines.append(f"{i}. {content}")
+    lines.append(f"\n\U0001f680 {len(todos)} tasks")  # 🚀
+    return "\n".join(lines)
+
+
+def create_agent_handler(
+    on_thinking: Callable | None = None,
+    on_todo: Callable | None = None,
+):
     """Create handler that uses EvoScientist agent.
 
     Args:
         on_thinking: Optional async callback for thinking content.
             Signature: async def on_thinking(sender: str, thinking: str) -> None
+        on_todo: Optional async callback for todo list updates.
+            Signature: async def on_todo(sender: str, content: str, metadata: dict) -> None
     """
     from langchain_core.messages import HumanMessage
     from ...EvoScientist import create_cli_agent
@@ -57,6 +72,9 @@ def create_agent_handler(on_thinking: Callable | None = None):
         if on_thinking:
             final_content = ""
             thinking_buffer = []
+            todo_sent = False
+            thinking_sent = False
+            _MIN_THINKING_LEN = 200  # Skip short thinking (simple conversations)
 
             async for event in stream_agent_events(agent, msg.content, thread_id):
                 event_type = event.get("type")
@@ -65,9 +83,20 @@ def create_agent_handler(on_thinking: Callable | None = None):
                     thinking_text = event.get("content", "")
                     if thinking_text:
                         thinking_buffer.append(thinking_text)
-                        if len("".join(thinking_buffer)) > 200:
-                            await on_thinking(sender, "".join(thinking_buffer), msg.metadata)
-                            thinking_buffer.clear()
+
+                elif event_type == "tool_call":
+                    if event.get("name") == "write_todos" and on_todo and not todo_sent:
+                        todos = event.get("args", {}).get("todos", [])
+                        if todos:
+                            # Flush thinking before todo (only if long enough)
+                            if thinking_buffer and not thinking_sent:
+                                full_thinking = "".join(thinking_buffer)
+                                if len(full_thinking) >= _MIN_THINKING_LEN:
+                                    await on_thinking(sender, full_thinking, msg.metadata)
+                                    thinking_sent = True
+                                thinking_buffer.clear()
+                            await on_todo(sender, _format_todo_list(todos), msg.metadata)
+                            todo_sent = True
 
                 elif event_type == "text":
                     final_content += event.get("content", "")
@@ -75,8 +104,11 @@ def create_agent_handler(on_thinking: Callable | None = None):
                 elif event_type == "done":
                     final_content = event.get("content", "") or final_content
 
-            if thinking_buffer:
-                await on_thinking(sender, "".join(thinking_buffer), msg.metadata)
+            if thinking_buffer and not thinking_sent:
+                full_thinking = "".join(thinking_buffer)
+                if len(full_thinking) >= _MIN_THINKING_LEN:
+                    await on_thinking(sender, full_thinking, msg.metadata)
+                    thinking_sent = True
 
             return final_content or "No response"
         else:
@@ -111,7 +143,9 @@ class IMessageServer:
         config: IMessageConfig,
         handler: Callable | None = None,
         send_thinking: bool = False,
-        debounce_window: float = 1.0,
+        initial_debounce: float = 2.0,
+        debounce_step: float = 0.5,
+        max_debounce: float = 5.0,
     ):
         """Initialize iMessage server.
 
@@ -119,14 +153,16 @@ class IMessageServer:
             config: iMessage channel configuration.
             handler: Message handler function. If None, uses echo handler.
             send_thinking: If True, send thinking content as intermediate messages.
-            debounce_window: Time window (seconds) to wait for additional messages
-                before processing. Messages from same sender within this window
-                are merged. Default 1.0s.
+            initial_debounce: Wait time after first message (seconds).
+            debounce_step: Additional wait per subsequent message.
+            max_debounce: Maximum debounce window cap.
         """
         self.config = config
         self.channel = IMessageChannel(config)
         self.send_thinking = send_thinking
-        self.debounce_window = debounce_window
+        self.initial_debounce = initial_debounce
+        self.debounce_step = debounce_step
+        self.max_debounce = max_debounce
         self._running = False
         self._pending_thinking: dict[str, str] = {}  # sender -> accumulated thinking
 
@@ -146,7 +182,16 @@ class IMessageServer:
         return f"Echo: {msg.content}"
 
     async def _process_buffered_messages(self, sender: str) -> None:
-        """Process all buffered messages for a sender."""
+        """Process all buffered messages for a sender.
+
+        If the sender is currently being processed, skip — new messages
+        stay in the buffer and will be picked up after current processing.
+        """
+        # Don't start a new handler if one is already running for this sender
+        if sender in self._processing:
+            logger.debug(f"Agent busy for {sender}, messages stay queued")
+            return
+
         if sender not in self._message_buffers:
             return
 
@@ -159,7 +204,6 @@ class IMessageServer:
 
         merged_content = "\n".join(messages)
         logger.info(f"Processing {len(messages)} merged message(s) from {sender}")
-        logger.debug(f"Using metadata: {metadata}")
 
         self._processing.add(sender)
         try:
@@ -170,7 +214,6 @@ class IMessageServer:
                     self.metadata = m
 
             merged_msg = MergedMessage(sender, merged_content, metadata)
-            logger.debug(f"Calling handler with metadata: {metadata}")
             response = await self.handler(merged_msg)
 
             if response:
@@ -184,25 +227,64 @@ class IMessageServer:
         finally:
             self._processing.discard(sender)
 
+            # If new messages arrived during processing, restart debounce
+            if sender in self._message_buffers and self._message_buffers[sender]:
+                msg_count = len(self._message_buffers[sender])
+                wait = min(
+                    self.initial_debounce + (msg_count - 1) * self.debounce_step,
+                    self.max_debounce,
+                )
+                logger.info(f"New messages queued for {sender}, restarting debounce ({wait:.1f}s)")
+
+                async def restart_debounce(_s=sender, _w=wait):
+                    await asyncio.sleep(_w)
+                    await self._process_buffered_messages(_s)
+
+                self._debounce_tasks[sender] = asyncio.create_task(restart_debounce())
+
     async def _queue_message(self, msg) -> None:
-        """Queue a message for debounced processing."""
+        """Queue a message with progressive debounce.
+
+        If agent is busy, just buffer — messages will be picked up
+        after current processing finishes. Otherwise, start debounce:
+        1st: 2.0s, 2nd: 2.5s, 3rd: 3.0s, ... up to max_debounce.
+        """
         sender = msg.sender
 
         if sender not in self._message_buffers:
             self._message_buffers[sender] = []
-            # Save metadata from first message (contains chat_id/chat_guid for replies)
             self._message_metadata[sender] = msg.metadata
-            logger.debug(f"Saved metadata for {sender}: {msg.metadata}")
         self._message_buffers[sender].append(msg.content)
+
+        # Agent is busy — just buffer, no debounce needed
+        if sender in self._processing:
+            logger.debug(f"Agent busy for {sender}, buffering message #{len(self._message_buffers[sender])}")
+            return
 
         if sender in self._debounce_tasks:
             self._debounce_tasks[sender].cancel()
 
-        async def debounce_callback():
-            await asyncio.sleep(self.debounce_window)
-            await self._process_buffered_messages(sender)
+        msg_count = len(self._message_buffers[sender])
+        wait = min(
+            self.initial_debounce + (msg_count - 1) * self.debounce_step,
+            self.max_debounce,
+        )
+        logger.debug(f"Debounce for {sender}: {wait:.1f}s (message #{msg_count})")
+
+        async def debounce_callback(_s=sender, _w=wait):
+            await asyncio.sleep(_w)
+            await self._process_buffered_messages(_s)
 
         self._debounce_tasks[sender] = asyncio.create_task(debounce_callback())
+
+    async def send_todo_message(self, sender: str, content: str, metadata: dict | None = None) -> None:
+        """Send todo list as intermediate message."""
+        logger.debug(f"Sending todo list to {sender}")
+        await self.channel.send(OutgoingMessage(
+            recipient=sender,
+            content=content,
+            metadata=metadata or {},
+        ))
 
     async def send_thinking_message(self, sender: str, thinking: str, metadata: dict | None = None) -> None:
         """Send thinking content as intermediate message."""
@@ -210,7 +292,7 @@ class IMessageServer:
             return
 
         logger.debug(f"Sending thinking to {sender} with metadata: {metadata}")
-        content = f"[Thinking...]\n{thinking}"
+        content = f"\U0001f9e0\n{thinking}\n\u23f3"
         await self.channel.send(OutgoingMessage(
             recipient=sender,
             content=content,
@@ -228,8 +310,7 @@ class IMessageServer:
             logger.info(f"Allowed senders: {self.config.allowed_senders}")
         else:
             logger.info("Allowing all senders")
-        if self.debounce_window > 0:
-            logger.info(f"Message debounce: {self.debounce_window}s")
+        logger.info(f"Debounce: {self.initial_debounce}s + {self.debounce_step}s/msg (max {self.max_debounce}s)")
 
         try:
             async for msg in self.channel.receive():
@@ -282,12 +363,6 @@ def parse_args():
         action="store_true",
         help="Send thinking content as intermediate messages (requires --agent)",
     )
-    parser.add_argument(
-        "--debounce",
-        type=float,
-        default=1.0,
-        help="Message debounce window in seconds (default: 1.0)",
-    )
     return parser.parse_args()
 
 
@@ -313,12 +388,12 @@ async def async_main():
         config,
         handler=None,
         send_thinking=send_thinking,
-        debounce_window=args.debounce,
     )
 
     if args.agent:
         on_thinking = server.send_thinking_message if send_thinking else None
-        handler = create_agent_handler(on_thinking=on_thinking)
+        on_todo = server.send_todo_message
+        handler = create_agent_handler(on_thinking=on_thinking, on_todo=on_todo)
         server.handler = handler
         if send_thinking:
             logger.info("Thinking messages enabled")
