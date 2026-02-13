@@ -349,7 +349,7 @@ def cmd_interactive(
     async def _cmd_threads():
         """Handle /threads command — show recent sessions."""
         threads = await list_threads(
-            limit=20, include_message_count=True, include_preview=True,
+            limit=0, include_message_count=True, include_preview=True,
         )
         if not threads:
             console.print("[yellow]No saved sessions.[/yellow]")
@@ -423,7 +423,7 @@ def cmd_interactive(
         if not arg:
             # Show interactive session picker with conversation previews
             threads = await list_threads(
-                limit=10, include_message_count=True, include_preview=True,
+                limit=0, include_message_count=True, include_preview=True,
             )
             if not threads:
                 console.print("[yellow]No sessions to resume.[/yellow]")
@@ -453,11 +453,20 @@ def cmd_interactive(
                 label = f"{_pad_to_width(left_text, col_width)}({tid} {when})"
                 choices.append(questionary.Choice(title=label, value=tid))
 
-            selected = questionary.select(
+            from prompt_toolkit.layout.dimension import Dimension
+            from questionary.prompts.common import InquirerControl
+
+            prompt = questionary.select(
                 "Select session to resume:",
                 choices=choices,
                 style=_PICKER_STYLE,
-            ).ask()
+            )
+            # Limit visible list to 10 rows with scrolling
+            for window in prompt.application.layout.find_all_windows():
+                if isinstance(window.content, InquirerControl):
+                    window.height = Dimension(max=10)
+                    break
+            selected = prompt.ask()
 
             if selected is None:
                 return

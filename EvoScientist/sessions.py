@@ -184,9 +184,12 @@ async def list_threads(
             WHERE json_extract(metadata, '$.agent_name') = ?
             GROUP BY thread_id
             ORDER BY updated_at DESC
-            LIMIT ?
         """
-        async with conn.execute(query, (AGENT_NAME, limit)) as cur:
+        params: tuple = (AGENT_NAME,)
+        if limit > 0:
+            query += "    LIMIT ?\n"
+            params = (AGENT_NAME, limit)
+        async with conn.execute(query, params) as cur:
             rows = await cur.fetchall()
 
         threads = [
