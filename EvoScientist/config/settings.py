@@ -85,9 +85,101 @@ class EvoScientistConfig:
     show_thinking: bool = True
 
     # Channel Settings
-    imessage_enabled: bool = False
-    imessage_allowed_senders: str = ""  # comma-separated, empty = allow all
-    imessage_send_thinking: bool = True  # forward thinking to channel
+    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "" (comma-separated for multiple)
+    require_mention: str = "group"  # "always" | "group" | "off"
+    text_chunk_limit: int = 0  # 0 = use capability default
+    allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
+
+    # iMessage Settings
+    imessage_enabled: bool = False  # legacy compat
+    imessage_allowed_senders: str = ""
+    imessage_send_thinking: bool = True
+
+    # Telegram Settings
+    telegram_bot_token: str = ""
+    telegram_allowed_senders: str = ""
+    telegram_proxy: str = ""
+
+    # Discord Settings
+    discord_bot_token: str = ""
+    discord_allowed_senders: str = ""
+    discord_allowed_channels: str = ""
+    discord_proxy: str = ""
+
+    # Slack Settings
+    slack_bot_token: str = ""
+    slack_app_token: str = ""
+    slack_allowed_senders: str = ""
+    slack_allowed_channels: str = ""
+    slack_proxy: str = ""
+
+    # Feishu Settings
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_verification_token: str = ""
+    feishu_encrypt_key: str = ""
+    feishu_webhook_port: int = 9000
+    feishu_allowed_senders: str = ""
+    feishu_domain: str = "https://open.feishu.cn"
+    feishu_proxy: str = ""
+
+    # WeChat Settings
+    wechat_backend: str = "wecom"
+    wechat_webhook_port: int = 9001
+    wechat_allowed_senders: str = ""
+    wechat_proxy: str = ""
+    wechat_wecom_corp_id: str = ""
+    wechat_wecom_agent_id: str = ""
+    wechat_wecom_secret: str = ""
+    wechat_wecom_token: str = ""
+    wechat_wecom_encoding_aes_key: str = ""
+    wechat_mp_app_id: str = ""
+    wechat_mp_app_secret: str = ""
+    wechat_mp_token: str = ""
+    wechat_mp_encoding_aes_key: str = ""
+
+    # DingTalk Settings
+    dingtalk_client_id: str = ""
+    dingtalk_client_secret: str = ""
+    dingtalk_allowed_senders: str = ""
+    dingtalk_proxy: str = ""
+
+    # Email Settings
+    email_imap_host: str = ""
+    email_imap_port: int = 993
+    email_imap_username: str = ""
+    email_imap_password: str = ""
+    email_imap_mailbox: str = "INBOX"
+    email_imap_use_ssl: bool = True
+    email_smtp_host: str = ""
+    email_smtp_port: int = 587
+    email_smtp_username: str = ""
+    email_smtp_password: str = ""
+    email_smtp_use_tls: bool = True
+    email_from_address: str = ""
+    email_poll_interval: int = 30
+    email_mark_seen: bool = True
+    email_max_body_chars: int = 12000
+    email_subject_prefix: str = "Re: "
+    email_allowed_senders: str = ""
+
+    # QQ Settings
+    qq_app_id: str = ""
+    qq_app_secret: str = ""
+    qq_allowed_senders: str = ""
+
+    # Signal Settings
+    signal_phone_number: str = ""
+    signal_cli_path: str = "signal-cli"
+    signal_config_dir: str = ""
+    signal_allowed_senders: str = ""
+    signal_rpc_port: int = 7583
+
+    # Shared webhook port (0 = disabled)
+    shared_webhook_port: int = 9000
+
+    # DM access control policy
+    dm_policy: str = "allowlist"
 
 
 # =============================================================================

@@ -44,6 +44,17 @@ dev = [
     "ruff>=0.5",
     "build>=1.0",
 ]
+telegram = ["python-telegram-bot>=21.0"]
+discord = ["discord.py>=2.3"]
+slack = ["slack-sdk>=3.27", "aiohttp>=3.9"]
+wechat = ["pycryptodome>=3.20"]
+all-channels = [
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3",
+    "aiohttp>=3.9",
+    "slack-sdk>=3.27",
+    "pycryptodome>=3.20",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/EvoScientist/EvoScientist"

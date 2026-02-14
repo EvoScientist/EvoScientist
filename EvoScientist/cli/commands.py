@@ -12,8 +12,9 @@ from rich.table import Table
 
 from ..stream.display import console
 from ..paths import ensure_dirs, default_workspace_dir
-from ._app import app, config_app, mcp_app
-from .agent import _deduplicate_run_name, _create_session_workspace, _load_agent
+from ._app import app, config_app, mcp_app, channel_app
+from .agent import _deduplicate_run_name, _create_session_workspace, _load_agent, _shorten_path
+from .channel import _channels_stop, _start_channels_bus_mode
 from .mcp_ui import (
     _mcp_list_servers,
     _mcp_add_server_from_kwargs,
@@ -43,6 +44,100 @@ def onboard(
     """
     from ..config import run_onboard
     run_onboard(skip_validation=skip_validation)
+
+
+# =============================================================================
+# Channel setup command
+# =============================================================================
+
+@channel_app.command("setup")
+def channel_setup():
+    """Interactive channel configuration wizard.
+
+    Guides you through selecting and configuring a messaging channel
+    (Telegram, Discord, or iMessage).
+    """
+    import asyncio
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    from ..config import load_config, save_config
+    from ..config.onboard import _step_channels
+
+    config = load_config()
+    updates = _step_channels(config)
+    if updates:
+        for key, value in updates.items():
+            setattr(config, key, value)
+        save_config(config)
+        console.print("[green]Channel configuration saved.[/green]")
+    else:
+        console.print("[dim]No changes made.[/dim]")
+
+
+# =============================================================================
+# Serve command (headless mode)
+# =============================================================================
+
+@app.command()
+def serve(
+    no_thinking: bool = typer.Option(False, "--no-thinking", help="Disable thinking relay to channels"),
+    workdir: Optional[str] = typer.Option(None, "--workdir", help="Override workspace directory"),
+):
+    """Run EvoScientist in headless mode -- channels only, no interactive prompt.
+
+    Starts all configured channels and processes messages via the agent.
+    Press Ctrl+C to shut down.
+    """
+    import nest_asyncio  # type: ignore[import-untyped]
+    import uuid
+    nest_asyncio.apply()
+
+    from dotenv import load_dotenv, find_dotenv  # type: ignore[import-untyped]
+    load_dotenv(find_dotenv(), override=True)
+
+    from ..config import get_effective_config, apply_config_to_env
+
+    config = get_effective_config()
+    apply_config_to_env(config)
+
+    if not config.channel_enabled:
+        console.print("[red]No channels configured.[/red]")
+        console.print("[dim]Run [bold]evosci channel setup[/bold] first.[/dim]")
+        raise typer.Exit(1)
+
+    show_thinking = not no_thinking
+    ensure_dirs()
+
+    if workdir:
+        ws = os.path.abspath(os.path.expanduser(workdir))
+        os.makedirs(ws, exist_ok=True)
+    else:
+        ws = str(default_workspace_dir())
+        os.makedirs(ws, exist_ok=True)
+
+    console.print("[dim]Loading agent...[/dim]")
+    agent = _load_agent(workspace_dir=ws)
+    tid = str(uuid.uuid4())
+
+    _start_channels_bus_mode(config, agent, tid, show_thinking)
+    console.print("[green]Serve mode started (bus mode).[/green]")
+
+    console.print(f"[dim]Thread: {tid}[/dim]")
+    console.print(f"[dim]Workspace: {_shorten_path(ws)}[/dim]")
+    console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
+
+    import time
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Shutting down...[/dim]")
+    finally:
+        _channels_stop()
+        console.print("[dim]Stopped.[/dim]")
 
 
 # =============================================================================
@@ -430,9 +525,6 @@ def _main_callback(
             mode=effective_mode,
             model=config.model,
             provider=config.provider,
-            imessage_enabled=config.imessage_enabled,
-            imessage_allowed_senders=config.imessage_allowed_senders,
-            imessage_send_thinking=config.imessage_send_thinking,
             run_name=name,
             thread_id=thread_id,
         )

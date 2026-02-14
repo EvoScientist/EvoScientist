@@ -34,6 +34,9 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     # Tools
     "tavily_search": (".tools", "tavily_search"),
     "think_tool": (".tools", "think_tool"),
+    "view_image": (".tools", "view_image"),
+    # Middleware
+    "create_skills_middleware": (".middleware", "create_skills_middleware"),
     # Sessions
     "get_checkpointer": (".sessions", "get_checkpointer"),
     "generate_thread_id": (".sessions", "generate_thread_id"),

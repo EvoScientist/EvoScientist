@@ -5,41 +5,309 @@ This module defines the Channel interface that all messaging channels
 """
 
 from abc import ABC, abstractmethod
+import asyncio
+import dataclasses
+import logging
+import re
+import time
+from collections import defaultdict
+from collections.abc import Awaitable, Callable as CallableABC
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import AsyncIterator
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable
+
+from ..paths import WORKSPACE_ROOT
+
+from .bus.events import InboundMessage, OutboundMessage
+from .capabilities import ChannelCapabilities
+from .formatter import UnifiedFormatter
+from .plugin import ChannelPlugin, ChannelMeta
+
+_logger = logging.getLogger(__name__)
+
+
+# ── Text chunking ────────────────────────────────────────────────────
+
+def chunk_text(text: str, limit: int) -> list[str]:
+    """Split text into chunks that respect logical boundaries.
+
+    Splitting priority (highest to lowest):
+    1. Code block boundaries (``` fences)
+    2. Double newlines (paragraph breaks)
+    3. Single newlines
+    4. Spaces (word boundaries)
+    5. Hard cut (last resort)
+
+    Code blocks are never split mid-block when possible. If a single code
+    block exceeds the limit it is sent as its own chunk(s).
+
+    Args:
+        text: The text to split.
+        limit: Maximum characters per chunk.
+
+    Returns:
+        List of text chunks, each <= limit characters.
+    """
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        # Try to find a split point within the limit
+        segment = remaining[:limit]
+
+        # 1. Prefer splitting at code block boundary (``` at line start)
+        best = -1
+        fence_pos = segment.rfind("\n```")
+        if fence_pos > 0:
+            line_end = segment.find("\n", fence_pos + 1)
+            if line_end == -1:
+                line_end = len(segment)
+            best = line_end
+
+        # 2. Double newline (paragraph break)
+        if best == -1:
+            pos = segment.rfind("\n\n")
+            if pos > 0:
+                best = pos
+
+        # 3. Single newline
+        if best == -1:
+            pos = segment.rfind("\n")
+            if pos > 0:
+                best = pos
+
+        # 4. Space (word boundary)
+        if best == -1:
+            pos = segment.rfind(" ")
+            if pos > 0:
+                best = pos
+
+        # 5. Hard cut
+        if best == -1:
+            best = limit
+
+        chunk = remaining[:best].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[best:].lstrip("\n")
+
+    return chunks
+
+
+# ── Attachment / media helpers ───────────────────────────────────────
+
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20 MB
+MEDIA_DIR = WORKSPACE_ROOT / "media"
+
+IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+VIDEO_EXTS = frozenset({".mp4", ".mov", ".avi", ".webm"})
+AUDIO_EXTS = frozenset({".mp3", ".ogg", ".m4a", ".wav"})
+
+
+def classify_media(ext: str) -> str | None:
+    """Classify a file extension into a media type string.
+
+    Returns ``"image"``, ``"video"``, ``"audio"``, or ``None``.
+    """
+    ext = ext.lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in VIDEO_EXTS:
+        return "video"
+    if ext in AUDIO_EXTS:
+        return "audio"
+    return None
+
+
+def media_path(filename: str) -> Path:
+    """Ensure MEDIA_DIR exists and return a path inside it."""
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    return MEDIA_DIR / filename
+
+
+def check_attachment_size(file_size: int, filename: str) -> str | None:
+    """Return a 'too large' annotation if *file_size* exceeds the limit.
+
+    Returns ``None`` when the file is within the allowed size.
+    """
+    if file_size > MAX_ATTACHMENT_BYTES:
+        return f"[attachment: {filename} - too large ({file_size} bytes)]"
+    return None
+
+
+async def download_attachment(
+    url: str,
+    filename: str,
+    *,
+    channel_name: str = "",
+    headers: dict[str, str] | None = None,
+    file_size: int | None = None,
+    proxy: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Download an attachment via httpx.
+
+    Returns ``(local_path, annotation)``.
+
+    If *file_size* exceeds ``MAX_ATTACHMENT_BYTES``, returns
+    ``(None, too-large-annotation)`` without downloading.
+    On download failure returns ``(None, failure-annotation)``.
+    On success returns ``(local_path_str, success-annotation)``.
+    """
+    if file_size is not None:
+        too_large = check_attachment_size(file_size, filename)
+        if too_large:
+            return None, too_large
+
+    try:
+        import httpx
+
+        safe_name = filename.replace("/", "_")
+        prefix = f"{channel_name}_" if channel_name else ""
+        local_path = media_path(f"{prefix}{safe_name}")
+
+        async with httpx.AsyncClient(proxy=proxy) as client:
+            resp = await client.get(url, headers=headers or {}, timeout=30)
+        if resp.status_code != 200:
+            return None, f"[attachment: {filename} - download failed]"
+
+        # Check Content-Length when file_size was not known beforehand
+        if file_size is None:
+            cl = resp.headers.get("content-length")
+            if cl:
+                try:
+                    too_large = check_attachment_size(int(cl), filename)
+                    if too_large:
+                        return None, too_large
+                except (ValueError, TypeError):
+                    pass
+            if len(resp.content) > MAX_ATTACHMENT_BYTES:
+                return None, check_attachment_size(len(resp.content), filename)
+
+        local_path.write_bytes(resp.content)
+        return str(local_path), f"[attachment: {local_path}]"
+    except Exception as e:
+        _logger.warning(f"Failed to download attachment: {e}")
+        return None, f"[attachment: {filename} - download failed]"
+
+# Deprecated aliases — use InboundMessage / OutboundMessage instead.
+IncomingMessage = InboundMessage
+OutgoingMessage = OutboundMessage
 
 
 @dataclass
-class IncomingMessage:
-    """Represents a message received from a channel."""
+class RawIncoming:
+    """Raw data extracted from a platform-specific message event.
 
-    sender: str  # Phone number, email, or unique identifier
-    content: str  # Message text content
-    timestamp: datetime  # When the message was sent
-    message_id: str  # Unique identifier for the message
-    metadata: dict = field(default_factory=dict)  # Channel-specific metadata
+    Each channel's ``_on_message`` populates this with platform data,
+    then calls ``_enqueue_raw()`` which handles allow-list checks,
+    content merging, and ``InboundMessage`` creation.
+    """
+
+    sender_id: str
+    chat_id: str
+    text: str = ""
+    media_files: list[str] = field(default_factory=list)
+    content_annotations: list[str] = field(default_factory=list)
+    timestamp: datetime = field(default_factory=datetime.now)
+    message_id: str = ""
+    metadata: dict = field(default_factory=dict)
+    is_group: bool = False
+    was_mentioned: bool = True  # default True so DMs always pass
 
 
-@dataclass
-class OutgoingMessage:
-    """Represents a message to be sent through a channel."""
-
-    recipient: str  # Phone number, email, or unique identifier
-    content: str  # Message text content
-    reply_to: str | None = None  # Optional message ID being replied to
-    metadata: dict = field(default_factory=dict)  # Channel-specific metadata
-
-
-class Channel(ABC):
+class Channel(ChannelPlugin, ABC):
     """Abstract base class for messaging channels.
 
     Subclasses must implement:
     - start(): Initialize the channel (connect, authenticate, etc.)
-    - stop(): Clean up resources
-    - receive(): Async iterator yielding incoming messages
-    - send(): Send a message through the channel
+    - _send_chunk(): Send a single text chunk (platform-specific)
+
+    Subclasses may optionally override:
+    - _cleanup(): Channel-specific teardown (called by stop())
+    - _format_chunk(): Convert Markdown to channel format
+    - _is_ready(): Return False if channel cannot send
+    - _resolve_chat_id(): Extract chat_id from message
+    - receive(): Only if custom exit conditions are needed
+
+    Subclasses should set ``name`` to a unique identifier (e.g. "telegram").
     """
+
+    name: str = "base"
+    capabilities: ChannelCapabilities = ChannelCapabilities()
+    _typing_interval: float = 5.0
+    _ready_attrs: tuple[str, ...] = ()
+
+    def __init__(self, config, *, queue_maxsize: int = 1000):
+        ChannelPlugin.__init__(self)
+        self.id = self.name
+        self.meta = ChannelMeta(id=self.name, label=self.name.title())
+
+        self.config = config
+
+        # Auto-configure formatter from capabilities
+        self._formatter = UnifiedFormatter.for_channel(self.capabilities.format_type)
+        self._queue: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=queue_maxsize)
+        self._running = False
+
+        # Typing indicator — delegated to TypingManager
+        from .middleware import TypingManager
+        self._typing_manager = TypingManager(
+            self._send_typing_action, interval=self._typing_interval,
+        )
+        # Keep legacy dict reference for any subclass that touches it directly
+        self._typing_tasks = self._typing_manager._tasks
+
+        # Bus integration (injected by ChannelManager.register / set_bus)
+        self._bus: Any = None
+        self.send_thinking: bool = False
+        self._on_activity: Callable | None = None
+
+        # Debounce settings
+        self.initial_debounce: float = 2.0
+        self.debounce_step: float = 0.5
+        self.max_debounce: float = 5.0
+
+        # Per-sender message buffers for debouncing
+        self._message_buffers: dict[str, list[str]] = {}
+        self._message_metadata: dict[str, dict] = {}
+        self._message_media: dict[str, list[str]] = {}
+        self._message_ids: dict[str, str] = {}
+        self._debounce_tasks: dict[str, asyncio.Task] = {}
+
+        # Deduplication
+        from .middleware import DedupCache
+        self._dedup = DedupCache()
+
+        # Mention gating: "always" | "group" | "off"
+        self.require_mention: str = getattr(config, "require_mention", "group")
+
+        # DM policy: "open" | "allowlist" | "pairing"
+        self.dm_policy: str = getattr(config, "dm_policy", "allowlist")
+
+        # Shared pairing manager for DM pairing mode
+        from .middleware import PairingManager
+        self._pairing_manager = PairingManager()
+
+        # Retry configuration (auto-resolved from channel name)
+        from .retry import RetryConfig, DEFAULT_RETRY, RETRY_PRESETS
+        self._retry_config: RetryConfig = RETRY_PRESETS.get(self.name, DEFAULT_RETRY)
+
+        # Per-chat send locks to prevent message reordering
+        self._send_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+        # Group history buffer for context injection
+        from .middleware import GroupHistoryBuffer
+        self._group_history = GroupHistoryBuffer()
 
     @abstractmethod
     async def start(self) -> None:
@@ -55,56 +323,684 @@ class Channel(ABC):
         """
         pass
 
-    @abstractmethod
     async def stop(self) -> None:
-        """Stop the channel and clean up resources.
+        """Stop the channel. Cancels typing tasks, then calls _cleanup()."""
+        self._running = False
+        await self._typing_manager.stop_all()
+        await self._cleanup()
 
-        This method should:
-        - Close connections
-        - Cancel background tasks
-        - Release any held resources
+    async def _cleanup(self) -> None:
+        """Channel-specific teardown. Override in subclasses."""
+
+    async def receive(self) -> AsyncIterator[InboundMessage]:
+        """Yield incoming messages from the queue.
+
+        Default implementation polls ``self._queue``. Override only if
+        the channel needs custom exit conditions.
         """
-        pass
+        while self._running:
+            try:
+                msg = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                yield msg
+            except asyncio.TimeoutError:
+                continue
+
+    async def send(self, message: OutboundMessage) -> bool:
+        """Send a message. Handles chunking, retry, and error logging.
+
+        Subclasses override ``_send_chunk()`` for the platform-specific call.
+        Override ``_format_chunk()`` to convert Markdown to channel format.
+
+        A per-chat lock ensures messages to the same chat are serialised,
+        preventing out-of-order delivery when multiple sends overlap.
+
+        If formatting expands a chunk beyond the platform limit (e.g. Markdown
+        → HTML), the chunk is automatically re-split at a smaller size.  Per-
+        chunk errors are logged but do not abort delivery of remaining chunks.
+
+        When the channel satisfies ``ThreadingAdapter``, its ``reply_to_mode``
+        controls which chunks carry a ``reply_to`` reference.
+        """
+        if not self._is_ready():
+            return False
+        try:
+            chat_id = self._resolve_chat_id(message)
+            limit = self._get_chunk_limit()
+            async with self._send_locks[chat_id]:
+                pairs = self._prepare_chunks(message.content, limit)
+                had_error = False
+                for i, (formatted, raw) in enumerate(pairs):
+                    reply_to = self._resolve_reply_to(message.reply_to, i)
+                    try:
+                        await self._send_with_retry(
+                            lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
+                                self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
+                            )
+                        )
+                    except Exception as chunk_err:
+                        _logger.error(
+                            f"{self.name} chunk {i} send error: {chunk_err}"
+                        )
+                        had_error = True
+            return not had_error
+        except Exception as e:
+            _logger.error(f"{self.name} send error: {e}")
+            return False
+
+    def _resolve_reply_to(self, reply_to: str | None, chunk_index: int) -> str | None:
+        """Determine the reply_to value for a given chunk index.
+
+        Legacy: reply_to on first chunk only.
+        """
+        if not reply_to:
+            return None
+        return reply_to if chunk_index == 0 else None
+
+    def _prepare_chunks(
+        self, content: str, limit: int,
+    ) -> list[tuple[str, str]]:
+        """Build ``(formatted, raw)`` pairs, re-splitting when formatting
+        expands a chunk beyond *limit*.
+
+        Returns a list of ``(formatted_text, raw_text)`` tuples ready
+        for ``_send_chunk()``.
+        """
+        raw_chunks = chunk_text(content, limit)
+        pairs: list[tuple[str, str]] = []
+        for raw in raw_chunks:
+            formatted = self._format_chunk(raw)
+            if len(formatted) <= limit:
+                pairs.append((formatted, raw))
+            else:
+                # Re-chunk at half the limit to leave room for format expansion
+                sub_limit = max(limit // 2, 500)
+                for sub_raw in chunk_text(raw, sub_limit):
+                    sub_fmt = self._format_chunk(sub_raw)
+                    if len(sub_fmt) <= limit:
+                        pairs.append((sub_fmt, sub_raw))
+                    else:
+                        # Still too long — send raw text (guaranteed to fit)
+                        pairs.append((sub_raw, sub_raw))
+        return pairs
+
+    def _is_ready(self) -> bool:
+        """Return False if the channel cannot send (e.g. client not connected).
+
+        Default checks that every attribute named in ``_ready_attrs`` is truthy.
+        Override for channels with more complex readiness logic.
+        """
+        if not self._ready_attrs:
+            return True
+        return all(getattr(self, attr, None) for attr in self._ready_attrs)
+
+    def _resolve_chat_id(self, message: OutboundMessage) -> str:
+        """Extract chat_id from metadata or recipient. Override if needed."""
+        return message.metadata.get("chat_id", message.recipient)
+
+    def _get_chunk_limit(self) -> int:
+        config_limit = getattr(self.config, "text_chunk_limit", 0)
+        cap_limit = self.capabilities.max_text_length
+        return config_limit or cap_limit or 4096
+
+    def _format_chunk(self, text: str) -> str:
+        """Convert Markdown to channel format via UnifiedFormatter.
+
+        Uses the formatter auto-configured from ``capabilities.format_type``.
+        Subclasses rarely need to override this — set ``capabilities`` instead.
+        """
+        return self._formatter.format(text)
 
     @abstractmethod
-    async def receive(self) -> AsyncIterator[IncomingMessage]:
-        """Async iterator that yields incoming messages.
+    async def _send_chunk(
+        self, chat_id: str, formatted_text: str, raw_text: str,
+        reply_to: str | None, metadata: dict,
+    ) -> None:
+        """Send a single text chunk. Platform-specific implementation."""
+        ...
 
-        Yields:
-            IncomingMessage: Each new message received
+    _format_fallback_patterns: tuple[str, ...] = ("parse", "invalid")
 
-        Example:
-            async for msg in channel.receive():
-                print(f"From {msg.sender}: {msg.content}")
+    async def _send_with_format_fallback(
+        self, send_fn: CallableABC[[str], Awaitable], formatted: str, raw: str,
+    ) -> None:
+        """Try *send_fn(formatted)*; on format-related errors retry with *raw*.
+
+        Channels whose ``_send_chunk`` follows the try-formatted / except-fallback
+        pattern can delegate to this helper instead of duplicating the logic.
         """
-        pass
+        try:
+            await send_fn(formatted)
+        except Exception as e:
+            if formatted != raw and any(
+                p in str(e).lower() for p in self._format_fallback_patterns
+            ):
+                await send_fn(raw)
+            else:
+                raise
 
-    @abstractmethod
-    async def send(self, message: OutgoingMessage) -> bool:
-        """Send a message through the channel.
+    async def send_media(
+        self,
+        recipient: str,
+        file_path: str,
+        caption: str = "",
+        metadata: dict | None = None,
+    ) -> bool:
+        """Send a media file through the channel.
+
+        Handles the ready-check guard and error logging.  Subclasses
+        override ``_send_media_impl()`` with platform-specific logic.
 
         Args:
-            message: The message to send
+            recipient: Target recipient or chat identifier.
+            file_path: Local path to the media file.
+            caption: Optional caption text.
+            metadata: Optional channel-specific metadata.
 
         Returns:
-            True if sent successfully, False otherwise
+            True if sent successfully, False otherwise.
         """
+        if not self._is_ready():
+            return False
+        try:
+            return await self._send_media_impl(recipient, file_path, caption, metadata)
+        except Exception as e:
+            _logger.error(f"{self.name} send_media error: {e}")
+            return False
+
+    async def _send_media_impl(
+        self,
+        recipient: str,
+        file_path: str,
+        caption: str = "",
+        metadata: dict | None = None,
+    ) -> bool:
+        """Platform-specific media send.  Override in subclasses."""
+        return False
+
+    # ── Attachment / proxy helpers ─────────────────────────────────
+
+    def _media_path(self, filename: str) -> Path:
+        """Ensure MEDIA_DIR exists and return a path inside it."""
+        return media_path(filename)
+
+    def _resolve_media_chat_id(self, recipient: str, metadata: dict | None) -> str:
+        """Extract chat_id from metadata, falling back to recipient."""
+        return (metadata or {}).get("chat_id", recipient)
+
+    def _get_proxy(self) -> str | None:
+        """Return the configured proxy URL, or ``None`` if unset/empty."""
+        return getattr(self.config, "proxy", None) or None
+
+    def _check_attachment_size(self, file_size: int, filename: str) -> str | None:
+        """Return a 'too large' annotation string if *file_size* exceeds the limit."""
+        return check_attachment_size(file_size, filename)
+
+    async def _download_attachment(
+        self,
+        url: str,
+        filename: str,
+        *,
+        headers: dict[str, str] | None = None,
+        file_size: int | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Download an attachment via httpx.  Returns ``(local_path, annotation)``.
+
+        Delegates to :func:`download_attachment`.
+        """
+        return await download_attachment(
+            url, filename,
+            channel_name=self.name,
+            headers=headers,
+            file_size=file_size,
+            proxy=self._get_proxy(),
+        )
+
+    # ── Send retry abstraction ──────────────────────────────────────
+
+    _non_retryable_patterns: tuple[str, ...] = ()
+    _rate_limit_patterns: tuple[str, ...] = ("429", "ratelimit")
+    _rate_limit_delay: float = 1.0
+
+    def _extract_retry_after(self, exc: Exception) -> float | None:
+        """Extract retry-wait seconds from an exception.
+
+        Returns ``None`` to signal that the error is **not retryable**.
+
+        Pipeline:
+        1. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
+        2. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
+        3. Non-retryable pattern match → ``None``.
+        4. Rate-limit pattern match → ``_rate_limit_delay``.
+        5. Default ``1.0`` s (generic transient-error retry).
+
+        Channels can customise behaviour declaratively via class attributes
+        ``_non_retryable_patterns``, ``_rate_limit_patterns``, and
+        ``_rate_limit_delay``, or override this method entirely.
+        """
+        # 1. SDK retry_after attribute
+        retry = getattr(exc, "retry_after", None)
+        if retry is not None:
+            return float(retry)
+
+        # 2. HTTP Retry-After header
+        header_val = self._parse_retry_after_header(exc)
+        if header_val is not None:
+            return header_val
+
+        msg = str(exc).lower()
+
+        # 3. Non-retryable patterns
+        if self._non_retryable_patterns and any(
+            p in msg for p in self._non_retryable_patterns
+        ):
+            return None
+
+        # 4. Rate-limit patterns
+        if self._rate_limit_patterns and any(
+            p in msg for p in self._rate_limit_patterns
+        ):
+            return self._rate_limit_delay
+
+        # 5. Default
+        return 1.0
+
+    def _parse_retry_after_header(self, exc: Exception) -> float | None:
+        """Try to extract a ``Retry-After`` value from an HTTP response."""
+        resp = getattr(exc, "response", None)
+        if resp is None:
+            return None
+        headers = getattr(resp, "headers", None)
+        if not headers:
+            return None
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            return None
+
+    async def _send_with_retry(
+        self,
+        coro_factory: CallableABC[[], Awaitable],
+        max_retries: int = 3,
+    ) -> Any:
+        """Send helper with automatic exponential-backoff retry.
+
+        *coro_factory* is called on every attempt so that the awaitable is
+        fresh.  Uses :func:`retry.retry_async` for backoff, jitter, and
+        server-supplied ``Retry-After`` support.
+
+        The *max_retries* parameter is accepted for backward compatibility
+        but the attempt count is taken from ``self._retry_config``.
+        """
+        from .retry import retry_async
+
+        return await retry_async(
+            coro_factory,
+            config=self._retry_config,
+            should_retry=lambda exc, _: self._extract_retry_after(exc) is not None,
+            retry_after_s=self._extract_retry_after,
+            on_retry=lambda info: _logger.warning(
+                f"{self.name} send retry {info.attempt}/{info.max_attempts} "
+                f"in {info.delay_s:.2f}s: {info.error}"
+            ),
+            label=f"{self.name}.send",
+        )
+
+    # ── Typing indicator abstraction ─────────────────────────────────
+
+    async def _send_typing_action(self, chat_id: str) -> None:
+        """Send a single typing indicator.  Override in sub-classes."""
+
+    async def start_typing(self, chat_id: str) -> None:
+        """Start a background typing-indicator loop for *chat_id*."""
+        await self._typing_manager.start(chat_id)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Cancel the typing-indicator loop for *chat_id*."""
+        await self._typing_manager.stop(chat_id)
+
+    # ── Mention gating ──────────────────────────────────────────────
+
+    async def _send_pairing_response(self, chat_id: str, code: str):
+        """Send pairing code to the sender."""
+        text = f"🔐 Pairing required. Your code: {code}\nThis code expires in 1 hour."
+        await self._send_chunk(chat_id, text, text, None, {})
+
+    def _should_process(self, raw: RawIncoming) -> bool:
+        """Decide whether to process a message based on mention gating."""
+        if not raw.is_group or self.require_mention == "off":
+            return True
+        return raw.was_mentioned
+
+    _mention_pattern: str | None = None
+    _mention_strip_count: int = 0  # 0 = all occurrences, 1 = first only
+
+    def _get_bot_identifier(self) -> str | None:
+        """Return the bot's identifier for mention pattern substitution.
+
+        Override in subclasses where ``_mention_pattern`` contains
+        ``{bot_id}`` placeholder.
+        """
+        return None
+
+    def _strip_mention(self, text: str) -> str:
+        """Strip bot mention from text using the ``_mention_pattern`` approach."""
+        if not self._mention_pattern:
+            return text
+        pattern = self._mention_pattern
+        if "{bot_id}" in pattern:
+            bot_id = self._get_bot_identifier()
+            if not bot_id:
+                return text
+            pattern = pattern.replace("{bot_id}", re.escape(bot_id))
+        return re.sub(pattern, "", text, count=self._mention_strip_count).strip()
+
+    # ── ACK reaction ─────────────────────────────────────────────────
+
+    async def _send_ack_reaction(self, chat_id: str, message_id: str, emoji: str = "👀") -> None:
+        """Send an acknowledgment reaction to a message. Override in subclasses that support reactions."""
+        pass  # Default no-op; channels override if they support reactions
+
+    async def _remove_ack_reaction(self, chat_id: str, message_id: str, emoji: str = "👀") -> None:
+        """Remove the ack reaction after replying. Override in subclasses."""
         pass
+
+    # ── Inbound message pipeline ──────────────────────────────────────
+
+    def _build_inbound(self, raw: RawIncoming) -> InboundMessage | None:
+        """Build an ``InboundMessage`` from raw platform data.
+
+        Performs mention gating, allow-list checks, and merges text +
+        annotations into a single content string.  Returns ``None`` if
+        the message should be dropped (not mentioned, sender not
+        allowed, no content, etc.).
+        """
+        if not self._should_process(raw):
+            return None
+
+        # DM policy handling for non-group messages
+        if not raw.is_group:
+            if self.dm_policy == "open":
+                pass  # skip allowlist check for DMs
+            elif self.dm_policy == "pairing":
+                if not self.is_allowed(raw.sender_id) and not self._pairing_manager.is_approved(self.name, raw.sender_id):
+                    code = self._pairing_manager.request_pairing(self.name, raw.sender_id)
+                    # Schedule pairing response (fire-and-forget)
+                    asyncio.ensure_future(self._send_pairing_response(raw.chat_id, code))
+                    _logger.info(f"Pairing required for {raw.sender_id}, code sent")
+                    return None
+            else:  # "allowlist" (default)
+                if not self.is_allowed(raw.sender_id):
+                    _logger.debug(
+                        f"Ignoring message from non-allowed sender {raw.sender_id}"
+                    )
+                    return None
+        elif not self.is_allowed(raw.sender_id):
+            _logger.debug(
+                f"Ignoring message from non-allowed sender {raw.sender_id}"
+            )
+            return None
+
+        # Check channel allow-list
+        if not self.is_channel_allowed(raw.chat_id):
+            _logger.debug(
+                f"Ignoring message from non-allowed channel {raw.chat_id}"
+            )
+            return None
+
+        # Apply mention stripping in group messages
+        if raw.is_group:
+            raw = dataclasses.replace(raw, text=self._strip_mention(raw.text))
+
+        # Merge text and annotations into content
+        parts: list[str] = []
+        if raw.text:
+            parts.append(raw.text)
+        parts.extend(raw.content_annotations)
+
+        content = "\n".join(p for p in parts if p)
+        if not content and not raw.media_files:
+            return None
+
+        # Ensure chat_id is in metadata
+        meta = dict(raw.metadata)
+        meta.setdefault("chat_id", raw.chat_id)
+
+        return InboundMessage(
+            channel=self.name,
+            sender_id=raw.sender_id,
+            chat_id=raw.chat_id,
+            content=content or "[media only]",
+            timestamp=raw.timestamp,
+            message_id=raw.message_id,
+            media=raw.media_files,
+            metadata=meta,
+        )
+
+    async def _enqueue_raw(self, raw: RawIncoming) -> None:
+        """Build an InboundMessage from *raw* and put it on the queue.
+
+        Convenience method for subclass ``_on_message`` handlers.
+        Stores non-mentioned group messages in history buffer and injects
+        context when the bot is mentioned.
+        """
+        from .middleware import HistoryEntry
+
+        # Store all group messages in history buffer BEFORE mention gating
+        if raw.is_group:
+            ts = raw.timestamp.timestamp() if hasattr(raw.timestamp, 'timestamp') else time.time()
+            if not raw.was_mentioned:
+                # Store for context, _build_inbound will return None via _should_process
+                self._group_history.add(raw.chat_id, HistoryEntry(
+                    sender_id=raw.sender_id,
+                    text=raw.text,
+                    timestamp=ts,
+                    message_id=raw.message_id,
+                ))
+            else:
+                # Inject context before the current message
+                context = self._group_history.format_context(raw.chat_id)
+                if context:
+                    raw = dataclasses.replace(
+                        raw,
+                        text=context + "\n\n[Current message - respond to this]\n" + raw.text,
+                    )
+                self._group_history.clear(raw.chat_id)
+
+        msg = self._build_inbound(raw)
+        if msg is not None:
+            # Fire-and-forget ACK reaction
+            if raw.message_id:
+                try:
+                    await self._send_ack_reaction(raw.chat_id, raw.message_id)
+                except Exception:
+                    pass
+            await self._queue.put(msg)
+
+    # ── Bus integration ──────────────────────────────────────────────
+
+    def set_bus(self, bus) -> None:
+        """Inject the MessageBus reference (called by ChannelManager)."""
+        self._bus = bus
+
+    async def queue_message(self, msg: InboundMessage) -> None:
+        """Buffer *msg* with debounce + dedup, then publish to bus."""
+        sender = msg.sender_id
+
+        # Deduplication
+        mid = msg.message_id
+        if mid and self._dedup.is_duplicate(mid):
+            _logger.debug(f"Dedup: skipping duplicate message {mid}")
+            return
+
+        if sender not in self._message_buffers:
+            self._message_buffers[sender] = []
+            self._message_metadata[sender] = msg.metadata
+            self._message_media[sender] = []
+        self._message_buffers[sender].append(msg.content)
+        if mid:
+            self._message_ids[sender] = mid
+        if msg.media:
+            self._message_media[sender].extend(msg.media)
+
+        if self._on_activity:
+            try:
+                self._on_activity(sender, "received")
+            except Exception:
+                pass
+
+        if sender in self._debounce_tasks:
+            self._debounce_tasks[sender].cancel()
+
+        msg_count = len(self._message_buffers[sender])
+        wait = min(
+            self.initial_debounce + (msg_count - 1) * self.debounce_step,
+            self.max_debounce,
+        )
+        _logger.debug(
+            f"Debounce for {sender}: {wait:.1f}s (message #{msg_count})"
+        )
+
+        async def debounce_callback(_s=sender, _w=wait):
+            await asyncio.sleep(_w)
+            await self._process_buffered_messages(_s)
+
+        self._debounce_tasks[sender] = asyncio.create_task(
+            debounce_callback()
+        )
+
+    async def _process_buffered_messages(self, sender: str) -> None:
+        """Flush buffered messages for *sender* and publish to bus."""
+        if sender not in self._message_buffers:
+            return
+
+        messages = self._message_buffers.pop(sender, [])
+        metadata = self._message_metadata.pop(sender, None)
+        media = self._message_media.pop(sender, [])
+        message_id = self._message_ids.pop(sender, "")
+        self._debounce_tasks.pop(sender, None)
+        if not messages:
+            return
+
+        merged_content = "\n".join(messages)
+        _logger.info(
+            f"Processing {len(messages)} merged message(s) from {sender}"
+        )
+
+        if self._bus:
+            chat_id = (metadata or {}).get("chat_id", sender)
+            inbound = InboundMessage(
+                channel=self.name,
+                sender_id=sender,
+                chat_id=str(chat_id),
+                content=merged_content,
+                media=media,
+                metadata=metadata or {},
+                message_id=message_id,
+            )
+            await self._bus.publish_inbound(inbound)
+
+    async def _send_status_message(
+        self, sender: str, content: str, metadata: dict | None = None,
+    ) -> None:
+        """Send a status/intermediate message to the channel."""
+        chat_id = (metadata or {}).get("chat_id", sender)
+        await self.send(OutboundMessage(
+            channel=self.name,
+            chat_id=str(chat_id),
+            content=content,
+            metadata=metadata or {},
+        ))
+
+    async def send_thinking_message(
+        self, sender: str, thinking: str, metadata: dict | None = None,
+    ) -> None:
+        """Send a thinking intermediate message to the channel."""
+        if not self.send_thinking:
+            return
+        await self._send_status_message(sender, f"\U0001f9e0\n{thinking}\n\u23f3", metadata)
+
+    async def send_todo_message(
+        self, sender: str, content: str, metadata: dict | None = None,
+    ) -> None:
+        """Send a todo list intermediate message to the channel."""
+        await self._send_status_message(sender, content, metadata)
+
+    async def run(self) -> None:
+        """Run the channel with auto-reconnect (exponential backoff)."""
+        backoff = 1.0
+        max_backoff = 60.0
+        self._running = True
+        while self._running:
+            try:
+                await self.start()
+                backoff = 1.0
+                async for msg in self.receive():
+                    _logger.info(f"From {msg.sender_id}: {msg.content[:50]}...")
+                    await self.queue_message(msg)
+            except asyncio.CancelledError:
+                break
+            except ChannelError as e:
+                _logger.error(f"Channel {self.name} fatal error: {e}")
+                self._running = False
+                break
+            except Exception as e:
+                _logger.error(f"Channel {self.name} error: {e}")
+            finally:
+                for task in self._debounce_tasks.values():
+                    task.cancel()
+                self._debounce_tasks.clear()
+                # Preserve reconnect intent across stop()
+                should_reconnect = self._running
+                try:
+                    await self.stop()
+                except Exception:
+                    pass
+                self._running = should_reconnect
+
+            if self._running:
+                _logger.info(
+                    f"Reconnecting {self.name} in {backoff:.1f}s..."
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    # ── Channel allow-list check ─────────────────────────────────────
+
+    def is_channel_allowed(self, channel_id: str) -> bool:
+        """Return ``True`` if *channel_id* is permitted by config.
+
+        When the allow-list is empty or absent every channel is allowed.
+        """
+        allowed = getattr(self.config, "allowed_channels", None)
+        return not allowed or str(channel_id) in allowed
+
+    # ── Sender allow-list check ──────────────────────────────────────
+
+    def is_allowed(self, sender: str) -> bool:
+        """Check if *sender* is permitted by ``self.config.allowed_senders``.
+
+        Returns ``True`` when the allow-list is empty / None (open access).
+        Supports ``|``-separated composite IDs (e.g. ``"uid|gid"``).
+        Subclasses with richer filtering (iMessage) may override.
+        """
+        config = getattr(self, "config", None)
+        allowed = getattr(config, "allowed_senders", None) if config else None
+        if not allowed:
+            return True
+        sender_str = str(sender)
+        if sender_str in allowed:
+            return True
+        if "|" in sender_str:
+            for part in sender_str.split("|"):
+                if part and part in allowed:
+                    return True
+        return False
 
 
 class ChannelError(Exception):
     """Base exception for channel-related errors."""
-
-    pass
-
-
-class ChannelPermissionError(ChannelError):
-    """Raised when the channel lacks required permissions."""
-
-    pass
-
-
-class ChannelConnectionError(ChannelError):
-    """Raised when the channel cannot establish a connection."""
 
     pass

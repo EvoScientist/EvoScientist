@@ -23,10 +23,10 @@ from .backends import CustomSandboxBackend, MergedReadOnlyBackend
 from .config import get_effective_config, apply_config_to_env
 from .llm import get_chat_model
 from .mcp import load_mcp_tools
-from .middleware import create_memory_middleware
+from .middleware import create_memory_middleware, create_skills_middleware
 from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
 from .utils import load_subagents
-from .tools import tavily_search, think_tool, skill_manager
+from .tools import tavily_search, think_tool, skill_manager, view_image
 from .paths import (
     ensure_dirs,
     default_workspace_dir,
@@ -106,10 +106,11 @@ backend = CompositeBackend(
 tool_registry = {
     "think_tool": think_tool,
     "tavily_search": tavily_search,
+    "view_image": view_image,
 }
 
 # Base tools that every agent variant gets (before MCP)
-BASE_TOOLS = [think_tool, skill_manager]
+BASE_TOOLS = [think_tool, skill_manager, view_image]
 
 
 def _build_base_kwargs(base_backend, base_middleware):
@@ -178,6 +179,7 @@ prompt_refs = {
 
 base_middleware = [
     create_memory_middleware(MEMORY_DIR, extraction_model=chat_model),
+    create_skills_middleware(backend),
 ]
 
 # Default agent (no checkpointer) — used by langgraph dev / LangSmith / notebooks.
@@ -245,6 +247,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None):
 
     mw = [
         create_memory_middleware(MEMORY_DIR, extraction_model=chat_model),
+        create_skills_middleware(be),
     ]
 
     # Re-load MCP tools from current config (picks up /mcp add changes)

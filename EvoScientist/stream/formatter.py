@@ -68,10 +68,14 @@ class ToolResultFormatter:
 
         return ContentType.TEXT
 
+    def is_success(self, content: str) -> bool:
+        """Check if content indicates successful execution."""
+        return _is_success(content)
+
     def format(self, name: str, content: str, max_length: int = 800) -> FormattedResult:
         """Format tool result based on detected content type."""
         content_type = self.detect_type(content)
-        success = _is_success(content)
+        success = self.is_success(content)
 
         formatter_map = {
             ContentType.SUCCESS: self._format_success,
