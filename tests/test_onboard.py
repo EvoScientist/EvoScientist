@@ -527,35 +527,31 @@ class TestStepSkills:
 
 class TestStepChannels:
     def test_returns_disabled_when_skip(self):
-        """Test channels step returns disabled when user selects skip."""
+        """Test channels step returns empty dict when user selects nothing."""
         from EvoScientist.config.onboard import _step_channels
 
         config = EvoScientistConfig()
 
         with patch("EvoScientist.config.onboard.questionary") as mock_q:
-            mock_q.select.return_value.ask.return_value = "skip"
+            mock_q.checkbox.return_value.ask.return_value = []
             result = _step_channels(config)
 
-        assert result == (False, "", True)
+        assert result == {"channel_enabled": "", "imessage_enabled": False}
 
     def test_returns_enabled_when_setup_passes(self):
-        """Test channels step returns enabled when setup succeeds."""
+        """Test channels step returns enabled when iMessage setup succeeds."""
         from EvoScientist.config.onboard import _step_channels
 
         config = EvoScientistConfig()
 
-        select_mock_1 = MagicMock()
-        select_mock_1.ask.return_value = "imessage"
-        select_mock_2 = MagicMock()
-        select_mock_2.ask.return_value = True
-
         with patch("EvoScientist.config.onboard.questionary") as mock_q, \
              patch("EvoScientist.config.onboard._setup_imessage", return_value=True):
-            mock_q.select.side_effect = [select_mock_1, select_mock_2]
+            mock_q.checkbox.return_value.ask.return_value = ["imessage"]
             mock_q.text.return_value.ask.return_value = ""
             result = _step_channels(config)
 
-        assert result == (True, "", True)
+        assert result["channel_enabled"] == "imessage"
+        assert result["imessage_enabled"] is True
 
     def test_returns_enabled_with_senders(self):
         """Test channels step returns enabled with specific senders."""
@@ -563,52 +559,46 @@ class TestStepChannels:
 
         config = EvoScientistConfig()
 
-        select_mock_1 = MagicMock()
-        select_mock_1.ask.return_value = "imessage"
-        select_mock_2 = MagicMock()
-        select_mock_2.ask.return_value = False
-
         with patch("EvoScientist.config.onboard.questionary") as mock_q, \
              patch("EvoScientist.config.onboard._setup_imessage", return_value=True):
-            mock_q.select.side_effect = [select_mock_1, select_mock_2]
+            mock_q.checkbox.return_value.ask.return_value = ["imessage"]
             mock_q.text.return_value.ask.return_value = "+1234567890,+0987654321"
             result = _step_channels(config)
 
-        assert result == (True, "+1234567890,+0987654321", False)
+        assert result["channel_enabled"] == "imessage"
+        assert result["imessage_enabled"] is True
+        assert result["imessage_allowed_senders"] == "+1234567890,+0987654321"
 
     def test_setup_fails_user_declines(self):
-        """Test channels step returns disabled when setup fails and user declines."""
+        """Test channels step skips iMessage when setup fails and user declines."""
         from EvoScientist.config.onboard import _step_channels
 
         config = EvoScientistConfig()
 
         with patch("EvoScientist.config.onboard.questionary") as mock_q, \
              patch("EvoScientist.config.onboard._setup_imessage", return_value=False):
-            mock_q.select.return_value.ask.return_value = "imessage"
+            mock_q.checkbox.return_value.ask.return_value = ["imessage"]
             mock_q.confirm.return_value.ask.return_value = False
             result = _step_channels(config)
 
-        assert result == (False, "", True)
+        assert result["channel_enabled"] == ""
+        assert result["imessage_enabled"] is False
 
     def test_setup_fails_user_enables_anyway(self):
-        """Test channels step enables when setup fails but user confirms."""
+        """Test channels step enables iMessage when setup fails but user confirms."""
         from EvoScientist.config.onboard import _step_channels
 
         config = EvoScientistConfig()
 
-        select_mock_1 = MagicMock()
-        select_mock_1.ask.return_value = "imessage"
-        select_mock_2 = MagicMock()
-        select_mock_2.ask.return_value = True
-
         with patch("EvoScientist.config.onboard.questionary") as mock_q, \
              patch("EvoScientist.config.onboard._setup_imessage", return_value=False):
-            mock_q.select.side_effect = [select_mock_1, select_mock_2]
+            mock_q.checkbox.return_value.ask.return_value = ["imessage"]
             mock_q.confirm.return_value.ask.return_value = True
             mock_q.text.return_value.ask.return_value = ""
             result = _step_channels(config)
 
-        assert result == (True, "", True)
+        assert result["channel_enabled"] == "imessage"
+        assert result["imessage_enabled"] is True
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test channels step raises KeyboardInterrupt on cancel."""
@@ -617,9 +607,39 @@ class TestStepChannels:
         config = EvoScientistConfig()
 
         with patch("EvoScientist.config.onboard.questionary") as mock_q:
-            mock_q.select.return_value.ask.return_value = None
+            mock_q.checkbox.return_value.ask.return_value = None
             with pytest.raises(KeyboardInterrupt):
                 _step_channels(config)
+
+    def test_telegram_channel_selected(self):
+        """Test channels step handles Telegram selection."""
+        from EvoScientist.config.onboard import _step_channels
+
+        config = EvoScientistConfig()
+
+        with patch("EvoScientist.config.onboard.questionary") as mock_q, \
+             patch("EvoScientist.config.onboard._probe_channel"):
+            mock_q.checkbox.return_value.ask.return_value = ["telegram"]
+            mock_q.text.return_value.ask.return_value = "test-token"
+            result = _step_channels(config)
+
+        assert result["channel_enabled"] == "telegram"
+        assert result["telegram_bot_token"] == "test-token"
+
+    def test_discord_channel_selected(self):
+        """Test channels step handles Discord selection."""
+        from EvoScientist.config.onboard import _step_channels
+
+        config = EvoScientistConfig()
+
+        with patch("EvoScientist.config.onboard.questionary") as mock_q, \
+             patch("EvoScientist.config.onboard._probe_channel"):
+            mock_q.checkbox.return_value.ask.return_value = ["discord"]
+            mock_q.text.return_value.ask.return_value = "discord-token"
+            result = _step_channels(config)
+
+        assert result["channel_enabled"] == "discord"
+        assert result["discord_bot_token"] == "discord-token"
 
 
 class TestStepMcpServersNpxFailure:

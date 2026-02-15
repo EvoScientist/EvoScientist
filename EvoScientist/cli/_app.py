@@ -45,3 +45,7 @@ Sub-agents (-e): planner-agent | research-agent | code-agent | debug-agent | dat
 """
 mcp_app = typer.Typer(help=_MCP_HELP, invoke_without_command=True)
 app.add_typer(mcp_app, name="mcp")
+
+# Channel subcommand group
+channel_app = typer.Typer(help="Channel management commands")
+app.add_typer(channel_app, name="channel")

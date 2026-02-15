@@ -4,6 +4,9 @@ Async generator that streams events from an agent graph,
 plus helpers for processing AI message chunks and tool results.
 """
 
+import base64
+import mimetypes
+import os
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage, AIMessageChunk  # type: ignore[import-untyped]
@@ -64,6 +67,7 @@ async def stream_agent_events(
     message: str,
     thread_id: str,
     metadata: dict | None = None,
+    media: list[str] | None = None,
 ) -> AsyncIterator[dict]:
     """Stream events from the agent graph using async iteration.
 
@@ -75,6 +79,7 @@ async def stream_agent_events(
         thread_id: Thread ID for conversation persistence
         metadata: Optional metadata dict merged into the LangGraph config
             (e.g. agent_name, updated_at for checkpoint persistence).
+        media: Optional list of local file paths for attachments.
 
     Yields:
         Event dicts: thinking, text, tool_call, tool_result,
@@ -247,9 +252,41 @@ async def stream_agent_events(
         # 4) No real names available yet -- return generic WITHOUT caching
         return "sub-agent"
 
+    # Build user message content: text + inline images + file path references
+    user_content: str | list[dict[str, Any]] = message
+    if media:
+        _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+        _MAX_INLINE_SIZE = 5 * 1024 * 1024  # 5 MB
+        content_blocks: list[dict[str, Any]] = []
+        if message:
+            content_blocks.append({"type": "text", "text": message})
+        file_refs: list[str] = []
+        for path in media:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in _IMAGE_EXTS and os.path.isfile(path):
+                fsize = os.path.getsize(path)
+                if fsize <= _MAX_INLINE_SIZE:
+                    mime = mimetypes.guess_type(path)[0] or "image/png"
+                    with open(path, "rb") as fh:
+                        b64 = base64.b64encode(fh.read()).decode("ascii")
+                    content_blocks.append({"type": "image_url", "image_url": {
+                        "url": f"data:{mime};base64,{b64}",
+                    }})
+                else:
+                    file_refs.append(path)
+            else:
+                file_refs.append(path)
+        if file_refs:
+            ref_text = "\n".join(
+                f"[attached file: {os.path.basename(p)}] path: {p}" for p in file_refs
+            )
+            content_blocks.append({"type": "text", "text": ref_text})
+        if content_blocks:
+            user_content = content_blocks
+
     try:
         async for chunk in agent.astream(
-            {"messages": [{"role": "user", "content": message}]},
+            {"messages": [{"role": "user", "content": user_content}]},
             config=config,
             stream_mode="messages",
             subgraphs=True,

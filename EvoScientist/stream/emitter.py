@@ -86,7 +86,7 @@ class StreamEventEmitter:
     @staticmethod
     def done(response: str = "") -> StreamEvent:
         """Done event."""
-        return StreamEvent("done", {"type": "done", "response": response})
+        return StreamEvent("done", {"type": "done", "content": response, "response": response})
 
     @staticmethod
     def error(message: str) -> StreamEvent:

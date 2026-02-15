@@ -1289,91 +1289,192 @@ def _setup_imessage() -> bool:
         return False
 
 
-def _step_channels(config: EvoScientistConfig) -> tuple[bool, str, bool]:
-    """Step 7: Select a channel to enable on startup.
+def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
+    """Step: Select channels to enable on startup.
 
-    Presents a single-select list with "Skip for now" as default.
-    Selecting a channel triggers validation and guided installation.
+    Presents a multi-select list of supported channels.
+    For each selected channel, prompts for required credentials
+    and validates them via the channel's probe function.
 
     Args:
         config: Current configuration.
 
     Returns:
-        Tuple of (imessage_enabled, imessage_allowed_senders_csv, imessage_send_thinking).
+        Dict mapping config field names to their new values.
+        Empty dict when the user skips or selects nothing.
     """
-    # Determine default based on current config
-    default = "imessage" if config.imessage_enabled else "skip"
+    # Currently enabled channels
+    _currently_enabled = {
+        t.strip()
+        for t in (getattr(config, "channel_enabled", "") or "").split(",")
+        if t.strip()
+    }
+    # Legacy iMessage compat
+    if getattr(config, "imessage_enabled", False) and "imessage" not in _currently_enabled:
+        _currently_enabled.add("imessage")
 
-    choices = [
-        Choice(title="Skip for now", value="skip"),
-        Choice(title="iMessage", value="imessage"),
-        # Future channels:
-        # Choice(title="Slack", value="slack"),
-        # Choice(title="Email", value="email"),
+    # Channel definitions: (value, display_name, required_fields)
+    _CHANNELS = [
+        ("telegram",  "Telegram",  [("telegram_bot_token", "Bot token (from @BotFather)")]),
+        ("discord",   "Discord",   [("discord_bot_token", "Bot token")]),
+        ("imessage",  "iMessage",  []),  # handled via _setup_imessage()
     ]
 
-    selected = questionary.select(
-        "Select channel to enable on startup:",
+    choices = [
+        Choice(
+            title=display,
+            value=value,
+            checked=value in _currently_enabled,
+        )
+        for value, display, _ in _CHANNELS
+    ]
+
+    selected = questionary.checkbox(
+        "Select channels to enable (Space to toggle, Enter to confirm):",
         choices=choices,
-        default=default,
         style=WIZARD_STYLE,
         qmark=QMARK,
-        use_indicator=True,
     ).ask()
 
     if selected is None:
         raise KeyboardInterrupt()
 
-    if selected == "skip":
-        return False, "", True
+    updates: dict[str, object] = {}
 
-    # iMessage selected — run guided setup
-    ready = _setup_imessage()
+    if not selected:
+        updates["channel_enabled"] = ""
+        updates["imessage_enabled"] = False
+        return updates
 
-    if not ready:
-        # Setup failed — ask if they want to enable anyway
-        console.print()
-        enable_anyway = questionary.confirm(
-            "Enable iMessage anyway? (will try to connect on startup)",
-            default=False,
-            style=WIZARD_STYLE,
-            qmark=f"  {QMARK}",
-        ).ask()
-        if enable_anyway is None:
-            raise KeyboardInterrupt()
-        if not enable_anyway:
-            return False, "", True
+    # Build a lookup for channel definitions
+    _ch_lookup = {v: (v, d, fields) for v, d, fields in _CHANNELS}
 
-    # Ask for allowed senders (indented to align with ✓ status lines)
-    senders = questionary.text(
-        "Allowed senders (comma-separated, empty = all):",
-        default=config.imessage_allowed_senders,
-        style=WIZARD_STYLE,
-        qmark=f"  {QMARK}",
-    ).ask()
+    enabled_channels: list[str] = []
 
-    if senders is None:
-        raise KeyboardInterrupt()
+    for ch_name in selected:
+        _, display, required_fields = _ch_lookup[ch_name]
+        console.print(f"\n  [bold cyan]── {display} ──[/bold cyan]")
 
-    # Ask whether to forward thinking content to channel
-    thinking_choices = [
-        Choice(title="On (forward model reasoning)", value=True),
-        Choice(title="Off (only send final responses)", value=False),
-    ]
+        # Special handling for iMessage
+        if ch_name == "imessage":
+            ready = _setup_imessage()
+            if not ready:
+                console.print()
+                enable_anyway = questionary.confirm(
+                    "Enable iMessage anyway? (will try to connect on startup)",
+                    default=False,
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                ).ask()
+                if enable_anyway is None:
+                    raise KeyboardInterrupt()
+                if not enable_anyway:
+                    continue
+            # Allowed senders
+            senders = questionary.text(
+                "Allowed senders (comma-separated, empty = all):",
+                default=getattr(config, "imessage_allowed_senders", ""),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if senders is None:
+                raise KeyboardInterrupt()
+            updates["imessage_enabled"] = True
+            updates["imessage_allowed_senders"] = senders.strip()
+            enabled_channels.append("imessage")
+            continue
 
-    send_thinking = questionary.select(
-        "Send thinking panel in channel?",
-        choices=thinking_choices,
-        default=config.imessage_send_thinking,
-        style=WIZARD_STYLE,
-        qmark=f"  {QMARK}",
-        use_indicator=True,
-    ).ask()
+        # Prompt for required fields
+        for field_name, prompt_label in required_fields:
+            current = getattr(config, field_name, "")
+            value = questionary.text(
+                f"{prompt_label}:",
+                default=current,
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if value is None:
+                raise KeyboardInterrupt()
+            updates[field_name] = value.strip()
 
-    if send_thinking is None:
-        raise KeyboardInterrupt()
+        # Allowed senders (common for all channels)
+        senders_field = f"{ch_name}_allowed_senders"
+        if hasattr(config, senders_field):
+            senders = questionary.text(
+                "Allowed senders (comma-separated, empty = all):",
+                default=getattr(config, senders_field, ""),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if senders is None:
+                raise KeyboardInterrupt()
+            updates[senders_field] = senders.strip()
 
-    return True, senders.strip(), send_thinking
+        # Probe validation
+        _probe_channel(ch_name, config, updates)
+
+        enabled_channels.append(ch_name)
+
+    updates["channel_enabled"] = ",".join(enabled_channels)
+    # Keep legacy field in sync
+    updates["imessage_enabled"] = "imessage" in enabled_channels
+    return updates
+
+
+def _probe_channel(
+    ch_name: str,
+    config: EvoScientistConfig,
+    updates: dict[str, object],
+) -> None:
+    """Run the probe for a channel type and print the result.
+
+    Non-fatal: prints a warning on failure but does not prevent enabling.
+    """
+    import asyncio
+
+    def _val(key: str, fallback: str = "") -> str:
+        """Get a value from updates first, then config, then fallback."""
+        if key in updates:
+            return str(updates[key])
+        return str(getattr(config, key, fallback))
+
+    console.print("  [dim]Validating credentials...[/dim]")
+
+    async def _run() -> tuple[bool, str]:
+        if ch_name == "telegram":
+            from ..channels.telegram.probe import validate_telegram_token
+            return await validate_telegram_token(
+                _val("telegram_bot_token"),
+                _val("telegram_proxy") or None,
+            )
+        elif ch_name == "discord":
+            from ..channels.discord.probe import validate_discord_token
+            return await validate_discord_token(
+                _val("discord_bot_token"),
+                _val("discord_proxy") or None,
+            )
+        else:
+            return True, "No probe available"
+
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import nest_asyncio  # type: ignore[import-untyped]
+                nest_asyncio.apply()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        ok, detail = loop.run_until_complete(_run())
+        if ok:
+            console.print(f"  [green]✓ {detail}[/green]")
+        else:
+            console.print(f"  [yellow]⚠ {detail}[/yellow]")
+            console.print("  [dim]Channel will still be enabled — check credentials later.[/dim]")
+    except Exception as e:
+        console.print(f"  [yellow]⚠ Could not validate: {e}[/yellow]")
+        console.print("  [dim]Channel will still be enabled — check credentials later.[/dim]")
 
 
 # =============================================================================
@@ -1516,10 +1617,9 @@ def run_onboard(skip_validation: bool = False) -> bool:
         _step_mcp_servers()
 
         # Step 9: Channels
-        imessage_enabled, imessage_allowed_senders, imessage_send_thinking = _step_channels(config)
-        config.imessage_enabled = imessage_enabled
-        config.imessage_allowed_senders = imessage_allowed_senders
-        config.imessage_send_thinking = imessage_send_thinking
+        channel_updates = _step_channels(config)
+        for key, value in channel_updates.items():
+            setattr(config, key, value)
 
         # Confirm save
         console.print()

@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import queue
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -33,12 +32,12 @@ from ..sessions import (
 from ..stream.display import console, _run_streaming
 from .agent import _shorten_path, _create_session_workspace, _load_agent
 from .channel import (
-    ChannelMessage,
-    _ChannelState,
+    _channels_is_running,
     _cmd_channel,
     _cmd_channel_stop,
     _auto_start_channel,
 )
+import EvoScientist.cli.channel as _ch_mod
 from .mcp_ui import _cmd_mcp
 from .skills_cmd import _cmd_list_skills, _cmd_install_skill, _cmd_uninstall_skill
 
@@ -177,9 +176,6 @@ def cmd_interactive(
     mode: str | None = None,
     model: str | None = None,
     provider: str | None = None,
-    imessage_enabled: bool = False,
-    imessage_allowed_senders: str = "",
-    imessage_send_thinking: bool = True,
     run_name: str | None = None,
     thread_id: str | None = None,
 ) -> None:
@@ -195,9 +191,6 @@ def cmd_interactive(
         mode: Workspace mode ('daemon' or 'run'), displayed in banner
         model: Model name to display in banner
         provider: LLM provider name to display in banner
-        imessage_enabled: Whether to auto-start iMessage channel
-        imessage_allowed_senders: Comma-separated allowed senders
-        imessage_send_thinking: Whether to forward thinking to channel
         run_name: Optional run name for /new session deduplication
         thread_id: Optional thread ID to resume a previous session
     """
@@ -230,106 +223,6 @@ def cmd_interactive(
         "running": True,
         "resumed": False,
     }
-
-    def _process_channel_message(msg: ChannelMessage) -> None:
-        """Process a message from a channel with full Live streaming."""
-        # Move past the current prompt line to avoid interference with prompt_toolkit
-        # Then move back up and clear that line
-        sys.stdout.write("\n\033[A\033[2K\r")
-        sys.stdout.flush()
-        # Display prompt with channel source on second line
-        console.print(f"[bold blue]>[/bold blue] {msg.content}")
-        console.print(Text.assemble(
-            ("[", "dim"),
-            (f"{msg.channel_type}: Received from ", "dim"),
-            (msg.sender, "cyan"),
-            ("]", "dim"),
-        ))
-        _print_separator()
-        console.print()
-
-        # Build channel callbacks for intermediate messages (thinking + todo + files)
-        on_thinking = None
-        on_todo = None
-        on_file_write = None
-        if _ChannelState.is_running() and _ChannelState.server and _ChannelState.loop:
-            def _send_thinking(thinking_text: str) -> None:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        _ChannelState.server.send_thinking_message(
-                            msg.sender, thinking_text, msg.metadata,
-                        ),
-                        _ChannelState.loop,
-                    )
-                except Exception:
-                    pass  # Non-critical — don't break main flow
-
-            def _send_todo(todo_items: list) -> None:
-                try:
-                    lines = [f"\U0001f4cb {len(todo_items)} tasks ongoing"]  # 📋
-                    for i, item in enumerate(todo_items, 1):
-                        content = item.get("content", "")
-                        lines.append(f"{i}. {content}")
-                    lines.append("\U0001f680")  # 🚀
-                    formatted = "\n".join(lines)
-                    asyncio.run_coroutine_threadsafe(
-                        _ChannelState.server.send_todo_message(
-                            msg.sender, formatted, msg.metadata,
-                        ),
-                        _ChannelState.loop,
-                    )
-                except Exception:
-                    pass  # Non-critical — don't break main flow
-
-            def _send_file(real_path: str) -> None:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        _ChannelState.server.channel.send_media(
-                            recipient=msg.sender, file_path=real_path,
-                            metadata=msg.metadata,
-                        ),
-                        _ChannelState.loop,
-                    )
-                except Exception:
-                    pass  # Non-critical — don't break main flow
-
-            on_thinking = _send_thinking
-            on_todo = _send_todo
-            on_file_write = _send_file
-
-        try:
-            meta = _build_metadata(state["workspace_dir"], model)
-            # Use SAME _run_streaming as CLI input — full Live experience
-            response_text = _run_streaming(
-                state["agent"], msg.content, state["thread_id"], show_thinking,
-                interactive=True, on_thinking=on_thinking, on_todo=on_todo,
-                on_file_write=on_file_write, metadata=meta,
-            )
-
-            # Set response for channel handler to retrieve
-            _ChannelState.set_response(msg.msg_id, response_text or "")
-            # Show replied indicator
-            console.print(Text.assemble(
-                ("[", "dim"),
-                (f"{msg.channel_type}: Replied to ", "dim"),
-                (msg.sender, "cyan"),
-                ("]", "dim"),
-            ))
-        except Exception as e:
-            console.print(f"[red]Channel processing error: {e}[/red]")
-            _ChannelState.set_response(msg.msg_id, f"Error: {e}")
-
-        _print_separator()
-
-    async def _check_channel_queue():
-        """Background task to check channel queue periodically."""
-        while state["running"]:
-            try:
-                msg = _ChannelState.message_queue.get_nowait()
-                _process_channel_message(msg)
-            except queue.Empty:
-                pass
-            await asyncio.sleep(0.1)  # Check every 100ms
 
     async def _resolve_thread_id(tid: str) -> str | None:
         """Resolve a (possibly partial) thread ID. Returns full ID or None."""
@@ -486,9 +379,9 @@ def cmd_interactive(
         console.print("[dim]Loading session...[/dim]")
         state["agent"] = _load_agent(workspace_dir=state["workspace_dir"], checkpointer=checkpointer)
         # Sync shared refs if channel is running
-        if _ChannelState.is_running():
-            _ChannelState.agent = state["agent"]
-            _ChannelState.thread_id = state["thread_id"]
+        if _channels_is_running():
+            _ch_mod._cli_agent = state["agent"]
+            _ch_mod._cli_thread_id = state["thread_id"]
         console.print(f"[green]Resumed session:[/green] [yellow]{resolved}[/yellow]")
         if state["workspace_dir"]:
             console.print(f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]")
@@ -537,11 +430,13 @@ def cmd_interactive(
                 print_banner(state["thread_id"], state["workspace_dir"], memory_dir, mode, model, provider)
 
             # Start background queue checker
-            queue_task = asyncio.create_task(_check_channel_queue())
+            # (no longer needed — bus mode handles messages internally)
 
-            # Auto-start iMessage channel if enabled in config
-            if imessage_enabled and not _ChannelState.is_running():
-                _auto_start_channel(state["agent"], state["thread_id"], imessage_allowed_senders, imessage_send_thinking)
+            # Auto-start channel if enabled in config
+            from ..config import load_config
+            config = load_config()
+            if config and config.channel_enabled and not _channels_is_running():
+                _auto_start_channel(state["agent"], state["thread_id"], config)
 
             try:
                 _print_separator()
@@ -588,10 +483,6 @@ def cmd_interactive(
                             state["agent"] = _load_agent(workspace_dir=state["workspace_dir"], checkpointer=checkpointer)
                             state["thread_id"] = generate_thread_id()
                             state["resumed"] = False
-                            # Sync shared refs if channel is running
-                            if _ChannelState.is_running():
-                                _ChannelState.agent = state["agent"]
-                                _ChannelState.thread_id = state["thread_id"]
                             console.print(f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]")
                             if state["workspace_dir"]:
                                 console.print(f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]\n")
@@ -626,8 +517,9 @@ def cmd_interactive(
 
                         if user_input.lower().startswith("/channel"):
                             args = user_input[len("/channel"):].strip()
-                            if args.lower() == "stop":
-                                _cmd_channel_stop()
+                            if args.lower().startswith("stop"):
+                                stop_arg = args[len("stop"):].strip()
+                                _cmd_channel_stop(stop_arg or None)
                             else:
                                 _cmd_channel(args, state["agent"], state["thread_id"])
                             continue
@@ -660,11 +552,7 @@ def cmd_interactive(
                         else:
                             console.print(f"[red]Error: {e}[/red]")
             finally:
-                queue_task.cancel()
-                try:
-                    await queue_task
-                except asyncio.CancelledError:
-                    pass
+                pass
 
     # Run the async main loop
     try:

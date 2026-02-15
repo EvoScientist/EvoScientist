@@ -6,11 +6,12 @@ via JSON-RPC, similar to OpenClaw's approach.
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncIterator
+from pathlib import Path
 
-from ..base import Channel, IncomingMessage, OutgoingMessage, ChannelError
+from ..base import Channel, RawIncoming, ChannelError
+from ..config import BaseChannelConfig
 from .rpc_client import ImsgRpcClient, RpcNotification
 from .targets import (
     normalize_handle,
@@ -23,15 +24,32 @@ from .targets import (
 logger = logging.getLogger(__name__)
 
 
+class _IMessageAllowListMiddleware:
+    """Custom allow-list middleware for iMessage's rich sender filtering.
+
+    Supports chat_id/chat_guid matching, wildcard, and normalized
+    phone/email matching — logic that the generic AllowListMiddleware
+    does not cover.
+    """
+
+    def __init__(self, channel: 'IMessageChannelRpc'):
+        self._channel = channel
+
+    async def process_inbound(self, raw, context):
+        chat_id = raw.metadata.get("chat_id")
+        chat_guid = raw.metadata.get("chat_guid")
+        if not self._channel._is_sender_allowed(raw.sender_id, chat_id, chat_guid):
+            return None
+        return raw
+
+
 @dataclass
-class IMessageConfig:
+class IMessageConfig(BaseChannelConfig):
     """Configuration for iMessage channel."""
 
     cli_path: str = "imsg"
     db_path: str | None = None
-    allowed_senders: list[str] = field(default_factory=list)
-    include_attachments: bool = False
-    text_chunk_limit: int = 4000
+    text_chunk_limit: int = 4096
     service: str = "auto"  # imessage, sms, or auto
     region: str = "US"
 
@@ -46,21 +64,39 @@ class IMessageChannelRpc(Channel):
         config: Channel configuration
     """
 
+    name = "imessage"
+    _ready_attrs = ("_client",)
+
     def __init__(self, config: IMessageConfig | None = None):
-        self.config = config or IMessageConfig()
+        super().__init__(config or IMessageConfig())
         self._client: ImsgRpcClient | None = None
-        self._running = False
-        self._message_queue: asyncio.Queue[IncomingMessage] = asyncio.Queue()
         self._subscription_id: int | None = None
+
+    # ── Pipeline overrides ────────────────────────────────────────
+
+    def _build_inbound_middlewares(self):
+        """Use iMessage-specific allow-list middleware.
+
+        iMessage doesn't need MentionGating (always sets was_mentioned=True).
+        """
+        from ..middleware import DedupMiddleware, GroupHistoryMiddleware
+        middlewares = []
+        middlewares.append(DedupMiddleware())
+        middlewares.append(_IMessageAllowListMiddleware(self))
+        if self.capabilities.groups:
+            middlewares.append(GroupHistoryMiddleware())
+        return middlewares
+
+    # ── Incoming message handling ─────────────────────────────────
 
     def _handle_notification(self, notification: RpcNotification) -> None:
         """Handle incoming RPC notifications."""
         if notification.method == "message":
-            self._handle_message(notification.params)
+            asyncio.create_task(self._handle_message(notification.params))
         elif notification.method == "error":
             logger.error(f"imsg error: {notification.params}")
 
-    def _handle_message(self, params: dict | None) -> None:
+    async def _handle_message(self, params: dict | None) -> None:
         """Process incoming message notification."""
         if not params:
             return
@@ -77,16 +113,7 @@ class IMessageChannelRpc(Channel):
         if not sender:
             return
 
-        # Check allowed senders
-        chat_id = message.get("chat_id")
-        chat_guid = message.get("chat_guid")
-        if not self._is_sender_allowed(sender, chat_id, chat_guid):
-            logger.debug(f"Ignoring message from {sender}")
-            return
-
         text = message.get("text", "").strip()
-        if not text:
-            return
 
         # Parse timestamp
         timestamp = datetime.now()
@@ -105,23 +132,61 @@ class IMessageChannelRpc(Channel):
         }
 
         # Handle attachments if enabled
+        annotations: list[str] = []
+        media_paths: list[str] = []
+        _VOICE_EXTS = {".caf", ".m4a", ".aac", ".ogg", ".opus", ".mp3", ".amr"}
         if self.config.include_attachments:
             attachments = message.get("attachments", [])
-            if attachments:
-                metadata["attachments"] = attachments
+            for att in attachments:
+                # imsg CLI provides local file paths for attachments
+                file_path = att if isinstance(att, str) else att.get("path", "")
+                if not file_path:
+                    annotations.append("[attachment: missing path]")
+                    continue
+                att_path = Path(file_path)
+                is_voice = att_path.suffix.lower() in _VOICE_EXTS
+                media_label = "voice" if is_voice else "attachment"
+                if att_path.exists():
+                    fname = att_path.name
+                    # Check file size before copying
+                    from ..base import MAX_ATTACHMENT_BYTES
+                    if att_path.stat().st_size > MAX_ATTACHMENT_BYTES:
+                        annotations.append(
+                            f"[{media_label}: {fname} - too large "
+                            f"({att_path.stat().st_size} bytes)]"
+                        )
+                    else:
+                        local = self._media_path(f"imsg_{fname}")
+                        try:
+                            import shutil
+                            shutil.copy2(str(att_path), str(local))
+                            media_paths.append(str(local))
+                            annotations.append(f"[{media_label}: {local}]")
+                        except Exception as e:
+                            logger.warning(f"Failed to copy iMessage attachment: {e}")
+                            annotations.append(f"[{media_label}: {fname} - copy failed]")
+                else:
+                    annotations.append(f"[{media_label}: {file_path} - not found]")
 
-        incoming = IncomingMessage(
-            sender=sender,
-            content=text,
+        if not text and not media_paths and not annotations:
+            return
+
+        is_group = message.get("is_group", False)
+
+        await self._enqueue_raw(RawIncoming(
+            sender_id=sender,
+            chat_id=str(metadata.get("chat_id", sender)),
+            text=text,
+            media_files=media_paths,
+            content_annotations=annotations,
             timestamp=timestamp,
             message_id=str(message.get("id", "")),
             metadata=metadata,
-        )
+            is_group=is_group,
+            was_mentioned=True,  # iMessage has no mention concept
+        ))
 
-        try:
-            self._message_queue.put_nowait(incoming)
-        except asyncio.QueueFull:
-            logger.warning("Message queue full, dropping message")
+    # ── Sender filtering ──────────────────────────────────────────
 
     def _is_sender_allowed(
         self,
@@ -179,28 +244,35 @@ class IMessageChannelRpc(Channel):
 
         return False
 
+    def _normalize_sender(self, sender: str) -> str:
+        """Normalize a sender identifier."""
+        return sender if sender.startswith("chat") else normalize_handle(sender)
+
     def add_allowed_sender(self, sender: str) -> None:
         """Add a sender to the allowed list."""
-        normalized = normalize_handle(sender) if not sender.startswith("chat") else sender
-        if normalized not in self.config.allowed_senders:
-            self.config.allowed_senders.append(normalized)
-            logger.info(f"Added allowed sender: {normalized}")
+        normalized = self._normalize_sender(sender)
+        if self.config.allowed_senders is None:
+            self.config.allowed_senders = set()
+        self.config.allowed_senders.add(normalized)
+        logger.info(f"Added allowed sender: {normalized}")
 
     def remove_allowed_sender(self, sender: str) -> None:
         """Remove a sender from the allowed list."""
-        normalized = normalize_handle(sender) if not sender.startswith("chat") else sender
-        if normalized in self.config.allowed_senders:
-            self.config.allowed_senders.remove(normalized)
+        normalized = self._normalize_sender(sender)
+        if self.config.allowed_senders:
+            self.config.allowed_senders.discard(normalized)
             logger.info(f"Removed allowed sender: {normalized}")
 
     def clear_allowed_senders(self) -> None:
         """Clear allowed list (allow all)."""
-        self.config.allowed_senders = []
+        self.config.allowed_senders = None
         logger.info("Cleared allowed senders (allowing all)")
 
     def list_allowed_senders(self) -> list[str]:
         """Get current allowed senders."""
-        return self.config.allowed_senders
+        return list(self.config.allowed_senders) if self.config.allowed_senders else []
+
+    # ── Lifecycle ─────────────────────────────────────────────────
 
     async def start(self) -> None:
         """Initialize and start the channel."""
@@ -231,11 +303,7 @@ class IMessageChannelRpc(Channel):
         self._running = True
         logger.info("iMessage channel started")
 
-    async def stop(self) -> None:
-        """Stop the channel and clean up."""
-        logger.info("Stopping iMessage channel...")
-        self._running = False
-
+    async def _cleanup(self) -> None:
         if self._client and self._subscription_id:
             try:
                 await self._client.request(
@@ -244,149 +312,82 @@ class IMessageChannelRpc(Channel):
                 )
             except Exception:
                 pass
-
         if self._client:
             await self._client.stop()
             self._client = None
-
         logger.info("iMessage channel stopped")
 
-    async def receive(self) -> AsyncIterator[IncomingMessage]:
-        """Yield incoming messages from the queue."""
-        while self._running:
+    # ── Send (template method overrides) ──────────────────────────
+
+    def _resolve_target(self, chat_id: str | None, metadata: dict | None) -> dict:
+        """Resolve send target from metadata or chat_id string."""
+        meta = metadata or {}
+        for key in ("chat_id", "chat_guid", "chat_identifier"):
+            if meta.get(key):
+                return {key: meta[key]}
+        if chat_id:
             try:
-                msg = await asyncio.wait_for(
-                    self._message_queue.get(),
-                    timeout=1.0,
-                )
-                yield msg
-            except asyncio.TimeoutError:
-                continue
-
-    def _segment_message(self, content: str) -> list[str]:
-        """Split long message into segments."""
-        limit = self.config.text_chunk_limit
-        if len(content) <= limit:
-            return [content]
-
-        segments = []
-        remaining = content
-
-        while remaining:
-            if len(remaining) <= limit:
-                segments.append(remaining)
-                break
-
-            chunk = remaining[:limit]
-            # Try split at newline
-            nl_pos = chunk.rfind("\n")
-            if nl_pos > limit // 2:
-                split_pos = nl_pos + 1
-            else:
-                # Try split at space
-                sp_pos = chunk.rfind(" ")
-                if sp_pos > limit // 2:
-                    split_pos = sp_pos + 1
+                target = parse_target(chat_id)
+                if isinstance(target, ChatIdTarget):
+                    return {"chat_id": target.chat_id}
+                elif isinstance(target, ChatGuidTarget):
+                    return {"chat_guid": target.chat_guid}
+                elif isinstance(target, ChatIdentifierTarget):
+                    return {"chat_identifier": target.chat_identifier}
                 else:
-                    split_pos = limit
+                    return {"to": target.to, "service": target.service.value}
+            except ValueError:
+                return {"to": chat_id}
+        return {}
 
-            segments.append(remaining[:split_pos].rstrip())
-            remaining = remaining[split_pos:].lstrip()
-
-        return segments
-
-    async def send(self, message: OutgoingMessage) -> bool:
-        """Send a message via iMessage."""
+    async def _send_chunk(self, chat_id, formatted_text, raw_text, reply_to, metadata):
+        """Send a single text chunk via iMessage RPC."""
         if not self._client:
-            logger.error("Cannot send: client not running")
-            return False
+            raise RuntimeError("iMessage client not running")
 
-        segments = self._segment_message(message.content)
-
-        for segment in segments:
-            params = self._build_send_params(message, segment)
-            if not params:
-                logger.error(f"_build_send_params returned None for recipient={message.recipient}, metadata={message.metadata}")
-                return False
-
-            try:
-                logger.debug(f"Calling imsg send with params: {params}")
-                await self._client.request("send", params)
-            except Exception as e:
-                logger.error(f"Send failed: {e}")
-                logger.error(f"Failed params were: {params}")
-                return False
-
-        return True
-
-    def _build_send_params(
-        self, message: OutgoingMessage, text: str
-    ) -> dict | None:
-        """Build send parameters from message."""
         params: dict = {
-            "text": text,
+            "text": formatted_text,
             "service": self.config.service,
             "region": self.config.region,
         }
+        params.update(self._resolve_target(chat_id, metadata))
 
-        logger.debug(f"Building send params - recipient: {message.recipient}, metadata: {message.metadata}")
+        if reply_to:
+            params["reply_to"] = reply_to
 
-        # Check metadata for chat targets
-        chat_id = message.metadata.get("chat_id")
-        chat_guid = message.metadata.get("chat_guid")
-        chat_identifier = message.metadata.get("chat_identifier")
+        await self._client.request("send", params)
 
-        if chat_id:
-            params["chat_id"] = chat_id
-        elif chat_guid:
-            params["chat_guid"] = chat_guid
-        elif chat_identifier:
-            params["chat_identifier"] = chat_identifier
-        elif message.recipient:
-            # Parse recipient to determine target type
-            try:
-                target = parse_target(message.recipient)
-                if isinstance(target, ChatIdTarget):
-                    params["chat_id"] = target.chat_id
-                elif isinstance(target, ChatGuidTarget):
-                    params["chat_guid"] = target.chat_guid
-                elif isinstance(target, ChatIdentifierTarget):
-                    params["chat_identifier"] = target.chat_identifier
-                else:
-                    params["to"] = target.to
-                    params["service"] = target.service.value
-            except ValueError:
-                params["to"] = message.recipient
-        else:
-            logger.error("Cannot send: no recipient or chat target")
-            return None
+    # ── Retry logic (override base) ───────────────────────────────
 
-        logger.debug(f"Built send params: {params}")
-        return params
+    def _format_chunk(self, text: str) -> str:
+        """iMessage uses plain text; no formatting conversion needed."""
+        return text
 
-    async def send_media(
+
+    def _extract_retry_after(self, exc: Exception) -> float | None:
+        """iMessage-specific retry logic.
+
+        RPC errors (e.g. AppleScript failures) are generally not
+        retryable.  Transient connection issues get a short retry.
+        """
+        msg = str(exc).lower()
+        if "not found" in msg or "applescript" in msg or "permission" in msg:
+            return None  # not retryable
+        if "timeout" in msg or "connection" in msg:
+            return 1.0
+        return None  # default: don't retry RPC errors
+
+    async def _send_media_impl(
         self,
         recipient: str,
         file_path: str,
         caption: str = "",
         metadata: dict | None = None,
     ) -> bool:
-        """Send a media file via iMessage.
-
-        Args:
-            recipient: Target recipient or chat target
-            file_path: Local path to the media file
-            caption: Optional caption text
-            metadata: Optional metadata with chat_id etc.
-
-        Returns:
-            True if sent successfully
-        """
+        """Send a media file via iMessage."""
         if not self._client:
-            logger.error("Cannot send media: client not running")
             return False
 
-        metadata = metadata or {}
         params: dict = {
             "file": file_path,
             "service": self.config.service,
@@ -396,32 +397,11 @@ class IMessageChannelRpc(Channel):
         if caption:
             params["text"] = caption
 
-        # Determine target
-        chat_id = metadata.get("chat_id")
-        chat_guid = metadata.get("chat_guid")
-
-        if chat_id:
-            params["chat_id"] = chat_id
-        elif chat_guid:
-            params["chat_guid"] = chat_guid
-        elif recipient:
-            try:
-                target = parse_target(recipient)
-                if isinstance(target, ChatIdTarget):
-                    params["chat_id"] = target.chat_id
-                elif isinstance(target, ChatGuidTarget):
-                    params["chat_guid"] = target.chat_guid
-                else:
-                    params["to"] = target.to
-            except ValueError:
-                params["to"] = recipient
-        else:
+        target = self._resolve_target(recipient, metadata)
+        if not target:
             logger.error("Cannot send media: no recipient")
             return False
+        params.update(target)
 
-        try:
-            await self._client.request("send", params)
-            return True
-        except Exception as e:
-            logger.error(f"Send media failed: {e}")
-            return False
+        await self._client.request("send", params)
+        return True
