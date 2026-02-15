@@ -337,11 +337,19 @@ class WeChatChannel(Channel, WebhookMixin, TokenMixin):
                 logger.error(f"WeChat decrypt failed: {e}")
                 return web.Response(status=500)
 
-        # Route to backend-specific handler
-        await self._process_message(xml_data)
+        # Process message asynchronously — WeCom requires a response within
+        # 5 seconds, but media downloads can take much longer.  Return
+        # "success" immediately and handle the message in the background.
+        asyncio.create_task(self._safe_process_message(xml_data))
 
-        # Return "success" to acknowledge receipt (async reply via API)
         return web.Response(text="success")
+
+    async def _safe_process_message(self, xml_data: dict[str, str]) -> None:
+        """Wrapper that catches exceptions so fire-and-forget tasks don't leak."""
+        try:
+            await self._process_message(xml_data)
+        except Exception:
+            logger.exception("Error processing WeChat message")
 
     async def _process_message(self, xml_data: dict[str, str]) -> None:
         """Process a parsed XML message from WeChat/WeCom callback."""
@@ -436,7 +444,7 @@ class WeChatChannel(Channel, WebhookMixin, TokenMixin):
             text = f"[位置] {label} ({lat}, {lon})"
         elif msg_type == "file":
             media_id = xml_data.get("MediaId", "")
-            file_name = xml_data.get("Title", f"wechat_file_{msg_id}")
+            file_name = xml_data.get("FileName", "") or xml_data.get("Title", f"wechat_file_{msg_id}")
             logger.info(f"WeChat file message: name={file_name}, media_id={media_id!r}, keys={list(xml_data.keys())}")
             if media_id:
                 local, ann = await self._download_wechat_media(
