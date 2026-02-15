@@ -1,6 +1,5 @@
 """Tests for EvoScientist onboarding wizard."""
 
-import os
 import subprocess
 from unittest.mock import patch, Mock, MagicMock
 

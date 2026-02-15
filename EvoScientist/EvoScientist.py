@@ -28,7 +28,6 @@ from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
 from .utils import load_subagents
 from .tools import tavily_search, think_tool, skill_manager
 from .paths import (
-    ensure_dirs,
     default_workspace_dir,
     set_active_workspace,
     MEMORY_DIR as _MEMORY_DIR_PATH,
