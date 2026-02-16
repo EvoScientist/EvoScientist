@@ -85,7 +85,7 @@ class EvoScientistConfig:
     show_thinking: bool = True
 
     # Channel Settings
-    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "" (comma-separated for multiple)
+    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "" (comma-separated for multiple)
     channel_send_thinking: bool = True  # forward thinking to any channel
     require_mention: str = "group"  # "always" | "group" | "off"
     text_chunk_limit: int = 0  # 0 = use capability default

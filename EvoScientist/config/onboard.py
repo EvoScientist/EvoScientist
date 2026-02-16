@@ -1317,6 +1317,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
     _CHANNELS = [
         ("telegram",  "Telegram",  [("telegram_bot_token", "Bot token (from @BotFather)")]),
         ("discord",   "Discord",   [("discord_bot_token", "Bot token")]),
+        ("slack",     "Slack",     [("slack_bot_token", "Bot token (xoxb-...)"), ("slack_app_token", "App token for Socket Mode (xapp-...)")]),
+        ("wechat",    "WeChat",    [("wechat_wecom_corp_id", "WeCom Corp ID"), ("wechat_wecom_agent_id", "WeCom Agent ID"), ("wechat_wecom_secret", "WeCom Secret")]),
         ("imessage",  "iMessage",  []),  # handled via _setup_imessage()
     ]
 
@@ -1475,6 +1477,29 @@ def _probe_channel(
                 _val("discord_bot_token"),
                 _val("discord_proxy") or None,
             )
+        elif ch_name == "slack":
+            from ..channels.slack.probe import validate_slack_tokens
+            return await validate_slack_tokens(
+                _val("slack_bot_token"),
+                _val("slack_app_token") or None,
+                _val("slack_proxy") or None,
+            )
+        elif ch_name == "wechat":
+            backend = _val("wechat_backend", "wecom")
+            if backend == "wechatmp":
+                from ..channels.wechat.probe import validate_wechat_mp
+                return await validate_wechat_mp(
+                    _val("wechat_mp_app_id"),
+                    _val("wechat_mp_app_secret"),
+                    _val("wechat_proxy") or None,
+                )
+            else:
+                from ..channels.wechat.probe import validate_wecom
+                return await validate_wecom(
+                    _val("wechat_wecom_corp_id"),
+                    _val("wechat_wecom_secret"),
+                    _val("wechat_proxy") or None,
+                )
         else:
             return True, "No probe available"
 

@@ -299,6 +299,7 @@ Two backends supported: **WeCom** (recommended, free, no certification needed) a
 1. Log in to [WeCom Admin Console](https://work.weixin.qq.com) → App Management → create a custom app.
 2. Copy the **Corp ID**, **AgentId**, and **Secret**.
 3. In app details → Receive Messages → Set API Receive → URL: `http://your-host:9001/wechat/callback` → copy **Token** and **EncodingAESKey**.
+4. In app details → **Trusted IP** → add your server's public IP address. Without this, all API calls will fail with error `60020`.
 
 ```yaml
 channel_enabled: "wechat"

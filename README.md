@@ -473,6 +473,15 @@ We thank the authors for their valuable contributions to the open-source communi
           <sub><b>Dinos Papakostas</b></sub>
         </a>
       </td>
+      <td align="center">
+        <a href="https://muxincg2004.github.io/">
+          <img src="https://muxincg2004.github.io/resume_avatar.jpg"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Ziheng Zhang"/>
+          <br />
+          <sub><b>Ziheng Zhang</b></sub>
+        </a>
+      </td>
     </tr>
   </tbody>
 </table>

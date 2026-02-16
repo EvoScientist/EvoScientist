@@ -1,7 +1,7 @@
 """Communication channels for EvoScientist.
 
 This module provides an extensible interface for different messaging channels
-(iMessage, Telegram, Discord) to communicate with the EvoScientist agent.
+(iMessage, Telegram, Discord, Slack, WeChat) to communicate with the EvoScientist agent.
 """
 
 from .base import Channel, RawIncoming, IncomingMessage, OutgoingMessage, chunk_text
