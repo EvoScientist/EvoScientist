@@ -1251,8 +1251,8 @@ class TestInboundConsumer:
         assert tid1 == "shared_thread:alice"
         assert tid2 == "shared_thread:bob"
 
-    def test_session_eviction_is_fifo_not_lru(self):
-        """[B-19] Sessions evict oldest by insertion, not by access."""
+    def test_session_eviction_is_lru(self):
+        """Sessions use LRU eviction: recently accessed senders are kept."""
         consumer = self._make_consumer()
         consumer._sessions.clear()
 
@@ -1260,13 +1260,12 @@ class TestInboundConsumer:
         for i in range(10):
             consumer._sessions[f"user_{i}"] = f"thread_{i}"
 
-        # Access "user_0" (should make it LRU-recent, but dict doesn't)
-        _ = consumer._sessions["user_0"]
+        # Access "user_0" via _get_thread_id (triggers LRU move_to_end)
+        consumer._get_thread_id("user_0")
 
-        # Force eviction by exceeding limit (simulate)
-        # Note: actual limit is 10_000, we test the logic pattern
+        # "user_0" should now be at the end (most recently used)
         oldest = next(iter(consumer._sessions))
-        assert oldest == "user_0"  # Still first in insertion order
+        assert oldest == "user_1"  # user_1 is now the least recently used
 
     def test_metrics_initial(self):
         consumer = self._make_consumer()
@@ -1537,20 +1536,20 @@ class TestIntegration:
             assert flushed.content == "will be lost"
         _run(_test())
 
-    def test_send_locks_unbounded_growth(self):
-        """[B-03] _send_locks grows without bound for unique chat_ids."""
+    def test_send_locks_bounded_growth(self):
+        """_send_locks stays bounded via LRU eviction of unlocked entries."""
         async def _test():
             ch = StubChannel()
-            for i in range(100):
+            ch._send_locks_max = 10  # Small limit for testing
+            for i in range(20):
                 msg = OutboundMessage(
                     channel="stub", chat_id=f"chat_{i}",
                     content="hi", metadata={"chat_id": f"chat_{i}"},
                 )
                 await ch.send(msg)
 
-            # All 100 unique chat_ids created a lock
-            assert len(ch._send_locks) == 100
-            # BUG: These are never cleaned up
+            # Should be bounded at max + 1 (the newly inserted entry)
+            assert len(ch._send_locks) <= ch._send_locks_max + 1
         _run(_test())
 
 

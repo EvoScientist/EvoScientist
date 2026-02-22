@@ -428,12 +428,18 @@ class Channel(ChannelPlugin, ABC):
             self._send_locks.move_to_end(chat_id)
         else:
             self._send_locks[chat_id] = asyncio.Lock()
-            # Evict oldest unlocked entries when over capacity
-            while len(self._send_locks) > self._send_locks_max:
-                oldest_key, oldest_lock = next(iter(self._send_locks.items()))
-                if oldest_lock.locked():
-                    break  # don't evict a lock that's in use
-                del self._send_locks[oldest_key]
+            # Evict oldest unlocked entries when over capacity.
+            # Skip locked entries instead of giving up entirely,
+            # to prevent unbounded growth.
+            if len(self._send_locks) > self._send_locks_max:
+                to_evict = [
+                    k for k, lock in self._send_locks.items()
+                    if not lock.locked() and k != chat_id
+                ]
+                for k in to_evict:
+                    if len(self._send_locks) <= self._send_locks_max:
+                        break
+                    del self._send_locks[k]
         return self._send_locks[chat_id]
 
     async def send(self, message: OutboundMessage) -> bool:
@@ -816,26 +822,30 @@ class Channel(ChannelPlugin, ABC):
     def _build_inbound(self, raw: RawIncoming) -> InboundMessage | None:
         """Run *raw* through inbound middlewares and convert to InboundMessage.
 
-        Synchronous wrapper around :meth:`_build_inbound_async`.  Safe to
-        call from both sync and async contexts.
+        Synchronous wrapper around :meth:`_build_inbound_async`.  When an
+        event loop is already running, the coroutine is scheduled on that
+        loop via :func:`asyncio.run_coroutine_threadsafe` to avoid
+        thread-safety issues with middleware state (DedupCache,
+        GroupHistoryBuffer, etc.).
         """
         import asyncio
-        import concurrent.futures
 
         try:
-            asyncio.get_running_loop()
-            # Inside a running loop — run in a worker thread
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(
-                    lambda: asyncio.run(self._build_inbound_async(raw))
-                ).result()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop — safe to create one
-            loop = asyncio.new_event_loop()
+            loop = None
+
+        if loop is not None and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self._build_inbound_async(raw), loop,
+            )
+            return future.result()
+        else:
+            new_loop = asyncio.new_event_loop()
             try:
-                return loop.run_until_complete(self._build_inbound_async(raw))
+                return new_loop.run_until_complete(self._build_inbound_async(raw))
             finally:
-                loop.close()
+                new_loop.close()
 
     def _raw_to_inbound(self, raw: RawIncoming) -> InboundMessage | None:
         """Convert a RawIncoming to InboundMessage (pure transformation, no filtering).
@@ -917,7 +927,12 @@ class Channel(ChannelPlugin, ABC):
 
         async def debounce_callback(_s=sender, _w=wait):
             await asyncio.sleep(_w)
-            await self._process_buffered_messages(_s)
+            try:
+                await self._process_buffered_messages(_s)
+            except Exception as e:
+                _logger.error(
+                    f"{self.name} debounce flush error for {_s}: {e}"
+                )
 
         self._debounce_tasks[sender] = asyncio.create_task(
             debounce_callback()

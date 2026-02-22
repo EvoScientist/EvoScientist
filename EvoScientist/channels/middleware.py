@@ -26,6 +26,22 @@ from .base import RawIncoming
 _logger = logging.getLogger(__name__)
 
 
+# ── Task cancellation helper ─────────────────────────────────────────
+
+async def _cancel_task(task: asyncio.Task) -> None:
+    """Cancel an asyncio task and await its completion.
+
+    Suppresses ``CancelledError`` so callers don't need to handle it.
+    """
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass  # Already logged elsewhere; prevent unhandled propagation
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Supporting data structures
 # ═══════════════════════════════════════════════════════════════════════
@@ -135,7 +151,7 @@ class GroupHistoryBuffer:
         buf = self._buffers.get(chat_id)
         if not buf:
             return []
-        now = time.time()
+        now = time.monotonic()
         recent = [e for e in buf if now - e.timestamp < self._max_age]
         return recent[-limit:]
 
@@ -193,7 +209,7 @@ class TypingManager:
         """Cancel the typing-indicator loop for *chat_id*."""
         task = self._tasks.pop(chat_id, None)
         if task:
-            task.cancel()
+            await _cancel_task(task)
 
     async def stop_all(self) -> None:
         """Cancel all active typing-indicator loops."""
@@ -236,7 +252,7 @@ class PairingManager:
         # Check if already has pending request
         for code, req in list(self._pending.items()):
             if req.sender_id == sender_id and req.channel == channel:
-                if time.time() - req.created_at < self.CODE_EXPIRY:
+                if time.monotonic() - req.created_at < self.CODE_EXPIRY:
                     return code  # return existing code
                 else:
                     del self._pending[code]
@@ -254,7 +270,7 @@ class PairingManager:
             sender_id=sender_id,
             channel=channel,
             code=code,
-            created_at=time.time(),
+            created_at=time.monotonic(),
         )
         _logger.info(f"Pairing code {code} generated for {channel}:{sender_id}")
         return code
@@ -264,7 +280,7 @@ class PairingManager:
         req = self._pending.get(code)
         if not req:
             return False, f"Unknown code: {code}"
-        if time.time() - req.created_at > self.CODE_EXPIRY:
+        if time.monotonic() - req.created_at > self.CODE_EXPIRY:
             del self._pending[code]
             return False, f"Code {code} expired"
 
@@ -287,7 +303,7 @@ class PairingManager:
         return list(self._pending.values())
 
     def _cleanup_expired(self):
-        now = time.time()
+        now = time.monotonic()
         expired = [c for c, r in self._pending.items() if now - r.created_at > self.CODE_EXPIRY]
         for c in expired:
             del self._pending[c]
@@ -440,11 +456,12 @@ class DebounceMiddleware:
         if self.on_ready:
             await self.on_ready(inbound)
 
-    def cancel_all(self) -> None:
-        """Cancel all pending debounce tasks."""
-        for task in self._tasks.values():
-            task.cancel()
+    async def cancel_all(self) -> None:
+        """Cancel all pending debounce tasks and await their completion."""
+        tasks = list(self._tasks.values())
         self._tasks.clear()
+        for task in tasks:
+            await _cancel_task(task)
 
 
 # ── Chunking ─────────────────────────────────────────────────────────
@@ -743,11 +760,8 @@ class GroupHistoryMiddleware(InboundMiddleware):
         if not raw.is_group:
             return raw
 
-        ts = (
-            raw.timestamp.timestamp()
-            if hasattr(raw.timestamp, "timestamp")
-            else time.time()
-        )
+        # Use monotonic clock for consistent expiry calculation
+        ts = time.monotonic()
 
         if not raw.was_mentioned:
             self._buffer.add(
@@ -792,6 +806,7 @@ class PairingMiddleware(InboundMiddleware):
         self._channel_name = channel_name
         self._send_response_fn = send_response_fn
         self._dm_policy = dm_policy
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def process_inbound(
         self, raw: RawIncoming, context: dict[str, Any],
@@ -809,6 +824,9 @@ class PairingMiddleware(InboundMiddleware):
         code = self._manager.request_pairing(self._channel_name, raw.sender_id)
         if self._send_response_fn:
             text = f"\U0001f510 Pairing required. Your code: {code}\nThis code expires in 1 hour."
-            asyncio.ensure_future(self._send_response_fn(raw.chat_id, text))
+            task = asyncio.create_task(self._send_response_fn(raw.chat_id, text))
+            # Track the task to prevent GC and handle exceptions
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         _logger.info(f"Pairing required for {raw.sender_id}, code sent")
         return None

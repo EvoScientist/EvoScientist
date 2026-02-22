@@ -33,6 +33,7 @@
   - [CLI Inference](#cli-inference)
   - [Script Inference](#script-inference)
   - [Web Interface](#web-interface)
+- [💬 Channels](#-channels)
 - [🔌 MCP Integration](#-mcp-integration)
 - [📊 Evaluation](#-evaluation)
 - [📝 Citation](#-citation)
@@ -221,24 +222,49 @@ EvoSci config path            # Show config file path
 /install-skill owner/repo@skill-name
 ```
 
-### iMessage Channel
+### Channels
 
-EvoScientist can be controlled remotely via iMessage. The channel shares the same agent and conversation thread as the CLI — messages from your phone go through the same session.
+EvoScientist integrates with 10 messaging platforms, allowing you to control the agent remotely from any chat app. All channels share the same agent core — messages from any platform go through the same processing pipeline.
 
-```Shell
-# Enable during onboard
-EvoSci onboard        # Step 7 configures iMessage
+| Channel | Transport | Public IP Required | Install Extra |
+|:--------|:----------|:------------------:|:--------------|
+| Telegram | Long Polling | No | `pip install evoscientist[telegram]` |
+| Discord | WebSocket | No | `pip install evoscientist[discord]` |
+| Slack | Socket Mode | No | `pip install evoscientist[slack]` |
+| Feishu / Lark | HTTP Webhook | Yes | `pip install evoscientist[feishu]` |
+| WeChat (WeCom / MP) | HTTP Webhook | Yes | `pip install evoscientist[wechat]` |
+| DingTalk | WebSocket Stream | No | `pip install evoscientist[dingtalk]` |
+| QQ | WebSocket | No | `pip install evoscientist[qq]` |
+| Signal | JSON-RPC | No | `pip install evoscientist[signal]` |
+| Email | IMAP + SMTP | No | `pip install evoscientist[email]` |
+| iMessage | JSON-RPC (stdio) | No | macOS only, requires [imsg](https://github.com/anthropics/imsg) CLI |
 
-# Or enable manually
-EvoSci config set imessage_enabled true
-EvoSci config set imessage_allowed_senders "+1234567890"
+**Quick start:**
+
+```bash
+# 1. Install channel dependencies
+pip install evoscientist[telegram]   # or discord, slack, feishu, etc.
+
+# 2. Configure via wizard or CLI
+EvoSci onboard                      # interactive setup
+# or
+EvoSci config set channel_enabled telegram
+EvoSci config set telegram_bot_token "123456:ABC-xxx"
+
+# 3. Start
+EvoSci serve                        # agent + all enabled channels
 ```
 
-The channel can also be started manually with `/channel` in the interactive CLI.
+Multiple channels can run concurrently — comma-separate names in the config:
 
-**Features:**
-- Thinking content and todo lists are forwarded to iMessage as intermediate messages
-- Media files (images, PDFs) are auto-sent when the agent writes (`write_file`) or reads (`read_file`) them — no extra commands needed
+```yaml
+channel_enabled: "telegram,discord,slack"
+```
+
+The channel can also be started interactively with `/channel` in the CLI session.
+
+> [!NOTE]
+> For per-channel setup guides, capability matrix, architecture details, and troubleshooting, see the **[Channel Integration Guide](./EvoScientist/channels)**.
 
 ### Runtime Directories
 

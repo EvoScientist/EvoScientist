@@ -229,7 +229,7 @@ class WebSocketMixin:
             except Exception as e:
                 logger.error(f"{getattr(self, 'name', '?')} WS error: {e}")
 
-            self._ws_cleanup_heartbeat()
+            await self._ws_cleanup_heartbeat()
             self._ws_session = None
 
             if getattr(self, "_running", False):
@@ -244,10 +244,17 @@ class WebSocketMixin:
                 break
             await asyncio.sleep(self._ws_heartbeat_interval)
 
-    def _ws_cleanup_heartbeat(self) -> None:
+    async def _ws_cleanup_heartbeat(self) -> None:
         if self._ws_heartbeat_task:
-            self._ws_heartbeat_task.cancel()
+            task = self._ws_heartbeat_task
             self._ws_heartbeat_task = None
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
     async def _ws_send_json(self, data: dict) -> None:
         """Send JSON to the active WebSocket."""
@@ -255,7 +262,7 @@ class WebSocketMixin:
             await self._ws_session.send_str(json.dumps(data))
 
     async def _stop_ws(self) -> None:
-        self._ws_cleanup_heartbeat()
+        await self._ws_cleanup_heartbeat()
         if self._ws_session:
             await self._ws_session.close()
             self._ws_session = None
@@ -302,5 +309,12 @@ class PollingMixin:
 
     async def _stop_polling(self) -> None:
         if self._poll_task:
-            self._poll_task.cancel()
+            task = self._poll_task
             self._poll_task = None
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass

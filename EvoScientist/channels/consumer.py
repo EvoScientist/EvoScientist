@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, TypeVar
 
@@ -131,7 +132,7 @@ class InboundConsumer:
         self._on_message_received = on_message_received
         self._on_streaming_event = on_streaming_event
         self._on_message_sent = on_message_sent
-        self._sessions: dict[str, str] = {}  # sender_id -> thread_id
+        self._sessions: OrderedDict[str, str] = OrderedDict()  # sender_id -> thread_id (LRU)
 
         # Per-chat locks: same chat is processed serially (bounded)
         self._chat_locks: dict[str, asyncio.Lock] = {}
@@ -152,16 +153,22 @@ class InboundConsumer:
         self._metrics = ConsumerMetrics()
 
     def _get_thread_id(self, sender_id: str) -> str:
-        """Get or create a thread ID for the given sender."""
-        if sender_id not in self._sessions:
-            if len(self._sessions) >= _MAX_SESSIONS:
-                # Evict oldest entry
-                oldest = next(iter(self._sessions))
-                del self._sessions[oldest]
-            if self.thread_id:
-                self._sessions[sender_id] = f"{self.thread_id}:{sender_id}"
-            else:
-                self._sessions[sender_id] = str(uuid.uuid4())
+        """Get or create a thread ID for the given sender.
+
+        Uses LRU ordering: recently accessed senders are moved to the
+        end, so eviction always removes the least-recently-active sender.
+        """
+        if sender_id in self._sessions:
+            self._sessions.move_to_end(sender_id)
+            return self._sessions[sender_id]
+
+        if len(self._sessions) >= _MAX_SESSIONS:
+            # Evict the least-recently-used entry
+            self._sessions.popitem(last=False)
+        if self.thread_id:
+            self._sessions[sender_id] = f"{self.thread_id}:{sender_id}"
+        else:
+            self._sessions[sender_id] = str(uuid.uuid4())
         return self._sessions[sender_id]
 
     def _get_channel(self, channel_name: str) -> Channel | None:
