@@ -284,12 +284,12 @@ We thank the authors for their valuable contributions to the open-source communi
         </a>
       </td>
       <td align="center">
-        <a href="https://youganglyu.github.io/">
-          <img src="https://youganglyu.github.io/images/profile.png"
+        <a href="https://muxincg2004.github.io/">
+          <img src="https://muxincg2004.github.io/resume_avatar.jpg"
                width="100" height="100"
-               style="object-fit: cover; border-radius: 20%;" alt="Yougang Lyu"/>
+               style="object-fit: cover; border-radius: 20%;" alt="Ziheng Zhang"/>
           <br />
-          <sub><b>Yougang Lyu<sup>§</sup></b></sub>
+          <sub><b>Ziheng Zhang<sup>‡</sup></b></sub>
         </a>
       </td>
       <td align="center">
@@ -302,19 +302,19 @@ We thank the authors for their valuable contributions to the open-source communi
         </a>
       </td>
       <td align="center">
-        <a href="https://muxincg2004.github.io/">
-          <img src="https://muxincg2004.github.io/resume_avatar.jpg"
+        <a href="https://youganglyu.github.io/">
+          <img src="https://youganglyu.github.io/images/profile.png"
                width="100" height="100"
-               style="object-fit: cover; border-radius: 20%;" alt="Ziheng Zhang"/>
+               style="object-fit: cover; border-radius: 20%;" alt="Yougang Lyu"/>
           <br />
-          <sub><b>Ziheng Zhang<sup>‡</sup></b></sub>
+          <sub><b>Yougang Lyu<sup>§</sup></b></sub>
         </a>
       </td>
     </tr>
   </tbody>
 </table>
 
-> <sup>†</sup> Project Leader <sup>§</sup> Research Contributor <sup>‡</sup> Core Developer
+> <sup>†</sup> Project Leader <sup>‡</sup> Core Developer <sup>§</sup> Project Correspondent
 
 For any enquiries or collaboration opportunities, please contact: [**EvoScientist.ai@gmail.com**](mailto:evoscientist.ai@gmail.com)
 
