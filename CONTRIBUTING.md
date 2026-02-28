@@ -20,7 +20,7 @@ EvoScientist is a multi-agent AI system for automated scientific experimentation
 | License | MIT |
 | Framework | [DeepAgents](https://github.com/langchain-ai/deepagents) + [LangChain](https://python.langchain.com/) + [LangGraph](https://langchain-ai.github.io/langgraph/) |
 | Default model | `claude-sonnet-4-5` (Anthropic) |
-| Tests | ~830 across 37 files, no API keys needed |
+| Tests | ~830 across 35 files, no API keys needed |
 | Config file | `~/.config/evoscientist/config.yaml` |
 
 ### Sub-Agents (defined in `EvoScientist/subagent.yaml`)
@@ -73,8 +73,8 @@ cd EvoScientist
 # Option A: uv (recommended)
 uv sync --dev
 
-# Option B: pip
-pip install -e ".[dev]"
+# Option B: pip (requires pip >=25.0 for PEP 735 dependency groups)
+pip install -e . --dependency-groups dev
 
 # Channel extras (optional)
 pip install -e ".[telegram]"      # single channel
@@ -225,7 +225,7 @@ Additional built-in skills (`agent-swarm-protocol`, `paper-planning`, `paper-rev
 
 ### Tests
 
-37 test files under `tests/`, following `test_*.py` naming. Tests are placed near the affected domain:
+35 test files under `tests/`, following `test_*.py` naming. Tests are placed near the affected domain:
 
 ```txt
 tests/
@@ -287,7 +287,7 @@ Two variants exist:
 
 **`CustomSandboxBackend`** extends `FilesystemBackend` + `LocalShellBackend`:
 - **Path sanitization** — `_resolve_path()` auto-corrects LLM hallucinated paths: strips `/workspace/` prefixes, system path prefixes (`/Users/`, `/home/`, etc.). See `_SYSTEM_PATH_PREFIXES` at `backends.py:21`.
-- **Command validation** — `validate_command()` blocks directory traversal (`..`), dangerous commands (`sudo`, `chmod`, `dd`, `shutdown`, `reboot`), and dangerous patterns (`rm -rf /`). See `BLOCKED_COMMANDS` at `backends.py:35`.
+- **Command validation** — `validate_command()` blocks directory traversal (`..`), dangerous commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`), and dangerous patterns (`rm -rf /`). See `BLOCKED_COMMANDS` at `backends.py:35`.
 - **Limits** — 300s execution timeout, 100KB output limit.
 
 **`MergedReadOnlyBackend`** (`backends.py`) merges two directories for `ls` and `read_file`. User skills (`workspace/skills/`) take priority over built-in skills (`EvoScientist/skills/`).
@@ -329,7 +329,7 @@ StreamState / SubAgentState (state.py)
 Rich rendering (display.py) / TUI widgets (cli/widgets/)
 ```
 
-**Sub-agent name resolution** — `_get_subagent_name()` in `state.py` uses a 6-level priority chain:
+**Sub-agent name resolution** — `_get_subagent_name()` in `events.py` and `_resolve_subagent_name()` in `state.py` use a 6-level priority chain:
 1. `metadata["lc_agent_name"]` — most reliable; filters out generic names
 2. Task ID from namespace tuple → maps to announced task `tool_call_id`
 3. Task ID from metadata fields
@@ -341,8 +341,8 @@ Rich rendering (display.py) / TUI widgets (cli/widgets/)
 
 `channels/base.py` — `Channel` ABC defines the interface all channels implement:
 
-- **`start(callback)`** — Start listening for incoming messages
-- **`_send_chunk()`** — Send a single message chunk to the channel
+- **`start()`** — Start listening for incoming messages (no callback; inbound messages arrive via the bus)
+- **`_send_chunk(chat_id, formatted_text, raw_text, reply_to, metadata)`** — Send a single message chunk to the channel
 - **Text chunking** — `chunk_text()` splits messages at code block boundaries > paragraph breaks > newlines > spaces > hard cut
 
 **Dual-thread design**: Bus thread enqueues `ChannelMessage` on a thread-safe queue. Main CLI thread polls queue, processes with `_run_streaming` (Rich Live, real-time), sets response. Bus thread publishes outbound.
@@ -350,7 +350,7 @@ Rich rendering (display.py) / TUI widgets (cli/widgets/)
 **Display format** (in `cli/interactive.py`):
 
 ```txt
-> message content              <-- user input style
+❯ message content              <-- user input style (❯ bold blue)
 [channel: Received from sender] <-- dim text, sender in cyan
 -----------------
                                 <-- Rich Live streaming (thinking, tools, markdown)
@@ -433,7 +433,7 @@ Each pattern includes WHY it exists, so contributors understand the reason behin
 
 ### 9. Sub-Agent Name Resolution 6-Level Priority
 
-**Where**: `stream/state.py` — `_get_subagent_name()`
+**Where**: `stream/events.py` — `_get_subagent_name()`, `stream/state.py` — `_resolve_subagent_name()`
 
 **Why**: Sub-agent identity comes from multiple unreliable sources. The 6-level priority chain ensures the most reliable source wins. Critically, the fallback "sub-agent" name is NOT cached, allowing re-resolution when a more reliable source arrives later.
 
@@ -513,11 +513,14 @@ from ..base import Channel, IncomingMessage
 class MyChannel(Channel):
     name = "mychannel"
 
-    async def start(self, callback):
-        """Start listening. Call callback(IncomingMessage) for each message."""
+    async def start(self) -> None:
+        """Start listening. Inbound messages arrive via the bus (set_bus)."""
         ...
 
-    async def _send_chunk(self, channel_id: str, text: str) -> None:
+    async def _send_chunk(
+        self, chat_id: str, formatted_text: str, raw_text: str,
+        reply_to: str | None, metadata: dict,
+    ) -> None:
         """Send a single text chunk to the channel."""
         ...
 
@@ -582,16 +585,26 @@ my-agent:
 
 ```python
 # EvoScientist/middleware/my_middleware.py
-from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
+from deepagents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
+from typing import Awaitable, Callable
 
 class MyMiddleware(AgentMiddleware):
-    async def on_model_request(self, request: ModelRequest) -> ModelRequest:
-        """Modify the request before it reaches the LLM."""
-        return request
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Modify the request before it reaches the LLM (sync)."""
+        # Modify request here, then pass to handler
+        return handler(request)
 
-    async def on_model_response(self, response: ModelResponse) -> ModelResponse:
-        """Process the response after the LLM returns."""
-        return response
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Modify the request before it reaches the LLM (async)."""
+        return await handler(request)
 ```
 
 2. **Re-export** from `EvoScientist/middleware/__init__.py`.
@@ -734,7 +747,7 @@ pytest --cov=EvoScientist --cov-report=term-missing
 
 - **Placement**: Tests near the affected domain — `EvoScientist/llm/...` → `tests/test_llm.py`.
 - **Mocking**: Use `unittest.mock.patch` for external services, API calls, and file system operations.
-- **Stub channels**: Use `StubChannel` (see `tests/conftest.py`) for channel tests rather than real connections.
+- **Stub channels**: Use `StubChannel` (see `tests/test_channel_comprehensive.py`) for channel tests rather than real connections.
 - **Fixtures**: See `tests/conftest.py` for shared fixtures (temp directories, mock configs, etc.).
 
 ### CI Workflows
