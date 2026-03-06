@@ -2,7 +2,7 @@
 
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, NVIDIA,
-SiliconFlow, OpenRouter, Ollama, and custom OpenAI-compatible endpoints) and
+SiliconFlow, OpenRouter, ZhipuAI, Ollama, and custom OpenAI-compatible endpoints) and
 convenient short names for common models.
 """
 
@@ -15,12 +15,16 @@ from langchain.chat_models import init_chat_model
 
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+_ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 
 # Third-party providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
 _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
+    "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
+    "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
     "custom": (None, "CUSTOM_API_KEY"),  # base_url from CUSTOM_BASE_URL env
 }
 
@@ -73,6 +77,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
+    # Zhipu (智谱)
+    ("glm-5", "glm-5", "zhipu"),
+    ("glm-4.7", "glm-4.7", "zhipu"),
+    # Zhipu Code Plan (智谱代码计划)
+    ("glm-5", "glm-5", "zhipu-code"),
+    ("glm-4.7", "glm-4.7", "zhipu-code"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).

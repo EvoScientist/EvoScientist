@@ -19,6 +19,7 @@ import yaml
 # Configuration paths
 # =============================================================================
 
+
 def get_config_dir() -> Path:
     """Get the configuration directory path.
 
@@ -38,6 +39,7 @@ def get_config_path() -> Path:
 # =============================================================================
 # Configuration dataclass
 # =============================================================================
+
 
 @dataclass
 class EvoScientistConfig:
@@ -63,6 +65,7 @@ class EvoScientistConfig:
     google_api_key: str = ""
     siliconflow_api_key: str = ""
     openrouter_api_key: str = ""
+    zhipu_api_key: str = ""
     custom_api_key: str = ""
     custom_base_url: str = ""
     ollama_base_url: str = ""
@@ -182,6 +185,7 @@ class EvoScientistConfig:
 # Config file operations
 # =============================================================================
 
+
 def load_config() -> EvoScientistConfig:
     """Load configuration from file.
 
@@ -234,6 +238,7 @@ def reset_config() -> None:
 # =============================================================================
 # Config value operations
 # =============================================================================
+
 
 def _coerce_value(value: Any, field_type: Any) -> Any:
     """Coerce a value to the expected field type.
@@ -322,6 +327,7 @@ _ENV_MAPPINGS = {
     "google_api_key": "GOOGLE_API_KEY",
     "siliconflow_api_key": "SILICONFLOW_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
+    "zhipu_api_key": "ZHIPU_API_KEY",
     "custom_api_key": "CUSTOM_API_KEY",
     "custom_base_url": "CUSTOM_BASE_URL",
     "ollama_base_url": "OLLAMA_BASE_URL",
@@ -332,7 +338,9 @@ _ENV_MAPPINGS = {
 }
 
 
-def get_effective_config(cli_overrides: dict[str, Any] | None = None) -> EvoScientistConfig:
+def get_effective_config(
+    cli_overrides: dict[str, Any] | None = None,
+) -> EvoScientistConfig:
     """Get effective configuration by merging all sources.
 
     Priority (highest to lowest):
@@ -355,7 +363,9 @@ def get_effective_config(cli_overrides: dict[str, Any] | None = None) -> EvoScie
     for config_key, env_key in _ENV_MAPPINGS.items():
         env_value = os.environ.get(env_key)
         if env_value:
-            field_info = next(f for f in fields(EvoScientistConfig) if f.name == config_key)
+            field_info = next(
+                f for f in fields(EvoScientistConfig) if f.name == config_key
+            )
             try:
                 data[config_key] = _coerce_value(env_value, field_info.type)
             except (ValueError, TypeError):
@@ -391,6 +401,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["SILICONFLOW_API_KEY"] = config.siliconflow_api_key
     if config.openrouter_api_key and not os.environ.get("OPENROUTER_API_KEY"):
         os.environ["OPENROUTER_API_KEY"] = config.openrouter_api_key
+    if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):
+        os.environ["ZHIPU_API_KEY"] = config.zhipu_api_key
     if config.custom_api_key and not os.environ.get("CUSTOM_API_KEY"):
         os.environ["CUSTOM_API_KEY"] = config.custom_api_key
     if config.custom_base_url and not os.environ.get("CUSTOM_BASE_URL"):

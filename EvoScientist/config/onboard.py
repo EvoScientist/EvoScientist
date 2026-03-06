@@ -35,26 +35,30 @@ console = Console()
 # Wizard Style
 # =============================================================================
 
-WIZARD_STYLE = Style.from_dict({
-    "qmark": "fg:#00bcd4 bold",          # Cyan question mark
-    "question": "bold",                   # Bold question text
-    "answer": "fg:#4caf50 bold",          # Green selected answer
-    "pointer": "fg:#4caf50",             # Green pointer (»)
-    "highlighted": "noreverse bold",      # No background, bold text
-    "selected": "fg:#4caf50 bold",        # Green ● indicator
-    "separator": "fg:#6c6c6c",            # Dim separator
-    "disabled": "fg:#858585",             # Dim disabled indicator (-)
-    "instruction": "fg:#858585",          # Dim instructions
-    "text": "fg:#858585",                 # Dim gray ○ and unselected text
-})
+WIZARD_STYLE = Style.from_dict(
+    {
+        "qmark": "fg:#00bcd4 bold",  # Cyan question mark
+        "question": "bold",  # Bold question text
+        "answer": "fg:#4caf50 bold",  # Green selected answer
+        "pointer": "fg:#4caf50",  # Green pointer (»)
+        "highlighted": "noreverse bold",  # No background, bold text
+        "selected": "fg:#4caf50 bold",  # Green ● indicator
+        "separator": "fg:#6c6c6c",  # Dim separator
+        "disabled": "fg:#858585",  # Dim disabled indicator (-)
+        "instruction": "fg:#858585",  # Dim instructions
+        "text": "fg:#858585",  # Dim gray ○ and unselected text
+    }
+)
 
-CONFIRM_STYLE = Style.from_dict({
-    "qmark": "fg:#e69500 bold",           # Orange warning mark (!)
-    "question": "bold",
-    "answer": "fg:#4caf50 bold",
-    "instruction": "fg:#858585",
-    "text": "",
-})
+CONFIRM_STYLE = Style.from_dict(
+    {
+        "qmark": "fg:#e69500 bold",  # Orange warning mark (!)
+        "question": "bold",
+        "answer": "fg:#4caf50 bold",
+        "instruction": "fg:#858585",
+        "text": "",
+    }
+)
 
 QMARK = "❯"
 
@@ -85,17 +89,34 @@ def _checkbox_ask(choices, message: str, **kwargs):
     InquirerControl._get_choice_tokens = _patched
     try:
         return questionary.checkbox(
-            message, choices=choices, style=WIZARD_STYLE, qmark=QMARK, **kwargs,
+            message,
+            choices=choices,
+            style=WIZARD_STYLE,
+            qmark=QMARK,
+            **kwargs,
         ).ask()
     finally:
         InquirerControl._get_choice_tokens = original
 
-STEPS = ["UI", "Provider", "API Key", "Model", "Tavily Key", "Workspace", "Thinking", "Skills", "MCP Servers", "Channels"]
+
+STEPS = [
+    "UI",
+    "Provider",
+    "API Key",
+    "Model",
+    "Tavily Key",
+    "Workspace",
+    "Thinking",
+    "Skills",
+    "MCP Servers",
+    "Channels",
+]
 
 
 # =============================================================================
 # Validators
 # =============================================================================
+
 
 class IntegerValidator(Validator):
     """Validates that input is a positive integer."""
@@ -130,14 +151,13 @@ class ChoiceValidator(Validator):
         if not text and self.allow_empty:
             return
         if text not in [c.lower() for c in self.choices]:
-            raise ValidationError(
-                message=f"Must be one of: {', '.join(self.choices)}"
-            )
+            raise ValidationError(message=f"Must be one of: {', '.join(self.choices)}")
 
 
 # =============================================================================
 # API Key Validation
 # =============================================================================
+
 
 def validate_anthropic_key(api_key: str) -> tuple[bool, str]:
     """Validate an Anthropic API key by making a test request.
@@ -153,6 +173,7 @@ def validate_anthropic_key(api_key: str) -> tuple[bool, str]:
 
     try:
         import anthropic
+
         client = anthropic.Anthropic(api_key=api_key)
         # Make a minimal request to validate the key
         client.models.list()
@@ -177,6 +198,7 @@ def validate_openai_key(api_key: str) -> tuple[bool, str]:
 
     try:
         import openai
+
         client = openai.OpenAI(api_key=api_key)
         # Make a minimal request to validate the key
         client.models.list()
@@ -201,12 +223,18 @@ def validate_nvidia_key(api_key: str) -> tuple[bool, str]:
 
     try:
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
+
         llm = ChatNVIDIA(api_key=api_key, model="meta/llama-3.1-8b-instruct")
         llm.available_models
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
-        if "401" in error_str or "unauthorized" in error_str or "invalid" in error_str or "authentication" in error_str:
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
             return False, "Invalid API key"
         return False, f"Error: {e}"
 
@@ -225,6 +253,7 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
 
     try:
         from google import genai
+
         client = genai.Client(api_key=api_key)
         # Make a minimal request to validate the key
         pager = client.models.list(config={"page_size": 1})
@@ -235,7 +264,14 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
-        if "400" in error_str or "401" in error_str or "403" in error_str or "unauthorized" in error_str or "invalid" in error_str or "api key" in error_str:
+        if (
+            "400" in error_str
+            or "401" in error_str
+            or "403" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "api key" in error_str
+        ):
             return False, "Invalid API key"
         return False, f"Error: {e}"
 
@@ -251,12 +287,20 @@ def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
 
     try:
         import openai
-        client = openai.OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
+
+        client = openai.OpenAI(
+            api_key=api_key, base_url="https://api.siliconflow.cn/v1"
+        )
         client.models.list()
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
-        if "401" in error_str or "unauthorized" in error_str or "invalid" in error_str or "authentication" in error_str:
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
             return False, "Invalid API key"
         return False, f"Error: {e}"
 
@@ -272,12 +316,47 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
 
     try:
         import openai
+
         client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
         client.models.list()
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
-        if "401" in error_str or "unauthorized" in error_str or "invalid" in error_str or "authentication" in error_str:
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
+def validate_zhipu_key(api_key: str) -> tuple[bool, str]:
+    """Validate a ZhipuAI API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key, base_url="https://open.bigmodel.cn/api/paas/v4"
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
             return False, "Invalid API key"
         return False, f"Error: {e}"
 
@@ -296,6 +375,7 @@ def validate_tavily_key(api_key: str) -> tuple[bool, str]:
 
     try:
         from tavily import TavilyClient
+
         client = TavilyClient(api_key=api_key)
         # Make a minimal search to validate
         client.search("test", max_results=1)
@@ -322,6 +402,7 @@ def validate_ollama_connection(base_url: str) -> tuple[bool, str, list[str]]:
 
     try:
         import httpx
+
         resp = httpx.get(f"{base_url.rstrip('/')}/api/tags", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
@@ -340,17 +421,20 @@ def validate_ollama_connection(base_url: str) -> tuple[bool, str, list[str]]:
 # Display Helpers
 # =============================================================================
 
+
 def _print_header() -> None:
     """Print the wizard header."""
     console.print()
-    console.print(Panel.fit(
-        Text.from_markup(
-            "[bold cyan]EvoScientist Setup Wizard[/bold cyan]\n\n"
-            "This wizard will help you configure EvoScientist.\n"
-            "Press Ctrl+C at any time to cancel."
-        ),
-        border_style="cyan",
-    ))
+    console.print(
+        Panel.fit(
+            Text.from_markup(
+                "[bold cyan]EvoScientist Setup Wizard[/bold cyan]\n\n"
+                "This wizard will help you configure EvoScientist.\n"
+                "Press Ctrl+C at any time to cancel."
+            ),
+            border_style="cyan",
+        )
+    )
     console.print()
 
 
@@ -379,6 +463,7 @@ def _print_step_skipped(step_name: str, reason: str = "kept current") -> None:
 # =============================================================================
 # Step Functions
 # =============================================================================
+
 
 def _step_ui_backend(config: EvoScientistConfig) -> str:
     """Step 0: Select UI backend (Rich CLI or Textual TUI).
@@ -423,14 +508,41 @@ def _step_provider(config: EvoScientistConfig) -> str:
         Choice(title="OpenAI (GPT models)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
         Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
-        Choice(title="SiliconFlow (third party — GLM, Kimi, MiniMax, etc.)", value="siliconflow"),
-        Choice(title="OpenRouter (third party — Grok, Gemini, Qwen, etc.)", value="openrouter"),
+        Choice(
+            title="SiliconFlow (third party — GLM, Kimi, MiniMax, etc.)",
+            value="siliconflow",
+        ),
+        Choice(
+            title="OpenRouter (third party — Grok, Gemini, Qwen, etc.)",
+            value="openrouter",
+        ),
+        Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
+        Choice(
+            title="ZhipuAI CodePlan (智谱代码计划 — GLM models for coding)",
+            value="zhipu-code",
+        ),
         Choice(title="Ollama (local models)", value="ollama"),
         Choice(title="Other (OpenAI-compatible)", value="custom"),
     ]
 
     # Set default based on current config
-    default = config.provider if config.provider in ["anthropic", "openai", "google-genai", "nvidia", "siliconflow", "openrouter", "ollama", "custom"] else "anthropic"
+    default = (
+        config.provider
+        if config.provider
+        in [
+            "anthropic",
+            "openai",
+            "google-genai",
+            "nvidia",
+            "siliconflow",
+            "openrouter",
+            "zhipu",
+            "zhipu-code",
+            "ollama",
+            "custom",
+        ]
+        else "anthropic"
+    )
 
     provider = questionary.select(
         "Select your LLM provider:",
@@ -450,15 +562,56 @@ def _step_provider(config: EvoScientistConfig) -> str:
 def _provider_key_info(config: EvoScientistConfig, provider: str):
     """Return (display_name, current_value, validate_fn) for a provider."""
     mapping = {
-        "anthropic":    ("Anthropic",    config.anthropic_api_key    or os.environ.get("ANTHROPIC_API_KEY", ""),    validate_anthropic_key),
-        "nvidia":       ("NVIDIA",       config.nvidia_api_key       or os.environ.get("NVIDIA_API_KEY", ""),       validate_nvidia_key),
-        "google-genai": ("Google",       config.google_api_key       or os.environ.get("GOOGLE_API_KEY", ""),       validate_google_key),
-        "siliconflow":  ("SiliconFlow",  config.siliconflow_api_key  or os.environ.get("SILICONFLOW_API_KEY", ""),  validate_siliconflow_key),
-        "openrouter":   ("OpenRouter",   config.openrouter_api_key   or os.environ.get("OPENROUTER_API_KEY", ""),   validate_openrouter_key),
-        "custom":       ("Custom",       config.custom_api_key       or os.environ.get("CUSTOM_API_KEY", ""),       None),
-        "ollama":       ("Ollama",       "__no_key__",                                                                None),
+        "anthropic": (
+            "Anthropic",
+            config.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
+            validate_anthropic_key,
+        ),
+        "nvidia": (
+            "NVIDIA",
+            config.nvidia_api_key or os.environ.get("NVIDIA_API_KEY", ""),
+            validate_nvidia_key,
+        ),
+        "google-genai": (
+            "Google",
+            config.google_api_key or os.environ.get("GOOGLE_API_KEY", ""),
+            validate_google_key,
+        ),
+        "siliconflow": (
+            "SiliconFlow",
+            config.siliconflow_api_key or os.environ.get("SILICONFLOW_API_KEY", ""),
+            validate_siliconflow_key,
+        ),
+        "openrouter": (
+            "OpenRouter",
+            config.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", ""),
+            validate_openrouter_key,
+        ),
+        "zhipu": (
+            "ZhipuAI",
+            config.zhipu_api_key or os.environ.get("ZHIPU_API_KEY", ""),
+            validate_zhipu_key,
+        ),
+        "zhipu-code": (
+            "ZhipuAI CodePlan",
+            config.zhipu_api_key or os.environ.get("ZHIPU_API_KEY", ""),
+            validate_zhipu_key,
+        ),
+        "custom": (
+            "Custom",
+            config.custom_api_key or os.environ.get("CUSTOM_API_KEY", ""),
+            None,
+        ),
+        "ollama": ("Ollama", "__no_key__", None),
     }
-    return mapping.get(provider, ("OpenAI", config.openai_api_key or os.environ.get("OPENAI_API_KEY", ""), validate_openai_key))
+    return mapping.get(
+        provider,
+        (
+            "OpenAI",
+            config.openai_api_key or os.environ.get("OPENAI_API_KEY", ""),
+            validate_openai_key,
+        ),
+    )
 
 
 def _prompt_and_validate_api_key(
@@ -541,7 +694,10 @@ def _step_provider_api_key(
     prompt_text = f"Enter {key_name} API key ({hint}, Enter to keep):"
 
     return _prompt_and_validate_api_key(
-        prompt_text, current, validate_fn, skip_validation,
+        prompt_text,
+        current,
+        validate_fn,
+        skip_validation,
     )
 
 
@@ -563,7 +719,9 @@ def _step_base_url(config: EvoScientistConfig) -> str:
         default=default,
         style=WIZARD_STYLE,
         qmark=QMARK,
-        placeholder=FormattedText([("fg:#858585", " e.g. https://api.example.com/v1")]) if not default else None,
+        placeholder=FormattedText([("fg:#858585", " e.g. https://api.example.com/v1")])
+        if not default
+        else None,
     ).ask()
     if url is None:
         raise KeyboardInterrupt()
@@ -626,8 +784,7 @@ def _step_model(
         if ollama_detected_models:
             _CUSTOM_SENTINEL = "__custom__"
             choices = [
-                Choice(title=name, value=name)
-                for name in ollama_detected_models
+                Choice(title=name, value=name) for name in ollama_detected_models
             ]
             choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
@@ -651,7 +808,9 @@ def _step_model(
 
         # No detected models (server down or empty) — direct text input
         if not ollama_detected_models:
-            console.print("  [dim]No models detected — type the model name you plan to pull.[/dim]")
+            console.print(
+                "  [dim]No models detected — type the model name you plan to pull.[/dim]"
+            )
         model = questionary.text(
             "Model name:",
             style=WIZARD_STYLE,
@@ -745,7 +904,10 @@ def _step_tavily_key(
     prompt_text = f"Tavily API key for web search ({hint}, Enter to keep):"
 
     return _prompt_and_validate_api_key(
-        prompt_text, current, validate_tavily_key, skip_validation,
+        prompt_text,
+        current,
+        validate_tavily_key,
+        skip_validation,
         placeholder=FormattedText([("fg:#858585", " (recommended for web search)")]),
     )
 
@@ -875,7 +1037,9 @@ def _check_npx() -> bool:
     try:
         result = subprocess.run(
             ["npx", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -897,7 +1061,9 @@ def _detect_node_install_method() -> tuple[str, str]:
         try:
             result = subprocess.run(
                 ["brew", "--version"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0:
                 return "brew", "brew install node"
@@ -919,7 +1085,8 @@ def _install_node(method: str, command: str) -> bool:
     try:
         proc = subprocess.run(
             command.split(),
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             timeout=120,
         )
         return proc.returncode == 0
@@ -965,7 +1132,9 @@ def _ensure_npx(reason: str) -> bool:
                     console.print("  [green]✓ npx now available[/green]")
                     return True
                 else:
-                    console.print("  [yellow]✗ npx still not found after install[/yellow]")
+                    console.print(
+                        "  [yellow]✗ npx still not found after install[/yellow]"
+                    )
             else:
                 console.print("  [red]✗ Installation failed[/red]")
     else:
@@ -1016,11 +1185,12 @@ def _step_skills() -> list[str]:
             choices.append(Choice(title=skill["label"], value=skill["source"]))
 
     all_installed = all(
-        _hint_name(skill["source"]) in installed_names
-        for skill in _RECOMMENDED_SKILLS
+        _hint_name(skill["source"]) in installed_names for skill in _RECOMMENDED_SKILLS
     )
     if all_installed:
-        console.print("  [green]✓ All recommended skills are already installed.[/green]")
+        console.print(
+            "  [green]✓ All recommended skills are already installed.[/green]"
+        )
         return []
 
     selected = _checkbox_ask(choices, "Install or Sync predefined skills:")
@@ -1035,7 +1205,9 @@ def _step_skills() -> list[str]:
         if has_npx:
             _print_step_skipped("Skills", "none selected — good choice!")
             console.print("  [green]✓ npx found — skill discovery available[/green]")
-            console.print("  [yellow bold]* Less is more[/yellow bold] [dim](EvoScientist can discover and install skills on its own)[/dim]")
+            console.print(
+                "  [yellow bold]* Less is more[/yellow bold] [dim](EvoScientist can discover and install skills on its own)[/dim]"
+            )
         else:
             _print_step_skipped("Skills", "none selected")
 
@@ -1052,7 +1224,9 @@ def _step_skills() -> list[str]:
                 _print_step_result("Skill", label)
                 installed.append(source)
             else:
-                _print_step_result("Skill", f"{label} — {result.get('error', 'failed')}", success=False)
+                _print_step_result(
+                    "Skill", f"{label} — {result.get('error', 'failed')}", success=False
+                )
         except Exception as e:
             _print_step_result("Skill", f"{label} — {e}", success=False)
 
@@ -1117,7 +1291,9 @@ def _install_pip_package(package: str) -> bool:
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-q", package],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1156,9 +1332,13 @@ def _step_mcp_servers() -> list[str]:
         else:
             choices.append(Choice(title=srv["label"], value=srv["name"]))
 
-    all_installed = all(srv["name"] in existing_config for srv in _RECOMMENDED_MCP_SERVERS)
+    all_installed = all(
+        srv["name"] in existing_config for srv in _RECOMMENDED_MCP_SERVERS
+    )
     if all_installed:
-        console.print("  [green]✓ All recommended MCP servers are already configured.[/green]")
+        console.print(
+            "  [green]✓ All recommended MCP servers are already configured.[/green]"
+        )
         return []
 
     selected = _checkbox_ask(choices, "Install recommended MCP servers:")
@@ -1168,7 +1348,9 @@ def _step_mcp_servers() -> list[str]:
 
     if not selected:
         _print_step_skipped("MCP Servers", "none selected")
-        console.print("  [dim]Add later with: EvoSci mcp add <name> <command> [--env-ref KEY] -- [args][/dim]")
+        console.print(
+            "  [dim]Add later with: EvoSci mcp add <name> <command> [--env-ref KEY] -- [args][/dim]"
+        )
         return []
 
     # Check if any selected servers require npx
@@ -1186,7 +1368,9 @@ def _step_mcp_servers() -> list[str]:
             }
             selected = [s for s in selected if s not in npx_servers]
             if npx_servers:
-                console.print(f"  [yellow]\u26a0 Skipping {', '.join(sorted(npx_servers))} (npx not available)[/yellow]")
+                console.print(
+                    f"  [yellow]\u26a0 Skipping {', '.join(sorted(npx_servers))} (npx not available)[/yellow]"
+                )
             if not selected:
                 return []
 
@@ -1205,14 +1389,18 @@ def _step_mcp_servers() -> list[str]:
                     console.print(f"  [yellow]⚠ Requires {env_key}[/yellow]")
                     console.print(f"  [dim]{hint}[/dim]")
                     if not os.environ.get(env_key):
-                        console.print(f"  [dim]Set it before running EvoScientist: export {env_key}=...[/dim]")
+                        console.print(
+                            f"  [dim]Set it before running EvoScientist: export {env_key}=...[/dim]"
+                        )
 
             # Install pip package if needed
             pip_pkg = srv.get("pip_package")
             if pip_pkg:
                 console.print(f"  [dim]Installing {pip_pkg}...[/dim]")
                 if not _install_pip_package(pip_pkg):
-                    _print_step_result("MCP", f"{name} — pip install {pip_pkg} failed", success=False)
+                    _print_step_result(
+                        "MCP", f"{name} — pip install {pip_pkg} failed", success=False
+                    )
                     continue
 
             # Add to MCP config
@@ -1220,7 +1408,8 @@ def _step_mcp_servers() -> list[str]:
                 add_mcp_server(name, "streamable_http", url=srv["url"])
             else:
                 add_mcp_server(
-                    name, "stdio",
+                    name,
+                    "stdio",
                     command=srv["command"],
                     args=srv.get("args", []),
                     env=srv.get("env"),
@@ -1253,7 +1442,9 @@ def validate_imessage() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [cli_path, "--version"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         version = result.stdout.strip() if result.returncode == 0 else None
     except Exception:
@@ -1263,14 +1454,19 @@ def validate_imessage() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [cli_path, "rpc", "--help"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         rpc_ok = result.returncode == 0
     except Exception:
         rpc_ok = False
 
     if not rpc_ok:
-        return False, f"imsg found at {cli_path} but RPC not supported (update with: brew upgrade imsg)"
+        return (
+            False,
+            f"imsg found at {cli_path} but RPC not supported (update with: brew upgrade imsg)",
+        )
 
     version_str = f" ({version})" if version else ""
     return True, f"imsg{version_str} at {cli_path}"
@@ -1285,7 +1481,8 @@ def _install_imsg() -> bool:
     try:
         proc = subprocess.run(
             ["brew", "install", "steipete/tap/imsg"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             timeout=120,
         )
         return proc.returncode == 0
@@ -1349,7 +1546,9 @@ def _setup_imessage() -> bool:
             else:
                 return False
         else:
-            console.print("  [dim]Skipped. Install manually: brew install steipete/tap/imsg[/dim]")
+            console.print(
+                "  [dim]Skipped. Install manually: brew install steipete/tap/imsg[/dim]"
+            )
             return False
     else:
         # RPC not supported or other issue
@@ -1378,22 +1577,97 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         if t.strip()
     }
     # Legacy iMessage compat
-    if getattr(config, "imessage_enabled", False) and "imessage" not in _currently_enabled:
+    if (
+        getattr(config, "imessage_enabled", False)
+        and "imessage" not in _currently_enabled
+    ):
         _currently_enabled.add("imessage")
 
     # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
     # import_check: module name to try importing; None = no check needed
     _CHANNELS = [
-        ("telegram",  "Telegram",  [("telegram_bot_token", "Bot token (from @BotFather)")], "telegram", "telegram"),
-        ("discord",   "Discord",   [("discord_bot_token", "Bot token")], "discord", "discord"),
-        ("slack",     "Slack",     [("slack_bot_token", "Bot token (xoxb-...)"), ("slack_app_token", "App token for Socket Mode (xapp-...)")], "slack_sdk", "slack"),
-        ("feishu",    "Feishu",    [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")], "aiohttp", "feishu"),
-        ("dingtalk",  "DingTalk",  [("dingtalk_client_id", "Client ID (AppKey)"), ("dingtalk_client_secret", "Client Secret (AppSecret)")], "aiohttp", "dingtalk"),
-        ("wechat",    "WeChat",    [("wechat_wecom_corp_id", "WeCom Corp ID"), ("wechat_wecom_agent_id", "WeCom Agent ID"), ("wechat_wecom_secret", "WeCom Secret")], "aiohttp", "wechat"),
-        ("email",     "Email",     [("email_imap_host", "IMAP host"), ("email_imap_username", "IMAP username"), ("email_imap_password", "IMAP password"), ("email_smtp_host", "SMTP host"), ("email_smtp_username", "SMTP username"), ("email_smtp_password", "SMTP password"), ("email_from_address", "From address")], None, None),
-        ("qq",        "QQ",        [("qq_app_id", "App ID"), ("qq_app_secret", "App Secret")], "botpy", "qq"),
-        ("signal",    "Signal",    [("signal_phone_number", "Phone number (E.164)")], None, None),
-        ("imessage",  "iMessage",  [], None, None),  # handled via _setup_imessage()
+        (
+            "telegram",
+            "Telegram",
+            [("telegram_bot_token", "Bot token (from @BotFather)")],
+            "telegram",
+            "telegram",
+        ),
+        (
+            "discord",
+            "Discord",
+            [("discord_bot_token", "Bot token")],
+            "discord",
+            "discord",
+        ),
+        (
+            "slack",
+            "Slack",
+            [
+                ("slack_bot_token", "Bot token (xoxb-...)"),
+                ("slack_app_token", "App token for Socket Mode (xapp-...)"),
+            ],
+            "slack_sdk",
+            "slack",
+        ),
+        (
+            "feishu",
+            "Feishu",
+            [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")],
+            "aiohttp",
+            "feishu",
+        ),
+        (
+            "dingtalk",
+            "DingTalk",
+            [
+                ("dingtalk_client_id", "Client ID (AppKey)"),
+                ("dingtalk_client_secret", "Client Secret (AppSecret)"),
+            ],
+            "aiohttp",
+            "dingtalk",
+        ),
+        (
+            "wechat",
+            "WeChat",
+            [
+                ("wechat_wecom_corp_id", "WeCom Corp ID"),
+                ("wechat_wecom_agent_id", "WeCom Agent ID"),
+                ("wechat_wecom_secret", "WeCom Secret"),
+            ],
+            "aiohttp",
+            "wechat",
+        ),
+        (
+            "email",
+            "Email",
+            [
+                ("email_imap_host", "IMAP host"),
+                ("email_imap_username", "IMAP username"),
+                ("email_imap_password", "IMAP password"),
+                ("email_smtp_host", "SMTP host"),
+                ("email_smtp_username", "SMTP username"),
+                ("email_smtp_password", "SMTP password"),
+                ("email_from_address", "From address"),
+            ],
+            None,
+            None,
+        ),
+        (
+            "qq",
+            "QQ",
+            [("qq_app_id", "App ID"), ("qq_app_secret", "App Secret")],
+            "botpy",
+            "qq",
+        ),
+        (
+            "signal",
+            "Signal",
+            [("signal_phone_number", "Phone number (E.164)")],
+            None,
+            None,
+        ),
+        ("imessage", "iMessage", [], None, None),  # handled via _setup_imessage()
     ]
 
     choices = [
@@ -1423,7 +1697,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         return updates
 
     # Build a lookup for channel definitions
-    _ch_lookup = {v: (v, d, fields, imp, extra) for v, d, fields, imp, extra in _CHANNELS}
+    _ch_lookup = {
+        v: (v, d, fields, imp, extra) for v, d, fields, imp, extra in _CHANNELS
+    }
 
     enabled_channels: list[str] = []
 
@@ -1437,7 +1713,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 __import__(import_check)
             except ImportError:
                 console.print("  [yellow]✗ Required package not installed.[/yellow]")
-                console.print(f'  [dim]Run:[/dim] pip install "evoscientist\\[{pip_extra}]"')
+                console.print(
+                    f'  [dim]Run:[/dim] pip install "evoscientist\\[{pip_extra}]"'
+                )
                 console.print("  [dim]Then re-run:[/dim] EvoSci onboard")
                 continue
 
@@ -1485,7 +1763,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
         # Feishu optional fields (verification_token & encrypt_key)
         if ch_name == "feishu":
-            console.print("  [dim]The following fields are optional (press Enter to skip):[/dim]")
+            console.print(
+                "  [dim]The following fields are optional (press Enter to skip):[/dim]"
+            )
             for field_name, prompt_label in [
                 ("feishu_verification_token", "Verification Token (optional)"),
                 ("feishu_encrypt_key", "Encrypt Key (optional)"),
@@ -1570,18 +1850,21 @@ def _probe_channel(
     async def _run() -> tuple[bool, str]:
         if ch_name == "telegram":
             from ..channels.telegram.probe import validate_telegram_token
+
             return await validate_telegram_token(
                 _val("telegram_bot_token"),
                 _val("telegram_proxy") or None,
             )
         elif ch_name == "discord":
             from ..channels.discord.probe import validate_discord_token
+
             return await validate_discord_token(
                 _val("discord_bot_token"),
                 _val("discord_proxy") or None,
             )
         elif ch_name == "slack":
             from ..channels.slack.probe import validate_slack_tokens
+
             return await validate_slack_tokens(
                 _val("slack_bot_token"),
                 _val("slack_app_token") or None,
@@ -1591,6 +1874,7 @@ def _probe_channel(
             backend = _val("wechat_backend", "wecom")
             if backend == "wechatmp":
                 from ..channels.wechat.probe import validate_wechat_mp
+
                 return await validate_wechat_mp(
                     _val("wechat_mp_app_id"),
                     _val("wechat_mp_app_secret"),
@@ -1598,6 +1882,7 @@ def _probe_channel(
                 )
             else:
                 from ..channels.wechat.probe import validate_wecom
+
                 return await validate_wecom(
                     _val("wechat_wecom_corp_id"),
                     _val("wechat_wecom_secret"),
@@ -1605,6 +1890,7 @@ def _probe_channel(
                 )
         elif ch_name == "feishu":
             from ..channels.feishu.probe import validate_feishu_credentials
+
             return await validate_feishu_credentials(
                 _val("feishu_app_id"),
                 _val("feishu_app_secret"),
@@ -1612,6 +1898,7 @@ def _probe_channel(
             )
         elif ch_name == "dingtalk":
             from ..channels.dingtalk.probe import validate_dingtalk
+
             return await validate_dingtalk(
                 _val("dingtalk_client_id"),
                 _val("dingtalk_client_secret"),
@@ -1619,6 +1906,7 @@ def _probe_channel(
             )
         elif ch_name == "email":
             from ..channels.email.probe import validate_email_imap
+
             return await validate_email_imap(
                 _val("email_imap_host"),
                 int(_val("email_imap_port", "993")),
@@ -1628,12 +1916,14 @@ def _probe_channel(
             )
         elif ch_name == "qq":
             from ..channels.qq.probe import validate_qq
+
             return await validate_qq(
                 _val("qq_app_id"),
                 _val("qq_app_secret"),
             )
         elif ch_name == "signal":
             from ..channels.signal.probe import validate_signal
+
             return await validate_signal(
                 _val("signal_phone_number"),
                 _val("signal_cli_path", "signal-cli"),
@@ -1647,6 +1937,7 @@ def _probe_channel(
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 import nest_asyncio  # type: ignore[import-untyped]
+
                 nest_asyncio.apply()
         except RuntimeError:
             loop = asyncio.new_event_loop()
@@ -1657,15 +1948,20 @@ def _probe_channel(
             console.print(f"  [green]✓ {detail}[/green]")
         else:
             console.print(f"  [yellow]⚠ {detail}[/yellow]")
-            console.print("  [dim]Channel will still be enabled — check credentials later.[/dim]")
+            console.print(
+                "  [dim]Channel will still be enabled — check credentials later.[/dim]"
+            )
     except Exception as e:
         console.print(f"  [yellow]⚠ Could not validate: {e}[/yellow]")
-        console.print("  [dim]Channel will still be enabled — check credentials later.[/dim]")
+        console.print(
+            "  [dim]Channel will still be enabled — check credentials later.[/dim]"
+        )
 
 
 # =============================================================================
 # Progress Rendering (for tests and potential future use)
 # =============================================================================
+
 
 def render_progress(current_step: int, completed: set[int]) -> Panel:
     """Render the progress indicator panel.
@@ -1712,6 +2008,7 @@ def render_progress(current_step: int, completed: set[int]) -> Panel:
 # =============================================================================
 # Main onboard function
 # =============================================================================
+
 
 def run_onboard(skip_validation: bool = False) -> bool:
     """Run the interactive onboarding wizard.
@@ -1760,6 +2057,8 @@ def run_onboard(skip_validation: bool = False) -> bool:
                     config.siliconflow_api_key = new_key
                 elif provider == "openrouter":
                     config.openrouter_api_key = new_key
+                elif provider in ("zhipu", "zhipu-code"):
+                    config.zhipu_api_key = new_key
                 elif provider == "custom":
                     config.custom_api_key = new_key
                 else:
@@ -1775,6 +2074,8 @@ def run_onboard(skip_validation: bool = False) -> bool:
                     current = config.siliconflow_api_key
                 elif provider == "openrouter":
                     current = config.openrouter_api_key
+                elif provider in ("zhipu", "zhipu-code"):
+                    current = config.zhipu_api_key
                 elif provider == "custom":
                     current = config.custom_api_key
                 else:
@@ -1783,7 +2084,9 @@ def run_onboard(skip_validation: bool = False) -> bool:
                     _print_step_skipped("API Key", "not set")
 
         # Step 3: Model
-        model = _step_model(config, provider, ollama_detected_models=ollama_detected_models)
+        model = _step_model(
+            config, provider, ollama_detected_models=ollama_detected_models
+        )
         config.model = model
 
         # Step 4: Tavily Key

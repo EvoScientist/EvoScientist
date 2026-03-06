@@ -10,6 +10,7 @@ build/
 *.egg
 *.pytest_cache/
 .coverage
+.ipynb_checkpoints/
 
 # Environment
 .env
@@ -41,3 +42,4 @@ media/
 *AGENTS.md
 *meals/
 botpy.log
+large_tool_results/

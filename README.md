@@ -82,7 +82,7 @@ Going beyond traditional human-in-the-loop systems, EvoScientist introduces an A
 ## 📦 Installation
 
 > [!TIP]
-> Requires **Python 3.11+**. We recommend [**uv**](https://docs.astral.sh/uv/) or **conda** for dependency management and virtual environments.
+> Requires **Python 3.11+** (**< 3.14**). We recommend [**uv**](https://docs.astral.sh/uv/) or **conda** for dependency management and virtual environments.
 
 <details>
 <summary> 🪛 Install uv (if you don't have it)</summary>
