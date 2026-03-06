@@ -35,7 +35,7 @@ class TestModelsRegistry:
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
-        valid_providers = {"anthropic", "openai", "google-genai", "nvidia", "siliconflow", "openrouter"}
+        valid_providers = {"anthropic", "openai", "google-genai", "nvidia", "siliconflow", "openrouter", "zhipu", "zhipu-code"}
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
             name, model_id, provider = entry
