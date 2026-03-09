@@ -1283,7 +1283,14 @@ def _install_pip_package(package: str) -> bool:
             text=True,
             timeout=120,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            # Invalidate import caches so newly-installed packages are
+            # discoverable in the current process without a restart.
+            import importlib
+
+            importlib.invalidate_caches()
+            return True
+        return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
@@ -1571,6 +1578,19 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
     ):
         _currently_enabled.add("imessage")
 
+    # Direct pip packages for each channel extra.  Used to install the
+    # exact dependency without requiring the evoscientist package itself
+    # to be resolvable on PyPI (e.g. editable / dev installs).
+    _CHANNEL_PIP_DEPS: dict[str, list[str]] = {
+        "telegram": ["python-telegram-bot>=21.0"],
+        "discord": ["discord.py>=2.3"],
+        "slack": ["slack-sdk>=3.27", "aiohttp>=3.9"],
+        "feishu": ["aiohttp>=3.9"],
+        "dingtalk": ["aiohttp>=3.9"],
+        "wechat": ["pycryptodome>=3.20"],
+        "qq": ["qq-botpy>=1.0"],
+    }
+
     # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
     # import_check: module name to try importing; None = no check needed
     _CHANNELS = [
@@ -1703,8 +1723,11 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 _pkg_ready = True
             except ImportError:
                 console.print("  [yellow]✗ Required package not installed.[/yellow]")
+                # Determine packages to install
+                _pip_pkgs = _CHANNEL_PIP_DEPS.get(pip_extra, []) if pip_extra else []
+                _pkg_display = ", ".join(_pip_pkgs) if _pip_pkgs else f"evoscientist[{pip_extra}]"
                 install_now = questionary.confirm(
-                    f'Install "evoscientist[{pip_extra}]" now?',
+                    f"Install {_pkg_display} now?",
                     default=True,
                     style=WIZARD_STYLE,
                     qmark=f"  {QMARK}",
@@ -1713,15 +1736,27 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     raise KeyboardInterrupt()
                 if install_now:
                     console.print(
-                        f"  [dim]Installing evoscientist[{pip_extra}]...[/dim]"
+                        f"  [dim]Installing {_pkg_display}...[/dim]"
                     )
-                    if _install_pip_package(f"evoscientist[{pip_extra}]"):
-                        console.print("  [green]✓ Installed successfully.[/green]")
-                        _pkg_ready = True
+                    if _pip_pkgs:
+                        _ok = all(_install_pip_package(p) for p in _pip_pkgs)
+                    else:
+                        _ok = _install_pip_package(f"evoscientist[{pip_extra}]")
+                    if _ok:
+                        # Verify the import actually works now
+                        try:
+                            __import__(import_check)
+                            console.print("  [green]✓ Installed successfully.[/green]")
+                            _pkg_ready = True
+                        except ImportError:
+                            console.print("  [red]✗ Package installed but import failed.[/red]")
+                            console.print(
+                                f"  [dim]Try restarting and running:[/dim] evosci channel setup"
+                            )
                     else:
                         console.print("  [red]✗ Installation failed.[/red]")
                         console.print(
-                            f'  [dim]Run manually:[/dim] pip install "evoscientist\\[{pip_extra}]"'
+                            f'  [dim]Run manually:[/dim] pip install {_pkg_display}'
                         )
             if not _pkg_ready:
                 continue
