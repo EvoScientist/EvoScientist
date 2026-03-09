@@ -1751,7 +1751,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         except ImportError:
                             console.print("  [red]✗ Package installed but import failed.[/red]")
                             console.print(
-                                f"  [dim]Try restarting and running:[/dim] evosci channel setup"
+                                "  [dim]Try restarting and running:[/dim] evosci channel setup"
                             )
                     else:
                         console.print("  [red]✗ Installation failed.[/red]")
