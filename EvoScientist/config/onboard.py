@@ -482,10 +482,17 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
     ]
 
+    # Map legacy values to current ones
+    default_backend = config.ui_backend
+    if default_backend == "textual":
+        default_backend = "tui"
+    elif default_backend not in ("tui", "cli"):
+        default_backend = "tui"
+
     backend = questionary.select(
         "Select UI mode:",
         choices=choices,
-        default=config.ui_backend,
+        default=default_backend,
         style=WIZARD_STYLE,
         qmark=QMARK,
         use_indicator=True,
