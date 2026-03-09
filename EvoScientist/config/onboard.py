@@ -1697,14 +1697,33 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
         # Check pip dependency before proceeding
         if import_check:
+            _pkg_ready = False
             try:
                 __import__(import_check)
+                _pkg_ready = True
             except ImportError:
                 console.print("  [yellow]✗ Required package not installed.[/yellow]")
-                console.print(
-                    f'  [dim]Run:[/dim] pip install "evoscientist\\[{pip_extra}]"'
-                )
-                console.print("  [dim]Then re-run:[/dim] EvoSci onboard")
+                install_now = questionary.confirm(
+                    f'Install "evoscientist[{pip_extra}]" now?',
+                    default=True,
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                ).ask()
+                if install_now is None:
+                    raise KeyboardInterrupt()
+                if install_now:
+                    console.print(
+                        f"  [dim]Installing evoscientist[{pip_extra}]...[/dim]"
+                    )
+                    if _install_pip_package(f"evoscientist[{pip_extra}]"):
+                        console.print("  [green]✓ Installed successfully.[/green]")
+                        _pkg_ready = True
+                    else:
+                        console.print("  [red]✗ Installation failed.[/red]")
+                        console.print(
+                            f'  [dim]Run manually:[/dim] pip install "evoscientist\\[{pip_extra}]"'
+                        )
+            if not _pkg_ready:
                 continue
 
         # Special handling for iMessage
