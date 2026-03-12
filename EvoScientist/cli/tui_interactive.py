@@ -72,17 +72,6 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
-def _channel_ask_user_prompt_from_event(event: dict, channel_hitl_fn: Any) -> dict:
-    """Bridge ask_user event to channel prompt (called via asyncio.to_thread).
-
-    This is a thin wrapper used by TUI channel mode — it delegates to the
-    channel module's ``channel_ask_user_prompt`` if available, otherwise
-    returns a cancelled result.
-    """
-    from .channel import channel_ask_user_prompt as _ch_ask
-
-    return _ch_ask(event)
-
 
 def _build_welcome_banner(
     *,
