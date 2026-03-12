@@ -17,8 +17,8 @@ Notes:
 
 import argparse
 import json
-import os
-import math
+import re
+import string
 from tqdm import tqdm
 
 import torch
@@ -37,8 +37,6 @@ def read_jsonl(path):
 
 
 # SQuAD-style evaluation helpers
-import re
-import string
 
 def normalize_answer(s):
     def remove_articles(text):

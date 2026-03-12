@@ -7,8 +7,6 @@ Run: python scripts/sanity_test.py
 Expected: prints generated answers for a few toy questions.
 """
 
-import argparse
-import json
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
