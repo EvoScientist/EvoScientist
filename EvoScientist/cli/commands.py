@@ -24,6 +24,7 @@ from .channel import (
     _message_queue,
     _set_channel_response,
     _start_channels_bus_mode,
+    channel_ask_user_prompt,
     channel_hitl_prompt,
 )
 from .tui_runtime import run_streaming
@@ -170,6 +171,9 @@ def _serve_process_message(
     def _hitl_prompt(action_requests: list) -> list[dict] | None:
         return channel_hitl_prompt(action_requests, msg)
 
+    def _ask_user_prompt(ask_user_data: dict) -> dict:
+        return channel_ask_user_prompt(ask_user_data, msg)
+
     meta = build_metadata(workspace_dir, model)
     try:
         response = run_streaming(
@@ -184,6 +188,7 @@ def _serve_process_message(
             on_todo=_send_todo,
             on_file_write=_send_media,
             hitl_prompt_fn=_hitl_prompt,
+            ask_user_prompt_fn=_ask_user_prompt,
         )
     except Exception as e:
         response = f"Error: {e}"

@@ -1,0 +1,27 @@
+FROM pytorch/pytorch:1.13.1-cuda11.6-cudnn8-runtime
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    wget \
+    ca-certificates \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Copy and install Python dependencies
+COPY environment/requirements.txt /workspace/requirements.txt
+RUN pip install --upgrade pip
+# If using GPU, replace faiss-cpu with faiss-gpu or install faiss from conda/manylinux wheel
+RUN pip install --no-cache-dir -r /workspace/requirements.txt
+
+# Create a non-root user
+RUN useradd -m raguser
+USER raguser
+
+CMD ["bash"]

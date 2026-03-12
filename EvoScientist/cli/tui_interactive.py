@@ -496,6 +496,7 @@ def run_textual_interactive(
             on_media_cb: Callable[[str], None] | None = None,
             skip_user_message: bool = False,
             channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
+            channel_ask_user_fn: Callable[[dict], dict] | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -508,6 +509,9 @@ def run_textual_interactive(
                 channel_hitl_fn: Optional channel-based HITL approval function.
                     When provided (channel messages), this is called instead
                     of mounting the ApprovalWidget.
+                channel_ask_user_fn: Optional channel-based ask_user function.
+                    When provided (channel messages), this is called instead
+                    of mounting the AskUserWidget.
             """
             container = self.query_one("#chat", VerticalScroll)
 
@@ -896,13 +900,14 @@ def run_textual_interactive(
                             questions = event.get("questions", [])
                             if questions:
                                 # Channel messages: use channel-based text prompt
-                                if channel_hitl_fn is not None:
+                                if channel_ask_user_fn is not None:
                                     self._append_system(
                                         "Waiting for channel user input...",
                                         style="dim italic",
                                     )
+                                    _ask_fn = channel_ask_user_fn
                                     result = await asyncio.to_thread(
-                                        lambda: _channel_ask_user_prompt_from_event(event, channel_hitl_fn),
+                                        lambda: _ask_fn(event),
                                     )
                                 else:
                                     # Interactive TUI: display widget, collect via arrow keys
@@ -1209,6 +1214,14 @@ def run_textual_interactive(
                 """
                 return _ch_mod.channel_hitl_prompt(action_requests, msg)
 
+            def _channel_ask_user(ask_user_data: dict) -> dict:
+                """Send ask_user questions to channel user and wait for reply.
+
+                This runs in a thread (called via asyncio.to_thread) so it can
+                block without freezing the Textual event loop.
+                """
+                return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+
             response = ""
             try:
                 response = await self._stream_with_widgets(
@@ -1218,6 +1231,7 @@ def run_textual_interactive(
                     on_media_cb=_send_media,
                     skip_user_message=True,
                     channel_hitl_fn=_channel_hitl_prompt,
+                    channel_ask_user_fn=_channel_ask_user,
                 )
             except Exception as exc:
                 response = f"Error: {exc}"

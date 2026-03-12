@@ -153,6 +153,13 @@ class _PendingInterrupt:
     decision: str | None = None  # "approve", "reject", "auto"
 
 
+@dataclass
+class _PendingAskUserReply:
+    """Stored state for a pending ask_user question awaiting channel user reply."""
+    event: asyncio.Event  # set when user replies
+    reply: str | None = None  # raw reply text
+
+
 class InboundConsumer:
     """Consume inbound messages from the bus, process via agent, publish outbound.
 
@@ -236,6 +243,9 @@ class InboundConsumer:
         # HITL: pending interrupts per session_key, and auto-approve sessions
         self._pending_interrupts: dict[str, _PendingInterrupt] = {}
         self._auto_approve_sessions: set[str] = set()
+
+        # ask_user: pending reply per session_key
+        self._pending_ask_user_replies: dict[str, _PendingAskUserReply] = {}
 
     def _get_thread_id(self, sender_id: str) -> str:
         """Get or create a thread ID for the given sender.
@@ -357,6 +367,14 @@ class InboundConsumer:
 
         self._metrics.total_processed += 1
 
+        # ask_user: check if this message is a reply to a pending question.
+        # Must be checked BEFORE HITL approval — any text is a valid answer.
+        if session_key in self._pending_ask_user_replies:
+            pending_ask = self._pending_ask_user_replies[session_key]
+            pending_ask.reply = msg.content
+            pending_ask.event.set()
+            return  # consumed as ask_user answer
+
         # HITL: check if this message is a reply to a pending approval
         if session_key in self._pending_interrupts:
             pending = self._pending_interrupts[session_key]
@@ -447,6 +465,10 @@ class InboundConsumer:
                         interrupt_data = event
                         break  # exit async for to handle interrupt
 
+                    elif event_type == "ask_user":
+                        interrupt_data = event
+                        break  # exit async for to handle ask_user
+
                 # Flush thinking
                 if thinking_buffer and not thinking_sent and channel:
                     full_thinking = "".join(thinking_buffer)
@@ -472,6 +494,15 @@ class InboundConsumer:
                         except Exception:
                             pass
                     return  # done
+
+                # ask_user: send questions to channel user, collect answers
+                if interrupt_data.get("type") == "ask_user":
+                    result = await self._resolve_ask_user(
+                        msg, interrupt_data, session_key,
+                    )
+                    from langgraph.types import Command  # type: ignore[import-untyped]
+                    stream_input = Command(resume=result)
+                    continue
 
                 # HITL: resolve the interrupt
                 action_reqs = interrupt_data.get("action_requests", [])
@@ -587,6 +618,147 @@ class InboundConsumer:
             "chat_locks": len(self._chat_locks),
             "sessions": len(self._sessions),
         }
+
+    # ── ask_user helpers ──
+
+    async def _wait_for_ask_user_reply(
+        self, session_key: str, timeout: float,
+    ) -> str | None:
+        """Register a pending ask_user slot and wait for the user to reply.
+
+        Returns the raw reply text, or ``None`` on timeout.
+        """
+        pending = _PendingAskUserReply(event=asyncio.Event())
+        self._pending_ask_user_replies[session_key] = pending
+        try:
+            await asyncio.wait_for(pending.event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self._pending_ask_user_replies.pop(session_key, None)
+        return pending.reply
+
+    async def _resolve_ask_user(
+        self,
+        msg: InboundMessage,
+        event_data: dict,
+        session_key: str,
+    ) -> dict:
+        """Handle an ask_user interrupt: send questions to channel, collect answers.
+
+        Mirrors the logic of ``cli.channel.channel_ask_user_prompt`` but runs
+        fully async inside the consumer event loop.
+
+        Returns a dict suitable for ``Command(resume=...)``:
+        ``{"answers": [...], "status": "answered"}`` or
+        ``{"status": "cancelled"}``.
+        """
+        questions = event_data.get("questions", [])
+        if not questions:
+            return {"answers": [], "status": "answered"}
+
+        total = len(questions)
+        answers: list[str] = []
+
+        for i, q in enumerate(questions):
+            q_text = q.get("question", "")
+            q_type = q.get("type", "text")
+            required = q.get("required", True)
+
+            # -- Format question header --
+            if total == 1:
+                header = "\u2753 Quick check-in from EvoScientist\n"
+            else:
+                header = f"\u2753 Question {i + 1}/{total}\n"
+
+            lines: list[str] = [header, f"{i + 1}. {q_text}"]
+            if not required:
+                lines[-1] += " (optional)"
+
+            if q_type == "multiple_choice":
+                choices = q.get("choices", [])
+                for j, choice in enumerate(choices):
+                    label = choice.get("value", str(choice))
+                    letter = chr(ord("A") + j)
+                    lines.append(f"   {letter}. {label}")
+                other_letter = chr(ord("A") + len(choices))
+                lines.append(f"   {other_letter}. Other")
+                letters = "/".join(
+                    chr(ord("A") + k) for k in range(len(choices) + 1)
+                )
+                lines.append(
+                    f"\nReply with a letter ({letters}), or 'cancel'."
+                )
+            else:
+                skip_hint = " Leave empty to skip." if not required else ""
+                lines.append(
+                    f"\nReply with your answer, or 'cancel'.{skip_hint}"
+                )
+
+            # -- Send question --
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="\n".join(lines),
+                metadata=msg.metadata,
+            ))
+
+            # -- Wait for user reply --
+            reply = await self._wait_for_ask_user_reply(
+                session_key, _HITL_APPROVAL_TIMEOUT,
+            )
+
+            if not reply:
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="\u23f0 Response timed out.",
+                    metadata=msg.metadata,
+                ))
+                return {"status": "cancelled"}
+
+            raw = reply.strip()
+            if raw.lower() == "cancel":
+                return {"status": "cancelled"}
+
+            # -- Parse answer --
+            if q_type == "multiple_choice":
+                choices = q.get("choices", [])
+                other_letter = chr(ord("A") + len(choices))
+                if len(raw) == 1 and raw.upper() == other_letter:
+                    # "Other" selected — ask for free-form input
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="Please type your answer:",
+                        metadata=msg.metadata,
+                    ))
+                    other_reply = await self._wait_for_ask_user_reply(
+                        session_key, _HITL_APPROVAL_TIMEOUT,
+                    )
+                    if not other_reply:
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content="\u23f0 Response timed out.",
+                            metadata=msg.metadata,
+                        ))
+                        return {"status": "cancelled"}
+                    if other_reply.strip().lower() == "cancel":
+                        return {"status": "cancelled"}
+                    answers.append(other_reply.strip())
+                elif len(raw) == 1 and raw.upper().isalpha():
+                    idx = ord(raw.upper()) - ord("A")
+                    if 0 <= idx < len(choices):
+                        answers.append(choices[idx].get("value", raw))
+                    else:
+                        answers.append(raw)
+                else:
+                    answers.append(raw)
+            else:
+                answers.append(raw)
+
+        return {"answers": answers, "status": "answered"}
 
     # ── internal ──
 
