@@ -978,12 +978,17 @@ _RECOMMENDED_SKILLS = [
     },
     # ── Third-party (K-Dense) ──
     {
-        "label": "Scientific Skills  (147+ research & experiment skills, third party by K-Dense)",
+        "label": "Scientific Skills  (147 research & experiment skills, third party by K-Dense)",
         "source": "K-Dense-AI/claude-scientific-skills@scientific-skills",
     },
     {
         "label": "Scientific Writer  (23 writing, review & presentation skills, third party by K-Dense)",
         "source": "K-Dense-AI/claude-scientific-writer@skills",
+    },
+    # ── Third-party (Orchestra Research) ──
+    {
+        "label": "AI Research Skills  (85 skills for training, evaluation, deployment, etc., third party by Orchestra Research)",
+        "source": "Orchestra-Research/AI-Research-SKILLs",
     },
     # ── Third-party (Anthropic) ──
     {
@@ -994,11 +999,6 @@ _RECOMMENDED_SKILLS = [
     {
         "label": "HuggingFace Skills  (dataset creation, model training & evaluation, third party by HuggingFace)",
         "source": "huggingface/skills@skills",
-    },
-    # ── Third-party (Orchestra Research) ──
-    {
-        "label": "AI Research Skills  (85 skills for training, evaluation, deployment, etc., third party by Orchestra Research)",
-        "source": "Orchestra-Research/AI-Research-SKILLs",
     },
 ]
 
