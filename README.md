@@ -76,19 +76,6 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 > Powered by EvoScientist's multi-agent engine and installable [**EvoSkills**](https://github.com/EvoScientist/EvoSkills), the entire end-to-end research lifecycle is covered out of the box.
 
-## 🎯 ᯓ➤ Roadmap
-- [x] 🖥️ Full-screen TUI and classic CLI interfaces
-- [x] 📻 EvoMemory v1.0 shipped
-- [x] ⚒️ 200+ predefined skills built in
-- [x] 🧩 Built-in research-lifecycle skills shipped
-- [x] 👋 Human-in-the-loop action approval
-- [x] 🦾 Agent-initiated human clarification
-- [x] 📑 Technical report on the way
-- [ ] 📺 Web app with workspace UI
-- [ ] 📹 Demo and tutorial in the works
-- [ ] 📊 Benchmark suite to be released
-- [ ] ⏰ Scheduled tasks for the core system planned
-
 ## 🔥 News
 - **[13 Mar 2026]** 🚀 [**EvoScientist**](https://github.com/EvoScientist/EvoScientist) officially debuts!
 - **[11 Mar 2026]** ⛳ Technical Report is live! [**Check it out**](https://arxiv.org/abs/2603.08127) 👈
@@ -102,6 +89,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - [🔌 MCP Integration](#-mcp-integration)
 - [📱 Channels](#-channels)
 - [📚 Acknowledgments](#-acknowledgments)
+- [🎯 Roadmap](#-ᯓ-roadmap)
 - [🌍 Project Roles](#-project-roles)
 - [🤝 Contributing](#-contributing)
 - [📝 Citation](#-citation)
@@ -391,6 +379,21 @@ This project builds upon the following outstanding open-source works:
 - [**DeepAgents**](https://github.com/langchain-ai/deepagents) — The batteries-included agent harness.
 
 We thank the authors for their valuable contributions to the open-source community.
+
+<p align="right"><a href="#top">🔝Back to top</a></p>
+
+## 🎯 ᯓ➤ Roadmap
+- [x] 🖥️ Full-screen TUI and classic CLI interfaces
+- [x] 📻 EvoMemory v1.0 shipped
+- [x] ⚒️ 200+ predefined skills built in
+- [x] 🧩 Built-in research-lifecycle skills shipped
+- [x] 👋 Human-in-the-loop action approval
+- [x] 🦾 Agent-initiated human clarification
+- [x] 📑 Technical report on the way
+- [ ] 📺 Web app with workspace UI
+- [ ] 📹 Demo and tutorial in the works
+- [ ] 📊 Benchmark suite to be released
+- [ ] ⏰ Scheduled tasks for the core system planned
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 
