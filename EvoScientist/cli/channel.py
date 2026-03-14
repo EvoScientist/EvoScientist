@@ -90,7 +90,8 @@ _pending_hitl: dict[str, dict] = {}  # "channel:chat_id" -> {event, reply}
 _hitl_lock = threading.Lock()
 _hitl_auto_approve: set[str] = set()  # "channel:chat_id" keys with auto-approve
 
-_HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for channel user reply
+_HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for HITL approval reply
+_ASK_USER_TIMEOUT = 300.0  # seconds to wait for ask_user reply (longer for thinking time)
 
 
 def _register_hitl_wait(channel_type: str, chat_id: str) -> threading.Event:
@@ -201,7 +202,7 @@ def channel_ask_user_prompt(
 
         # Wait for reply
         hitl_event = _register_hitl_wait(msg.channel_type, msg.chat_id)
-        replied = hitl_event.wait(timeout=_HITL_APPROVAL_TIMEOUT)
+        replied = hitl_event.wait(timeout=_ASK_USER_TIMEOUT)
         reply_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
 
         if not replied or not reply_text:
@@ -221,7 +222,7 @@ def channel_ask_user_prompt(
                 if not _send("Please type your answer:"):
                     return {"status": "cancelled"}
                 hitl_event = _register_hitl_wait(msg.channel_type, msg.chat_id)
-                replied = hitl_event.wait(timeout=_HITL_APPROVAL_TIMEOUT)
+                replied = hitl_event.wait(timeout=_ASK_USER_TIMEOUT)
                 other_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
                 if not replied or not other_text:
                     _send("\u23f0 Response timed out.")

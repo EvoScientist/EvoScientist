@@ -27,7 +27,8 @@ T = TypeVar("T")
 _MAX_CHAT_LOCKS = 10_000
 _MAX_SESSIONS = 10_000
 _MAX_HITL_ROUNDS = 50
-_HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for user reply
+_HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for HITL approval reply
+_ASK_USER_TIMEOUT = 300.0  # seconds to wait for ask_user reply (longer for thinking time)
 
 
 @dataclass
@@ -705,7 +706,7 @@ class InboundConsumer:
 
             # -- Wait for user reply --
             reply = await self._wait_for_ask_user_reply(
-                session_key, _HITL_APPROVAL_TIMEOUT,
+                session_key, _ASK_USER_TIMEOUT,
             )
 
             if not reply:
@@ -734,7 +735,7 @@ class InboundConsumer:
                         metadata=msg.metadata,
                     ))
                     other_reply = await self._wait_for_ask_user_reply(
-                        session_key, _HITL_APPROVAL_TIMEOUT,
+                        session_key, _ASK_USER_TIMEOUT,
                     )
                     if not other_reply:
                         await self.bus.publish_outbound(OutboundMessage(
