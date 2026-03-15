@@ -94,7 +94,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
 
 > [!TIP]
-> Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by **EvoScientist**'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box.
+> Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other AI coding agents like Claude Code, Cursor, and OpenClaw.
 
 ## 🔥 News
 - **[13 Mar 2026]** 🚀 [**EvoScientist**](https://github.com/EvoScientist/EvoScientist) officially debuts!
@@ -413,6 +413,7 @@ Coming soon:
 - [x] 👋 Human-in-the-loop action approval
 - [x] 🦾 Agent-initiated human clarification
 - [x] 📑 Technical report on the way
+- [ ] 🔐 OAuth sign-in (Anthropic, OpenAI, etc.)
 - [ ] 📺 Web app with workspace UI
 - [ ] 📹 Demo and tutorial in the works
 - [ ] 📊 Benchmark suite to be released
