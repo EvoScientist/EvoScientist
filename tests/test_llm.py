@@ -393,6 +393,35 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "custom-key-789"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_anthropic_base_url_override(self, mock_init, monkeypatch):
+        """Anthropic provider should support base_url override (e.g. ccproxy)."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://localhost:8000/api/v1")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+
+        get_chat_model("claude-sonnet-4-6", provider="anthropic")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert call_kwargs["base_url"] == "http://localhost:8000/api/v1"
+        assert call_kwargs["api_key"] == "sk-dummy"
+        # Should still get anthropic auto-config (thinking)
+        assert "thinking" in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_anthropic_no_base_url_when_unset(self, mock_init, monkeypatch):
+        """Anthropic provider should not set base_url when env var is empty."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-real")
+
+        get_chat_model("claude-sonnet-4-6", provider="anthropic")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert "base_url" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_third_party_no_reasoning(self, mock_init, monkeypatch):
         """Third-party providers routed through OpenAI should NOT get auto-reasoning."""
         mock_init.return_value = "mock_model"

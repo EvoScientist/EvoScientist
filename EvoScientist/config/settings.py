@@ -60,6 +60,7 @@ class EvoScientistConfig:
 
     # API Keys
     anthropic_api_key: str = ""
+    anthropic_base_url: str = ""
     openai_api_key: str = ""
     nvidia_api_key: str = ""
     google_api_key: str = ""
@@ -329,6 +330,7 @@ def list_config() -> dict[str, Any]:
 # Environment variable mappings
 _ENV_MAPPINGS = {
     "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "anthropic_base_url": "ANTHROPIC_BASE_URL",
     "openai_api_key": "OPENAI_API_KEY",
     "nvidia_api_key": "NVIDIA_API_KEY",
     "google_api_key": "GOOGLE_API_KEY",
@@ -398,6 +400,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     """
     if config.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
         os.environ["ANTHROPIC_API_KEY"] = config.anthropic_api_key
+    if config.anthropic_base_url and not os.environ.get("ANTHROPIC_BASE_URL"):
+        os.environ["ANTHROPIC_BASE_URL"] = config.anthropic_base_url
     if config.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = config.openai_api_key
     if config.nvidia_api_key and not os.environ.get("NVIDIA_API_KEY"):

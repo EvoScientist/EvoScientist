@@ -196,9 +196,18 @@ def get_chat_model(
             else:
                 provider = "anthropic"  # Default fallback
 
-    # Third-party providers → route through OpenAI provider with base_url
+    # Anthropic base_url override (e.g. ccproxy at localhost:8000/api/v1)
     _is_third_party = provider in _THIRD_PARTY_PROVIDERS
-    if provider in _THIRD_PARTY_PROVIDERS:
+    if provider == "anthropic":
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+        if base_url:
+            kwargs["base_url"] = base_url
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            kwargs["api_key"] = api_key
+
+    # Third-party providers → route through OpenAI provider with base_url
+    elif provider in _THIRD_PARTY_PROVIDERS:
         base_url_default, api_key_env = _THIRD_PARTY_PROVIDERS[provider]
         if provider == "custom":
             base_url = os.environ.get("CUSTOM_BASE_URL", "")
