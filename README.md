@@ -504,6 +504,14 @@ For any inquiries or collaboration opportunities, please contact: [**EvoScientis
 
 We welcome contributions from developers, researchers, and AI coding agents at all levels. Our [Contributing Guidelines](./CONTRIBUTING.md) are designed for both humans and AI agents — covering architecture, patterns, extension guides, and code standards to help you contribute safely and effectively.
 
+### 👥 Community Contributors
+
+Every contribution brings us one step closer to a future where AI accelerates scientific breakthroughs for all of humanity.
+
+<a href="https://github.com/EvoScientist/EvoScientist/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=EvoScientist/EvoScientist" />
+</a>
+
 ### 📈 Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=EvoScientist/EvoScientist&type=date&legend=bottom-right)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=bottom-right)
