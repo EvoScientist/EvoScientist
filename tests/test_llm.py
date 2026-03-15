@@ -37,7 +37,7 @@ class TestModelsRegistry:
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
-        valid_providers = {"anthropic", "openai", "google-genai", "nvidia", "siliconflow", "openrouter", "zhipu", "zhipu-code"}
+        valid_providers = {"anthropic", "openai", "google-genai", "nvidia", "siliconflow", "openrouter", "zhipu", "zhipu-code", "custom-anthropic", "custom-openai"}
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
             name, model_id, provider = entry
@@ -380,12 +380,12 @@ class TestThirdPartyRouting:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_routes_through_openai(self, mock_init, monkeypatch):
-        """Custom provider should route through OpenAI with env-configured base_url."""
+        """Custom-openai provider should route through OpenAI with env-configured base_url."""
         mock_init.return_value = "mock_model"
-        monkeypatch.setenv("CUSTOM_BASE_URL", "https://my-llm.example.com/v1")
-        monkeypatch.setenv("CUSTOM_API_KEY", "custom-key-789")
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://my-llm.example.com/v1")
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "custom-key-789")
 
-        get_chat_model("my-custom-model", provider="custom")
+        get_chat_model("my-custom-model", provider="custom-openai")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openai"

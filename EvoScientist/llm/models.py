@@ -68,18 +68,25 @@ _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
-    # Anthropic (ordered by capability)
-    ("claude-opus-4-6", "claude-opus-4-6", "anthropic"),
-    ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
-    ("claude-opus-4-5", "claude-opus-4-5", "anthropic"),
-    ("claude-sonnet-4-5", "claude-sonnet-4-5", "anthropic"),
-    ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # Custom Anthropic (third-party Claude-compatible endpoints)
+    # Listed BEFORE native anthropic so MODELS dict defaults to native provider
     ("claude-opus-4-6", "claude-opus-4-6", "custom-anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "custom-anthropic"),
     ("claude-sonnet-4-5", "claude-sonnet-4-5", "custom-anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "custom-anthropic"),
-    # OpenAI
+    # Anthropic (ordered by capability) — last entry wins in MODELS dict
+    ("claude-opus-4-6", "claude-opus-4-6", "anthropic"),
+    ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
+    ("claude-opus-4-5", "claude-opus-4-5-20251101", "anthropic"),
+    ("claude-sonnet-4-5", "claude-sonnet-4-5-20250929", "anthropic"),
+    ("claude-haiku-4-5", "claude-haiku-4-5-20251001", "anthropic"),
+    # Custom OpenAI (third-party OpenAI-compatible endpoints)
+    ("gpt-5.4", "gpt-5.4-2026-03-05", "custom-openai"),
+    ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
+    ("gpt-5.2", "gpt-5.2-2025-12-11", "custom-openai"),
+    ("gpt-5.1", "gpt-5.1-2025-11-13", "custom-openai"),
+    ("gpt-5-mini", "gpt-5-mini-2025-08-07", "custom-openai"),
+    # OpenAI — last entry wins in MODELS dict
     ("gpt-5.4", "gpt-5.4-2026-03-05", "openai"),
     ("gpt-5.3-codex", "gpt-5.3-codex", "openai"),
     ("gpt-5.2-codex", "gpt-5.2-codex", "openai"),
@@ -88,12 +95,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5", "gpt-5-2025-08-07", "openai"),
     ("gpt-5-mini", "gpt-5-mini-2025-08-07", "openai"),
     ("gpt-5-nano", "gpt-5-nano-2025-08-07", "openai"),
-    # Custom OpenAI (third-party OpenAI-compatible endpoints)
-    ("gpt-5.4", "gpt-5.4-2026-03-05", "custom-openai"),
-    ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
-    ("gpt-5.2", "gpt-5.2-2025-12-11", "custom-openai"),
-    ("gpt-5.1", "gpt-5.1-2025-11-13", "custom-openai"),
-    ("gpt-5-mini", "gpt-5-mini-2025-08-07", "custom-openai"),
     # Google GenAI
     ("gemini-3.1-pro", "gemini-3.1-pro-preview", "google-genai"),
     (
@@ -284,8 +285,6 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
 
-        provider = "openai"  # Route through OpenAI provider
-
         # SiliconFlow: disable thinking — LangChain drops reasoning_content
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
@@ -293,10 +292,6 @@ def get_chat_model(
         provider = "openai"
     elif provider == "ollama":
         base_url = os.environ.get("OLLAMA_BASE_URL", "")
-        if base_url:
-            kwargs["base_url"] = base_url
-    elif provider == "anthropic":
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
         if base_url:
             kwargs["base_url"] = base_url
     elif provider == "custom-anthropic":

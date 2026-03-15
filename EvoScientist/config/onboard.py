@@ -786,12 +786,12 @@ def _step_base_url(config: EvoScientistConfig, current_value: str | None = None)
 
     Args:
         config: Current configuration.
-        current_value: Current base URL value (if None, reads from config.custom_base_url).
+        current_value: Current base URL value (if None, defaults to empty).
 
     Returns:
         Base URL string.
     """
-    current = current_value if current_value is not None else config.custom_base_url
+    current = current_value if current_value is not None else ""
     hint = f"Current: {current}" if current else ""
     default = current if current else ""
 
