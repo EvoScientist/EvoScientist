@@ -478,6 +478,19 @@ def serve(
     config = get_effective_config(cli_overrides)
     apply_config_to_env(config)
 
+    # Auto-start ccproxy if OAuth mode
+    _ccproxy_proc_serve = None
+    if config.provider == "anthropic" and config.anthropic_auth_mode == "oauth":
+        try:
+            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+            _ccproxy_proc_serve = maybe_start_ccproxy(config)
+            if _ccproxy_proc_serve:
+                import atexit
+                atexit.register(stop_ccproxy, _ccproxy_proc_serve)
+        except RuntimeError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+
     if not config.channel_enabled:
         console.print("[red]No channels configured.[/red]")
         console.print("[dim]Run [bold]evosci channel setup[/bold] first.[/dim]")
@@ -796,6 +809,11 @@ def _main_callback(
     no_thinking: bool = typer.Option(False, "--no-thinking", help="Disable thinking display"),
     auto_approve: bool = typer.Option(False, "--auto-approve", help="Auto-approve all tool executions without prompting"),
     ask_user: bool = typer.Option(False, "--ask-user", help="Enable agent to ask clarifying questions about your research preferences"),
+    auth_mode: Optional[str] = typer.Option(
+        None,
+        "--auth-mode",
+        help="Anthropic auth mode: api_key (default) or oauth (ccproxy).",
+    ),
     ui: Optional[str] = typer.Option(
         None,
         "--ui",
@@ -828,9 +846,26 @@ def _main_callback(
         cli_overrides["auto_approve"] = True
     if ask_user:
         cli_overrides["enable_ask_user"] = True
+    if auth_mode:
+        if auth_mode not in ("api_key", "oauth"):
+            raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")
+        cli_overrides["anthropic_auth_mode"] = auth_mode
 
     config = get_effective_config(cli_overrides)
     apply_config_to_env(config)
+
+    # Auto-start ccproxy if OAuth mode
+    _ccproxy_proc = None
+    if config.provider == "anthropic" and config.anthropic_auth_mode == "oauth":
+        try:
+            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+            _ccproxy_proc = maybe_start_ccproxy(config)
+            if _ccproxy_proc:
+                import atexit
+                atexit.register(stop_ccproxy, _ccproxy_proc)
+        except RuntimeError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
 
     show_thinking = config.show_thinking if not no_thinking else False
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)

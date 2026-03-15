@@ -89,6 +89,16 @@ class TestEvoScientistConfig:
         assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
+    def test_auth_mode_default(self):
+        """Test that anthropic_auth_mode defaults to api_key."""
+        config = EvoScientistConfig()
+        assert config.anthropic_auth_mode == "api_key"
+
+    def test_auth_mode_set(self):
+        """Test that anthropic_auth_mode can be set."""
+        config = EvoScientistConfig(anthropic_auth_mode="oauth")
+        assert config.anthropic_auth_mode == "oauth"
+
     def test_custom_values(self):
         """Test that custom values can be set."""
         config = EvoScientistConfig(
@@ -338,6 +348,14 @@ class TestPriorityChain:
 
         config = get_effective_config()
         assert config.anthropic_api_key == "env-key"
+
+    def test_env_auth_mode_override(self, temp_config_dir, monkeypatch):
+        """Test auth mode from env overrides file."""
+        save_config(EvoScientistConfig(anthropic_auth_mode="api_key"))
+        monkeypatch.setenv("EVOSCIENTIST_ANTHROPIC_AUTH_MODE", "oauth")
+
+        config = get_effective_config()
+        assert config.anthropic_auth_mode == "oauth"
 
 
 # =============================================================================

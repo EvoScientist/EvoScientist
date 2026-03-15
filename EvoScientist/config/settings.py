@@ -64,6 +64,7 @@ class EvoScientistConfig:
     # API Keys
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
+    anthropic_auth_mode: str = "api_key"  # "api_key" | "oauth"
     openai_api_key: str = ""
     nvidia_api_key: str = ""
     google_api_key: str = ""
@@ -73,7 +74,11 @@ class EvoScientistConfig:
     custom_api_key: str = ""
     custom_base_url: str = _DEFAULT_CUSTOM_BASE_URL
     custom_wire_api: str = ""
+    custom_openai_api_key: str = ""
+    custom_openai_base_url: str = ""
     ollama_base_url: str = ""
+    custom_anthropic_api_key: str = ""
+    custom_anthropic_base_url: str = ""
     tavily_api_key: str = ""
 
     # LLM Settings
@@ -335,6 +340,7 @@ def list_config() -> dict[str, Any]:
 _ENV_MAPPINGS = {
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "anthropic_base_url": "ANTHROPIC_BASE_URL",
+    "anthropic_auth_mode": "EVOSCIENTIST_ANTHROPIC_AUTH_MODE",
     "openai_api_key": "OPENAI_API_KEY",
     "nvidia_api_key": "NVIDIA_API_KEY",
     "google_api_key": "GOOGLE_API_KEY",
@@ -344,7 +350,11 @@ _ENV_MAPPINGS = {
     "custom_api_key": "CUSTOM_API_KEY",
     "custom_base_url": "CUSTOM_BASE_URL",
     "custom_wire_api": "CUSTOM_WIRE_API",
+    "custom_openai_api_key": "CUSTOM_OPENAI_API_KEY",
+    "custom_openai_base_url": "CUSTOM_OPENAI_BASE_URL",
     "ollama_base_url": "OLLAMA_BASE_URL",
+    "custom_anthropic_api_key": "CUSTOM_ANTHROPIC_API_KEY",
+    "custom_anthropic_base_url": "CUSTOM_ANTHROPIC_BASE_URL",
     "tavily_api_key": "TAVILY_API_KEY",
     "default_mode": "EVOSCIENTIST_DEFAULT_MODE",
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
@@ -425,7 +435,19 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["CUSTOM_BASE_URL"] = config.custom_base_url
     if config.custom_wire_api and not os.environ.get("CUSTOM_WIRE_API"):
         os.environ["CUSTOM_WIRE_API"] = config.custom_wire_api
+    if config.custom_openai_api_key and not os.environ.get("CUSTOM_OPENAI_API_KEY"):
+        os.environ["CUSTOM_OPENAI_API_KEY"] = config.custom_openai_api_key
+    if config.custom_openai_base_url and not os.environ.get("CUSTOM_OPENAI_BASE_URL"):
+        os.environ["CUSTOM_OPENAI_BASE_URL"] = config.custom_openai_base_url
     if config.ollama_base_url and not os.environ.get("OLLAMA_BASE_URL"):
         os.environ["OLLAMA_BASE_URL"] = config.ollama_base_url
+    if config.custom_anthropic_api_key and not os.environ.get(
+        "CUSTOM_ANTHROPIC_API_KEY"
+    ):
+        os.environ["CUSTOM_ANTHROPIC_API_KEY"] = config.custom_anthropic_api_key
+    if config.custom_anthropic_base_url and not os.environ.get(
+        "CUSTOM_ANTHROPIC_BASE_URL"
+    ):
+        os.environ["CUSTOM_ANTHROPIC_BASE_URL"] = config.custom_anthropic_base_url
     if config.tavily_api_key and not os.environ.get("TAVILY_API_KEY"):
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key

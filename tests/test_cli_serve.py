@@ -16,6 +16,8 @@ def _make_config(
         channel_enabled="telegram",
         default_workdir=default_workdir,
         channel_send_thinking=channel_send_thinking,
+        provider="anthropic",
+        anthropic_auth_mode="api_key",
     )
 
 
