@@ -187,6 +187,18 @@ class TestGetChatModel:
         assert call_kwargs["model_provider"] == "custom_provider"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_provider_preserves_raw_model_name(self, mock_init):
+        """Custom providers should preserve raw model aliases."""
+        mock_init.return_value = "mock_model"
+
+        get_chat_model("gpt-5.4", provider="custom")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "gpt-5.4"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.openai.com/v1"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_passes_kwargs(self, mock_init):
         """Test that additional kwargs are passed through."""
         mock_init.return_value = "mock_model"
@@ -393,6 +405,33 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "custom-key-789"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_responses_wire_api_enables_streaming(self, mock_init, monkeypatch):
+        """Codex-style custom providers should use Responses API with streaming."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_BASE_URL", "https://my-llm.example.com/openai")
+        monkeypatch.setenv("CUSTOM_API_KEY", "custom-key-789")
+        monkeypatch.setenv("CUSTOM_WIRE_API", "responses")
+
+        get_chat_model("gpt-5.4", provider="custom")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "gpt-5.4"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["use_responses_api"] is True
+        assert call_kwargs["streaming"] is True
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_provider_uses_official_base_url_by_default(self, mock_init, monkeypatch):
+        """Custom provider should default to the official OpenAI-compatible base URL."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+
+        get_chat_model("gpt-5.4", provider="custom")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "https://api.openai.com/v1"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_base_url_override(self, mock_init, monkeypatch):
         """Anthropic provider should support base_url override (e.g. ccproxy)."""
         mock_init.return_value = "mock_model"
@@ -490,4 +529,3 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["include_thoughts"] is True
-

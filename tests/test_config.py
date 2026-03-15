@@ -35,6 +35,9 @@ def temp_config_dir(tmp_path, monkeypatch):
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "CUSTOM_API_KEY",
+        "CUSTOM_BASE_URL",
+        "CUSTOM_WIRE_API",
         "TAVILY_API_KEY",
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
@@ -50,6 +53,9 @@ def clean_env(monkeypatch):
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "CUSTOM_API_KEY",
+        "CUSTOM_BASE_URL",
+        "CUSTOM_WIRE_API",
         "TAVILY_API_KEY",
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
@@ -78,6 +84,8 @@ class TestEvoScientistConfig:
         assert config.show_thinking is True
         assert config.ui_backend == "tui"
         assert config.ollama_base_url == ""
+        assert config.custom_base_url == "https://api.openai.com/v1"
+        assert config.custom_wire_api == ""
         assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
@@ -274,6 +282,9 @@ class TestPriorityChain:
         for key in [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
+            "CUSTOM_API_KEY",
+            "CUSTOM_BASE_URL",
+            "CUSTOM_WIRE_API",
             "TAVILY_API_KEY",
             "EVOSCIENTIST_DEFAULT_MODE",
             "EVOSCIENTIST_WORKSPACE_DIR",
@@ -340,6 +351,9 @@ class TestApplyConfigToEnv:
         config = EvoScientistConfig(
             anthropic_api_key="config-ant-key",
             openai_api_key="config-oai-key",
+            custom_api_key="config-custom-key",
+            custom_base_url="https://proxy.example.com/openai",
+            custom_wire_api="responses",
             tavily_api_key="config-tav-key",
         )
 
@@ -347,6 +361,9 @@ class TestApplyConfigToEnv:
 
         assert os.environ.get("ANTHROPIC_API_KEY") == "config-ant-key"
         assert os.environ.get("OPENAI_API_KEY") == "config-oai-key"
+        assert os.environ.get("CUSTOM_API_KEY") == "config-custom-key"
+        assert os.environ.get("CUSTOM_BASE_URL") == "https://proxy.example.com/openai"
+        assert os.environ.get("CUSTOM_WIRE_API") == "responses"
         assert os.environ.get("TAVILY_API_KEY") == "config-tav-key"
 
     def test_does_not_override_existing_env(self, monkeypatch):
@@ -359,12 +376,13 @@ class TestApplyConfigToEnv:
         assert os.environ.get("ANTHROPIC_API_KEY") == "existing-key"
 
     def test_empty_config_keys_not_applied(self, clean_env):
-        """Test that empty config keys don't create env vars."""
+        """Test that empty config keys only apply non-empty defaults."""
         config = EvoScientistConfig()  # All empty
         apply_config_to_env(config)
 
         assert os.environ.get("ANTHROPIC_API_KEY") is None
         assert os.environ.get("OPENAI_API_KEY") is None
+        assert os.environ.get("CUSTOM_BASE_URL") == "https://api.openai.com/v1"
 
     def test_ollama_base_url_applied(self, clean_env, monkeypatch):
         """Test that ollama_base_url is applied to OLLAMA_BASE_URL env var."""

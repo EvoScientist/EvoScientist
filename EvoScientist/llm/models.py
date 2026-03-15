@@ -17,6 +17,7 @@ _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # Third-party providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -25,7 +26,7 @@ _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
     "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
-    "custom": (None, "CUSTOM_API_KEY"),  # base_url from CUSTOM_BASE_URL env
+    "custom": (_OPENAI_BASE_URL, "CUSTOM_API_KEY"),  # base_url can be overridden by CUSTOM_BASE_URL env
 }
 
 # Model registry: list of (short_name, model_id, provider)
@@ -92,6 +93,8 @@ MODELS: dict[str, tuple[str, str]] = {
 }
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+_RESPONSES_WIRE_APIS = {"responses", "responses/v1", "response"}
 
 
 def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
@@ -169,7 +172,11 @@ def get_chat_model(
 
     # Look up short name in registry (provider-aware)
     model_id = None
-    if provider:
+    if provider == "custom":
+        # Custom OpenAI-compatible endpoints may use provider-specific aliases
+        # that collide with the built-in registry (e.g. gpt-5.4 via Codex proxy).
+        model_id = model
+    elif provider:
         # Try exact match with provider first
         for name, mid, p in _MODEL_ENTRIES:
             if name == model and p == provider:
@@ -210,14 +217,19 @@ def get_chat_model(
     elif provider in _THIRD_PARTY_PROVIDERS:
         base_url_default, api_key_env = _THIRD_PARTY_PROVIDERS[provider]
         if provider == "custom":
-            base_url = os.environ.get("CUSTOM_BASE_URL", "")
+            base_url = os.environ.get("CUSTOM_BASE_URL", base_url_default or "")
+            wire_api = os.environ.get("CUSTOM_WIRE_API", "").strip().lower()
         else:
             base_url = base_url_default
+            wire_api = ""
         if base_url:
             kwargs["base_url"] = base_url
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
+        if provider == "custom" and wire_api in _RESPONSES_WIRE_APIS:
+            kwargs.setdefault("use_responses_api", True)
+            kwargs.setdefault("streaming", True)
         # SiliconFlow: disable thinking — LangChain drops reasoning_content
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":

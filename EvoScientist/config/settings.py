@@ -15,6 +15,9 @@ from typing import Any, Literal
 import yaml
 
 
+_DEFAULT_CUSTOM_BASE_URL = "https://api.openai.com/v1"
+
+
 # =============================================================================
 # Configuration paths
 # =============================================================================
@@ -68,7 +71,8 @@ class EvoScientistConfig:
     openrouter_api_key: str = ""
     zhipu_api_key: str = ""
     custom_api_key: str = ""
-    custom_base_url: str = ""
+    custom_base_url: str = _DEFAULT_CUSTOM_BASE_URL
+    custom_wire_api: str = ""
     ollama_base_url: str = ""
     tavily_api_key: str = ""
 
@@ -339,6 +343,7 @@ _ENV_MAPPINGS = {
     "zhipu_api_key": "ZHIPU_API_KEY",
     "custom_api_key": "CUSTOM_API_KEY",
     "custom_base_url": "CUSTOM_BASE_URL",
+    "custom_wire_api": "CUSTOM_WIRE_API",
     "ollama_base_url": "OLLAMA_BASE_URL",
     "tavily_api_key": "TAVILY_API_KEY",
     "default_mode": "EVOSCIENTIST_DEFAULT_MODE",
@@ -418,6 +423,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["CUSTOM_API_KEY"] = config.custom_api_key
     if config.custom_base_url and not os.environ.get("CUSTOM_BASE_URL"):
         os.environ["CUSTOM_BASE_URL"] = config.custom_base_url
+    if config.custom_wire_api and not os.environ.get("CUSTOM_WIRE_API"):
+        os.environ["CUSTOM_WIRE_API"] = config.custom_wire_api
     if config.ollama_base_url and not os.environ.get("OLLAMA_BASE_URL"):
         os.environ["OLLAMA_BASE_URL"] = config.ollama_base_url
     if config.tavily_api_key and not os.environ.get("TAVILY_API_KEY"):

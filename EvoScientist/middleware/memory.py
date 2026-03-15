@@ -27,6 +27,7 @@ agent = create_deep_agent(middleware=[middleware, ...])
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -130,6 +131,14 @@ Rules:
 - Do NOT repeat information already in <current_memory>.
 - For experiment_conclusion, only include if a complete experiment was actually run.
 - Be concise. Each value should be a short phrase, not a paragraph.
+"""
+
+FALLBACK_JSON_INSTRUCTION = """\
+
+Return only a JSON object matching this schema:
+{schema}
+
+Do not include markdown fences or any explanatory text.
 """
 
 # ---------------------------------------------------------------------------
@@ -579,6 +588,50 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return {}
 
     @staticmethod
+    def _message_text(message: Any) -> str:
+        """Normalize provider-specific message content to plain text."""
+        content = getattr(message, "content", message)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts)
+        return str(content)
+
+    @classmethod
+    def _parse_extracted_memory_json(cls, text: str) -> dict[str, Any]:
+        """Parse ExtractedMemory JSON from raw model text."""
+        candidate = text.strip()
+        fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", candidate, re.DOTALL)
+        if fenced:
+            candidate = fenced.group(1)
+        else:
+            inline = re.search(r"\{.*\}", candidate, re.DOTALL)
+            if inline:
+                candidate = inline.group(0)
+        parsed = ExtractedMemory.model_validate_json(candidate)
+        return parsed.model_dump(exclude_none=True)
+
+    @classmethod
+    def _fallback_extract(cls, model: BaseChatModel, prompt: str) -> dict[str, Any]:
+        """Fallback for providers that return raw JSON without parsed metadata."""
+        schema = json.dumps(ExtractedMemory.model_json_schema(), ensure_ascii=True)
+        result = model.invoke(prompt + FALLBACK_JSON_INSTRUCTION.format(schema=schema))
+        return cls._parse_extracted_memory_json(cls._message_text(result))
+
+    @classmethod
+    async def _afallback_extract(cls, model: BaseChatModel, prompt: str) -> dict[str, Any]:
+        """Async fallback for providers that return raw JSON without parsed metadata."""
+        schema = json.dumps(ExtractedMemory.model_json_schema(), ensure_ascii=True)
+        result = await model.ainvoke(prompt + FALLBACK_JSON_INSTRUCTION.format(schema=schema))
+        return cls._parse_extracted_memory_json(cls._message_text(result))
+
+    @staticmethod
     def _disable_thinking(model: BaseChatModel) -> BaseChatModel:
         """Return a copy of the model with thinking/reasoning disabled.
 
@@ -620,8 +673,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
             result = structured_model.invoke(prompt)
             return result.model_dump(exclude_none=True)
         except Exception as e:  # noqa: BLE001
-            logger.warning("Memory extraction failed: %s", e)
-            return {}
+            logger.warning("Structured memory extraction failed, falling back to JSON parse: %s", e)
+            try:
+                plain_model = self._disable_thinking(model)
+                return self._fallback_extract(plain_model, prompt)
+            except Exception as fallback_error:  # noqa: BLE001
+                logger.warning("Memory extraction failed: %s", fallback_error)
+                return {}
 
     async def _aextract(self, model: BaseChatModel, memory: str, messages: list[AnyMessage]) -> dict[str, Any]:
         """Async: Run LLM extraction on recent messages using structured output."""
@@ -633,8 +691,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
             result = await structured_model.ainvoke(prompt)
             return result.model_dump(exclude_none=True)
         except Exception as e:  # noqa: BLE001
-            logger.warning("Memory extraction failed: %s", e)
-            return {}
+            logger.warning("Structured memory extraction failed, falling back to JSON parse: %s", e)
+            try:
+                plain_model = self._disable_thinking(model)
+                return await self._afallback_extract(plain_model, prompt)
+            except Exception as fallback_error:  # noqa: BLE001
+                logger.warning("Memory extraction failed: %s", fallback_error)
+                return {}
 
     # -- middleware hooks -----------------------------------------------------
 
