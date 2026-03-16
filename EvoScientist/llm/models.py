@@ -220,9 +220,7 @@ def _apply_auto_config(
         base_url = os.environ.get("OPENAI_BASE_URL", "")
         _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
         if _is_openai_proxy:
-            # ccproxy forces store=False. Setting `reasoning` triggers
-            # langchain-openai's Responses API path, which produces
-            # rs_ summary items that 404 on multi-turn. Skip entirely.
+            # Skip reasoning kwarg for ccproxy — not needed and may cause issues.
             pass
         else:
             kwargs["reasoning"] = {"effort": "high", "summary": "auto"}
@@ -308,8 +306,8 @@ def get_chat_model(
             kwargs["base_url"] = base_url
             _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
             if _is_openai_proxy:
-                kwargs.setdefault("streaming", False)  # ccproxy streaming incompatible
-                kwargs.setdefault("use_responses_api", False)  # force Chat Completions
+                kwargs.setdefault("streaming", False)  # ccproxy streaming format incompatible with langchain-openai
+                kwargs.setdefault("use_responses_api", True)  # ccproxy Chat Completions does not support tool calling; Responses API does
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key

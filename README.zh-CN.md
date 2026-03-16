@@ -217,6 +217,7 @@ EvoSci onboard
 
 > [!TIP]
 > 向导将引导你完成供应商选择、密钥验证、模型选择和工作区模式设置。
+> 支持 [Claude Code](https://claude.com/product/claude-code) 和 [Codex CLI](https://developers.openai.com/codex/cli/) 用户通过 OAuth 直连——无需 API Key。
 
 ![onboard](.github/assets/EvoScientist_onboard.png)
 
@@ -422,7 +423,7 @@ channel_enabled: "telegram,slack,feishu,qq"
 - [x] 👋 Human-in-the-loop 操作审批
 - [x] 🦾 智能体主动向人类澄清确认
 - [x] 📑 技术报告已发布
-- [ ] 🔐 OAuth 登录（Anthropic、OpenAI 等）
+- [x] 🔐 OAuth 登录（Anthropic、OpenAI 等）
 - [ ] 📺 带工作区的 Web 应用界面
 - [ ] 📹 Demo 与教程正在制作中
 - [ ] 📊 基准测试套件即将推出
