@@ -1,8 +1,8 @@
 ---
 name: Bug report
-about: Create a report to help us improve
+about: Report a bug to help us improve EvoScientist
 title: ''
-labels: ''
+labels: bug
 assignees: ''
 type: Bug
 
@@ -13,21 +13,26 @@ A clear and concise description of what the bug is.
 
 **To Reproduce**
 Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+1. Run `EvoSci ...`
+2. Provide input '...'
+3. See error
 
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+**Error output / logs**
+If applicable, paste the relevant terminal output or traceback.
+
+```
+<paste here>
+```
 
 **System information**
- - OS: [e.g. Windows, MacOS, Linux]
- - Terminal [e.g. iTerm2, Alacritty, Windows Terminal]
- - EvoScientist Version [e.g. 0.0.1]
+ - OS: [e.g. Ubuntu 22.04, macOS 14.3, Windows 11]
+ - Python version: [e.g. 3.11.8]
+ - Terminal: [e.g. iTerm2, Alacritty, Windows Terminal]
+ - EvoScientist version: [e.g. 0.0.2 — run `EvoSci --version`]
+ - LLM provider: [e.g. Anthropic, OpenAI, Ollama]
 
 **Additional context**
 Add any other context about the problem here.
