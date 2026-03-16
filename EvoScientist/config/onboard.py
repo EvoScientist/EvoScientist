@@ -364,6 +364,66 @@ def validate_zhipu_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_volcengine_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Volcengine API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
+def validate_dashscope_key(api_key: str) -> tuple[bool, str]:
+    """Validate a DashScope API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
 def validate_tavily_key(api_key: str) -> tuple[bool, str]:
     """Validate a Tavily API key by making a test request.
 
@@ -530,6 +590,14 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="ZhipuAI CodePlan (智谱代码计划 — GLM models for coding)",
             value="zhipu-code",
         ),
+        Choice(
+            title="Volcengine (火山引擎 — Doubao models)",
+            value="volcengine",
+        ),
+        Choice(
+            title="DashScope (阿里云 — Qwen models)",
+            value="dashscope",
+        ),
         Choice(title="Ollama (local models)", value="ollama"),
         Choice(title="Other (OpenAI-compatible)", value="custom"),
     ]
@@ -590,6 +658,16 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "ZhipuAI CodePlan",
             config.zhipu_api_key or os.environ.get("ZHIPU_API_KEY", ""),
             validate_zhipu_key,
+        ),
+        "volcengine": (
+            "Volcengine",
+            config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
+            validate_volcengine_key,
+        ),
+        "dashscope": (
+            "DashScope",
+            config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
+            validate_dashscope_key,
         ),
         "custom": (
             "Custom",
@@ -2082,6 +2160,8 @@ def run_onboard(skip_validation: bool = False) -> bool:
             "openrouter": "openrouter_api_key",
             "zhipu": "zhipu_api_key",
             "zhipu-code": "zhipu_api_key",
+            "volcengine": "volcengine_api_key",
+            "dashscope": "dashscope_api_key",
             "custom": "custom_api_key",
         }
         if provider != "ollama":

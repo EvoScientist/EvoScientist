@@ -2,8 +2,8 @@
 
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, NVIDIA,
-SiliconFlow, OpenRouter, ZhipuAI, Ollama, and custom OpenAI-compatible endpoints) and
-convenient short names for common models.
+SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, Ollama, and custom
+OpenAI-compatible endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+_VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # Third-party providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -25,6 +27,8 @@ _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
     "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
+    "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
+    "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "custom": (None, "CUSTOM_API_KEY"),  # base_url from CUSTOM_BASE_URL env
 }
 
@@ -83,6 +87,15 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Zhipu (智谱 — general endpoint, default for simple lookups)
     ("glm-5", "glm-5", "zhipu"),
     ("glm-4.7", "glm-4.7", "zhipu"),
+    # Volcengine (火山引擎 — Doubao models)
+    ("doubao-seed-1.6", "doubao-seed-1.6", "volcengine"),
+    ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
+    ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
+    # DashScope (阿里云 — Qwen models)
+    ("qwen3-coder", "qwen3-coder-plus", "dashscope"),
+    ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
+    ("qwen-max", "qwen-max", "dashscope"),
+    ("qwq-plus", "qwq-plus", "dashscope"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).
