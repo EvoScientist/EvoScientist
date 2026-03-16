@@ -14,9 +14,10 @@ Instead of building a custom `RemoteSSHBackend`, EvoScientist leverages the exis
 
 ## Prerequisites
 
-1. **SSH MCP Server**: Install an SSH MCP server. Recommended options:
-   - [`mcp-server-ssh`](https://github.com/modelcontextprotocol/servers/tree/main/src/ssh) (Node.js-based)
-   - Any other SSH-capable MCP server that provides `ssh_execute`, `ssh_upload`, `ssh_download` tools
+1. **SSH MCP Server**: Install an SSH MCP server. Available options include:
+   - Check the [MCP Servers Directory](https://github.com/modelcontextprotocol/servers) for SSH-capable servers
+   - Any SSH-capable MCP server that provides `ssh_execute`, `ssh_upload`, `ssh_download` tools
+   - Verify server capabilities match the tool names in your mcp.yaml configuration
 
 2. **SSH Key Authentication**: Set up SSH key-based authentication to your remote GPU server
 
@@ -29,15 +30,18 @@ Instead of building a custom `RemoteSSHBackend`, EvoScientist leverages the exis
 
 ### Step 1: Install SSH MCP Server
 
-For Node.js-based SSH server:
+For Node.js-based SSH servers (check specific server name):
 
 ```bash
-# Install globally
-npm install -g mcp-server-ssh
+# Install globally (if required by your chosen server)
+npm install -g <mcp-ssh-server-package>
 
 # Or use npx (no installation required)
-npx -y mcp-server-ssh --help
+npx -y <mcp-ssh-server-package> --help
 ```
+
+**Note**: Replace `<mcp-ssh-server-package>` with the actual package name of your chosen SSH MCP server.
+Check the server's documentation for the correct package name and available tools.
 
 ### Step 2: Create MCP Configuration
 
@@ -57,21 +61,14 @@ ssh-gpu:
   expose_to: [code-agent, debug-agent]
 ```
 
-### Step 3: Verify Configuration
+### Step 3: Activate Configuration
 
-Add the SSH MCP server via CLI:
+After creating the config file, start an EvoScientist session. The SSH MCP
+server will be loaded automatically from `~/.config/evoscientist/mcp.yaml`.
 
-```bash
-EvoSci mcp add ssh-gpu npx -- -y mcp-server-ssh \
-  --transport stdio \
-  --tools ssh_execute,ssh_upload,ssh_download
-```
-
-Or start an agent session and use the in-session command:
-
-```bash
-/mcp add ssh-gpu npx -- -y mcp-server-ssh
-```
+**Note**: CLI commands like `EvoSci mcp add` and in-session `/mcp add` are
+not yet implemented. For now, edit `~/.config/evoscientist/mcp.yaml` directly.
+Future versions may add these convenience commands.
 
 ## Usage
 
@@ -114,11 +111,10 @@ The `debug-agent` will use SSH tools to:
 ## Example Workflow
 
 ```bash
-# 1. Start agent session
-EvoScientist
+# 1. Pre-configure ~/.config/evoscientist/mcp.yaml (see Step 2 above)
 
-# 2. Add SSH MCP server
-/mcp add ssh-gpu npx -- -y mcp-server-ssh
+# 2. Start agent session
+EvoScientist
 
 # 3. Task: Run training experiment
 "Run training on remote GPU server with dataset X"
@@ -180,7 +176,7 @@ When no SSH MCP server is configured:
 
 | Server | Language | Tools | Notes |
 |--------|----------|-------|-------|
-| `mcp-server-ssh` | Node.js | ssh_execute, ssh_upload, ssh_download | Recommended, well-maintained |
+| `<your-ssh-server>` | Varies | ssh_execute, ssh_upload, ssh_download | Check server documentation |
 | `mcp-server-shell` | Python | shell_execute | Limited to shell commands |
 | Custom | Any | Varies | Can implement custom SSH logic |
 

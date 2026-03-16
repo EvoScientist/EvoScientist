@@ -83,7 +83,11 @@ class TestSSHGPUSupport:
 
     def test_debug_agent_execution_mode_declaration(self, debug_prompt):
         p = debug_prompt.lower()
-        assert "execution mode" in p or ("debugging" in p and "locally" in p)
+        # Must mention execution mode or have remote + locally + debugging
+        has_mode_decl = "execution mode" in p or (
+            "remote" in p and "locally" in p and "debugging" in p
+        )
+        assert has_mode_decl, "debug-agent should declare execution mode clearly"
 
     def test_debug_agent_has_ssh_upload(self, debug_prompt):
         p = debug_prompt.lower()
@@ -107,9 +111,9 @@ class TestSubagentYAMLStructure:
 
     def test_all_agents_have_system_prompts(self, subagent_config):
         for agent_name, agent_config in subagent_config.items():
-            assert "system_prompt" in agent_config or "system_prompt_ref" in agent_config, (
-                f"{agent_name} should have a system prompt or system_prompt_ref"
-            )
+            assert (
+                "system_prompt" in agent_config or "system_prompt_ref" in agent_config
+            ), f"{agent_name} should have a system prompt or system_prompt_ref"
 
 
 class TestMcpConfigTemplate:

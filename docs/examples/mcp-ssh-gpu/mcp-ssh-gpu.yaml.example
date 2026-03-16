@@ -37,7 +37,9 @@ ssh-gpu:
     # SSH_PORT: "22"
     
     # Optional: Additional SSH options
-    # SSH_OPTIONS: "-o StrictHostKeyChecking=no"
+    # SSH_OPTIONS: "-o StrictHostKeyChecking=accept-new"
+    # SECURITY WARNING: For production servers, prefer StrictHostKeyChecking=yes
+    # and ensure known_hosts is pre-populated to prevent MITM attacks
   
   # Which agents should have access to SSH tools
   # Available: code-agent, debug-agent

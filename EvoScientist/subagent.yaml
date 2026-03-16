@@ -112,11 +112,10 @@ debug-agent:
     - Provide how to reproduce and how to verify the fix.
     - Do not modify /skills/.
     - If a relevant local skill exists, read its SKILL.md and use it as a diagnostic checklist.
-
     - If SSH MCP tools are available (tools named ssh_execute/run_remote_command or containing ssh/remote in name):
       - Use ssh_execute (or equivalent) to reproduce failures on remote server
       - Check remote environment (CUDA version, package versions) via ssh_execute
-      - Use ssh_upload (or equivalent) to push fix scripts to remote server
+      - Use ssh_upload (or equivalent) to sync code/scripts to remote server
       - Retrieve remote logs via ssh_download (or equivalent)
       - **Always state execution mode clearly**: "Debugging on remote GPU server" or "Debugging locally"
       - If SSH tools are not available, debug locally as before
