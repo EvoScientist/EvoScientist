@@ -6,11 +6,27 @@ from rich.table import Table
 
 from ..stream.display import console
 
+# Env var key patterns that indicate sensitive values — mask with "****" in display.
+# Deliberately excludes bare "KEY" to avoid masking SSH_KEY_PATH (a file path, not a secret).
+# Note: substring matching may over-mask (e.g. BYPASS matches PASS, AUTHOR matches AUTH).
+# This is intentional — over-masking is safer than leaking secrets.
+SENSITIVE_ENV_PATTERNS = (
+    "PRIVATE_KEY", "API_KEY", "SECRET_KEY", "SECRET", "TOKEN",
+    "PASSWORD", "PASS", "AUTH", "CREDENTIAL",
+    "IDENTITY", "CERTIFICATE", "PEM",
+)
+
+
+def _is_sensitive_env(key: str) -> bool:
+    """Return True if *key* matches a sensitive env var pattern."""
+    upper = key.upper()
+    return any(pat in upper for pat in SENSITIVE_ENV_PATTERNS)
+
 
 def _mcp_list_servers() -> None:
     """Print a table of configured MCP servers."""
     from ..mcp import load_mcp_config
-    from ..mcp.client import USER_MCP_CONFIG
+    from ..mcp.client import USER_MCP_CONFIG, _redact_home_path
 
     config = load_mcp_config()
 
@@ -39,7 +55,7 @@ def _mcp_list_servers() -> None:
         table.add_row(name, transport, tools_str, expose_str)
 
     console.print(table)
-    console.print(f"\n[dim]Config file: {USER_MCP_CONFIG}[/dim]")
+    console.print(f"\n[dim]Config file: {_redact_home_path(USER_MCP_CONFIG)}[/dim]")
     console.print()
 
 
@@ -71,7 +87,7 @@ def _mcp_add_server_from_kwargs(
         console.print(
             f"[green]Added MCP server:[/green] [cyan]{kwargs['name']}[/cyan] ({entry['transport']})"
         )
-        if is_ssh_server(kwargs):
+        if is_ssh_server(entry):
             _print_ssh_security_warning()
         if show_reload_hint:
             console.print("[dim]Reload with /new to apply.[/dim]")
@@ -100,7 +116,13 @@ def _mcp_edit_server_fields(
         edit_mcp_server(name, **fields)
         console.print(f"[green]Updated MCP server:[/green] [cyan]{name}[/cyan]")
         for k, v in fields.items():
-            console.print(f"  [dim]{k}:[/dim] {v}")
+            if k == "headers":
+                console.print(f"  [dim]{k}:[/dim] (masked)")
+            elif k == "env" and isinstance(v, dict):
+                masked = {ek: ("****" if _is_sensitive_env(ek) else ev) for ek, ev in v.items()}
+                console.print(f"  [dim]{k}:[/dim] {masked}")
+            else:
+                console.print(f"  [dim]{k}:[/dim] {v}")
         # Check if edited server is now SSH
         from ..mcp import load_mcp_config
         updated_config = load_mcp_config()
@@ -156,10 +178,11 @@ def _render_mcp_server_config_table(name: str, server: dict[str, Any]) -> None:
         table.add_row("url", str(server["url"]))
     if server.get("headers"):
         for k, v in server["headers"].items():
-            table.add_row(f"header: {k}", str(v))
+            table.add_row(f"header: {k}", "****")
     if server.get("env"):
         for k, v in server["env"].items():
-            table.add_row(f"env: {k}", str(v))
+            display_val = "****" if _is_sensitive_env(k) else str(v)
+            table.add_row(f"env: {k}", display_val)
 
     tools = server.get("tools")
     table.add_row("tools", ", ".join(tools) if tools else "[dim](all)[/dim]")
@@ -180,7 +203,7 @@ def _show_mcp_config(name: str = "", *, show_blank_line: bool = True) -> str:
         a specific server name is requested but not found.
     """
     from ..mcp import load_mcp_config
-    from ..mcp.client import USER_MCP_CONFIG
+    from ..mcp.client import USER_MCP_CONFIG, _redact_home_path
 
     config = load_mcp_config()
     if not config:
@@ -200,7 +223,7 @@ def _show_mcp_config(name: str = "", *, show_blank_line: bool = True) -> str:
     for srv_name, srv in servers.items():
         _render_mcp_server_config_table(srv_name, srv)
 
-    console.print(f"[dim]Config file: {USER_MCP_CONFIG}[/dim]")
+    console.print(f"[dim]Config file: {_redact_home_path(USER_MCP_CONFIG)}[/dim]")
     if show_blank_line:
         console.print()
     return "ok"
@@ -214,7 +237,7 @@ def _cmd_mcp_check(args_str: str) -> None:
     """
     import asyncio
 
-    from ..mcp import load_mcp_config, validate_ssh_config, check_ssh_server
+    from ..mcp import load_mcp_config, validate_server_config, check_server
 
     config = load_mcp_config()
     if not config:
@@ -260,9 +283,11 @@ def _cmd_mcp_check(args_str: str) -> None:
                     )
                     console.print()
                     return
-            checks = asyncio.run(check_ssh_server(srv_name, srv_cfg))
+                checks = loop.run_until_complete(check_server(srv_name, srv_cfg))
+            else:
+                checks = asyncio.run(check_server(srv_name, srv_cfg))
         else:
-            checks = validate_ssh_config(srv_name, srv_cfg)
+            checks = validate_server_config(srv_name, srv_cfg)
 
         table = Table(
             title=f"Check: {srv_name}",

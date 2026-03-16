@@ -11,6 +11,8 @@ import fnmatch
 import logging
 import os
 import re
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -90,22 +92,57 @@ def _load_user_config() -> dict[str, Any]:
         try:
             data = yaml.safe_load(USER_MCP_CONFIG.read_text()) or {}
             return data if isinstance(data, dict) else {}
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to load user config: %s", exc)
             return {}
     return {}
 
 
 def _save_user_config(config: dict[str, Any]) -> None:
-    """Write *config* to the user-level MCP config file."""
+    """Write *config* to the user-level MCP config file.
+
+    On POSIX systems, uses atomic write (tempfile + fchmod + rename) so the
+    config file is never world-readable, even momentarily.
+    """
     USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    USER_MCP_CONFIG.write_text(
-        yaml.dump(config, default_flow_style=False, sort_keys=False)
-    )
+    content = yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+    if sys.platform != "win32":
+        # Set directory permissions first
+        try:
+            os.chmod(USER_CONFIG_DIR, 0o700)
+        except OSError as exc:
+            logger.warning("Could not set permissions on %s: %s", _redact_home_path(USER_CONFIG_DIR), exc)
+
+        # Atomic write: create temp file with 0o600, write, then rename
+        fd, tmp_path = tempfile.mkstemp(dir=USER_CONFIG_DIR, suffix=".tmp")
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                logger.warning("Could not set permissions on temp file: %s", exc)
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            os.replace(tmp_path, str(USER_MCP_CONFIG))
+        except Exception:
+            # Clean up temp file on failure; fd already closed by fdopen
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                logger.debug("Failed to clean up temp file %s", tmp_path, exc_info=True)
+            raise
+    else:
+        # Windows: write_text uses default ACLs. For stronger protection,
+        # use icacls or win32security to restrict access to the current user.
+        USER_MCP_CONFIG.write_text(content)
 
 
 # =============================================================================
 # CRUD operations
 # =============================================================================
+
+
+_SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 
 
 def add_mcp_server(
@@ -123,7 +160,17 @@ def add_mcp_server(
     """Add or replace an MCP server in the user config.
 
     Returns the server entry that was written.
+
+    Security note: If the entry is an SSH server (as detected by
+    ``is_ssh_server()``), callers are responsible for displaying an
+    appropriate unsupervised-access warning to the user. The CLI layer
+    does this via ``mcp_ui._print_ssh_security_warning()``.
     """
+    if not _SERVER_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid server name {name!r}. "
+            "Names must contain only letters, digits, hyphens, underscores, and dots."
+        )
     if transport not in VALID_TRANSPORTS:
         raise ValueError(
             f"Unknown transport {transport!r}. "
@@ -168,6 +215,10 @@ def edit_mcp_server(name: str, **fields: Any) -> dict[str, Any]:
     Raises:
         KeyError: if *name* doesn't exist in the user config.
         ValueError: on invalid transport or missing required fields.
+
+    Security note: If the edited entry becomes an SSH server, callers are
+    responsible for displaying an unsupervised-access warning. See
+    ``mcp_ui._print_ssh_security_warning()``.
     """
     user_cfg = _load_user_config()
     if name not in user_cfg:
@@ -486,7 +537,7 @@ def load_mcp_config() -> dict[str, Any]:
         if not isinstance(data, dict):
             return {}
     except Exception as exc:
-        logger.warning("Failed to load MCP config %s: %s", USER_MCP_CONFIG, exc)
+        logger.warning("Failed to load MCP config %s: %s", _redact_home_path(USER_MCP_CONFIG), exc)
         return {}
 
     return _interpolate_value(data)
@@ -645,16 +696,49 @@ async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
 # =============================================================================
 
 
+_SSH_PACKAGE_RE = re.compile(
+    r"(?:^|[@/])mcp[-_](?:server[-_]ssh|ssh[-_]server)(?:@|$)",
+    re.IGNORECASE,
+)
+
+
 def is_ssh_server(server_config: dict[str, Any]) -> bool:
     """Return True if *server_config* describes an SSH MCP server."""
     env = server_config.get("env") or {}
     if env.get("SSH_HOST"):
         return True
+    # Check command field
+    cmd = server_config.get("command") or ""
+    cmd_base = cmd.rsplit("/", 1)[-1].lower()
+    if cmd_base in ("ssh", "mcp-server-ssh", "mcp-ssh-server"):
+        return True
+    # Check args with segment-based matching
     args = server_config.get("args") or []
-    return any("ssh" in str(a).lower() for a in args)
+    for a in args:
+        s = str(a)
+        # Exact match for bare "ssh" arg
+        if s.lower() == "ssh":
+            return True
+        # Match known SSH MCP server packages (handles @scope/pkg@version)
+        if _SSH_PACKAGE_RE.search(s):
+            return True
+    return False
 
 
-def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
+def _redact_home_path(p: Path) -> str:
+    """Replace the user's home directory prefix with ``~`` in *p*."""
+    try:
+        home = Path.home()
+        # Use is_relative_to to avoid prefix-collision false positives
+        # (e.g. /home/alice matching /home/alicebob).
+        if p.is_relative_to(home):
+            return "~" + str(p)[len(str(home)):]
+    except (RuntimeError, TypeError):
+        pass
+    return str(p)
+
+
+def validate_server_config(name: str, server_config: dict[str, Any]) -> list[dict]:
     """Validate an MCP server config entry without making any network connections.
 
     Returns a list of check result dicts:
@@ -715,14 +799,52 @@ def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
         else:
             _check(f"ssh.env.{var}", "ok", f"{var} is set")
 
-    # SSH_KEY_PATH file existence
+    # SSH_KEY_PATH validation
+    # NOTE: Key file checks below are advisory (TOCTOU). The file system state
+    # may change between this check and actual SSH connection. These checks
+    # provide early feedback, not security guarantees.
     key_path_raw = env.get("SSH_KEY_PATH", "")
     if key_path_raw:
         key_path = Path(key_path_raw).expanduser()
-        if key_path.is_file():
-            _check("ssh.key_file", "ok", f"key file exists: {key_path}")
-        else:
-            _check("ssh.key_file", "fail", f"key file not found: {key_path}")
+        # Resolve symlinks safely
+        try:
+            resolved = key_path.resolve()
+        except OSError:
+            _check("ssh.key_file", "warn", "could not resolve key path")
+            resolved = None
+
+        if resolved is not None:
+            display = _redact_home_path(resolved)
+            # Existence check first
+            if not key_path.is_file():
+                _check("ssh.key_file", "fail", f"key file not found: {display}")
+            else:
+                _check("ssh.key_file", "ok", f"key file exists: {display}")
+                # Allowed directory check
+                try:
+                    ssh_dir = Path("~/.ssh").expanduser().resolve()
+                    cwd = Path.cwd().resolve()
+                    if not (resolved.is_relative_to(ssh_dir) or resolved.is_relative_to(cwd)):
+                        _check(
+                            "ssh.key_location",
+                            "warn",
+                            f"key path is outside ~/.ssh and CWD; ensure this is intentional: {display}",
+                        )
+                except OSError:
+                    pass  # Can't determine dirs; skip location check
+
+                # Permission check (POSIX only)
+                if sys.platform != "win32":
+                    try:
+                        mode = os.stat(resolved).st_mode
+                        if mode & 0o077:
+                            _check(
+                                "ssh.key_permissions",
+                                "warn",
+                                f"key file is world/group-readable (mode {oct(mode)[-3:]}); should be 0600",
+                            )
+                    except OSError:
+                        _check("ssh.key_permissions", "warn", "could not check key file permissions")
 
     if not server_config.get("expose_to"):
         _check("config.expose_to", "warn", "expose_to not set; defaulting to main")
@@ -732,11 +854,11 @@ def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
     return results
 
 
-async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dict]:
+async def check_server(name: str, server_config: dict[str, Any]) -> list[dict]:
     """Run live connection and GPU checks for an MCP server.
 
     Steps:
-    1. Runs ``validate_ssh_config()`` (config-only, no network).
+    1. Runs ``validate_server_config()`` (config-only, no network).
     2. Connects via ``MultiServerMCPClient`` and lists tools.
     3. If SSH tools found, runs ``echo ok`` via ``ssh_execute``.
     4. If SSH works, queries ``nvidia-smi`` for GPU info.
@@ -755,7 +877,7 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
             }
         ]
 
-    results = validate_ssh_config(name, server_config)
+    results = validate_server_config(name, server_config)
 
     # Abort live checks if config has any failures
     if any(r["status"] == "fail" for r in results):
@@ -784,8 +906,9 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
             )
             return results
         except Exception as exc:
+            logger.warning("MCP server %r: connection failed: %s", name, exc, exc_info=True)
             results.append(
-                {"check": "connection", "status": "fail", "detail": f"connection failed: {exc}"}
+                {"check": "connection", "status": "fail", "detail": "connection failed (see logs for details)"}
             )
             return results
 
@@ -819,8 +942,9 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
             )
             return results
         except Exception as exc:
+            logger.warning("MCP server %r: ssh_execute failed: %s", name, exc, exc_info=True)
             results.append(
-                {"check": "ssh.execute", "status": "fail", "detail": f"ssh_execute failed: {exc}"}
+                {"check": "ssh.execute", "status": "fail", "detail": "ssh_execute failed (see logs for details)"}
             )
             return results
 
@@ -848,11 +972,12 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
                 {"check": "ssh.gpu", "status": "fail", "detail": "nvidia-smi timed out (30s)"}
             )
         except Exception as exc:
+            logger.warning("MCP server %r: nvidia-smi not available: %s", name, exc, exc_info=True)
             results.append(
                 {
                     "check": "ssh.gpu",
                     "status": "warn",
-                    "detail": f"nvidia-smi not available: {exc}",
+                    "detail": "nvidia-smi not available (see logs for details)",
                 }
             )
 
@@ -865,7 +990,7 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
                 if asyncio.iscoroutine(result):
                     await result
             except Exception:
-                pass
+                logger.debug("Failed to close MCP client", exc_info=True)
 
 
 async def aload_mcp_tools() -> dict[str, list]:
@@ -910,11 +1035,18 @@ def load_mcp_tools() -> dict[str, list]:
     try:
         if loop and loop.is_running():
             # Inside an already-running event loop (e.g. Jupyter) —
-            # nest_asyncio patches the loop so asyncio.run() works.
-            import nest_asyncio
-
-            nest_asyncio.apply()
-        server_tools = asyncio.run(_load_tools(config))
+            # nest_asyncio patches the loop so run_until_complete() works.
+            try:
+                import nest_asyncio
+                nest_asyncio.apply()
+            except ImportError:
+                logger.warning(
+                    "nest_asyncio not installed; cannot load MCP tools in running event loop"
+                )
+                return {}
+            server_tools = loop.run_until_complete(_load_tools(config))
+        else:
+            server_tools = asyncio.run(_load_tools(config))
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}

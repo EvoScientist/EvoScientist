@@ -57,7 +57,7 @@ Create or edit `~/.config/evoscientist/mcp.yaml`:
 ssh-gpu:
   transport: stdio
   command: npx
-  args: ["-y", "mcp-server-ssh"]
+  args: ["-y", "mcp-server-ssh@0.6.0"]
   env:
     SSH_HOST: "your-gpu-server.example.com"
     SSH_USER: "your-username"

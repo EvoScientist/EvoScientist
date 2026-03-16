@@ -20,7 +20,8 @@ ssh-gpu:
   # Using npx -y to run without global installation
   args:
     - "-y"
-    - "mcp-server-ssh"
+    # Pin version to prevent supply-chain attacks via auto-installed latest
+    - "mcp-server-ssh@0.6.0"
   
   # Environment variables for SSH connection
   env:
@@ -37,9 +38,11 @@ ssh-gpu:
     # SSH_PORT: "22"
     
     # Optional: Additional SSH options
-    # SSH_OPTIONS: "-o StrictHostKeyChecking=accept-new"
-    # SECURITY WARNING: For production servers, prefer StrictHostKeyChecking=yes
-    # and ensure known_hosts is pre-populated to prevent MITM attacks
+    # SSH_OPTIONS: "-o StrictHostKeyChecking=yes"
+    # NOTE: Pre-populate ~/.ssh/known_hosts with the server's host key before use.
+    # WARNING: 'accept-new' trusts the server's key on first connect without
+    # verification. This is vulnerable to MITM attacks and should NEVER be used
+    # in production. Always pre-populate known_hosts with verified host keys.
   
   # Which agents should have access to SSH tools
   # Available: code-agent, debug-agent
@@ -52,7 +55,7 @@ ssh-gpu:
 # gpu-cluster-1:
 #   transport: stdio
 #   command: npx
-#   args: ["-y", "mcp-server-ssh"]
+#   args: ["-y", "mcp-server-ssh@0.6.0"]
 #   env:
 #     SSH_HOST: "gpu1.example.com"
 #     SSH_USER: "alice"
@@ -62,7 +65,7 @@ ssh-gpu:
 # gpu-cluster-2:
 #   transport: stdio
 #   command: npx
-#   args: ["-y", "mcp-server-ssh"]
+#   args: ["-y", "mcp-server-ssh@0.6.0"]
 #   env:
 #     SSH_HOST: "gpu2.example.com"
 #     SSH_USER: "bob"
