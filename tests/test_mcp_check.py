@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from EvoScientist.mcp.client import check_ssh_server, validate_ssh_config
+import asyncio
+
+from EvoScientist.mcp import check_ssh_server, is_ssh_server, validate_ssh_config
 from tests.conftest import run_async
 
 
@@ -252,6 +254,41 @@ class TestCheckSSHServer:
             results = run_async(check_ssh_server("gpu", cfg))
 
         assert _status(results, "ssh.gpu") == "warn"
+
+    def test_connection_timeout_returns_fail(self, tmp_path):
+        key = tmp_path / "id_rsa"
+        key.write_text("fake key")
+        cfg = _ssh_config(ssh_key_path=str(key))
+
+        MockClient = MagicMock()
+        MockClient.return_value.get_tools = AsyncMock(
+            side_effect=asyncio.TimeoutError()
+        )
+
+        with _patch_mcp_client(MockClient):
+            results = run_async(check_ssh_server("gpu", cfg))
+
+        assert _status(results, "connection") == "fail"
+        conn_result = next(r for r in results if r["check"] == "connection")
+        assert "timed out" in conn_result["detail"]
+
+    def test_ssh_execute_timeout_returns_fail(self, tmp_path):
+        key = tmp_path / "id_rsa"
+        key.write_text("fake key")
+        cfg = _ssh_config(ssh_key_path=str(key), expose_to=["main"])
+
+        ssh_tool = _make_mock_tool("ssh_execute")
+        ssh_tool.ainvoke = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        MockClient = MagicMock()
+        MockClient.return_value.get_tools = AsyncMock(return_value=[ssh_tool])
+
+        with _patch_mcp_client(MockClient):
+            results = run_async(check_ssh_server("gpu", cfg))
+
+        assert _status(results, "ssh.execute") == "fail"
+        exec_result = next(r for r in results if r["check"] == "ssh.execute")
+        assert "timed out" in exec_result["detail"]
 
     def test_missing_langchain_mcp_adapters_returns_fail(self, tmp_path):
         key = tmp_path / "id_rsa"

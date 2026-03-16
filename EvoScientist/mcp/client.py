@@ -645,6 +645,15 @@ async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
 # =============================================================================
 
 
+def is_ssh_server(server_config: dict[str, Any]) -> bool:
+    """Return True if *server_config* describes an SSH MCP server."""
+    env = server_config.get("env") or {}
+    if env.get("SSH_HOST"):
+        return True
+    args = server_config.get("args") or []
+    return any("ssh" in str(a).lower() for a in args)
+
+
 def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
     """Validate an MCP server config entry without making any network connections.
 
@@ -683,9 +692,8 @@ def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
             _check("config.url", "ok", f"url={server_config['url']!r}")
 
     # --- detect SSH server ---
-    args = server_config.get("args", [])
-    env = server_config.get("env", {})
-    is_ssh = any("ssh" in str(a).lower() for a in args) or bool(env.get("SSH_HOST"))
+    is_ssh = is_ssh_server(server_config)
+    env = server_config.get("env") or {}
 
     if not is_ssh:
         # No SSH-specific checks needed
@@ -758,26 +766,96 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
     client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
 
     try:
-        tools = await asyncio.wait_for(
-            client.get_tools(server_name=name), timeout=30
+        try:
+            tools = await asyncio.wait_for(
+                client.get_tools(server_name=name), timeout=30
+            )
+            tool_names = [t.name for t in tools]
+            results.append(
+                {
+                    "check": "connection",
+                    "status": "ok",
+                    "detail": f"connected; {len(tools)} tool(s): {', '.join(tool_names[:5])}{'...' if len(tool_names) > 5 else ''}",
+                }
+            )
+        except asyncio.TimeoutError:
+            results.append(
+                {"check": "connection", "status": "fail", "detail": "connection timed out (30s)"}
+            )
+            return results
+        except Exception as exc:
+            results.append(
+                {"check": "connection", "status": "fail", "detail": f"connection failed: {exc}"}
+            )
+            return results
+
+        # --- SSH execute echo ---
+        ssh_tools = {t.name: t for t in tools if "ssh" in t.name.lower()}
+        execute_tool = ssh_tools.get("ssh_execute") or next(
+            (t for t in tools if "execute" in t.name.lower()), None
         )
-        tool_names = [t.name for t in tools]
-        results.append(
-            {
-                "check": "connection",
-                "status": "ok",
-                "detail": f"connected; {len(tools)} tool(s): {', '.join(tool_names[:5])}{'...' if len(tool_names) > 5 else ''}",
-            }
-        )
-    except asyncio.TimeoutError:
-        results.append(
-            {"check": "connection", "status": "fail", "detail": "connection timed out (30s)"}
-        )
-        return results
-    except Exception as exc:
-        results.append(
-            {"check": "connection", "status": "fail", "detail": f"connection failed: {exc}"}
-        )
+
+        if execute_tool is None:
+            results.append(
+                {"check": "ssh.execute", "status": "warn", "detail": "no ssh_execute tool found"}
+            )
+            return results
+
+        try:
+            echo_result = await asyncio.wait_for(
+                execute_tool.ainvoke({"command": "echo ok"}), timeout=30
+            )
+            echo_ok = "ok" in str(echo_result).lower()
+            results.append(
+                {
+                    "check": "ssh.execute",
+                    "status": "ok" if echo_ok else "warn",
+                    "detail": f"echo ok → {str(echo_result)[:80]}",
+                }
+            )
+        except asyncio.TimeoutError:
+            results.append(
+                {"check": "ssh.execute", "status": "fail", "detail": "ssh_execute timed out (30s)"}
+            )
+            return results
+        except Exception as exc:
+            results.append(
+                {"check": "ssh.execute", "status": "fail", "detail": f"ssh_execute failed: {exc}"}
+            )
+            return results
+
+        # --- nvidia-smi GPU check ---
+        try:
+            gpu_result = await asyncio.wait_for(
+                execute_tool.ainvoke(
+                    {
+                        "command": "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"
+                    }
+                ),
+                timeout=30,
+            )
+            gpu_str = str(gpu_result).strip()
+            if gpu_str:
+                results.append(
+                    {"check": "ssh.gpu", "status": "ok", "detail": f"GPU(s): {gpu_str[:120]}"}
+                )
+            else:
+                results.append(
+                    {"check": "ssh.gpu", "status": "warn", "detail": "nvidia-smi returned no output"}
+                )
+        except asyncio.TimeoutError:
+            results.append(
+                {"check": "ssh.gpu", "status": "fail", "detail": "nvidia-smi timed out (30s)"}
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "check": "ssh.gpu",
+                    "status": "warn",
+                    "detail": f"nvidia-smi not available: {exc}",
+                }
+            )
+
         return results
     finally:
         _close = getattr(client, "aclose", None) or getattr(client, "close", None)
@@ -788,75 +866,6 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
                     await result
             except Exception:
                 pass
-
-    # --- SSH execute echo ---
-    ssh_tools = {t.name: t for t in tools if "ssh" in t.name.lower()}
-    execute_tool = ssh_tools.get("ssh_execute") or next(
-        (t for t in tools if "execute" in t.name.lower()), None
-    )
-
-    if execute_tool is None:
-        results.append(
-            {"check": "ssh.execute", "status": "warn", "detail": "no ssh_execute tool found"}
-        )
-        return results
-
-    try:
-        echo_result = await asyncio.wait_for(
-            execute_tool.ainvoke({"command": "echo ok"}), timeout=30
-        )
-        echo_ok = "ok" in str(echo_result).lower()
-        results.append(
-            {
-                "check": "ssh.execute",
-                "status": "ok" if echo_ok else "warn",
-                "detail": f"echo ok → {str(echo_result)[:80]}",
-            }
-        )
-    except asyncio.TimeoutError:
-        results.append(
-            {"check": "ssh.execute", "status": "fail", "detail": "ssh_execute timed out (30s)"}
-        )
-        return results
-    except Exception as exc:
-        results.append(
-            {"check": "ssh.execute", "status": "fail", "detail": f"ssh_execute failed: {exc}"}
-        )
-        return results
-
-    # --- nvidia-smi GPU check ---
-    try:
-        gpu_result = await asyncio.wait_for(
-            execute_tool.ainvoke(
-                {
-                    "command": "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"
-                }
-            ),
-            timeout=30,
-        )
-        gpu_str = str(gpu_result).strip()
-        if gpu_str:
-            results.append(
-                {"check": "ssh.gpu", "status": "ok", "detail": f"GPU(s): {gpu_str[:120]}"}
-            )
-        else:
-            results.append(
-                {"check": "ssh.gpu", "status": "warn", "detail": "nvidia-smi returned no output"}
-            )
-    except asyncio.TimeoutError:
-        results.append(
-            {"check": "ssh.gpu", "status": "fail", "detail": "nvidia-smi timed out (30s)"}
-        )
-    except Exception as exc:
-        results.append(
-            {
-                "check": "ssh.gpu",
-                "status": "warn",
-                "detail": f"nvidia-smi not available: {exc}",
-            }
-        )
-
-    return results
 
 
 async def aload_mcp_tools() -> dict[str, list]:
