@@ -142,6 +142,57 @@ class TestSSHGPUSupport:
             "debug-agent should mention local debugging as fallback"
         )
 
+    def test_code_agent_execution_mode_declaration(self, subagent_config):
+        """code-agent should declare execution mode (remote vs local)."""
+        code_agent = subagent_config.get("code-agent", {})
+        system_prompt = code_agent.get("system_prompt", "")
+
+        assert (
+            "execution mode" in system_prompt.lower()
+            or "remote" in system_prompt.lower()
+            and "locally" in system_prompt.lower()
+        ), "code-agent should declare execution mode clearly"
+
+    def test_debug_agent_execution_mode_declaration(self, subagent_config):
+        """debug-agent should declare execution mode (remote vs local)."""
+        debug_agent = subagent_config.get("debug-agent", {})
+        system_prompt = debug_agent.get("system_prompt", "")
+
+        assert (
+            "execution mode" in system_prompt.lower()
+            or "debugging" in system_prompt.lower()
+            and "locally" in system_prompt.lower()
+        ), "debug-agent should declare execution mode clearly"
+
+    def test_debug_agent_has_ssh_upload(self, subagent_config):
+        """debug-agent should have ssh_upload for pushing fix scripts."""
+        debug_agent = subagent_config.get("debug-agent", {})
+        system_prompt = debug_agent.get("system_prompt", "")
+
+        assert (
+            "ssh_upload" in system_prompt.lower()
+            or "upload" in system_prompt.lower()
+            and "push" in system_prompt.lower()
+        ), "debug-agent should have ssh_upload capability"
+
+    def test_flexible_tool_matching_documented(self, subagent_config):
+        """Prompts should document flexible tool name matching."""
+        code_agent = subagent_config.get("code-agent", {})
+        debug_agent = subagent_config.get("debug-agent", {})
+
+        code_prompt = code_agent.get("system_prompt", "")
+        debug_prompt = debug_agent.get("system_prompt", "")
+
+        # Should mention alternative tool names or flexible matching
+        has_flexible_matching = (
+            "run_remote_command" in code_prompt
+            or "or equivalent" in code_prompt.lower()
+            or "or equivalent" in debug_prompt.lower()
+        )
+        assert has_flexible_matching, (
+            "Prompts should document flexible tool name matching"
+        )
+
 
 class TestSubagentYAMLStructure:
     """Tests for subagent.yaml structure and formatting."""
@@ -162,3 +213,37 @@ class TestSubagentYAMLStructure:
             assert (
                 "system_prompt" in agent_config or "system_prompt_ref" in agent_config
             ), f"{agent_name} should have a system prompt or system_prompt_ref"
+
+
+class TestMcpConfigTemplate:
+    """Tests for MCP config template fields."""
+
+    def test_mcp_config_template_exists(self):
+        """SSH MCP config template should exist."""
+        template_path = (
+            Path(__file__).parent.parent
+            / "docs/examples/mcp-ssh-gpu/mcp-ssh-gpu.yaml.example"
+        )
+        assert template_path.exists(), "SSH MCP config template should exist"
+
+    def test_mcp_config_template_has_expose_to(self):
+        """MCP config template should have expose_to field."""
+        template_path = (
+            Path(__file__).parent.parent
+            / "docs/examples/mcp-ssh-gpu/mcp-ssh-gpu.yaml.example"
+        )
+        with template_path.open() as f:
+            content = f.read()
+        assert "expose_to" in content, "MCP config template should have expose_to field"
+
+    def test_mcp_config_template_has_env(self):
+        """MCP config template should have env field."""
+        template_path = (
+            Path(__file__).parent.parent
+            / "docs/examples/mcp-ssh-gpu/mcp-ssh-gpu.yaml.example"
+        )
+        with template_path.open() as f:
+            content = f.read()
+        assert "env:" in content or "SSH_HOST" in content, (
+            "MCP config template should have env field with SSH_HOST"
+        )

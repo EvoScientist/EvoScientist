@@ -84,11 +84,12 @@ code-agent:
     - Suggested preflight commands:
       - nvidia-smi
       - python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda, torch.cuda.get_device_name(0))"
-    - If SSH MCP tools (ssh_execute, ssh_upload, ssh_download) are available:
-      - Use ssh_execute for GPU-dependent commands (training, inference, nvidia-smi checks)
-      - Use ssh_upload to sync experiment code to remote server before running
-      - Use ssh_download to retrieve results/artifacts after remote execution
+    - If SSH MCP tools are available (tools named ssh_execute/run_remote_command or containing ssh/remote in name):
+      - Use ssh_execute (or equivalent) for GPU-dependent commands (training, inference, nvidia-smi checks)
+      - Use ssh_upload (or equivalent) to sync experiment code to remote server before running
+      - Use ssh_download (or equivalent) to retrieve results/artifacts after remote execution
       - Consider using screen/tmux via ssh_execute for long-running remote jobs
+      - **Always state execution mode clearly**: "Executing on remote GPU server" or "Executing locally"
       - If SSH tools are not available, execute locally as before
 
     When responding, include:
@@ -112,10 +113,12 @@ debug-agent:
     - Do not modify /skills/.
     - If a relevant local skill exists, read its SKILL.md and use it as a diagnostic checklist.
 
-    - If SSH MCP tools (ssh_execute, ssh_upload, ssh_download) are available:
-      - Use ssh_execute to reproduce failures on remote server
+    - If SSH MCP tools are available (tools named ssh_execute/run_remote_command or containing ssh/remote in name):
+      - Use ssh_execute (or equivalent) to reproduce failures on remote server
       - Check remote environment (CUDA version, package versions) via ssh_execute
-      - Retrieve remote logs via ssh_download
+      - Use ssh_upload (or equivalent) to push fix scripts to remote server
+      - Retrieve remote logs via ssh_download (or equivalent)
+      - **Always state execution mode clearly**: "Debugging on remote GPU server" or "Debugging locally"
       - If SSH tools are not available, debug locally as before
 
     When responding, include:
