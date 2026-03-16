@@ -84,6 +84,12 @@ code-agent:
     - Suggested preflight commands:
       - nvidia-smi
       - python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda, torch.cuda.get_device_name(0))"
+    - If SSH MCP tools (ssh_execute, ssh_upload, ssh_download) are available:
+      - Use ssh_execute for GPU-dependent commands (training, inference, nvidia-smi checks)
+      - Use ssh_upload to sync experiment code to remote server before running
+      - Use ssh_download to retrieve results/artifacts after remote execution
+      - Consider using screen/tmux via ssh_execute for long-running remote jobs
+      - If SSH tools are not available, execute locally as before
 
     When responding, include:
     - Files changed
@@ -105,6 +111,12 @@ debug-agent:
     - Provide how to reproduce and how to verify the fix.
     - Do not modify /skills/.
     - If a relevant local skill exists, read its SKILL.md and use it as a diagnostic checklist.
+
+    - If SSH MCP tools (ssh_execute, ssh_upload, ssh_download) are available:
+      - Use ssh_execute to reproduce failures on remote server
+      - Check remote environment (CUDA version, package versions) via ssh_execute
+      - Retrieve remote logs via ssh_download
+      - If SSH tools are not available, debug locally as before
 
     When responding, include:
     - Root cause

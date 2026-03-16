@@ -1,0 +1,68 @@
+# Example SSH MCP Server Configuration for Remote GPU Execution
+# 
+# This file demonstrates how to configure an SSH MCP server for remote
+# GPU experiment execution with EvoScientist.
+#
+# Usage:
+# 1. Copy this file to ~/.config/evoscientist/mcp.yaml
+# 2. Update the SSH_HOST, SSH_USER, and SSH_KEY_PATH values
+# 3. Start EvoScientist CLI or reload agent session
+
+# SSH GPU server configuration
+ssh-gpu:
+  # Transport type (stdio for local MCP server, sse for remote)
+  transport: stdio
+  
+  # Command to start the MCP server
+  command: npx
+  
+  # Arguments for the MCP server
+  # Using npx -y to run without global installation
+  args:
+    - "-y"
+    - "mcp-server-ssh"
+  
+  # Environment variables for SSH connection
+  env:
+    # Remote server hostname or IP
+    SSH_HOST: "your-gpu-server.example.com"
+    
+    # SSH username
+    SSH_USER: "your-username"
+    
+    # Path to SSH private key (must not be password-protected)
+    SSH_KEY_PATH: "~/.ssh/id_rsa"
+    
+    # Optional: SSH port (default: 22)
+    # SSH_PORT: "22"
+    
+    # Optional: Additional SSH options
+    # SSH_OPTIONS: "-o StrictHostKeyChecking=no"
+  
+  # Which agents should have access to SSH tools
+  # Available: code-agent, debug-agent
+  expose_to:
+    - code-agent
+    - debug-agent
+
+# Example: Multiple SSH servers for different GPU clusters
+#
+# gpu-cluster-1:
+#   transport: stdio
+#   command: npx
+#   args: ["-y", "mcp-server-ssh"]
+#   env:
+#     SSH_HOST: "gpu1.example.com"
+#     SSH_USER: "alice"
+#     SSH_KEY_PATH: "~/.ssh/id_rsa_gpu1"
+#   expose_to: [code-agent, debug-agent]
+#
+# gpu-cluster-2:
+#   transport: stdio
+#   command: npx
+#   args: ["-y", "mcp-server-ssh"]
+#   env:
+#     SSH_HOST: "gpu2.example.com"
+#     SSH_USER: "bob"
+#     SSH_KEY_PATH: "~/.ssh/id_rsa_gpu2"
+#   expose_to: [code-agent]
