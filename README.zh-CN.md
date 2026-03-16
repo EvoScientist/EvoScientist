@@ -515,6 +515,11 @@ Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu 
 
 ### 👥 社区贡献者
 
+⚗️ 加入 EvoScientist 社区，探讨 AI 驱动的科研前沿，分享实验成果，共同推动自动化科学发现的未来。
+
+- [Discord](https://discord.gg/AZ9ZMXkunY) — 实时提问、分享发现，与研究者和开发者协作交流。
+- [微信](https://github.com/EvoScientist/EvoScientist/blob/main/.github/assets/cn_info.md) — 加入中文社区，与国内研究者和开发者交流。
+
 每一份贡献，都让我们离 AI 驱动科学突破、造福全人类的未来更近一步。
 
 <a href="https://github.com/EvoScientist/EvoScientist/graphs/contributors">
@@ -547,10 +552,3 @@ Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu 
 本项目基于 Apache License 2.0 开源——详情请见 [LICENSE](./LICENSE) 文件。
 
 <p align="right"><a href="#top">🔝回到顶部</a></p>
-
-<!-- ---
-
-<p align="center">
-  Created and maintained by <a href="https://github.com/x-izhang"><b>Xi Zhang</b></a>, built with the open-source community.
-</p> -->
-
