@@ -43,6 +43,15 @@ def _mcp_list_servers() -> None:
     console.print()
 
 
+def _is_ssh_server(kwargs: dict[str, Any]) -> bool:
+    """Return True if kwargs describe an SSH MCP server."""
+    env = kwargs.get("env") or {}
+    if "SSH_HOST" in env:
+        return True
+    args = kwargs.get("args") or []
+    return any("ssh" in str(a).lower() for a in args)
+
+
 def _mcp_add_server_from_kwargs(
     kwargs: dict[str, Any],
     *,
@@ -56,6 +65,18 @@ def _mcp_add_server_from_kwargs(
         console.print(
             f"[green]Added MCP server:[/green] [cyan]{kwargs['name']}[/cyan] ({entry['transport']})"
         )
+        if _is_ssh_server(kwargs):
+            console.print()
+            console.print(
+                "[bold yellow]⚠ Security Warning:[/bold yellow] This SSH MCP server gives the AI agent"
+                " [bold]full, unsupervised access[/bold] to the remote machine."
+            )
+            console.print(
+                "[yellow]Every command the agent generates will execute on that machine without human approval.[/yellow]"
+            )
+            console.print(
+                "[yellow]Only proceed if you fully control the remote machine and accept this risk.[/yellow]"
+            )
         if show_reload_hint:
             console.print("[dim]Reload with /new to apply.[/dim]")
         return True
@@ -183,6 +204,79 @@ def _show_mcp_config(name: str = "", *, show_blank_line: bool = True) -> str:
     return "ok"
 
 
+def _cmd_mcp_check(args_str: str) -> None:
+    """Handle ``/mcp check [name]``.
+
+    Without a name: config-only validation for all servers.
+    With a name: config validation + live connection/GPU check for that server.
+    """
+    import asyncio
+
+    from ..mcp import load_mcp_config, validate_ssh_config
+    from ..mcp.client import check_ssh_server
+
+    config = load_mcp_config()
+    if not config:
+        console.print("[dim]No MCP servers configured.[/dim]")
+        console.print()
+        return
+
+    name = args_str.strip()
+
+    if name:
+        # Live check for single server
+        if name not in config:
+            console.print(f"[red]Server not found:[/red] {name}")
+            console.print()
+            return
+        servers_to_check = {name: config[name]}
+        live = True
+    else:
+        # Config-only check for all servers
+        servers_to_check = config
+        live = False
+
+    status_style = {"ok": "green", "warn": "yellow", "fail": "red"}
+
+    for srv_name, srv_cfg in servers_to_check.items():
+        if live:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                try:
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                except ImportError:
+                    pass
+            checks = asyncio.run(check_ssh_server(srv_name, srv_cfg))
+        else:
+            checks = validate_ssh_config(srv_name, srv_cfg)
+
+        table = Table(
+            title=f"Check: {srv_name}",
+            show_header=True,
+            title_style="bold cyan",
+        )
+        table.add_column("Check", style="cyan")
+        table.add_column("Status", style="bold")
+        table.add_column("Detail")
+
+        for result in checks:
+            st = result["status"]
+            style = status_style.get(st, "white")
+            table.add_row(
+                result["check"],
+                f"[{style}]{st}[/{style}]",
+                result["detail"],
+            )
+
+        console.print(table)
+        console.print()
+
+
 def _cmd_mcp_add(args_str: str) -> None:
     """Handle ``/mcp add ...``."""
     import shlex
@@ -291,11 +385,15 @@ def _cmd_mcp(args: str) -> None:
         _cmd_mcp_remove(subargs)
     elif subcmd == "config":
         _cmd_mcp_config(subargs)
+    elif subcmd == "check":
+        _cmd_mcp_check(subargs)
     else:
         console.print("[bold]MCP commands:[/bold]")
         console.print("  /mcp              List configured servers")
         console.print("  /mcp list         List configured servers")
         console.print("  /mcp config       Show detailed server config")
+        console.print("  /mcp check        Validate config for all servers")
+        console.print("  /mcp check <name> Validate config + live GPU check for one server")
         console.print("  /mcp add ...      Add a server")
         console.print("  /mcp edit ...     Edit an existing server")
         console.print("  /mcp remove ...   Remove a server")

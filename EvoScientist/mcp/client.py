@@ -640,6 +640,216 @@ async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
     return server_tools
 
 
+# =============================================================================
+# SSH config validation & live checks
+# =============================================================================
+
+
+def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
+    """Validate an MCP server config entry without making any network connections.
+
+    Returns a list of check result dicts:
+        [{"check": "config.transport", "status": "ok"|"warn"|"fail", "detail": "..."}]
+    """
+    results: list[dict] = []
+
+    def _check(check: str, status: str, detail: str) -> None:
+        results.append({"check": check, "status": status, "detail": detail})
+
+    # --- transport ---
+    transport = server_config.get("transport", "")
+    if not transport:
+        _check("config.transport", "fail", "transport field is missing")
+        return results
+    if transport not in VALID_TRANSPORTS:
+        _check(
+            "config.transport",
+            "fail",
+            f"unknown transport {transport!r}; valid: {', '.join(sorted(VALID_TRANSPORTS))}",
+        )
+        return results
+    _check("config.transport", "ok", f"transport={transport!r}")
+
+    # --- command / url ---
+    if transport == "stdio":
+        if not server_config.get("command"):
+            _check("config.command", "fail", "stdio transport requires a command")
+        else:
+            _check("config.command", "ok", f"command={server_config['command']!r}")
+    elif transport in _URL_TRANSPORTS:
+        if not server_config.get("url"):
+            _check("config.url", "fail", f"{transport} transport requires a url")
+        else:
+            _check("config.url", "ok", f"url={server_config['url']!r}")
+
+    # --- detect SSH server ---
+    args = server_config.get("args", [])
+    env = server_config.get("env", {})
+    is_ssh = "ssh" in args or bool(env.get("SSH_HOST"))
+
+    if not is_ssh:
+        # No SSH-specific checks needed
+        if not server_config.get("expose_to"):
+            _check("config.expose_to", "warn", "expose_to not set; defaulting to main")
+        else:
+            _check("config.expose_to", "ok", f"expose_to={server_config['expose_to']!r}")
+        return results
+
+    # --- SSH-specific validation ---
+    for var in ("SSH_HOST", "SSH_USER", "SSH_KEY_PATH"):
+        val = env.get(var, "")
+        if not val:
+            _check(
+                f"ssh.env.{var}",
+                "fail",
+                f"{var} is missing or empty in env",
+            )
+        else:
+            _check(f"ssh.env.{var}", "ok", f"{var} is set")
+
+    # SSH_KEY_PATH file existence
+    key_path_raw = env.get("SSH_KEY_PATH", "")
+    if key_path_raw:
+        key_path = Path(key_path_raw).expanduser()
+        if key_path.is_file():
+            _check("ssh.key_file", "ok", f"key file exists: {key_path}")
+        else:
+            _check("ssh.key_file", "fail", f"key file not found: {key_path}")
+
+    if not server_config.get("expose_to"):
+        _check("config.expose_to", "warn", "expose_to not set; defaulting to main")
+    else:
+        _check("config.expose_to", "ok", f"expose_to={server_config['expose_to']!r}")
+
+    return results
+
+
+async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dict]:
+    """Run live connection and GPU checks for an MCP server.
+
+    Steps:
+    1. Runs ``validate_ssh_config()`` (config-only, no network).
+    2. Connects via ``MultiServerMCPClient`` and lists tools.
+    3. If SSH tools found, runs ``echo ok`` via ``ssh_execute``.
+    4. If SSH works, queries ``nvidia-smi`` for GPU info.
+
+    Each step uses ``asyncio.wait_for`` with a 30-second timeout.
+    Returns extended check result list.
+    """
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+    except ImportError:
+        return [
+            {
+                "check": "deps",
+                "status": "fail",
+                "detail": "langchain-mcp-adapters not installed",
+            }
+        ]
+
+    results = validate_ssh_config(name, server_config)
+
+    # Abort live checks if config has any failures
+    if any(r["status"] == "fail" for r in results):
+        return results
+
+    # --- live connection ---
+    connections = _build_connections({name: server_config})
+    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
+
+    try:
+        tools = await asyncio.wait_for(
+            client.get_tools(server_name=name), timeout=30
+        )
+        tool_names = [t.name for t in tools]
+        results.append(
+            {
+                "check": "connection",
+                "status": "ok",
+                "detail": f"connected; {len(tools)} tool(s): {', '.join(tool_names[:5])}{'...' if len(tool_names) > 5 else ''}",
+            }
+        )
+    except asyncio.TimeoutError:
+        results.append(
+            {"check": "connection", "status": "fail", "detail": "connection timed out (30s)"}
+        )
+        return results
+    except Exception as exc:
+        results.append(
+            {"check": "connection", "status": "fail", "detail": f"connection failed: {exc}"}
+        )
+        return results
+
+    # --- SSH execute echo ---
+    ssh_tools = {t.name: t for t in tools if "ssh" in t.name.lower()}
+    execute_tool = ssh_tools.get("ssh_execute") or next(
+        (t for t in tools if "execute" in t.name.lower()), None
+    )
+
+    if execute_tool is None:
+        results.append(
+            {"check": "ssh.execute", "status": "warn", "detail": "no ssh_execute tool found"}
+        )
+        return results
+
+    try:
+        echo_result = await asyncio.wait_for(
+            execute_tool.ainvoke({"command": "echo ok"}), timeout=30
+        )
+        echo_ok = "ok" in str(echo_result).lower()
+        results.append(
+            {
+                "check": "ssh.execute",
+                "status": "ok" if echo_ok else "warn",
+                "detail": f"echo ok → {str(echo_result)[:80]}",
+            }
+        )
+    except asyncio.TimeoutError:
+        results.append(
+            {"check": "ssh.execute", "status": "fail", "detail": "ssh_execute timed out (30s)"}
+        )
+        return results
+    except Exception as exc:
+        results.append(
+            {"check": "ssh.execute", "status": "fail", "detail": f"ssh_execute failed: {exc}"}
+        )
+        return results
+
+    # --- nvidia-smi GPU check ---
+    try:
+        gpu_result = await asyncio.wait_for(
+            execute_tool.ainvoke(
+                {
+                    "command": "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"
+                }
+            ),
+            timeout=30,
+        )
+        gpu_str = str(gpu_result).strip()
+        if gpu_str:
+            results.append(
+                {"check": "ssh.gpu", "status": "ok", "detail": f"GPU(s): {gpu_str[:120]}"}
+            )
+        else:
+            results.append(
+                {"check": "ssh.gpu", "status": "warn", "detail": "nvidia-smi returned no output"}
+            )
+    except asyncio.TimeoutError:
+        results.append(
+            {"check": "ssh.gpu", "status": "fail", "detail": "nvidia-smi timed out (30s)"}
+        )
+    except Exception as exc:
+        results.append(
+            {
+                "check": "ssh.gpu",
+                "status": "warn",
+                "detail": f"nvidia-smi not available: {exc}",
+            }
+        )
+
+    return results
+
+
 async def aload_mcp_tools() -> dict[str, list]:
     """Async version of :func:`load_mcp_tools`.
 

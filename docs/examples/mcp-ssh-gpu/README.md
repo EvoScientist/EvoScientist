@@ -1,5 +1,11 @@
 # Remote SSH GPU Execution with MCP
 
+> **⚠️ Security Warning**
+>
+> Configuring an SSH MCP server gives the AI agent **full, unsupervised access to the remote machine**.
+> Every command the agent generates — including destructive ones — will execute on that machine without
+> human approval. Only connect to machines you fully control and accept this risk explicitly.
+
 This guide explains how to configure EvoScientist for remote GPU experiment execution using SSH MCP servers.
 
 ## Overview
@@ -161,9 +167,13 @@ ssh_execute "screen -r train"
 
 ## Security Considerations
 
+> **⚠️ Full unsupervised access**: The agent can execute any command on the remote machine without
+> asking for confirmation. Treat this as equivalent to giving the agent an interactive shell.
+
 - **SSH Keys**: Never commit SSH private keys to repositories
 - **Environment Variables**: Use secure methods to manage SSH credentials
 - **Network**: Consider using VPN or bastion hosts for production deployments
+- **Least privilege**: Use a dedicated user with restricted permissions on the remote server
 
 ## Backward Compatibility
 

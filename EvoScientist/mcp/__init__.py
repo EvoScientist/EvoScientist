@@ -14,6 +14,8 @@ from .client import (
     parse_mcp_edit_args,
     build_mcp_add_kwargs,
     build_mcp_edit_fields,
+    validate_ssh_config,
+    check_ssh_server,
     VALID_TRANSPORTS,
 )
 
@@ -28,5 +30,7 @@ __all__ = [
     "parse_mcp_edit_args",
     "build_mcp_add_kwargs",
     "build_mcp_edit_fields",
+    "validate_ssh_config",
+    "check_ssh_server",
     "VALID_TRANSPORTS",
 ]
