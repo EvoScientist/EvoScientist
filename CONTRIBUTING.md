@@ -1,22 +1,60 @@
 # Contributing to EvoScientist
 
-We appreciate your interest and the time you spend helping improve EvoScientist. Please read the following instruction on how to help us.
+We appreciate your interest and the time you spend helping improve EvoScientist. Please read the following guidelines before contributing.
 
 ## How you can contribute
 
-- Report ideas, bugs, and feature requests: open an issue describing intent, motivation, and high-level impact. Make sure to correctly label the Issue. Use the provided template.
-- Propose design changes: use issues or discussion threads to outline the problem, alternatives, and trade-offs before implementing.
-- Contribute code or docs: submit PRs that tackle an open issue. They must have a clear rationale and tests where applicable. 
+- **Report bugs and request features:** open an issue using the provided templates. Make sure to use the correct template and labels.
+- **Propose design changes:** use issues or discussion threads to outline the problem, alternatives, and trade-offs before implementing.
+- **Contribute code or docs:** submit PRs that address an open issue. They must have a clear rationale and tests where applicable.
 
 ## What we are looking for in PRs
 
-We aim to keep the EvoScientist with only core functionality that will be used by majority of users. Therefore PRs should only include:
-- Bug fixes / Improvements to existing features
-- New features that were proposed in an Issue and agreed with Contributor
-- Updating documentation
-- Improving test suite with meaningful tests
+We aim to keep EvoScientist focused on core functionality that benefits the majority of users. PRs should only include:
 
-If you want to add nice to have or niche feature look at contributing to the [EvoSkills repository](https://github.com/EvoScientist/EvoSkills)
+- Bug fixes / improvements to existing features
+- New features that were proposed in an issue and agreed upon with maintainers
+- Documentation updates and examples
+- Meaningful additions to the test suite
+
+If you want to add a niche or specialized workflow, consider contributing to the [EvoSkills repository](https://github.com/EvoScientist/EvoSkills) instead.
+
+## Development setup
+
+1. **Fork and clone** the repository:
+   ```bash
+   git clone https://github.com/<your-username>/EvoScientist.git
+   cd EvoScientist
+   ```
+
+2. **Install dependencies** (requires [uv](https://docs.astral.sh/uv/)):
+   ```bash
+   uv sync --dev
+   ```
+
+3. **Run the test suite** (no API keys needed):
+   ```bash
+   uv run pytest
+   ```
+
+4. **Run the linter:**
+   ```bash
+   uv run ruff check .
+   ```
+
+## Submitting a pull request
+
+1. Create a branch from `main` with a descriptive name (e.g. `fix/session-crash`, `feat/export-csv`).
+2. Make your changes, keeping commits focused and well-described.
+3. Ensure `uv run ruff check .` and `uv run pytest` pass locally — these also run in CI.
+4. Open a PR against `main` and fill in the PR template.
+5. A maintainer will review your PR. Please be responsive to feedback.
+
+## Code style
+
+- We use [Ruff](https://docs.astral.sh/ruff/) for linting. Run `uv run ruff check .` before pushing.
+- Follow the existing code patterns and conventions in the area you're modifying.
+- Keep changes minimal and focused on the task at hand.
 
 ---
 
@@ -44,7 +82,7 @@ EvoScientist is a multi-agent AI system for automated scientific experimentation
 | `data-analysis-agent` | Computes metrics, creates plots, summarizes insights |
 | `writing-agent` | Drafts paper-ready Markdown experiment reports |
 
-### Data Flow
+### Data flow
 
 ```txt
 User Input (CLI / TUI / 10 Channel Integrations)
@@ -69,4 +107,5 @@ Stream Events --> Emitter --> Tracker --> State --> Rich Display / TUI
 ---
 
 ## Need help?
-You can reach us on Discord or WeChat linked in README
+
+Reach us on [Discord](https://discord.gg/AZ9ZMXkunY) or WeChat (linked in README).
