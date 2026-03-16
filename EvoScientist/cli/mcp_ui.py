@@ -105,6 +105,25 @@ def _mcp_edit_server_fields(
         console.print(f"[green]Updated MCP server:[/green] [cyan]{name}[/cyan]")
         for k, v in fields.items():
             console.print(f"  [dim]{k}:[/dim] {v}")
+        # Check if edited server is now SSH
+        from ..mcp import load_mcp_config
+        updated_config = load_mcp_config()
+        if updated_config and name in updated_config:
+            srv = updated_config[name]
+            env_check = srv.get("env") or {}
+            args_check = srv.get("args") or []
+            if "SSH_HOST" in env_check or any("ssh" in str(a).lower() for a in args_check):
+                console.print()
+                console.print(
+                    "[bold yellow]⚠ Security Warning:[/bold yellow] This SSH MCP server gives the AI agent"
+                    " [bold]full, unsupervised access[/bold] to the remote machine."
+                )
+                console.print(
+                    "[yellow]Every command the agent generates will execute on that machine without human approval.[/yellow]"
+                )
+                console.print(
+                    "[yellow]Only proceed if you fully control the remote machine and accept this risk.[/yellow]"
+                )
         if show_reload_hint:
             console.print("[dim]Reload with /new to apply.[/dim]")
         return True
@@ -212,8 +231,7 @@ def _cmd_mcp_check(args_str: str) -> None:
     """
     import asyncio
 
-    from ..mcp import load_mcp_config, validate_ssh_config
-    from ..mcp.client import check_ssh_server
+    from ..mcp import load_mcp_config, validate_ssh_config, check_ssh_server
 
     config = load_mcp_config()
     if not config:

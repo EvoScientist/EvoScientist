@@ -72,9 +72,8 @@ ssh-gpu:
 After creating the config file, start an EvoScientist session. The SSH MCP
 server will be loaded automatically from `~/.config/evoscientist/mcp.yaml`.
 
-**Note**: CLI commands like `EvoSci mcp add` and in-session `/mcp add` are
-not yet implemented. For now, edit `~/.config/evoscientist/mcp.yaml` directly.
-Future versions may add these convenience commands.
+**Note**: You can also use in-session commands `/mcp add` to add a server interactively,
+and `/mcp check <name>` to validate config and run a live connection + GPU check.
 
 ## Usage
 

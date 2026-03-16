@@ -685,7 +685,7 @@ def validate_ssh_config(name: str, server_config: dict[str, Any]) -> list[dict]:
     # --- detect SSH server ---
     args = server_config.get("args", [])
     env = server_config.get("env", {})
-    is_ssh = "ssh" in args or bool(env.get("SSH_HOST"))
+    is_ssh = any("ssh" in str(a).lower() for a in args) or bool(env.get("SSH_HOST"))
 
     if not is_ssh:
         # No SSH-specific checks needed
@@ -779,6 +779,15 @@ async def check_ssh_server(name: str, server_config: dict[str, Any]) -> list[dic
             {"check": "connection", "status": "fail", "detail": f"connection failed: {exc}"}
         )
         return results
+    finally:
+        _close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if _close is not None:
+            try:
+                result = _close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                pass
 
     # --- SSH execute echo ---
     ssh_tools = {t.name: t for t in tools if "ssh" in t.name.lower()}
