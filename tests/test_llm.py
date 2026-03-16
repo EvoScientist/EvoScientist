@@ -34,6 +34,8 @@ class TestModelsRegistry:
         assert "openrouter" in providers
         assert "zhipu" in providers
         assert "zhipu-code" in providers
+        assert "volcengine" in providers
+        assert "dashscope" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -46,6 +48,8 @@ class TestModelsRegistry:
             "openrouter",
             "zhipu",
             "zhipu-code",
+            "volcengine",
+            "dashscope",
             "custom-openai",
             "custom-anthropic",
         }
@@ -444,6 +448,32 @@ class TestThirdPartyRouting:
 
         call_kwargs = mock_init.call_args[1]
         assert "reasoning" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_volcengine_routes_through_openai(self, mock_init, monkeypatch):
+        """Volcengine provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("VOLCENGINE_API_KEY", "ve-key-123")
+
+        get_chat_model("doubao-seed-1.6", provider="volcengine")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://ark.cn-beijing.volces.com/api/v3"
+        assert call_kwargs["api_key"] == "ve-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_dashscope_routes_through_openai(self, mock_init, monkeypatch):
+        """DashScope provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key-456")
+
+        get_chat_model("qwen-max", provider="dashscope")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert call_kwargs["api_key"] == "ds-key-456"
 
 
 # =============================================================================

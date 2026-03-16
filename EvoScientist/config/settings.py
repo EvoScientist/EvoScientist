@@ -69,6 +69,8 @@ class EvoScientistConfig:
     siliconflow_api_key: str = ""
     openrouter_api_key: str = ""
     zhipu_api_key: str = ""
+    volcengine_api_key: str = ""
+    dashscope_api_key: str = ""
     custom_openai_api_key: str = ""
     custom_openai_base_url: str = ""
     custom_anthropic_api_key: str = ""
@@ -343,6 +345,8 @@ _ENV_MAPPINGS = {
     "siliconflow_api_key": "SILICONFLOW_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
+    "volcengine_api_key": "VOLCENGINE_API_KEY",
+    "dashscope_api_key": "DASHSCOPE_API_KEY",
     "custom_openai_api_key": "CUSTOM_OPENAI_API_KEY",
     "custom_openai_base_url": "CUSTOM_OPENAI_BASE_URL",
     "custom_anthropic_api_key": "CUSTOM_ANTHROPIC_API_KEY",
@@ -422,6 +426,10 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["OPENROUTER_API_KEY"] = config.openrouter_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):
         os.environ["ZHIPU_API_KEY"] = config.zhipu_api_key
+    if config.volcengine_api_key and not os.environ.get("VOLCENGINE_API_KEY"):
+        os.environ["VOLCENGINE_API_KEY"] = config.volcengine_api_key
+    if config.dashscope_api_key and not os.environ.get("DASHSCOPE_API_KEY"):
+        os.environ["DASHSCOPE_API_KEY"] = config.dashscope_api_key
     if config.custom_openai_api_key and not os.environ.get("CUSTOM_OPENAI_API_KEY"):
         os.environ["CUSTOM_OPENAI_API_KEY"] = config.custom_openai_api_key
     if config.custom_openai_base_url and not os.environ.get("CUSTOM_OPENAI_BASE_URL"):
