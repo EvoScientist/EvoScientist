@@ -199,6 +199,10 @@ class EvoScientistConfig:
     # ccproxy
     ccproxy_port: int = 8000
 
+    # STT (Speech-to-Text) Settings
+    stt_enabled: bool = False
+    stt_language: str = "auto"  # "auto" | "zh" | "en"
+
 
 # =============================================================================
 # Config file operations

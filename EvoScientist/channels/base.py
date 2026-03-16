@@ -934,7 +934,41 @@ class Channel(ChannelPlugin, ABC):
         InboundMessage, and put it on the queue.
 
         Convenience method for subclass ``_on_message`` handlers.
+        If STT is enabled and the message contains audio files, each audio
+        file is transcribed and the result is prepended to ``raw.text``.
         """
+        if raw.media_files:
+            from ..config.settings import load_config
+            from ..stt import is_audio_file, transcribe_file
+
+            cfg = load_config()
+            if cfg.stt_enabled:
+                transcripts: list[str] = []
+                transcribed_files: set[str] = set()
+                for fp in raw.media_files:
+                    if is_audio_file(fp):
+                        text = await transcribe_file(
+                            fp,
+                            language=cfg.stt_language,
+                        )
+                        if text:
+                            transcripts.append(text)
+                            transcribed_files.add(fp)
+                            _logger.info(
+                                f"[STT] {self.name}: {fp} → {text[:80]}..."
+                            )
+                if transcripts:
+                    prefix = "\n".join(transcripts)
+                    raw.text = (
+                        (prefix + "\n" + raw.text).strip() if raw.text else prefix
+                    )
+                    # Remove annotations for transcribed files so agent
+                    # doesn't try to process the audio file itself
+                    raw.content_annotations = [
+                        a for a in raw.content_annotations
+                        if not any(fp in a for fp in transcribed_files)
+                    ]
+
         msg = await self._build_inbound_async(raw)
         if msg is None:
             return
