@@ -29,8 +29,10 @@ class TestIsCcproxyAvailable:
         assert is_ccproxy_available() is True
         mock_which.assert_called_once_with("ccproxy")
 
+    @patch("os.access", return_value=False)
+    @patch("os.path.isfile", return_value=False)
     @patch("shutil.which", return_value=None)
-    def test_not_found(self, mock_which):
+    def test_not_found(self, mock_which, mock_isfile, mock_access):
         assert is_ccproxy_available() is False
 
 
@@ -49,7 +51,8 @@ class TestCheckCcproxyAuth:
         assert valid is True
         assert "Authenticated" in msg
         mock_run.assert_called_once()
-        assert mock_run.call_args[0][0] == ["ccproxy", "auth", "status", "claude_api"]
+        cmd = mock_run.call_args[0][0]
+        assert cmd[1:] == ["auth", "status", "claude_api"]
 
     @patch("subprocess.run")
     def test_valid_auth_codex(self, mock_run):
@@ -58,7 +61,8 @@ class TestCheckCcproxyAuth:
         )
         valid, msg = check_ccproxy_auth("codex")
         assert valid is True
-        assert mock_run.call_args[0][0] == ["ccproxy", "auth", "status", "codex"]
+        cmd = mock_run.call_args[0][0]
+        assert cmd[1:] == ["auth", "status", "codex"]
 
     @patch("subprocess.run")
     def test_invalid_auth(self, mock_run):

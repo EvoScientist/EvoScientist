@@ -30,9 +30,26 @@ _DEFAULT_PORT = 8000
 # =============================================================================
 
 
+def _ccproxy_exe() -> str | None:
+    """Return the path to the ccproxy binary, or None if not found.
+
+    Checks PATH first, then the current Python environment's bin directory
+    (handles conda envs where newly installed binaries may not be visible
+    to shutil.which immediately after pip install).
+    """
+    found = shutil.which("ccproxy")
+    if found:
+        return found
+    import sys as _sys
+    candidate = os.path.join(os.path.dirname(_sys.executable), "ccproxy")
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return None
+
+
 def is_ccproxy_available() -> bool:
-    """Check whether the ``ccproxy`` CLI binary is on PATH."""
-    return shutil.which("ccproxy") is not None
+    """Check whether the ``ccproxy`` CLI binary is available."""
+    return _ccproxy_exe() is not None
 
 
 def _summarize_auth_output(raw: str) -> str:
@@ -77,23 +94,35 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
         (is_valid, message) tuple.
     """
     try:
+        exe = _ccproxy_exe() or "ccproxy"
         result = subprocess.run(
-            ["ccproxy", "auth", "status", provider],
+            [exe, "auth", "status", provider],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        # ccproxy auth status exits 0 when authed
-        if result.returncode == 0:
-            summary = _summarize_auth_output(result.stdout)
-            return True, summary or "Authenticated"
-        # On failure, include stderr for diagnostics
-        raw = (result.stdout + result.stderr).strip()
-        # Strip ANSI escapes for cleaner error messages
         import re as _re
 
+        raw = (result.stdout + result.stderr).strip()
         clean = _re.sub(r"\x1b\[[0-9;]*m", "", raw)
-        return False, clean or "Not authenticated"
+
+        # Filter out structlog warning/noise lines, keep only status lines
+        status_lines = [
+            line for line in clean.splitlines()
+            if line.strip()
+            and not _re.match(r"\d{4}-\d{2}-\d{2}", line.strip())
+            and "warning" not in line.lower()
+            and "plugin" not in line.lower()
+        ]
+        status_msg = " ".join(status_lines).strip()
+
+        # ccproxy auth status may exit 0 even when not authenticated —
+        # detect failure by checking output content
+        if result.returncode != 0 or "not authenticated" in clean.lower():
+            return False, status_msg or "Not authenticated"
+
+        summary = _summarize_auth_output(result.stdout)
+        return True, summary or "Authenticated"
     except FileNotFoundError:
         return False, "ccproxy not found"
     except subprocess.TimeoutExpired:
@@ -131,8 +160,9 @@ def start_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen:
         RuntimeError: If ccproxy fails to become healthy within 10 seconds.
         FileNotFoundError: If ccproxy binary is not found.
     """
+    exe = _ccproxy_exe() or "ccproxy"
     proc = subprocess.Popen(
-        ["ccproxy", "serve", "--port", str(port)],
+        [exe, "serve", "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

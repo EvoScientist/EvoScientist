@@ -768,19 +768,16 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key", "oauth", or "auto".
     """
-    from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
+    from ..ccproxy_manager import _ccproxy_exe, is_ccproxy_available, check_ccproxy_auth
 
-    if not is_ccproxy_available():
-        console.print(
-            "  [dim]OAuth via ccproxy not available. "
-            'Install with: pip install "evoscientist[oauth]"[/dim]'
-        )
-        return "api_key"
+    ccproxy_available = is_ccproxy_available()
 
     choices = [
         Choice(title="API Key (direct Anthropic access)", value="api_key"),
         Choice(
-            title="Claude Code OAuth (via ccproxy — no API key needed)", value="oauth"
+            title="Claude Code OAuth (via ccproxy — no API key needed)"
+            + ("" if ccproxy_available else " [requires: pip install evoscientist[oauth]]"),
+            value="oauth",
         ),
     ]
 
@@ -800,6 +797,30 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     if auth_mode is None:
         raise KeyboardInterrupt()
 
+    if auth_mode == "oauth" and not ccproxy_available:
+        console.print("  [yellow]✗ ccproxy not installed[/yellow]")
+        console.print()
+        install = questionary.confirm(
+            'Install ccproxy now? (pip install "evoscientist[oauth]")',
+            default=True,
+            style=WIZARD_STYLE,
+            qmark=f"  {QMARK}",
+        ).ask()
+        if install is None:
+            raise KeyboardInterrupt()
+        if install:
+            console.print()
+            if _install_ccproxy():
+                console.print("  [green]✓ ccproxy installed successfully.[/green]")
+            else:
+                console.print("  [yellow]Falling back to API key mode.[/yellow]")
+                return "api_key"
+        else:
+            console.print(
+                '  [dim]Skipped. Install manually: pip install "evoscientist[oauth]"[/dim]'
+            )
+            return "api_key"
+
     # If OAuth selected, check auth status and offer login
     if auth_mode in ("oauth", "auto"):
         authed, msg = check_ccproxy_auth()
@@ -816,10 +837,17 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
             if login:
                 console.print("  [dim]Opening browser for authentication...[/dim]")
                 try:
-                    subprocess.run(
-                        ["ccproxy", "auth", "login", "claude_api"],
+                    proc = subprocess.run(
+                        [_ccproxy_exe() or "ccproxy", "auth", "login", "claude_api"],
+                        capture_output=True,
+                        text=True,
                         timeout=120,
                     )
+                    # Show browser URL in case browser didn't open automatically
+                    for line in proc.stdout.splitlines():
+                        if line.strip().startswith("https://"):
+                            console.print(f"  [dim]Visit: {line.strip()}[/dim]")
+                            break
                     authed, msg = check_ccproxy_auth()
                     if authed:
                         console.print(f"  [green]✓ OAuth: {msg}[/green]")
@@ -842,19 +870,16 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key" or "oauth".
     """
-    from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
+    from ..ccproxy_manager import _ccproxy_exe, is_ccproxy_available, check_ccproxy_auth
 
-    if not is_ccproxy_available():
-        console.print(
-            "  [dim]OAuth via ccproxy not available. "
-            'Install with: pip install "evoscientist[oauth]"[/dim]'
-        )
-        return "api_key"
+    ccproxy_available = is_ccproxy_available()
 
     choices = [
         Choice(title="API Key (direct OpenAI access)", value="api_key"),
         Choice(
-            title="Codex OAuth (via ccproxy — no API key needed)", value="oauth"
+            title="Codex OAuth (via ccproxy — no API key needed)"
+            + ("" if ccproxy_available else " [requires: pip install evoscientist[oauth]]"),
+            value="oauth",
         ),
     ]
 
@@ -874,6 +899,30 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     if auth_mode is None:
         raise KeyboardInterrupt()
 
+    if auth_mode == "oauth" and not ccproxy_available:
+        console.print("  [yellow]✗ ccproxy not installed[/yellow]")
+        console.print()
+        install = questionary.confirm(
+            'Install ccproxy now? (pip install "evoscientist[oauth]")',
+            default=True,
+            style=WIZARD_STYLE,
+            qmark=f"  {QMARK}",
+        ).ask()
+        if install is None:
+            raise KeyboardInterrupt()
+        if install:
+            console.print()
+            if _install_ccproxy():
+                console.print("  [green]✓ ccproxy installed successfully.[/green]")
+            else:
+                console.print("  [yellow]Falling back to API key mode.[/yellow]")
+                return "api_key"
+        else:
+            console.print(
+                '  [dim]Skipped. Install manually: pip install "evoscientist[oauth]"[/dim]'
+            )
+            return "api_key"
+
     # If OAuth selected, check auth status and offer login
     if auth_mode == "oauth":
         authed, msg = check_ccproxy_auth("codex")
@@ -890,10 +939,17 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
             if login:
                 console.print("  [dim]Opening browser for authentication...[/dim]")
                 try:
-                    subprocess.run(
-                        ["ccproxy", "auth", "login", "codex"],
+                    proc = subprocess.run(
+                        [_ccproxy_exe() or "ccproxy", "auth", "login", "codex"],
+                        capture_output=True,
+                        text=True,
                         timeout=120,
                     )
+                    # Show browser URL in case browser didn't open automatically
+                    for line in proc.stdout.splitlines():
+                        if line.strip().startswith("https://"):
+                            console.print(f"  [dim]Visit: {line.strip()}[/dim]")
+                            break
                     authed, msg = check_ccproxy_auth("codex")
                     if authed:
                         console.print(f"  [green]✓ Codex OAuth: {msg}[/green]")
@@ -1715,6 +1771,33 @@ def validate_imessage() -> tuple[bool, str]:
     return True, f"imsg{version_str} at {cli_path}"
 
 
+def _install_ccproxy() -> bool:
+    """Run pip install for ccproxy (evoscientist[oauth]).
+
+    Returns:
+        True if installation succeeded and ccproxy is available.
+    """
+    from ..ccproxy_manager import is_ccproxy_available
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "evoscientist[oauth]"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            console.print(f"  [red]✗ Installation failed:[/red]\n{proc.stderr.strip()}")
+            return False
+        return is_ccproxy_available()
+    except subprocess.TimeoutExpired:
+        console.print("  [red]✗ Installation timed out.[/red]")
+        return False
+    except Exception as e:
+        console.print(f"  [red]✗ Installation failed: {e}[/red]")
+        return False
+
+
 def _install_imsg() -> bool:
     """Run brew install for imsg CLI.
 
@@ -2353,6 +2436,11 @@ def run_onboard(skip_validation: bool = False) -> bool:
         elif provider == "openai":
             auth_mode = _step_openai_auth_mode(config)
             config.openai_auth_mode = auth_mode
+        else:
+            # Non-Anthropic/OpenAI provider: reset OAuth modes to avoid
+            # stale oauth config triggering ccproxy requirement on startup
+            config.anthropic_auth_mode = "api_key"
+            config.openai_auth_mode = "api_key"
 
         # Step 2c: Provider API Key (skip for Ollama — no key needed,
         # and for Anthropic/OpenAI pure OAuth — key provided by ccproxy)
