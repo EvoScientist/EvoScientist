@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: EvoSkills — niche features & custom workflows
+    url: https://github.com/EvoScientist/EvoSkills
+    about: Want to add a feature that serves a specific use case rather than all users? Contribute it as an EvoSkill instead.
+  - name: Community Discord
+    url: https://discord.gg/AZ9ZMXkunY
+    about: Ask questions, get help, and chat with the community.

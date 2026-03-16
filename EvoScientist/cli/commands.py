@@ -5,6 +5,7 @@ import os
 import queue
 import re
 from datetime import datetime
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any, Optional
 
@@ -874,9 +875,23 @@ def mcp_remove(
 # =============================================================================
 
 
+def _version_callback(value: bool):
+    if value:
+        typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "-V",
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
     mode: Optional[str] = typer.Option(
         None,
         "-m",
