@@ -141,6 +141,14 @@ Or install into the current environment instead:
 uv pip install EvoScientist
 ```
 
+### Latest from GitHub
+
+Install the latest version directly from GitHub to get the most recent patches (useful before a new PyPI release):
+
+```bash
+uv pip install git+https://github.com/EvoScientist/EvoScientist.git
+```
+
 ### Development Install
 
 ```bash
