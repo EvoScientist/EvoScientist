@@ -1817,28 +1817,18 @@ def validate_imessage() -> tuple[bool, str]:
 def _install_ccproxy() -> bool:
     """Run pip install for ccproxy (evoscientist[oauth]).
 
+    Uses uv pip install when available (uv-managed envs don't ship pip).
+
     Returns:
         True if installation succeeded and ccproxy is available.
     """
     from ..ccproxy_manager import is_ccproxy_available
 
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "evoscientist[oauth]"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if proc.returncode != 0:
-            console.print(f"  [red]✗ Installation failed:[/red]\n{proc.stderr.strip()}")
-            return False
-        return is_ccproxy_available()
-    except subprocess.TimeoutExpired:
-        console.print("  [red]✗ Installation timed out.[/red]")
+    ok = _install_pip_package("evoscientist[oauth]")
+    if not ok:
+        console.print("  [red]✗ Installation failed.[/red]")
         return False
-    except Exception as e:
-        console.print(f"  [red]✗ Installation failed: {e}[/red]")
-        return False
+    return is_ccproxy_available()
 
 
 def _install_imsg() -> bool:
