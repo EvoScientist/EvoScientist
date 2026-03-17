@@ -92,10 +92,29 @@ class TestIsCcproxyRunning:
         assert is_ccproxy_running(8000) is True
 
     @patch("httpx.get")
+    def test_uses_health_live_endpoint(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        is_ccproxy_running(8000)
+        url = mock_get.call_args[0][0]
+        assert url == "http://127.0.0.1:8000/health/live"
+
+    @patch("httpx.get")
+    def test_uses_custom_port(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        is_ccproxy_running(7777)
+        url = mock_get.call_args[0][0]
+        assert url == "http://127.0.0.1:7777/health/live"
+
+    @patch("httpx.get")
     def test_not_running(self, mock_get):
         import httpx
 
         mock_get.side_effect = httpx.ConnectError("Connection refused")
+        assert is_ccproxy_running(8000) is False
+
+    @patch("httpx.get")
+    def test_non_200_means_not_running(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=404)
         assert is_ccproxy_running(8000) is False
 
 
@@ -248,6 +267,7 @@ class TestMaybeStartCcproxy:
         config = MagicMock()
         config.anthropic_auth_mode = "oauth"
         config.openai_auth_mode = "api_key"
+        config.ccproxy_port = 8000
 
         result = maybe_start_ccproxy(config)
         assert result is proc
@@ -285,6 +305,7 @@ class TestMaybeStartCcproxy:
         config = MagicMock()
         config.anthropic_auth_mode = "api_key"
         config.openai_auth_mode = "oauth"
+        config.ccproxy_port = 8000
 
         result = maybe_start_ccproxy(config)
         assert result is proc
@@ -304,6 +325,7 @@ class TestMaybeStartCcproxy:
         config = MagicMock()
         config.anthropic_auth_mode = "oauth"
         config.openai_auth_mode = "oauth"
+        config.ccproxy_port = 8000
 
         result = maybe_start_ccproxy(config)
         assert result is proc
@@ -330,4 +352,45 @@ class TestMaybeStartCcproxy:
         config.anthropic_auth_mode = "api_key"
         config.openai_auth_mode = "oauth"
         with pytest.raises(RuntimeError, match="Codex OAuth not authenticated"):
+            maybe_start_ccproxy(config)
+
+    @patch("EvoScientist.ccproxy_manager.setup_ccproxy_env")
+    @patch("EvoScientist.ccproxy_manager.ensure_ccproxy")
+    @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
+    def test_uses_config_ccproxy_port(
+        self, mock_avail, mock_auth, mock_ensure, mock_env
+    ):
+        """maybe_start_ccproxy passes config.ccproxy_port to ensure_ccproxy."""
+        proc = MagicMock()
+        mock_ensure.return_value = proc
+        config = MagicMock()
+        config.anthropic_auth_mode = "oauth"
+        config.openai_auth_mode = "api_key"
+        config.ccproxy_port = 7777
+
+        maybe_start_ccproxy(config)
+        mock_ensure.assert_called_once_with(7777)
+
+    @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
+    def test_invalid_port_raises(self, mock_avail, mock_auth):
+        """maybe_start_ccproxy raises ValueError for out-of-range port."""
+        config = MagicMock()
+        config.anthropic_auth_mode = "oauth"
+        config.openai_auth_mode = "api_key"
+        config.ccproxy_port = 0
+
+        with pytest.raises(ValueError, match="Invalid ccproxy port"):
+            maybe_start_ccproxy(config)
+
+    @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
+    def test_port_too_large_raises(self, mock_avail, mock_auth):
+        config = MagicMock()
+        config.anthropic_auth_mode = "oauth"
+        config.openai_auth_mode = "api_key"
+        config.ccproxy_port = 99999
+
+        with pytest.raises(ValueError, match="Invalid ccproxy port"):
             maybe_start_ccproxy(config)

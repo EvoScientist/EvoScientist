@@ -139,7 +139,7 @@ def is_ccproxy_running(port: int) -> bool:
     import httpx
 
     try:
-        resp = httpx.get(f"http://127.0.0.1:{port}/providers", timeout=2.0)
+        resp = httpx.get(f"http://127.0.0.1:{port}/health/live", timeout=2.0)
         return resp.status_code == 200
     except (httpx.ConnectError, httpx.TimeoutException, OSError):
         return False
@@ -297,9 +297,9 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
                 "Run: ccproxy auth login codex"
             )
 
-    if not config:
-        logger.info("No config passed to ccproxy_manager")
-    port = config.ccproxy_port if config else 8000
+    port = config.ccproxy_port
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Invalid ccproxy port: {port}. Must be between 1 and 65535.")
 
     # Start ccproxy (single process serves both providers)
     proc = ensure_ccproxy(port)

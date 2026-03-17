@@ -759,6 +759,63 @@ def _prompt_and_validate_api_key(
     return new_key if new_key else None
 
 
+def _prompt_ccproxy_port(config: EvoScientistConfig) -> None:
+    """Prompt the user for a ccproxy port and save it to config."""
+
+    def valid_port(value: str) -> bool:
+        if not value:  # empty = keep default
+            return True
+        try:
+            return 0 < int(value) < 2**16
+        except (ValueError, TypeError):
+            return False
+
+    current_port = getattr(config, "ccproxy_port", 8000)
+    try:
+        raw = questionary.text(
+            f"Enter port number for ccproxy to run on (Current: {current_port}, Enter to keep):",
+            validate=valid_port,
+            style=WIZARD_STYLE,
+            qmark=QMARK,
+        ).ask()
+        ccproxy_port = int(raw) if raw else current_port
+    except (ValueError, TypeError):
+        ccproxy_port = current_port
+        console.print(f"  [dim]Using default port: {ccproxy_port}[/dim]")
+
+    setattr(config, "ccproxy_port", ccproxy_port)
+    console.print(
+        f"  [green]✓ ccproxy will run on http://127.0.0.1:{ccproxy_port}[/green]"
+    )
+
+
+def _run_ccproxy_login(provider: str, label: str) -> None:
+    """Run ccproxy auth login for the given provider and show status."""
+    from ..ccproxy_manager import _ccproxy_exe, check_ccproxy_auth
+
+    console.print("  [dim]Opening browser for authentication...[/dim]")
+    try:
+        proc = subprocess.run(
+            [_ccproxy_exe() or "ccproxy", "auth", "login", provider],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        for line in proc.stdout.splitlines():
+            if line.strip().startswith("https://"):
+                console.print(f"  [dim]Visit: {line.strip()}[/dim]")
+                break
+        authed, msg = check_ccproxy_auth(provider)
+        if authed:
+            console.print(f"  [green]✓ {label}: {msg}[/green]")
+        else:
+            console.print(f"  [red]Authentication failed: {msg}[/red]")
+    except subprocess.TimeoutExpired:
+        console.print("  [red]Login timed out.[/red]")
+    except Exception as exc:
+        console.print(f"  [red]Login error: {exc}[/red]")
+
+
 def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     """Step 2a: Select Anthropic authentication mode (API key vs OAuth).
 
@@ -768,7 +825,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key", "oauth", or "auto".
     """
-    from ..ccproxy_manager import _ccproxy_exe, is_ccproxy_available, check_ccproxy_auth
+    from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
 
     ccproxy_available = is_ccproxy_available()
 
@@ -826,22 +883,21 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
             return "api_key"
 
     if auth_mode == "oauth":
-        def valid_port(id):
-            return 0 < id < 2 ** 16
-
-        try:
-            ccproxy_port = int(questionary.text("Input port number for ccproxy to run on (default: 8000):").ask())
-        except Exception:
-            ccproxy_port = 8000
-            print(f"Using default: {ccproxy_port}")
-
-        setattr(config, "ccproxy_port", ccproxy_port)
+        _prompt_ccproxy_port(config)
 
     # If OAuth selected, check auth status and offer login
     if auth_mode in ("oauth", "auto"):
         authed, msg = check_ccproxy_auth()
         if authed:
             console.print(f"  [green]✓ OAuth: {msg}[/green]")
+            relogin = questionary.confirm(
+                "Re-authenticate to refresh credentials?",
+                default=False,
+                style=CONFIRM_STYLE,
+                qmark=QMARK,
+            ).ask()
+            if relogin:
+                _run_ccproxy_login("claude_api", "OAuth")
         else:
             console.print(f"  [yellow]OAuth not authenticated: {msg}[/yellow]")
             login = questionary.confirm(
@@ -851,28 +907,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
                 qmark=QMARK,
             ).ask()
             if login:
-                console.print("  [dim]Opening browser for authentication...[/dim]")
-                try:
-                    proc = subprocess.run(
-                        [_ccproxy_exe() or "ccproxy", "auth", "login", "claude_api"],
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                    )
-                    # Show browser URL in case browser didn't open automatically
-                    for line in proc.stdout.splitlines():
-                        if line.strip().startswith("https://"):
-                            console.print(f"  [dim]Visit: {line.strip()}[/dim]")
-                            break
-                    authed, msg = check_ccproxy_auth()
-                    if authed:
-                        console.print(f"  [green]✓ OAuth: {msg}[/green]")
-                    else:
-                        console.print(f"  [red]Authentication failed: {msg}[/red]")
-                except subprocess.TimeoutExpired:
-                    console.print("  [red]Login timed out.[/red]")
-                except Exception as exc:
-                    console.print(f"  [red]Login error: {exc}[/red]")
+                _run_ccproxy_login("claude_api", "OAuth")
 
     return auth_mode
 
@@ -886,7 +921,7 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key" or "oauth".
     """
-    from ..ccproxy_manager import _ccproxy_exe, is_ccproxy_available, check_ccproxy_auth
+    from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
 
     ccproxy_available = is_ccproxy_available()
 
@@ -943,11 +978,20 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
             )
             return "api_key"
 
-    # If OAuth selected, check auth status and offer login
+    # If OAuth selected, prompt for port and check auth status
     if auth_mode == "oauth":
+        _prompt_ccproxy_port(config)
         authed, msg = check_ccproxy_auth("codex")
         if authed:
             console.print(f"  [green]✓ Codex OAuth: {msg}[/green]")
+            relogin = questionary.confirm(
+                "Re-authenticate to refresh credentials?",
+                default=False,
+                style=CONFIRM_STYLE,
+                qmark=QMARK,
+            ).ask()
+            if relogin:
+                _run_ccproxy_login("codex", "Codex OAuth")
         else:
             console.print(f"  [yellow]Codex OAuth not authenticated: {msg}[/yellow]")
             login = questionary.confirm(
@@ -957,28 +1001,7 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
                 qmark=QMARK,
             ).ask()
             if login:
-                console.print("  [dim]Opening browser for authentication...[/dim]")
-                try:
-                    proc = subprocess.run(
-                        [_ccproxy_exe() or "ccproxy", "auth", "login", "codex"],
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                    )
-                    # Show browser URL in case browser didn't open automatically
-                    for line in proc.stdout.splitlines():
-                        if line.strip().startswith("https://"):
-                            console.print(f"  [dim]Visit: {line.strip()}[/dim]")
-                            break
-                    authed, msg = check_ccproxy_auth("codex")
-                    if authed:
-                        console.print(f"  [green]✓ Codex OAuth: {msg}[/green]")
-                    else:
-                        console.print(f"  [red]Authentication failed: {msg}[/red]")
-                except subprocess.TimeoutExpired:
-                    console.print("  [red]Login timed out.[/red]")
-                except Exception as exc:
-                    console.print(f"  [red]Login error: {exc}[/red]")
+                _run_ccproxy_login("codex", "Codex OAuth")
 
     return auth_mode
 
