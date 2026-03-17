@@ -39,3 +39,9 @@ class TestGetSystemPrompt:
 
     def test_shell_guidelines_mention_background(self):
         assert "background" in EXPERIMENT_WORKFLOW.lower()
+
+    def test_contains_todays_date(self):
+        from datetime import datetime
+
+        expected = datetime.now().strftime("%Y-%m-%d")
+        assert expected in get_system_prompt()

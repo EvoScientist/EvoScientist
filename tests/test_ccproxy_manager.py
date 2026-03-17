@@ -277,7 +277,9 @@ class TestMaybeStartCcproxy:
     @patch("EvoScientist.ccproxy_manager.ensure_ccproxy")
     @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
-    def test_openai_oauth_mode_starts(self, mock_avail, mock_auth, mock_ensure, mock_env):
+    def test_openai_oauth_mode_starts(
+        self, mock_avail, mock_auth, mock_ensure, mock_env
+    ):
         proc = MagicMock()
         mock_ensure.return_value = proc
         config = MagicMock()
@@ -294,7 +296,9 @@ class TestMaybeStartCcproxy:
     @patch("EvoScientist.ccproxy_manager.ensure_ccproxy")
     @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
-    def test_both_oauth_starts_both(self, mock_avail, mock_auth, mock_ensure, mock_anthropic_env, mock_codex_env):
+    def test_both_oauth_starts_both(
+        self, mock_avail, mock_auth, mock_ensure, mock_anthropic_env, mock_codex_env
+    ):
         proc = MagicMock()
         mock_ensure.return_value = proc
         config = MagicMock()

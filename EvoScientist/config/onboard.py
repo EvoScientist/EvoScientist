@@ -776,7 +776,11 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
         Choice(title="API Key (direct Anthropic access)", value="api_key"),
         Choice(
             title="Claude Code OAuth (via ccproxy — no API key needed)"
-            + ("" if ccproxy_available else " [requires: pip install evoscientist[oauth]]"),
+            + (
+                ""
+                if ccproxy_available
+                else " [requires: pip install evoscientist[oauth]]"
+            ),
             value="oauth",
         ),
     ]
@@ -878,7 +882,11 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
         Choice(title="API Key (direct OpenAI access)", value="api_key"),
         Choice(
             title="Codex OAuth (via ccproxy — no API key needed)"
-            + ("" if ccproxy_available else " [requires: pip install evoscientist[oauth]]"),
+            + (
+                ""
+                if ccproxy_available
+                else " [requires: pip install evoscientist[oauth]]"
+            ),
             value="oauth",
         ),
     ]
@@ -2457,10 +2465,10 @@ def run_onboard(skip_validation: bool = False) -> bool:
             "custom-openai": "custom_openai_api_key",
             "custom-anthropic": "custom_anthropic_api_key",
         }
-        _skip_api_key = provider == "ollama" or (
-            provider == "anthropic" and config.anthropic_auth_mode == "oauth"
-        ) or (
-            provider == "openai" and config.openai_auth_mode == "oauth"
+        _skip_api_key = (
+            provider == "ollama"
+            or (provider == "anthropic" and config.anthropic_auth_mode == "oauth")
+            or (provider == "openai" and config.openai_auth_mode == "oauth")
         )
         if not _skip_api_key:
             new_key = _step_provider_api_key(config, provider, skip_validation)

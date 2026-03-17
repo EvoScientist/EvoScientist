@@ -472,7 +472,10 @@ class TestThirdPartyRouting:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openai"
-        assert call_kwargs["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert (
+            call_kwargs["base_url"]
+            == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
         assert call_kwargs["api_key"] == "ds-key-456"
 
 

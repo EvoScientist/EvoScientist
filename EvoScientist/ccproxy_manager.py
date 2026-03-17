@@ -41,6 +41,7 @@ def _ccproxy_exe() -> str | None:
     if found:
         return found
     import sys as _sys
+
     candidate = os.path.join(os.path.dirname(_sys.executable), "ccproxy")
     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
         return candidate
@@ -108,7 +109,8 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
 
         # Filter out structlog warning/noise lines, keep only status lines
         status_lines = [
-            line for line in clean.splitlines()
+            line
+            for line in clean.splitlines()
             if line.strip()
             and not _re.match(r"\d{4}-\d{2}-\d{2}", line.strip())
             and "warning" not in line.lower()

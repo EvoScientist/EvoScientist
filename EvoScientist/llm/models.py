@@ -306,8 +306,12 @@ def get_chat_model(
             kwargs["base_url"] = base_url
             _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
             if _is_openai_proxy:
-                kwargs.setdefault("streaming", False)  # ccproxy streaming format incompatible with langchain-openai
-                kwargs.setdefault("use_responses_api", True)  # ccproxy Chat Completions does not support tool calling; Responses API does
+                kwargs.setdefault(
+                    "streaming", False
+                )  # ccproxy streaming format incompatible with langchain-openai
+                kwargs.setdefault(
+                    "use_responses_api", True
+                )  # ccproxy Chat Completions does not support tool calling; Responses API does
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key

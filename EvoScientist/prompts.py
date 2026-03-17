@@ -332,9 +332,17 @@ Finding one with context [1]. Another insight [2].
 
 
 def get_system_prompt() -> str:
-    """Generate the complete system prompt.
+    """Generate the complete system prompt with today's date.
 
     Returns:
         Combined system prompt string.
     """
-    return EXPERIMENT_WORKFLOW + "\n" + DELEGATION_STRATEGY
+    from datetime import datetime
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    return (
+        f"Today's date is {date}.\n\n"
+        + EXPERIMENT_WORKFLOW
+        + "\n"
+        + DELEGATION_STRATEGY
+    )
