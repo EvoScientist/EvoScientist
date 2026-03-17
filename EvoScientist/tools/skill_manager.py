@@ -7,12 +7,13 @@ from langchain_core.tools import tool
 
 @tool(parse_docstring=True)
 def skill_manager(
-    action: Literal["install", "list", "uninstall", "info"],
+    action: Literal["install", "list", "uninstall", "info", "browse"],
     source: str = "",
     name: str = "",
+    tag: str = "",
     include_system: bool = False,
 ) -> str:
-    """Manage user-installable skills: install from GitHub or local path, list available skills, get details, or uninstall.
+    """Manage user-installable skills: install from GitHub or local path, list available skills, browse remote skills, get details, or uninstall.
 
     Actions and required parameters:
 
@@ -28,17 +29,23 @@ def skill_manager(
       Set include_system=True to also show built-in system skills.
       Built-in skills evolve over time, so use action="list" to see the current set.
 
+    action="browse" (optional tag):
+      Browse available skills from the EvoSkills repository (EvoScientist/EvoSkills).
+      Set tag to filter by category (e.g. tag="core", tag="writing", tag="experiments").
+      Returns skill names, descriptions, tags, and install sources you can pass to action="install".
+
     action="info" (requires name):
-      Get details (description, source, path) about a specific skill by name.
+      Get details (description, source, path, tags) about a specific skill by name.
       Searches both user and system skills.
 
     action="uninstall" (requires name):
       Remove a user-installed skill by name. System skills cannot be uninstalled.
 
     Args:
-        action: The operation to perform — "install", "list", "info", or "uninstall"
+        action: The operation to perform — "install", "list", "browse", "info", or "uninstall"
         source: Required for install — GitHub shorthand, GitHub URL, or local directory path
         name: Required for info and uninstall — the skill name (for example, one returned by action="list")
+        tag: Optional for browse — filter by tag (e.g. "core", "writing", "experiments", "research")
         include_system: Only for list — set True to include built-in system skills in the output
 
     Returns:
@@ -49,6 +56,7 @@ def skill_manager(
         list_skills,
         uninstall_skill,
         get_skill_info,
+        fetch_remote_skill_index,
     )
 
     if action == "install":
@@ -81,13 +89,38 @@ def skill_manager(
         if user_skills:
             lines.append(f"User Skills ({len(user_skills)}):")
             for skill in user_skills:
-                lines.append(f"  - {skill.name}: {skill.description}")
+                tags_str = f" [{', '.join(skill.tags)}]" if skill.tags else ""
+                lines.append(f"  - {skill.name}: {skill.description}{tags_str}")
         if system_skills:
             if lines:
                 lines.append("")
             lines.append(f"System Skills ({len(system_skills)}):")
             for skill in system_skills:
-                lines.append(f"  - {skill.name}: {skill.description}")
+                tags_str = f" [{', '.join(skill.tags)}]" if skill.tags else ""
+                lines.append(f"  - {skill.name}: {skill.description}{tags_str}")
+        return "\n".join(lines)
+
+    elif action == "browse":
+        try:
+            index = fetch_remote_skill_index()
+        except Exception as e:
+            return f"Failed to fetch skill index: {e}"
+        if tag:
+            tag_lower = tag.lower()
+            index = [
+                s for s in index if tag_lower in [t.lower() for t in s.get("tags", [])]
+            ]
+        if not index:
+            return f"No skills found{' with tag: ' + tag if tag else ''}."
+        lines = [f"Available Skills ({len(index)}):"]
+        for s in index:
+            tags_str = " · ".join(s.get("tags", []))
+            lines.append(f"  - {s['name']}: {s['description']}")
+            if tags_str:
+                lines.append(f"    Tags: {tags_str}")
+            lines.append(
+                f"    Install: skill_manager(action='install', source='{s['install_source']}')"
+            )
         return "\n".join(lines)
 
     elif action == "uninstall":
@@ -114,14 +147,13 @@ def skill_manager(
                 f"Skill not found: {name}. "
                 f"Use action='list' with include_system=True to see all available skills."
             )
+        tags_str = f"\nTags: {', '.join(info.tags)}" if info.tags else ""
         return (
             f"Name: {info.name}\n"
             f"Description: {info.description}\n"
             f"Source: {info.source}\n"
-            f"Path: {info.path}"
+            f"Path: {info.path}{tags_str}"
         )
 
     else:
-        return (
-            f"Unknown action: {action}. Use 'install', 'list', 'uninstall', or 'info'."
-        )
+        return f"Unknown action: {action}. Use 'install', 'list', 'browse', 'uninstall', or 'info'."

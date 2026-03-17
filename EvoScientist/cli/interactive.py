@@ -46,7 +46,12 @@ from .channel import (
 )
 import EvoScientist.cli.channel as _ch_mod
 from .mcp_ui import _cmd_mcp
-from .skills_cmd import _cmd_list_skills, _cmd_install_skill, _cmd_uninstall_skill
+from .skills_cmd import (
+    _cmd_list_skills,
+    _cmd_install_skill,
+    _cmd_uninstall_skill,
+    _cmd_install_skills,
+)
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -116,6 +121,7 @@ _SLASH_COMMANDS = [
     ("/skills", "List installed skills"),
     ("/install-skill", "Add a skill from path or GitHub"),
     ("/uninstall-skill", "Remove an installed skill"),
+    ("/install-skills", "Browse and install skills (optional: /install-skills <tag>)"),
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
@@ -757,6 +763,11 @@ def cmd_interactive(
                         if user_input.lower().startswith("/uninstall-skill"):
                             name = user_input[len("/uninstall-skill") :].strip()
                             _cmd_uninstall_skill(name)
+                            continue
+
+                        if user_input.lower().startswith("/install-skills"):
+                            browse_args = user_input[len("/install-skills") :].strip()
+                            _cmd_install_skills(browse_args)
                             continue
 
                         if user_input.lower().startswith("/mcp"):
