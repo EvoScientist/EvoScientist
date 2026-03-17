@@ -499,10 +499,6 @@ def serve(
 
     nest_asyncio.apply()
 
-    from dotenv import load_dotenv, find_dotenv  # type: ignore[import-untyped]
-
-    load_dotenv(find_dotenv(), override=True)
-
     from ..config import get_effective_config, apply_config_to_env
 
     cli_overrides = {}
@@ -944,11 +940,6 @@ def _main_callback(
     # If a subcommand was invoked, don't run the default behavior
     if ctx.invoked_subcommand is not None:
         return
-
-    from dotenv import load_dotenv, find_dotenv  # type: ignore[import-untyped]
-
-    # find_dotenv() traverses up the directory tree to locate .env
-    load_dotenv(find_dotenv(), override=True)
 
     # Load and apply configuration
     from ..config import get_effective_config, apply_config_to_env

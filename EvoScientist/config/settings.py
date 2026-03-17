@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, asdict, fields
+from dotenv import find_dotenv, load_dotenv
 from pathlib import Path
 from typing import Any, Literal
 
@@ -378,6 +379,8 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
+    load_dotenv(find_dotenv(usecwd=True), override=True)
+
     # Start with file config (includes defaults for missing values)
     config = load_config()
     data = asdict(config)
