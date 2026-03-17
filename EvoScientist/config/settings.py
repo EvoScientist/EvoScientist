@@ -194,6 +194,8 @@ class EvoScientistConfig:
     # DM access control policy
     dm_policy: str = "allowlist"
 
+    # ccproxy
+    ccproxy_port: int = 8000
 
 # =============================================================================
 # Config file operations

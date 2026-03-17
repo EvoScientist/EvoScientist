@@ -825,6 +825,18 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
             )
             return "api_key"
 
+    if auth_mode == "oauth":
+        def valid_port(id):
+            return 0 < id < 2 ** 16
+
+        try:
+            ccproxy_port = int(questionary.text("Input port number for ccproxy to run on (default: 8000):").ask())
+        except Exception:
+            ccproxy_port = 8000
+            print(f"Using default: {ccproxy_port}")
+
+        setattr(config, "ccproxy_port", ccproxy_port)
+
     # If OAuth selected, check auth status and offer login
     if auth_mode in ("oauth", "auto"):
         authed, msg = check_ccproxy_auth()

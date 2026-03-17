@@ -37,6 +37,7 @@ dependencies = [
     "nest-asyncio>=1.6",
     "langchain-mcp-adapters>=0.1",
     "textual>=0.80",
+    "pip>=26.0",
 ]
 
 [dependency-groups]

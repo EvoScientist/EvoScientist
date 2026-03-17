@@ -15,14 +15,10 @@ import os
 import shutil
 import subprocess
 import time
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    pass
+from EvoScientist.config import EvoScientistConfig
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_PORT = 8000
 
 
 # =============================================================================
@@ -138,18 +134,18 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
 # =============================================================================
 
 
-def is_ccproxy_running(port: int = _DEFAULT_PORT) -> bool:
+def is_ccproxy_running(port: int) -> bool:
     """Check if ccproxy is already serving on the given port."""
     import httpx
 
     try:
-        resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2.0)
-        return resp.status_code < 500
+        resp = httpx.get(f"http://127.0.0.1:{port}/providers", timeout=2.0)
+        return resp.status_code == 200
     except (httpx.ConnectError, httpx.TimeoutException, OSError):
         return False
 
 
-def start_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen:
+def start_ccproxy(port: int) -> subprocess.Popen:
     """Start ccproxy serve as a background process.
 
     Args:
@@ -206,7 +202,7 @@ def stop_ccproxy(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def ensure_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen | None:
+def ensure_ccproxy(port: int) -> subprocess.Popen | None:
     """Ensure ccproxy is running — reuse existing or start new.
 
     Returns:
@@ -223,7 +219,7 @@ def ensure_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen | None:
 # =============================================================================
 
 
-def setup_ccproxy_env(port: int = _DEFAULT_PORT) -> None:
+def setup_ccproxy_env(port: int) -> None:
     """Set environment variables for Anthropic ccproxy routing.
 
     Force-sets ``ANTHROPIC_BASE_URL`` and ``ANTHROPIC_API_KEY`` so that
@@ -236,7 +232,7 @@ def setup_ccproxy_env(port: int = _DEFAULT_PORT) -> None:
     os.environ["ANTHROPIC_API_KEY"] = "ccproxy-oauth"
 
 
-def setup_codex_env(port: int = _DEFAULT_PORT) -> None:
+def setup_codex_env(port: int) -> None:
     """Set environment variables for OpenAI/Codex ccproxy routing.
 
     Force-sets ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY`` so that
@@ -255,7 +251,7 @@ def setup_codex_env(port: int = _DEFAULT_PORT) -> None:
 # =============================================================================
 
 
-def maybe_start_ccproxy(config: object) -> subprocess.Popen | None:
+def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     """High-level: conditionally start ccproxy based on config.
 
     Checks ``config.anthropic_auth_mode`` and ``config.openai_auth_mode``:
@@ -301,17 +297,21 @@ def maybe_start_ccproxy(config: object) -> subprocess.Popen | None:
                 "Run: ccproxy auth login codex"
             )
 
+    if not config:
+        logger.info("No config passed to ccproxy_manager")
+    port = config.ccproxy_port if config else 8000
+
     # Start ccproxy (single process serves both providers)
-    proc = ensure_ccproxy()
+    proc = ensure_ccproxy(port)
 
     # Set environment for each OAuth provider
     if anthropic_oauth:
-        setup_ccproxy_env()
+        setup_ccproxy_env(port)
     if openai_oauth:
-        setup_codex_env()
+        setup_codex_env(port)
 
     if proc:
-        logger.info("Started ccproxy on port %d", _DEFAULT_PORT)
+        logger.info("Started ccproxy on port %d", port)
     else:
-        logger.info("Reusing existing ccproxy on port %d", _DEFAULT_PORT)
+        logger.info("Reusing existing ccproxy on port %d", port)
     return proc
