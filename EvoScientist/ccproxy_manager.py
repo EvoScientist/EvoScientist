@@ -251,6 +251,85 @@ def setup_codex_env(port: int) -> None:
 # =============================================================================
 
 
+def _patch_ccproxy_oauth_header() -> None:
+    """Auto-patch ccproxy's adapter to send the correct OAuth beta header.
+
+    ccproxy 0.2.4 hardcodes ``computer-use-2025-01-24`` as the
+    ``anthropic-beta`` header, which causes two problems:
+    - Missing ``oauth-2025-04-20`` → 401 from Anthropic
+    - ``computer-use-2025-01-24`` incompatible with OAuth auth → 400
+
+    The ccproxy binary may use a different Python environment than the one
+    running EvoScientist, so we resolve the adapter path via the ccproxy
+    binary's shebang line rather than the current Python's import system.
+
+    This patch is idempotent and places the header AFTER cli_headers so it
+    cannot be overridden.
+    """
+    import pathlib
+    import re
+
+    try:
+        ccproxy_bin = _ccproxy_exe()
+        if not ccproxy_bin:
+            return
+
+        # Find the Python interpreter used by the ccproxy binary via shebang
+        shebang = pathlib.Path(ccproxy_bin).read_text().splitlines()[0]
+        python_exe = shebang.lstrip("#!").strip()
+
+        # Ask that Python where ccproxy's adapter lives
+        result = subprocess.run(
+            [
+                python_exe, "-c",
+                "import inspect, ccproxy.plugins.claude_api.adapter as m; print(inspect.getfile(m))",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return
+        src_file = pathlib.Path(result.stdout.strip())
+        if not src_file.exists():
+            return
+
+        text = src_file.read_text()
+
+        # Check if already correctly patched (oauth header set after cli_headers)
+        correct = 'filtered_headers["anthropic-beta"] = "oauth-2025-04-20"'
+        cli_marker = "cli_headers = self._collect_cli_headers()"
+        if correct in text:
+            # Verify it's placed after cli_headers
+            if text.index(correct) > text.index(cli_marker):
+                return  # Already correctly patched
+
+        # Move/replace anthropic-beta assignment to after cli_headers loop,
+        # and set only oauth-2025-04-20 (computer-use-* is incompatible).
+        # Step 1: remove any existing filtered_headers["anthropic-beta"] line
+        patched = re.sub(
+            r'\s*filtered_headers\["anthropic-beta"\]\s*=\s*"[^"]*"\n',
+            "\n",
+            text,
+        )
+        # Step 2: insert correct assignment after the cli_headers block
+        insert_after = 'filtered_headers[lk] = value\n'
+        replacement = (
+            'filtered_headers[lk] = value\n\n'
+            '        # oauth-2025-04-20: required for OAuth Bearer token auth (Anthropic 2026-03)\n'
+            '        filtered_headers["anthropic-beta"] = "oauth-2025-04-20"\n'
+        )
+        patched = patched.replace(insert_after, replacement, 1)
+
+        if patched == text:
+            return
+
+        src_file.write_text(patched)
+        for pyc in src_file.parent.glob("__pycache__/adapter*.pyc"):
+            pyc.unlink(missing_ok=True)
+        logger.info("Auto-patched ccproxy adapter: set anthropic-beta=oauth-2025-04-20")
+    except Exception as exc:
+        logger.warning("Could not auto-patch ccproxy adapter: %s", exc)
+
+
 def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     """High-level: conditionally start ccproxy based on config.
 
@@ -300,6 +379,9 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     port = config.ccproxy_port
     if not (1 <= port <= 65535):
         raise ValueError(f"Invalid ccproxy port: {port}. Must be between 1 and 65535.")
+
+    # Auto-patch ccproxy adapter to fix OAuth header compatibility
+    _patch_ccproxy_oauth_header()
 
     # Start ccproxy (single process serves both providers)
     proc = ensure_ccproxy(port)
