@@ -159,6 +159,10 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5-turbo", "glm-5-turbo", "zhipu"),
     ("glm-4.7", "glm-4.7", "zhipu"),
     # Volcengine (火山引擎 — Doubao models)
+    ("doubao-seed-2.0-pro", "doubao-seed-2-0-pro-260215", "volcengine"),
+    ("doubao-seed-2.0-lite", "doubao-seed-2-0-lite-260215", "volcengine"),
+    ("doubao-seed-2.0-mini", "doubao-seed-2-0-mini-260215", "volcengine"),
+    ("doubao-seed-2.0-code", "doubao-seed-2-0-code-preview-260215", "volcengine"),
     ("doubao-seed-1.6", "doubao-seed-1.6", "volcengine"),
     ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
     ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
