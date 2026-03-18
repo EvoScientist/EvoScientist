@@ -1,9 +1,16 @@
 """Clipboard utilities for EvoScientist TUI.
 
-Provides copy-on-select for the Textual TUI with three fallback methods:
+Provides copy-on-select and paste for the Textual TUI with fallback methods:
+
+Copy (3 methods):
   1. pyperclip  — preferred on local machines (uses pbcopy on macOS)
   2. Textual    — built-in app.copy_to_clipboard()
   3. OSC 52     — escape sequence for SSH / tmux remote sessions
+
+Paste (3 methods):
+  1. pyperclip  — preferred on local machines
+  2. Platform-native — pbpaste (macOS), xclip/xsel (Linux), PowerShell (Windows)
+  3. Textual    — built-in app.paste() on supported terminals
 """
 
 from __future__ import annotations
@@ -12,6 +19,8 @@ import base64
 import logging
 import os
 import pathlib
+import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,6 +29,61 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PREVIEW_MAX = 40
+
+
+# ── Platform-native clipboard read ────────────────────────────────
+
+
+def _paste_native() -> str | None:
+    """Read clipboard using platform-native commands.
+
+    Returns:
+        Clipboard text, or None if unavailable.
+    """
+    if sys.platform == "darwin":
+        # macOS: pbpaste
+        try:
+            result = subprocess.run(
+                ["pbpaste"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return result.stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+    elif sys.platform == "win32":
+        # Windows: PowerShell Get-Clipboard
+        try:
+            result = subprocess.run(
+                ["powershell", "-command", "Get-Clipboard"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return result.stdout.rstrip("\r\n")
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+    else:
+        # Linux: try xclip, then xsel
+        for cmd in (
+            ["xclip", "-selection", "clipboard", "-o"],
+            ["xsel", "--clipboard", "--output"],
+        ):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if result.returncode == 0:
+                    return result.stdout
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+    return None
 
 
 # ── OSC 52 (remote / SSH / tmux) ──────────────────────────────────
@@ -118,3 +182,33 @@ def copy_selection_to_clipboard(app: App) -> None:
         severity="warning",
         timeout=3,
     )
+
+
+def get_clipboard_text() -> str | None:
+    """Read text from the system clipboard.
+
+    Tries multiple methods in priority order:
+      1. pyperclip (if installed)
+      2. Platform-native commands (pbpaste, xclip, PowerShell)
+
+    Returns:
+        Clipboard text, or None if unavailable or empty.
+    """
+    # 1. Try pyperclip first
+    try:
+        import pyperclip
+
+        text = pyperclip.paste()
+        if text:
+            return text
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug("pyperclip.paste() failed: %s", exc)
+
+    # 2. Try platform-native commands
+    text = _paste_native()
+    if text:
+        return text
+
+    return None

@@ -198,7 +198,7 @@ def run_textual_interactive(
         from textual.events import MouseUp
         from textual.widgets import Input, Static
 
-        from .clipboard import copy_selection_to_clipboard
+        from .clipboard import copy_selection_to_clipboard, get_clipboard_text
         from .widgets import (
             LoadingWidget,
             ThinkingWidget,
@@ -284,6 +284,7 @@ def run_textual_interactive(
         """
         BINDINGS = [
             Binding("ctrl+c", "request_quit", "Quit", show=False),
+            Binding("ctrl+v", "paste_clipboard", "Paste", show=False),
             Binding("up", "edit_queued", show=False, priority=True),
             Binding("down", "down_delegate", show=False, priority=True),
             Binding("escape", "cancel_queued", show=False, priority=True),
@@ -1457,6 +1458,25 @@ def run_textual_interactive(
                 if isinstance(focused, ThreadPickerWidget):
                     focused.action_move_down()
                     return
+
+        def action_paste_clipboard(self) -> None:
+            """Paste text from system clipboard into the input field."""
+            text = get_clipboard_text()
+            if not text:
+                self.notify(
+                    "Clipboard is empty or unavailable",
+                    severity="warning",
+                    timeout=2,
+                )
+                return
+
+            prompt = self.query_one("#prompt", Input)
+            # Insert at cursor position
+            pos = prompt.cursor_position
+            current = prompt.value
+            new_value = current[:pos] + text + current[pos:]
+            prompt.value = new_value
+            prompt.cursor_position = pos + len(text)
 
         def on_key(self, event: Any) -> None:
             comp_widget = self.query_one("#completions", Static)
