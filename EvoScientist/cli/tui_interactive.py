@@ -540,12 +540,12 @@ def run_textual_interactive(
                     pass
                 self.query_one("#prompt", Input).focus()
 
-        def on_mcp_browser_widget_confirmed(self, event) -> None:  # type: ignore[override]
+        def on_mcpbrowser_widget_confirmed(self, event) -> None:  # type: ignore[override]
             """Handle MCPBrowserWidget.Confirmed message."""
             if self._mcp_browser_future and not self._mcp_browser_future.done():
                 self._mcp_browser_future.set_result(event.entries)
 
-        def on_mcp_browser_widget_cancelled(self, event) -> None:  # type: ignore[override]
+        def on_mcpbrowser_widget_cancelled(self, event) -> None:  # type: ignore[override]
             """Handle MCPBrowserWidget.Cancelled message."""
             if self._mcp_browser_future and not self._mcp_browser_future.done():
                 self._mcp_browser_future.set_result(None)
@@ -2150,8 +2150,11 @@ def run_textual_interactive(
 
             selected_entries = await self._wait_for_mcp_browse(browser)
 
-            if not selected_entries:
+            if selected_entries is None:
                 self._append_system("Browse cancelled.", style="dim")
+                return
+            if not selected_entries:
+                self._append_system("No servers selected.", style="dim")
                 return
 
             installed_count = 0
