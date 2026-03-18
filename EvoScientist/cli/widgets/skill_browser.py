@@ -305,10 +305,6 @@ class SkillBrowserWidget(Widget):
             self._checked.discard(self._selected)
         else:
             self._checked.add(self._selected)
-        # Move down after toggle for quick multi-select
-        n = len(self._skill_items)
-        if n > 1:
-            self._selected = (self._selected + 1) % n
         self._update_display()
 
     def action_confirm(self) -> None:

@@ -292,9 +292,6 @@ class MCPBrowserWidget(Widget):
             self._checked.discard(self._selected)
         else:
             self._checked.add(self._selected)
-        n = len(self._server_items)
-        if n > 1:
-            self._selected = (self._selected + 1) % n
         self._update_display()
 
     def action_confirm(self) -> None:
