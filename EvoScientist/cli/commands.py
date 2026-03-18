@@ -866,6 +866,26 @@ def mcp_remove(
         raise typer.Exit(1)
 
 
+@mcp_app.command("install")
+def mcp_install(
+    source: Optional[str] = typer.Argument(
+        None, help="Server name, tag filter, or path to YAML file"
+    ),
+):
+    """Browse and install MCP servers from the registry and marketplace
+
+    \b
+    Examples:
+      evosci mcp install                       # Interactive browser
+      evosci mcp install search                # Filter by 'search' tag
+      evosci mcp install sequential-thinking   # Install by name
+      evosci mcp install ./servers.yaml        # Import from YAML file
+    """
+    from .mcp_install_cmd import _cmd_install_mcp
+
+    _cmd_install_mcp(source or "")
+
+
 # =============================================================================
 # Main callback (default behavior)
 # =============================================================================

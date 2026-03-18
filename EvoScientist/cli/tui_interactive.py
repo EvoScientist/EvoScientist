@@ -58,6 +58,7 @@ _TUI_SLASH_COMMANDS = [
     ("/install-skill", "Add a skill from path or GitHub"),
     ("/uninstall-skill", "Remove an installed skill"),
     ("/install-skills", "Browse and install skills (optional: /install-skills <tag>)"),
+    ("/install-mcp", "Browse and install MCP servers"),
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
@@ -323,6 +324,7 @@ def run_textual_interactive(
             self._ask_user_future: asyncio.Future | None = None
             self._picker_future: asyncio.Future | None = None
             self._browser_future: asyncio.Future | None = None
+            self._mcp_browser_future: asyncio.Future | None = None
             self._history_suggester = HistorySuggester(get_config_dir() / "history")
 
         # ── Layout ─────────────────────────────────────────────
@@ -517,6 +519,36 @@ def run_textual_interactive(
             """Handle SkillBrowserWidget.Cancelled message."""
             if self._browser_future and not self._browser_future.done():
                 self._browser_future.set_result(None)
+
+        # ── MCP browser ───────────────────────────────────────
+
+        async def _wait_for_mcp_browse(self, browser_widget) -> list | None:
+            """Wait for user to complete MCP server browsing.
+
+            Returns list of MCPServerEntry, or None on cancel/timeout.
+            """
+            self._mcp_browser_future = asyncio.get_event_loop().create_future()
+            try:
+                return await asyncio.wait_for(self._mcp_browser_future, timeout=300)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                return None
+            finally:
+                self._mcp_browser_future = None
+                try:
+                    browser_widget.remove()
+                except Exception:
+                    pass
+                self.query_one("#prompt", Input).focus()
+
+        def on_mcp_browser_widget_confirmed(self, event) -> None:  # type: ignore[override]
+            """Handle MCPBrowserWidget.Confirmed message."""
+            if self._mcp_browser_future and not self._mcp_browser_future.done():
+                self._mcp_browser_future.set_result(event.entries)
+
+        def on_mcp_browser_widget_cancelled(self, event) -> None:  # type: ignore[override]
+            """Handle MCPBrowserWidget.Cancelled message."""
+            if self._mcp_browser_future and not self._mcp_browser_future.done():
+                self._mcp_browser_future.set_result(None)
 
         # ── Streaming core ─────────────────────────────────────
 
@@ -1429,10 +1461,11 @@ def run_textual_interactive(
                     # Force-resolve the future
                     self._ask_user_future.set_result({"type": "cancelled"})
                 return
-            # Delegate to ApprovalWidget, ThreadPickerWidget, or SkillBrowserWidget if focused
+            # Delegate to the corresponding widget if focused
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1445,17 +1478,21 @@ def run_textual_interactive(
                 if isinstance(focused, SkillBrowserWidget):
                     focused.action_cancel()
                     return
+                if isinstance(focused, MCPBrowserWidget):
+                    focused.action_cancel()
+                    return
             if self._queued_messages:
                 self._queued_messages.pop()
                 self._render_queue_indicator()
 
         def action_edit_queued(self) -> None:
             """Pop the last queued message back into input for editing."""
-            # Skip if an ApprovalWidget, AskUserWidget, ThreadPickerWidget, or SkillBrowserWidget has focus
+            # Skip if an interactive widget has focus
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1469,6 +1506,9 @@ def run_textual_interactive(
                     focused.action_move_up()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_move_up()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_up()
                     return
             if self._queued_messages:
@@ -1485,6 +1525,7 @@ def run_textual_interactive(
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1498,6 +1539,9 @@ def run_textual_interactive(
                     focused.action_move_down()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_move_down()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_down()
                     return
 
@@ -1645,6 +1689,10 @@ def run_textual_interactive(
 
             if cmd == "/install-skills":
                 await self._cmd_install_skills(arg)
+                return
+
+            if cmd == "/install-mcp":
+                await self._cmd_install_mcp(arg)
                 return
 
             if cmd == "/mcp":
@@ -2005,6 +2053,123 @@ def run_textual_interactive(
                     style="green",
                 )
 
+        async def _cmd_install_mcp(self, args: str) -> None:
+            from ..mcp.registry import (
+                get_merged_registry,
+                install_mcp_server,
+                load_servers_from_yaml,
+            )
+            from ..mcp.client import _load_user_config
+
+            args = args.strip()
+
+            # File import mode
+            if args and (
+                args.endswith((".yaml", ".yml"))
+                or "/" in args
+                or "\\" in args
+                or args.startswith(".")
+                or args.startswith("~")
+            ):
+                import os
+
+                resolved = os.path.expanduser(args)
+                try:
+                    servers = load_servers_from_yaml(resolved)
+                except FileNotFoundError:
+                    self._append_system(f"File not found: {args}", style="red")
+                    return
+                except Exception as e:
+                    self._append_system(f"Failed to parse {args}: {e}", style="red")
+                    return
+                if not servers:
+                    self._append_system(f"No servers found in {args}.", style="yellow")
+                    return
+                self._append_system(
+                    f"Found {len(servers)} server(s) in {args}", style="dim"
+                )
+            else:
+                # Interactive browser or name/tag lookup
+                self._append_system("Fetching MCP server index...", style="dim")
+                try:
+                    servers = get_merged_registry()
+                except Exception as e:
+                    self._append_system(
+                        f"Failed to fetch server index: {e}", style="red"
+                    )
+                    return
+
+                if not servers:
+                    self._append_system("No MCP servers found.", style="yellow")
+                    return
+
+                # Direct name install
+                if args:
+                    arg_lower = args.lower()
+                    match = next(
+                        (e for e in servers if e.name.lower() == arg_lower), None
+                    )
+                    if match:
+                        existing = _load_user_config()
+                        if match.name in existing:
+                            self._append_system(
+                                f"{match.name} is already configured.", style="yellow"
+                            )
+                            return
+                        if install_mcp_server(
+                            match,
+                            print_fn=lambda msg: self._append_system(msg),
+                        ):
+                            self._append_system(
+                                f"Configured: {match.name}", style="green"
+                            )
+                            self._append_system(
+                                "Reload with /new to apply.", style="dim"
+                            )
+                        else:
+                            self._append_system(
+                                f"Failed to configure {match.name}.", style="red"
+                            )
+                        return
+
+            # Mount interactive browser widget
+            existing_config = _load_user_config()
+            installed_names = set(existing_config.keys())
+
+            from .widgets.mcp_browser import MCPBrowserWidget
+
+            container = self.query_one("#chat", VerticalScroll)
+            browser = MCPBrowserWidget(
+                servers,
+                installed_names,
+                pre_filter_tag=args if not args.endswith((".yaml", ".yml")) else "",
+            )
+            await container.mount(browser)
+            container.scroll_end(animate=False)
+            browser.focus()
+
+            selected_entries = await self._wait_for_mcp_browse(browser)
+
+            if not selected_entries:
+                self._append_system("Browse cancelled.", style="dim")
+                return
+
+            installed_count = 0
+            for entry in selected_entries:
+                if install_mcp_server(
+                    entry, print_fn=lambda msg: self._append_system(msg)
+                ):
+                    self._append_system(f"Configured: {entry.name}", style="green")
+                    installed_count += 1
+                else:
+                    self._append_system(f"Failed: {entry.name}", style="red")
+
+            if installed_count:
+                self._append_system(
+                    f"{installed_count} server(s) configured. Reload with /new to apply.",
+                    style="green",
+                )
+
         def _cmd_uninstall_skill(self, name: str) -> None:
             from ..tools.skills_manager import uninstall_skill
 
@@ -2040,6 +2205,9 @@ def run_textual_interactive(
                 self._mcp_edit(subargs)
             elif subcmd == "remove":
                 self._mcp_remove(subargs.strip())
+            elif subcmd == "install":
+                # Delegate to async handler — schedule as a task
+                asyncio.create_task(self._cmd_install_mcp(subargs))
             else:
                 self._append_system("MCP commands:", style="bold")
                 self._append_system(
@@ -2056,6 +2224,7 @@ def run_textual_interactive(
                     "  /mcp edit ...     Edit an existing server", style="dim"
                 )
                 self._append_system("  /mcp remove ...   Remove a server", style="dim")
+                self._append_system("  /mcp install ...  Browse and install servers", style="dim")
 
         def _mcp_list(self) -> None:
             from ..mcp import load_mcp_config
