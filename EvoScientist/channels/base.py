@@ -29,17 +29,10 @@ _logger = logging.getLogger(__name__)
 
 
 def chunk_text(text: str, limit: int) -> list[str]:
-    """Split text into chunks that respect logical boundaries.
+    """Split text into chunks that respect logical boundaries and code fences.
 
-    Splitting priority (highest to lowest):
-    1. Code block boundaries (``` fences)
-    2. Double newlines (paragraph breaks)
-    3. Single newlines
-    4. Spaces (word boundaries)
-    5. Hard cut (last resort)
-
-    Code blocks are never split mid-block when possible. If a single code
-    block exceeds the limit it is sent as its own chunk(s).
+    If a code block is split across chunks, each chunk is automatically
+    wrapped in its own fences (```...```) to maintain formatting.
 
     Args:
         text: The text to split.
@@ -55,49 +48,75 @@ def chunk_text(text: str, limit: int) -> list[str]:
 
     chunks: list[str] = []
     remaining = text
+    in_code_block = False
+    code_block_lang = ""
 
     while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
+        # Effective limit is reduced if we need to add fences
+        # We reserve ~20 chars for fences (```lang\n and \n```)
+        effective_limit = limit - (20 if in_code_block else 0)
+        
+        if len(remaining) <= effective_limit:
+            segment = remaining
+            best = len(remaining)
+        else:
+            segment = remaining[:effective_limit]
+            best = -1
 
-        # Try to find a split point within the limit
-        segment = remaining[:limit]
+            # 1. Paragraph/Line/Word boundaries
+            if not in_code_block:
+                # Paragraph
+                pos = segment.rfind("\n\n")
+                if pos > 0:
+                    best = pos
+                
+                # Line
+                if best == -1:
+                    pos = segment.rfind("\n")
+                    if pos > 0:
+                        best = pos
+                
+                # Word
+                if best == -1:
+                    pos = segment.rfind(" ")
+                    if pos > 0:
+                        best = pos
+            else:
+                # INSIDE code block: ONLY split at newlines to avoid breaking lines of code
+                pos = segment.rfind("\n")
+                if pos > 0:
+                    best = pos
 
-        # 1. Prefer splitting at code block boundary (``` at line start)
-        best = -1
-        fence_pos = segment.rfind("\n```")
-        if fence_pos > 0:
-            line_end = segment.find("\n", fence_pos + 1)
-            if line_end == -1:
-                line_end = len(segment)
-            best = line_end
+            if best == -1:
+                best = effective_limit
 
-        # 2. Double newline (paragraph break)
-        if best == -1:
-            pos = segment.rfind("\n\n")
-            if pos > 0:
-                best = pos
+        chunk_raw = remaining[:best].rstrip()
+        
+        # Track state transitions within this raw segment
+        starts_in_code = in_code_block
+        current_lang = code_block_lang
+        
+        # We use a simple count of ``` to toggle state. 
+        # Note: This handles both opening and closing fences.
+        fences = list(re.finditer(r"```(\w*)", chunk_raw))
+        for f in fences:
+            if not in_code_block:
+                in_code_block = True
+                code_block_lang = f.group(1) or ""
+            else:
+                in_code_block = False
+                code_block_lang = ""
+        
+        ends_in_code = in_code_block
 
-        # 3. Single newline
-        if best == -1:
-            pos = segment.rfind("\n")
-            if pos > 0:
-                best = pos
-
-        # 4. Space (word boundary)
-        if best == -1:
-            pos = segment.rfind(" ")
-            if pos > 0:
-                best = pos
-
-        # 5. Hard cut
-        if best == -1:
-            best = limit
-
-        chunk = remaining[:best].rstrip()
-        if chunk:
-            chunks.append(chunk)
+        # Build the final chunk with necessary fences
+        prefix = f"```{current_lang}\n" if starts_in_code else ""
+        suffix = "\n```" if ends_in_code else ""
+            
+        final_chunk = prefix + chunk_raw + suffix
+        if final_chunk.strip():
+            chunks.append(final_chunk)
+            
         remaining = remaining[best:].lstrip("\n")
 
     return chunks

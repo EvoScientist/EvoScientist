@@ -453,5 +453,61 @@ class TestWidgetImports(unittest.TestCase):
             assert isinstance(cls, type), f"{cls} is not a class"
 
 
+class TestClipboardPaste(unittest.TestCase):
+    """Test clipboard paste functionality."""
+
+    def test_get_clipboard_text_import(self):
+        """get_clipboard_text should be importable."""
+        from EvoScientist.cli.clipboard import get_clipboard_text
+
+        assert callable(get_clipboard_text)
+
+    def test_paste_native_import(self):
+        """_paste_native should be importable."""
+        from EvoScientist.cli.clipboard import _paste_native
+
+        assert callable(_paste_native)
+
+    def test_paste_native_returns_string_or_none(self):
+        """_paste_native should return str or None."""
+        from EvoScientist.cli.clipboard import _paste_native
+
+        result = _paste_native()
+        assert result is None or isinstance(result, str)
+
+    def test_get_clipboard_text_with_pyperclip_mock(self):
+        """get_clipboard_text should use pyperclip when available."""
+        from unittest.mock import MagicMock, patch
+
+        mock_pyperclip = MagicMock()
+        mock_pyperclip.paste.return_value = "mocked text"
+
+        with patch.dict("sys.modules", {"pyperclip": mock_pyperclip}):
+            # Re-import to pick up the mock
+            from EvoScientist.cli import clipboard
+            import importlib
+
+            importlib.reload(clipboard)
+
+            result = clipboard.get_clipboard_text()
+            # pyperclip.paste was called
+            mock_pyperclip.paste.assert_called_once()
+            assert result == "mocked text"
+
+    def test_get_clipboard_text_fallback_to_native(self):
+        """get_clipboard_text should fall back to native when pyperclip unavailable."""
+        from unittest.mock import patch
+
+        with patch.dict("sys.modules", {"pyperclip": None}):
+            from EvoScientist.cli import clipboard
+            import importlib
+
+            importlib.reload(clipboard)
+
+            # Should not raise, returns None or string
+            result = clipboard.get_clipboard_text()
+            assert result is None or isinstance(result, str)
+
+
 if __name__ == "__main__":
     unittest.main()
