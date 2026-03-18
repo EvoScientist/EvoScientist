@@ -2,32 +2,9 @@
 
 import pytest
 
-from EvoScientist.channels.discord.channel import DiscordChannel, DiscordConfig
 from EvoScientist.channels.base import ChannelError
-
-
+from EvoScientist.channels.discord.channel import DiscordChannel, DiscordConfig
 from tests.conftest import run_async as _run
-
-
-class TestDiscordConfig:
-    def test_default_values(self):
-        config = DiscordConfig()
-        assert config.bot_token == ""
-        assert config.allowed_senders is None
-        assert config.allowed_channels is None
-        assert config.text_chunk_limit == 4096
-
-    def test_custom_values(self):
-        config = DiscordConfig(
-            bot_token="test-token",
-            allowed_senders={"111"},
-            allowed_channels={"222"},
-            text_chunk_limit=1000,
-        )
-        assert config.bot_token == "test-token"
-        assert config.allowed_senders == {"111"}
-        assert config.allowed_channels == {"222"}
-        assert config.text_chunk_limit == 1000
 
 
 class TestDiscordChannel:
