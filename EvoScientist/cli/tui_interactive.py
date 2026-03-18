@@ -57,6 +57,7 @@ _TUI_SLASH_COMMANDS = [
     ("/skills", "List installed skills"),
     ("/install-skill", "Add a skill from path or GitHub"),
     ("/uninstall-skill", "Remove an installed skill"),
+    ("/install-skills", "Browse and install skills (optional: /install-skills <tag>)"),
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
@@ -322,6 +323,7 @@ def run_textual_interactive(
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
             self._picker_future: asyncio.Future | None = None
+            self._browser_future: asyncio.Future | None = None
             self._history_suggester = HistorySuggester(get_config_dir() / "history")
 
         # ── Layout ─────────────────────────────────────────────
@@ -477,6 +479,7 @@ def run_textual_interactive(
                     picker_widget.remove()
                 except Exception:
                     pass
+                self.query_one("#prompt", Input).focus()
 
         def on_thread_picker_widget_picked(self, event) -> None:  # type: ignore[override]
             """Handle ThreadPickerWidget.Picked message."""
@@ -487,6 +490,34 @@ def run_textual_interactive(
             """Handle ThreadPickerWidget.Cancelled message."""
             if self._picker_future and not self._picker_future.done():
                 self._picker_future.set_result(None)
+
+        async def _wait_for_skill_browse(self, browser_widget) -> list[str] | None:
+            """Wait for user to complete skill browsing.
+
+            Returns list of install sources, or None on cancel/timeout.
+            """
+            self._browser_future = asyncio.get_event_loop().create_future()
+            try:
+                return await asyncio.wait_for(self._browser_future, timeout=300)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                return None
+            finally:
+                self._browser_future = None
+                try:
+                    browser_widget.remove()
+                except Exception:
+                    pass
+                self.query_one("#prompt", Input).focus()
+
+        def on_skill_browser_widget_confirmed(self, event) -> None:  # type: ignore[override]
+            """Handle SkillBrowserWidget.Confirmed message."""
+            if self._browser_future and not self._browser_future.done():
+                self._browser_future.set_result(event.install_sources)
+
+        def on_skill_browser_widget_cancelled(self, event) -> None:  # type: ignore[override]
+            """Handle SkillBrowserWidget.Cancelled message."""
+            if self._browser_future and not self._browser_future.done():
+                self._browser_future.set_result(None)
 
         # ── Streaming core ─────────────────────────────────────
 
@@ -1399,10 +1430,11 @@ def run_textual_interactive(
                     # Force-resolve the future
                     self._ask_user_future.set_result({"type": "cancelled"})
                 return
-            # Delegate to ApprovalWidget or ThreadPickerWidget if focused
+            # Delegate to ApprovalWidget, ThreadPickerWidget, or SkillBrowserWidget if focused
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
+                from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
                 if isinstance(focused, ApprovalWidget):
@@ -1411,17 +1443,21 @@ def run_textual_interactive(
                 if isinstance(focused, ThreadPickerWidget):
                     focused.action_cancel()
                     return
+                if isinstance(focused, SkillBrowserWidget):
+                    focused.action_cancel()
+                    return
             if self._queued_messages:
                 self._queued_messages.pop()
                 self._render_queue_indicator()
 
         def action_edit_queued(self) -> None:
             """Pop the last queued message back into input for editing."""
-            # Skip if an ApprovalWidget, AskUserWidget, or ThreadPickerWidget has focus
+            # Skip if an ApprovalWidget, AskUserWidget, ThreadPickerWidget, or SkillBrowserWidget has focus
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
                 if isinstance(focused, ApprovalWidget):
@@ -1431,6 +1467,9 @@ def run_textual_interactive(
                     focused.action_move_up()
                     return
                 if isinstance(focused, ThreadPickerWidget):
+                    focused.action_move_up()
+                    return
+                if isinstance(focused, SkillBrowserWidget):
                     focused.action_move_up()
                     return
             if self._queued_messages:
@@ -1442,11 +1481,12 @@ def run_textual_interactive(
                 self._render_queue_indicator()
 
         def action_down_delegate(self) -> None:
-            """Delegate down key to focused ApprovalWidget, AskUserWidget, or ThreadPickerWidget."""
+            """Delegate down key to focused interactive widget."""
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
                 if isinstance(focused, ApprovalWidget):
@@ -1456,6 +1496,9 @@ def run_textual_interactive(
                     focused.action_move_down()
                     return
                 if isinstance(focused, ThreadPickerWidget):
+                    focused.action_move_down()
+                    return
+                if isinstance(focused, SkillBrowserWidget):
                     focused.action_move_down()
                     return
 
@@ -1532,6 +1575,9 @@ def run_textual_interactive(
             cmd, _, arg = command.strip().partition(" ")
             cmd = cmd.lower()
             arg = arg.strip()
+
+            # Echo the command so the user sees what they ran
+            self._append_system(command.strip(), style="cyan")
 
             if cmd in ("/exit", "/quit", "/q"):
                 self.action_request_quit()
@@ -1615,6 +1661,10 @@ def run_textual_interactive(
 
             if cmd == "/uninstall-skill":
                 self._cmd_uninstall_skill(arg)
+                return
+
+            if cmd == "/install-skills":
+                await self._cmd_install_skills(arg)
                 return
 
             if cmd == "/mcp":
@@ -1850,8 +1900,10 @@ def run_textual_interactive(
                 )
                 table.add_column("Name", style="green")
                 table.add_column("Description", style="dim")
+                table.add_column("Tags", style="dim")
                 for s in user_skills:
-                    table.add_row(s.name, s.description)
+                    tags = "\n".join(f"· {t}" for t in s.tags[:4]) if s.tags else ""
+                    table.add_row(s.name, s.description, tags)
                 self._mount_renderable(table)
 
             if system_skills:
@@ -1860,8 +1912,10 @@ def run_textual_interactive(
                 )
                 table.add_column("Name", style="cyan")
                 table.add_column("Description", style="dim")
+                table.add_column("Tags", style="dim")
                 for s in system_skills:
-                    table.add_row(s.name, s.description)
+                    tags = "\n".join(f"· {t}" for t in s.tags[:4]) if s.tags else ""
+                    table.add_row(s.name, s.description, tags)
                 self._mount_renderable(table)
 
             self._append_system(
@@ -1901,6 +1955,75 @@ def run_textual_interactive(
                 self._append_system("Reload with /new to apply.", style="dim")
             else:
                 self._append_system(f"Failed: {result['error']}", style="red")
+
+        async def _cmd_install_skills(self, args: str) -> None:
+            from pathlib import Path as _Path
+
+            from ..paths import USER_SKILLS_DIR
+            from ..tools.skills_manager import fetch_remote_skill_index, install_skill
+
+            self._append_system("Fetching skill index...", style="dim")
+
+            try:
+                index = fetch_remote_skill_index()
+            except Exception as e:
+                self._append_system(f"Failed to fetch skill index: {e}", style="red")
+                self._append_system(
+                    "Try: /install-skill EvoScientist/EvoSkills@skills", style="dim"
+                )
+                return
+
+            if not index:
+                self._append_system("No skills found.", style="yellow")
+                return
+
+            # Detect installed skills
+            skills_dir = _Path(USER_SKILLS_DIR)
+            installed_names: set[str] = set()
+            if skills_dir.exists():
+                installed_names = {e.name for e in skills_dir.iterdir() if e.is_dir()}
+
+            # Mount interactive browser widget
+            from .widgets.skill_browser import SkillBrowserWidget
+
+            container = self.query_one("#chat", VerticalScroll)
+            browser = SkillBrowserWidget(
+                index,
+                installed_names,
+                pre_filter_tag=args.strip(),
+            )
+            await container.mount(browser)
+            container.scroll_end(animate=False)
+            browser.focus()
+
+            # Wait for user interaction
+            selected_sources = await self._wait_for_skill_browse(browser)
+
+            if not selected_sources:
+                self._append_system("Browse cancelled.", style="dim")
+                return
+
+            # Install selected skills
+            installed_count = 0
+            for source in selected_sources:
+                result = install_skill(source)
+                if result.get("batch"):
+                    for item in result.get("installed", []):
+                        self._append_system(f"Installed: {item['name']}", style="green")
+                        installed_count += 1
+                elif result.get("success"):
+                    self._append_system(f"Installed: {result['name']}", style="green")
+                    installed_count += 1
+                else:
+                    self._append_system(
+                        f"Failed: {result.get('error', 'unknown')}", style="red"
+                    )
+
+            if installed_count:
+                self._append_system(
+                    f"{installed_count} skill(s) installed. Reload with /new to apply.",
+                    style="green",
+                )
 
         def _cmd_uninstall_skill(self, name: str) -> None:
             from ..tools.skills_manager import uninstall_skill

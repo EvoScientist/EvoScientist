@@ -16,12 +16,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "deepagents>=0.4.9",
-    "langchain>=1.2.11",
-    "langchain-anthropic>=1.3.4",
-    "langchain-openai>=0.3",
+    "deepagents>=0.4.11",
+    "langchain>=1.2.12",
+    "langchain-anthropic>=1.4.0",
+    "langchain-openai>=1.1",
     "langchain-nvidia-ai-endpoints>=0.3",
-    "langchain-google-genai>=4.2",
+    "langchain-google-genai>=4.2.1",
     "langchain-ollama>=1.0",
     "tavily-python>=0.7",
     "pyyaml>=6.0",

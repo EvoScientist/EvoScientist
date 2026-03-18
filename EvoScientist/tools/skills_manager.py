@@ -32,7 +32,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -48,49 +49,74 @@ class SkillInfo:
     description: str
     path: Path
     source: str  # "user" or "system"
+    tags: list[str] = field(default_factory=list)
 
 
-def _parse_skill_md(skill_md_path: Path) -> dict[str, str]:
-    """Parse SKILL.md frontmatter to extract name and description.
+def _normalize_tags(raw: object) -> list[str]:
+    """Normalize a tags value to a list of strings."""
+    if isinstance(raw, list):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    if isinstance(raw, str):
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return []
+
+
+def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
+    """Parse SKILL.md frontmatter to extract name, description, and tags.
 
     SKILL.md format:
         ---
         name: skill-name
         description: A brief description...
+        tags: [tag1, tag2]
+        metadata:
+          tags: [tag1, tag2]   # fallback location
         ---
         # Skill Title
         ...
 
+    Args:
+        skill_md_path: Path to the SKILL.md file.
+        source: Origin label (e.g. "user", "system").
+
     Returns:
-        Dictionary with 'name' and 'description' keys.
+        SkillInfo with path set to the skill's parent directory.
     """
+    parent = skill_md_path.parent
     content = skill_md_path.read_text(encoding="utf-8")
+
+    def _info(name: str, description: str, tags: list[str] | None = None) -> SkillInfo:
+        return SkillInfo(
+            name=name,
+            description=description,
+            path=parent,
+            source=source,
+            tags=tags or [],
+        )
 
     # Extract YAML frontmatter
     frontmatter_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
     if not frontmatter_match:
         # No frontmatter, use directory name
-        return {
-            "name": skill_md_path.parent.name,
-            "description": "(no description)",
-        }
+        return _info(parent.name, "(no description)")
 
     try:
         frontmatter = yaml.safe_load(frontmatter_match.group(1))
         if not isinstance(frontmatter, dict):
-            return {
-                "name": skill_md_path.parent.name,
-                "description": "(empty frontmatter)",
-            }
-        return {
-            "name": frontmatter.get("name", skill_md_path.parent.name),
-            "description": frontmatter.get("description", "(no description)"),
-        }
+            return _info(parent.name, "(empty frontmatter)")
+        # Tags: check top-level first, fall back to metadata.tags
+        tags = _normalize_tags(frontmatter.get("tags"))
+        if not tags:
+            metadata = frontmatter.get("metadata")
+            if isinstance(metadata, dict):
+                tags = _normalize_tags(metadata.get("tags"))
+        return _info(
+            frontmatter.get("name", parent.name),
+            frontmatter.get("description", "(no description)"),
+            tags,
+        )
     except yaml.YAMLError:
-        return {
-            "name": skill_md_path.parent.name,
-            "description": "(invalid frontmatter)",
-        }
+        return _info(parent.name, "(invalid frontmatter)")
 
 
 def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
@@ -287,18 +313,18 @@ def _install_from_local(source: str, dest_dir: str) -> dict:
 def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -> dict:
     """Install one skill directory into *dest_dir*."""
     skill_info = _parse_skill_md(source_path / "SKILL.md")
-    skill_name = _sanitize_name(skill_info["name"])
+    skill_name = _sanitize_name(skill_info.name)
     if not skill_name:
         return {
             "success": False,
-            "error": f"Invalid skill name in SKILL.md: {skill_info['name']!r}",
+            "error": f"Invalid skill name in SKILL.md: {skill_info.name!r}",
         }
 
     target_path = (Path(dest_dir) / skill_name).resolve()
     if not str(target_path).startswith(str(Path(dest_dir).resolve())):
         return {
             "success": False,
-            "error": f"Skill name escapes destination: {skill_info['name']!r}",
+            "error": f"Skill name escapes destination: {skill_info.name!r}",
         }
 
     if target_path.exists():
@@ -310,7 +336,7 @@ def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -
         "success": True,
         "name": skill_name,
         "path": str(target_path),
-        "description": skill_info["description"],
+        "description": skill_info.description,
     }
 
 
@@ -413,16 +439,7 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
     if user_dir.exists():
         for entry in sorted(user_dir.iterdir()):
             if entry.is_dir() and _validate_skill_dir(entry):
-                skill_md = entry / "SKILL.md"
-                info = _parse_skill_md(skill_md)
-                skills.append(
-                    SkillInfo(
-                        name=info["name"],
-                        description=info["description"],
-                        path=entry,
-                        source="user",
-                    )
-                )
+                skills.append(_parse_skill_md(entry / "SKILL.md", source="user"))
 
     # System skills (optional)
     if include_system:
@@ -435,16 +452,7 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
                     # Skip if user has overridden this skill
                     if any(s.name == entry.name for s in skills):
                         continue
-                    skill_md = entry / "SKILL.md"
-                    info = _parse_skill_md(skill_md)
-                    skills.append(
-                        SkillInfo(
-                            name=info["name"],
-                            description=info["description"],
-                            path=entry,
-                            source="system",
-                        )
-                    )
+                    skills.append(_parse_skill_md(entry / "SKILL.md", source="system"))
 
     return skills
 
@@ -476,7 +484,7 @@ def uninstall_skill(name: str) -> dict:
             for entry in user_dir.iterdir():
                 if entry.is_dir() and _validate_skill_dir(entry):
                     info = _parse_skill_md(entry / "SKILL.md")
-                    if info["name"] == clean_name:
+                    if info.name == clean_name:
                         found = entry.resolve()
                         break
 
@@ -507,3 +515,101 @@ def get_skill_info(name: str) -> SkillInfo | None:
         if skill.name == name:
             return skill
     return None
+
+
+def list_skills_by_tag(
+    tag: str,
+    include_system: bool = False,
+) -> list[SkillInfo]:
+    """Filter installed skills by tag (case-insensitive).
+
+    Args:
+        tag: Tag to filter by.
+        include_system: If True, also include system skills.
+
+    Returns:
+        List of matching SkillInfo objects.
+    """
+    tag_lower = tag.lower()
+    return [
+        s
+        for s in list_skills(include_system=include_system)
+        if tag_lower in [t.lower() for t in s.tags]
+    ]
+
+
+def get_all_tags(include_system: bool = False) -> list[tuple[str, int]]:
+    """Return all tags and their counts, sorted by frequency then alphabetically.
+
+    Args:
+        include_system: If True, also include system skills.
+
+    Returns:
+        List of (tag, count) tuples sorted by count descending, then name ascending.
+    """
+    from collections import Counter
+
+    counter: Counter[str] = Counter()
+    for skill in list_skills(include_system=include_system):
+        for tag in skill.tags:
+            counter[tag.lower()] += 1
+    return sorted(counter.items(), key=lambda x: (-x[1], x[0]))
+
+
+# ── Remote skill index ──────────────────────────────────────────────
+
+_REMOTE_INDEX_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_REMOTE_INDEX_TTL = 600  # 10 minutes
+
+
+def fetch_remote_skill_index(
+    repo: str = "EvoScientist/EvoSkills",
+    ref: str | None = None,
+    path: str = "skills",
+) -> list[dict]:
+    """Fetch skill metadata from a GitHub repo via shallow clone.
+
+    Clones the repo to a temp directory, scans for SKILL.md files,
+    parses their frontmatter, and returns an index of available skills.
+    Results are cached for 10 minutes.
+
+    Args:
+        repo: GitHub repo in owner/repo format.
+        ref: Branch or tag (None for default branch).
+        path: Subdirectory containing skills.
+
+    Returns:
+        List of dicts with keys: name, description, tags, install_source.
+    """
+    cache_key = f"{repo}:{ref or 'default'}:{path}"
+    now = time.monotonic()
+    cached = _REMOTE_INDEX_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _REMOTE_INDEX_TTL:
+        return cached[1]
+
+    index: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="evoscientist-browse-") as tmp:
+        clone_dir = os.path.join(tmp, "repo")
+        _clone_repo(repo, ref, clone_dir)
+
+        skills_root = Path(clone_dir) / path if path else Path(clone_dir)
+        if not skills_root.is_dir():
+            return index
+
+        found = _scan_skill_dirs(skills_root)
+        for skill_dir in found:
+            info = _parse_skill_md(skill_dir / "SKILL.md")
+            # Compute relative path from clone root for install source
+            rel = skill_dir.relative_to(Path(clone_dir))
+            install_source = f"{repo}@{rel}"
+            index.append(
+                {
+                    "name": info.name,
+                    "description": info.description,
+                    "tags": info.tags,
+                    "install_source": install_source,
+                }
+            )
+
+    _REMOTE_INDEX_CACHE[cache_key] = (now, index)
+    return index

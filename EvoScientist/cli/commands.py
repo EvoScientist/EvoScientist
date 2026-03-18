@@ -5,6 +5,7 @@ import os
 import queue
 import re
 from datetime import datetime
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any, Optional
 
@@ -498,10 +499,6 @@ def serve(
 
     nest_asyncio.apply()
 
-    from dotenv import load_dotenv, find_dotenv  # type: ignore[import-untyped]
-
-    load_dotenv(find_dotenv(), override=True)
-
     from ..config import get_effective_config, apply_config_to_env
 
     cli_overrides = {}
@@ -874,9 +871,23 @@ def mcp_remove(
 # =============================================================================
 
 
+def _version_callback(value: bool):
+    if value:
+        typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "-V",
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
     mode: Optional[str] = typer.Option(
         None,
         "-m",
@@ -929,11 +940,6 @@ def _main_callback(
     # If a subcommand was invoked, don't run the default behavior
     if ctx.invoked_subcommand is not None:
         return
-
-    from dotenv import load_dotenv, find_dotenv  # type: ignore[import-untyped]
-
-    # find_dotenv() traverses up the directory tree to locate .env
-    load_dotenv(find_dotenv(), override=True)
 
     # Load and apply configuration
     from ..config import get_effective_config, apply_config_to_env

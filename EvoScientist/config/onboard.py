@@ -365,6 +365,66 @@ def validate_zhipu_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_volcengine_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Volcengine API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
+def validate_dashscope_key(api_key: str) -> tuple[bool, str]:
+    """Validate a DashScope API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
 def validate_tavily_key(api_key: str) -> tuple[bool, str]:
     """Validate a Tavily API key by making a test request.
 
@@ -531,6 +591,14 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="ZhipuAI CodePlan (智谱代码计划 — GLM models for coding)",
             value="zhipu-code",
         ),
+        Choice(
+            title="Volcengine (火山引擎 — Doubao models)",
+            value="volcengine",
+        ),
+        Choice(
+            title="DashScope (阿里云 — Qwen models)",
+            value="dashscope",
+        ),
         Choice(title="Ollama (local models)", value="ollama"),
         Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
@@ -598,6 +666,16 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "ZhipuAI CodePlan",
             config.zhipu_api_key or os.environ.get("ZHIPU_API_KEY", ""),
             validate_zhipu_key,
+        ),
+        "volcengine": (
+            "Volcengine",
+            config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
+            validate_volcengine_key,
+        ),
+        "dashscope": (
+            "DashScope",
+            config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
+            validate_dashscope_key,
         ),
         "custom-openai": (
             "OpenAI-compatible",
@@ -681,6 +759,63 @@ def _prompt_and_validate_api_key(
     return new_key if new_key else None
 
 
+def _prompt_ccproxy_port(config: EvoScientistConfig) -> None:
+    """Prompt the user for a ccproxy port and save it to config."""
+
+    def valid_port(value: str) -> bool:
+        if not value:  # empty = keep default
+            return True
+        try:
+            return 0 < int(value) < 2**16
+        except (ValueError, TypeError):
+            return False
+
+    current_port = getattr(config, "ccproxy_port", 8000)
+    try:
+        raw = questionary.text(
+            f"Enter port number for ccproxy to run on (Current: {current_port}, Enter to keep):",
+            validate=valid_port,
+            style=WIZARD_STYLE,
+            qmark=QMARK,
+        ).ask()
+        ccproxy_port = int(raw) if raw else current_port
+    except (ValueError, TypeError):
+        ccproxy_port = current_port
+        console.print(f"  [dim]Using default port: {ccproxy_port}[/dim]")
+
+    setattr(config, "ccproxy_port", ccproxy_port)
+    console.print(
+        f"  [green]✓ ccproxy will run on http://127.0.0.1:{ccproxy_port}[/green]"
+    )
+
+
+def _run_ccproxy_login(provider: str, label: str) -> None:
+    """Run ccproxy auth login for the given provider and show status."""
+    from ..ccproxy_manager import _ccproxy_exe, check_ccproxy_auth
+
+    console.print("  [dim]Opening browser for authentication...[/dim]")
+    try:
+        proc = subprocess.run(
+            [_ccproxy_exe() or "ccproxy", "auth", "login", provider],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        for line in proc.stdout.splitlines():
+            if line.strip().startswith("https://"):
+                console.print(f"  [dim]Visit: {line.strip()}[/dim]")
+                break
+        authed, msg = check_ccproxy_auth(provider)
+        if authed:
+            console.print(f"  [green]✓ {label}: {msg}[/green]")
+        else:
+            console.print(f"  [red]Authentication failed: {msg}[/red]")
+    except subprocess.TimeoutExpired:
+        console.print("  [red]Login timed out.[/red]")
+    except Exception as exc:
+        console.print(f"  [red]Login error: {exc}[/red]")
+
+
 def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     """Step 2a: Select Anthropic authentication mode (API key vs OAuth).
 
@@ -692,17 +827,18 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     """
     from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
 
-    if not is_ccproxy_available():
-        console.print(
-            "  [dim]OAuth via ccproxy not available. "
-            'Install with: pip install "evoscientist[oauth]"[/dim]'
-        )
-        return "api_key"
+    ccproxy_available = is_ccproxy_available()
 
     choices = [
         Choice(title="API Key (direct Anthropic access)", value="api_key"),
         Choice(
-            title="Claude Code OAuth (via ccproxy — no API key needed)", value="oauth"
+            title="Claude Code OAuth (via ccproxy — no API key needed)"
+            + (
+                ""
+                if ccproxy_available
+                else " [requires: pip install evoscientist[oauth]]"
+            ),
+            value="oauth",
         ),
     ]
 
@@ -722,11 +858,46 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     if auth_mode is None:
         raise KeyboardInterrupt()
 
+    if auth_mode == "oauth" and not ccproxy_available:
+        console.print("  [yellow]✗ ccproxy not installed[/yellow]")
+        console.print()
+        install = questionary.confirm(
+            'Install ccproxy now? (pip install "evoscientist[oauth]")',
+            default=True,
+            style=WIZARD_STYLE,
+            qmark=f"  {QMARK}",
+        ).ask()
+        if install is None:
+            raise KeyboardInterrupt()
+        if install:
+            console.print()
+            if _install_ccproxy():
+                console.print("  [green]✓ ccproxy installed successfully.[/green]")
+            else:
+                console.print("  [yellow]Falling back to API key mode.[/yellow]")
+                return "api_key"
+        else:
+            console.print(
+                '  [dim]Skipped. Install manually: pip install "evoscientist[oauth]"[/dim]'
+            )
+            return "api_key"
+
+    if auth_mode == "oauth":
+        _prompt_ccproxy_port(config)
+
     # If OAuth selected, check auth status and offer login
     if auth_mode in ("oauth", "auto"):
         authed, msg = check_ccproxy_auth()
         if authed:
             console.print(f"  [green]✓ OAuth: {msg}[/green]")
+            relogin = questionary.confirm(
+                "Re-authenticate to refresh credentials?",
+                default=False,
+                style=CONFIRM_STYLE,
+                qmark=QMARK,
+            ).ask()
+            if relogin:
+                _run_ccproxy_login("claude_api", "OAuth")
         else:
             console.print(f"  [yellow]OAuth not authenticated: {msg}[/yellow]")
             login = questionary.confirm(
@@ -736,21 +907,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
                 qmark=QMARK,
             ).ask()
             if login:
-                console.print("  [dim]Opening browser for authentication...[/dim]")
-                try:
-                    subprocess.run(
-                        ["ccproxy", "auth", "login", "claude_api"],
-                        timeout=120,
-                    )
-                    authed, msg = check_ccproxy_auth()
-                    if authed:
-                        console.print(f"  [green]✓ OAuth: {msg}[/green]")
-                    else:
-                        console.print(f"  [red]Authentication failed: {msg}[/red]")
-                except subprocess.TimeoutExpired:
-                    console.print("  [red]Login timed out.[/red]")
-                except Exception as exc:
-                    console.print(f"  [red]Login error: {exc}[/red]")
+                _run_ccproxy_login("claude_api", "OAuth")
 
     return auth_mode
 
@@ -766,17 +923,18 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     """
     from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
 
-    if not is_ccproxy_available():
-        console.print(
-            "  [dim]OAuth via ccproxy not available. "
-            'Install with: pip install "evoscientist[oauth]"[/dim]'
-        )
-        return "api_key"
+    ccproxy_available = is_ccproxy_available()
 
     choices = [
         Choice(title="API Key (direct OpenAI access)", value="api_key"),
         Choice(
-            title="Codex OAuth (via ccproxy — no API key needed)", value="oauth"
+            title="Codex OAuth (via ccproxy — no API key needed)"
+            + (
+                ""
+                if ccproxy_available
+                else " [requires: pip install evoscientist[oauth]]"
+            ),
+            value="oauth",
         ),
     ]
 
@@ -796,11 +954,44 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     if auth_mode is None:
         raise KeyboardInterrupt()
 
-    # If OAuth selected, check auth status and offer login
+    if auth_mode == "oauth" and not ccproxy_available:
+        console.print("  [yellow]✗ ccproxy not installed[/yellow]")
+        console.print()
+        install = questionary.confirm(
+            'Install ccproxy now? (pip install "evoscientist[oauth]")',
+            default=True,
+            style=WIZARD_STYLE,
+            qmark=f"  {QMARK}",
+        ).ask()
+        if install is None:
+            raise KeyboardInterrupt()
+        if install:
+            console.print()
+            if _install_ccproxy():
+                console.print("  [green]✓ ccproxy installed successfully.[/green]")
+            else:
+                console.print("  [yellow]Falling back to API key mode.[/yellow]")
+                return "api_key"
+        else:
+            console.print(
+                '  [dim]Skipped. Install manually: pip install "evoscientist[oauth]"[/dim]'
+            )
+            return "api_key"
+
+    # If OAuth selected, prompt for port and check auth status
     if auth_mode == "oauth":
+        _prompt_ccproxy_port(config)
         authed, msg = check_ccproxy_auth("codex")
         if authed:
             console.print(f"  [green]✓ Codex OAuth: {msg}[/green]")
+            relogin = questionary.confirm(
+                "Re-authenticate to refresh credentials?",
+                default=False,
+                style=CONFIRM_STYLE,
+                qmark=QMARK,
+            ).ask()
+            if relogin:
+                _run_ccproxy_login("codex", "Codex OAuth")
         else:
             console.print(f"  [yellow]Codex OAuth not authenticated: {msg}[/yellow]")
             login = questionary.confirm(
@@ -810,21 +1001,7 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
                 qmark=QMARK,
             ).ask()
             if login:
-                console.print("  [dim]Opening browser for authentication...[/dim]")
-                try:
-                    subprocess.run(
-                        ["ccproxy", "auth", "login", "codex"],
-                        timeout=120,
-                    )
-                    authed, msg = check_ccproxy_auth("codex")
-                    if authed:
-                        console.print(f"  [green]✓ Codex OAuth: {msg}[/green]")
-                    else:
-                        console.print(f"  [red]Authentication failed: {msg}[/red]")
-                except subprocess.TimeoutExpired:
-                    console.print("  [red]Login timed out.[/red]")
-                except Exception as exc:
-                    console.print(f"  [red]Login error: {exc}[/red]")
+                _run_ccproxy_login("codex", "Codex OAuth")
 
     return auth_mode
 
@@ -1637,6 +1814,23 @@ def validate_imessage() -> tuple[bool, str]:
     return True, f"imsg{version_str} at {cli_path}"
 
 
+def _install_ccproxy() -> bool:
+    """Run pip install for ccproxy (evoscientist[oauth]).
+
+    Uses uv pip install when available (uv-managed envs don't ship pip).
+
+    Returns:
+        True if installation succeeded and ccproxy is available.
+    """
+    from ..ccproxy_manager import is_ccproxy_available
+
+    ok = _install_pip_package("evoscientist[oauth]")
+    if not ok:
+        console.print("  [red]✗ Installation failed.[/red]")
+        return False
+    return is_ccproxy_available()
+
+
 def _install_imsg() -> bool:
     """Run brew install for imsg CLI.
 
@@ -2275,6 +2469,11 @@ def run_onboard(skip_validation: bool = False) -> bool:
         elif provider == "openai":
             auth_mode = _step_openai_auth_mode(config)
             config.openai_auth_mode = auth_mode
+        else:
+            # Non-Anthropic/OpenAI provider: reset OAuth modes to avoid
+            # stale oauth config triggering ccproxy requirement on startup
+            config.anthropic_auth_mode = "api_key"
+            config.openai_auth_mode = "api_key"
 
         # Step 2c: Provider API Key (skip for Ollama — no key needed,
         # and for Anthropic/OpenAI pure OAuth — key provided by ccproxy)
@@ -2286,13 +2485,15 @@ def run_onboard(skip_validation: bool = False) -> bool:
             "openrouter": "openrouter_api_key",
             "zhipu": "zhipu_api_key",
             "zhipu-code": "zhipu_api_key",
+            "volcengine": "volcengine_api_key",
+            "dashscope": "dashscope_api_key",
             "custom-openai": "custom_openai_api_key",
             "custom-anthropic": "custom_anthropic_api_key",
         }
-        _skip_api_key = provider == "ollama" or (
-            provider == "anthropic" and config.anthropic_auth_mode == "oauth"
-        ) or (
-            provider == "openai" and config.openai_auth_mode == "oauth"
+        _skip_api_key = (
+            provider == "ollama"
+            or (provider == "anthropic" and config.anthropic_auth_mode == "oauth")
+            or (provider == "openai" and config.openai_auth_mode == "oauth")
         )
         if not _skip_api_key:
             new_key = _step_provider_api_key(config, provider, skip_validation)

@@ -10,6 +10,7 @@ from EvoScientist.mcp.client import (
     _interpolate_env,
     _filter_tools,
     _route_tools,
+    _resolve_command,
     _build_connections,
     load_mcp_config,
     add_mcp_server,
@@ -99,6 +100,54 @@ class TestLoadMcpConfig:
 # ---- _build_connections ----
 
 
+# ---- _resolve_command ----
+
+
+class TestResolveCommand:
+    def test_absolute_path_returned_as_is(self, tmp_path):
+        """Absolute paths are never modified, even if the file doesn't exist."""
+        fake = str(tmp_path / "mytool")
+        assert _resolve_command(fake) == fake
+
+    def test_found_on_path(self):
+        """Commands found via shutil.which are returned as full paths."""
+        result = _resolve_command("python")
+        assert result.endswith("python") or result.endswith("python3")
+        assert result != "python"  # resolved, not the bare name
+
+    def test_found_in_python_bin(self, tmp_path, monkeypatch):
+        """Falls back to sys.executable's directory when not in PATH."""
+
+        # Create a fake executable next to sys.executable
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_exe = bin_dir / "my-mcp-tool"
+        fake_exe.write_text("#!/bin/sh\n")
+        fake_exe.chmod(0o755)
+
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        monkeypatch.setattr("EvoScientist.mcp.client.sys.executable", str(bin_dir / "python"))
+
+        assert _resolve_command("my-mcp-tool") == str(fake_exe)
+
+    def test_not_found_returns_original(self, monkeypatch):
+        """Returns the original command when not found anywhere (let OS report the error)."""
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client.sys.executable", "/nonexistent/bin/python"
+        )
+        assert _resolve_command("unknown-tool-xyz") == "unknown-tool-xyz"
+
+    def test_build_connections_resolves_command(self, monkeypatch):
+        """_build_connections uses _resolve_command so the full path appears in output."""
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client._resolve_command", lambda cmd: f"/resolved/{cmd}"
+        )
+        config = {"srv": {"transport": "stdio", "command": "mytool", "args": []}}
+        conns = _build_connections(config)
+        assert conns["srv"]["command"] == "/resolved/mytool"
+
+
 class TestBuildConnections:
     def test_stdio_connection(self):
         config = {
@@ -111,7 +160,7 @@ class TestBuildConnections:
         conns = _build_connections(config)
         assert "fs" in conns
         assert conns["fs"]["transport"] == "stdio"
-        assert conns["fs"]["command"] == "npx"
+        assert conns["fs"]["command"].endswith("npx")
         assert conns["fs"]["args"] == ["-y", "server"]
 
     def test_stdio_with_env(self):

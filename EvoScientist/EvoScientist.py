@@ -43,7 +43,6 @@ SKILLS_DIR = str(Path(__file__).parent / "skills")
 
 _config = None
 _chat_model = None
-_system_prompt = None
 
 # Cache MCP tools by the effective config signature to avoid reconnecting
 # to MCP servers on every `/new` when config is unchanged.
@@ -82,14 +81,6 @@ def _ensure_chat_model():
         cfg = _ensure_config()
         _chat_model = get_chat_model(model=cfg.model, provider=cfg.provider)
     return _chat_model
-
-
-def _ensure_system_prompt():
-    """Return cached system prompt, creating it on first call."""
-    global _system_prompt
-    if _system_prompt is None:
-        _system_prompt = get_system_prompt()
-    return _system_prompt
 
 
 # =============================================================================
@@ -180,7 +171,7 @@ def _build_base_kwargs(base_backend, base_middleware):
         backend=base_backend,
         subagents=subs,
         middleware=base_middleware,
-        system_prompt=_ensure_system_prompt(),
+        system_prompt=get_system_prompt(),
         skills=["/skills/"],
     )
 
@@ -229,7 +220,7 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware):
         backend=base_backend,
         subagents=subs,
         middleware=base_middleware,
-        system_prompt=_ensure_system_prompt(),
+        system_prompt=get_system_prompt(),
         skills=["/skills/"],
     )
 
@@ -310,7 +301,7 @@ def __getattr__(name: str):
     if name == "chat_model":
         return _ensure_chat_model()
     if name == "SYSTEM_PROMPT":
-        return _ensure_system_prompt()
+        return get_system_prompt()
     if name == "backend":
         return _get_default_backend()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

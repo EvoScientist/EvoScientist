@@ -30,7 +30,6 @@ def _run_serve_once(
     no_thinking: bool = False,
     cwd: str | None = None,
 ):
-    import dotenv
     import EvoScientist.config as config_mod
 
     order: list[tuple[str, str | None]] = []
@@ -71,9 +70,6 @@ def _run_serve_once(
 
     monkeypatch.setattr(config_mod, "get_effective_config", lambda *_a, **_k: config)
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
-
-    monkeypatch.setattr(dotenv, "load_dotenv", lambda *_a, **_k: None)
-    monkeypatch.setattr(dotenv, "find_dotenv", lambda *_a, **_k: "")
 
     if cwd is not None:
         monkeypatch.setattr(commands.os, "getcwd", lambda: cwd)

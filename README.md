@@ -1,28 +1,28 @@
 <div align="center">
     <picture>
-      <source media="(prefers-color-scheme: light)" srcset=".github/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-light.svg">
-      <img alt="EvoScientist Logo" src=".github/assets/logo-dark.svg" width="80%">
+      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-light.svg">
+      <img alt="EvoScientist Logo" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-dark.svg" width="80%">
     </picture>
 </div>
 
 <div align="center">
 <a href="https://pypi.org/project/EvoScientist/"><picture>
-  <source media="(prefers-color-scheme: light)" srcset=".github/assets/badge-pypi-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.0.2" src=".github/assets/badge-pypi-light.svg" height="28">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
+  <img alt="PyPI v0.0.2" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
-  <source media="(prefers-color-scheme: light)" srcset=".github/assets/badge-website-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/badge-website-dark.svg">
-  <img alt="Website" src=".github/assets/badge-website-light.svg" height="28">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
+  <img alt="Website" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg" height="28">
 </picture></a><a href="https://github.com/langchain-ai/deepagents"><picture>
-  <source media="(prefers-color-scheme: light)" srcset=".github/assets/badge-framework-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/badge-framework-dark.svg">
-  <img alt="Framework DeepAgents" src=".github/assets/badge-framework-light.svg" height="28">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-framework-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-framework-dark.svg">
+  <img alt="Framework DeepAgents" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-framework-light.svg" height="28">
 </picture></a><a href="https://github.com/EvoScientist/EvoScientist/blob/main/LICENSE"><picture>
-  <source media="(prefers-color-scheme: light)" srcset=".github/assets/badge-license-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/badge-license-dark.svg">
-  <img alt="License Apache 2.0" src=".github/assets/badge-license-light.svg" height="28">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-license-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-license-dark.svg">
+  <img alt="License Apache 2.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-license-light.svg" height="28">
 </picture></a>
 </div>
 
@@ -47,17 +47,17 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <table>
   <tr>
     <td align="center" valign="top" width="33%">
-      <img src=".github/assets/ICAIS_awards.JPG" height="180" alt="ICAIS 2025 Awards"/>
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_awards.JPG" height="180" alt="ICAIS 2025 Awards"/>
       <br />
       <sub><b>Best Paper & Appraisal Award</b></sub>
     </td>
     <td align="center" valign="top" width="33%">
-      <img src=".github/assets/ICAIS_best_paper.png" height="180" alt="Best Paper"/>
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_best_paper.png" height="180" alt="Best Paper"/>
       <br />
       <sub><b>AI-Generated Best Paper</b></sub>
     </td>
     <td align="center" valign="top" width="33%">
-      <img src=".github/assets/deepresearch_bench_2.JPG" height="180" alt="DeepResearch Bench II #1"/>
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/deepresearch_bench_2.JPG" height="180" alt="DeepResearch Bench II #1"/>
       <br />
       <sub><b>#1 on DeepResearch Bench II</b></sub>
     </td>
@@ -141,6 +141,14 @@ Or install into the current environment instead:
 uv pip install EvoScientist
 ```
 
+### Latest from GitHub
+
+To get the latest patches before a [PyPI](https://pypi.org/project/EvoScientist/) release:
+
+```bash
+uv pip install git+https://github.com/EvoScientist/EvoScientist.git
+```
+
 ### Development Install
 
 ```bash
@@ -207,9 +215,10 @@ EvoSci onboard
 ```
 
 > [!TIP]
-> It walks you through provider selection, key validation, model choice, and workspace mode.
+> It walks you through provider selection, key validation, model choice, and workspace mode. 
+> Supports OAuth sign-in for [Claude Code](https://claude.com/product/claude-code) and [Codex CLI](https://developers.openai.com/codex/cli/) users — no API key needed.
 
-![onboard](.github/assets/EvoScientist_onboard.png)
+![onboard](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_onboard.png)
 
 <details>
 <summary> 📟 Manual configuration via environment variables </summary>
@@ -247,11 +256,14 @@ cp .env.example .env  # then fill in your keys
 EvoSci  # or EvoScientist — interactive mode (TUI by default)
 ```
 
-![demo](.github/assets/EvoScientist_cli.png)
+![demo](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli.png)
 
 > Run `EvoSci -h` for all CLI options.
 
-![cli help](.github/assets/EvoScientist_cli_help.png)
+![cli help](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli_help.png)
+
+> [!TIP]
+> Need to copy long outputs? Use `--ui cli` for classic mode where native terminal copy works freely. On macOS, [iTerm2](https://iterm2.com/) users can also hold `⌥ Option` while dragging to select, then `⌘+C`.
 
 <details>
 <summary>Common examples</summary>
@@ -413,7 +425,7 @@ Coming soon:
 - [x] 👋 Human-in-the-loop action approval
 - [x] 🦾 Agent-initiated human clarification
 - [x] 📑 Technical report on the way
-- [ ] 🔐 OAuth sign-in (Anthropic, OpenAI, etc.)
+- [x] 🔐 OAuth sign-in (Anthropic, OpenAI, etc.)
 - [ ] 📺 Web app with workspace UI
 - [ ] 📹 Demo and tutorial in the works
 - [ ] 📊 Benchmark suite to be released
@@ -492,7 +504,7 @@ Stay tuned — more features are on the way!
 
 Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu Guo, Andreas Sauter, Wenxiang Hu, Jacopo Urbani, Zaiqiao Meng, Jun Luo, Lun Zhou
 
-> <a href="https://xiaoyi.huawei.com/chat/research"><img src=".github/assets/xiaoyi-deepresearch.webp" height="16" alt="Xiaoyi DeepResearch" align="center" /></a> [*Xiaoyi DeepResearch*](https://xiaoyi.huawei.com/chat/research) *Team* and the wider open-source community contribute to this project.
+> <a href="https://xiaoyi.huawei.com/chat/research"><img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/xiaoyi-deepresearch.webp" height="16" alt="Xiaoyi DeepResearch" align="center" /></a> [*Xiaoyi DeepResearch*](https://xiaoyi.huawei.com/chat/research) *Team* and the wider open-source community contribute to this project.
 
 For any inquiries or collaboration opportunities, please contact: [**EvoScientist.ai@gmail.com**](mailto:evoscientist.ai@gmail.com)
 
@@ -500,11 +512,16 @@ For any inquiries or collaboration opportunities, please contact: [**EvoScientis
 
 ## 🤝 Contributing
 
-<img align="right" alt="EvoScientist Team" src=".github/assets/EvoScientist_team.png" width="20%" />
+<img align="right" alt="EvoScientist Team" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_team.png" width="20%" />
 
 We welcome contributions from developers, researchers, and AI coding agents at all levels. Our [Contributing Guidelines](./CONTRIBUTING.md) are designed for both humans and AI agents — covering architecture, patterns, extension guides, and code standards to help you contribute safely and effectively.
 
 ### 👥 Community Contributors
+
+⚗️ Join the EvoScientist community to discuss AI-driven research, share experiment results, and help shape the future of automated scientific discovery.
+
+- [Discord](https://discord.gg/AZ9ZMXkunY) — Ask questions, share findings, and collaborate with researchers and developers in real-time.
+- [WeChat](https://github.com/EvoScientist/EvoScientist/blob/main/.github/assets/cn_info.md) — Connect with our Chinese-speaking research community.
 
 Every contribution brings us one step closer to a future where AI accelerates scientific breakthroughs for all of humanity.
 
@@ -538,4 +555,3 @@ If you find our paper and code useful in your research and applications, please 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](./LICENSE) file for details.
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
-
