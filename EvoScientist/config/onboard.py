@@ -7,7 +7,6 @@ workspace settings, and agent parameters. Uses flow-style arrow-key selection UI
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1694,8 +1693,9 @@ def _install_ccproxy() -> bool:
         True if installation succeeded and ccproxy is available.
     """
     from ..ccproxy_manager import is_ccproxy_available
+    from ..mcp.registry import install_pip_package
 
-    ok = _install_pip_package("evoscientist[oauth]")
+    ok = install_pip_package("evoscientist[oauth]")
     if not ok:
         console.print("  [red]✗ Installation failed.[/red]")
         return False
@@ -1939,6 +1939,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         updates["imessage_enabled"] = False
         return updates
 
+    from ..mcp.registry import install_pip_package, pip_install_hint
+
     # Build a lookup for channel definitions
     _ch_lookup = {
         v: (v, d, fields, imp, extra) for v, d, fields, imp, extra in _CHANNELS
@@ -1976,9 +1978,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 if install_now:
                     console.print(f"  [dim]Installing {_pkg_display}...[/dim]")
                     if _pip_pkgs:
-                        _ok = all(_install_pip_package(p) for p in _pip_pkgs)
+                        _ok = all(install_pip_package(p) for p in _pip_pkgs)
                     else:
-                        _ok = _install_pip_package(f"evoscientist[{pip_extra}]")
+                        _ok = install_pip_package(f"evoscientist[{pip_extra}]")
                     if _ok:
                         # Verify the import actually works now
                         try:
@@ -1995,7 +1997,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     else:
                         console.print("  [red]✗ Installation failed.[/red]")
                         console.print(
-                            f"  [dim]Run manually:[/dim] {_pip_install_hint()} {_pkg_display}"
+                            f"  [dim]Run manually:[/dim] {pip_install_hint()} {_pkg_display}"
                         )
             if not _pkg_ready:
                 continue

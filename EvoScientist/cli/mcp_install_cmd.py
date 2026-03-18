@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from typing import Any
 
 import questionary
 from prompt_toolkit.styles import Style as PtStyle
 from questionary import Choice
 
 from ..stream.display import console
-from .agent import _shorten_path
 
 
 _PICKER_STYLE = PtStyle.from_dict(
@@ -98,9 +96,7 @@ def _cmd_install_mcp(args: str = "") -> None:
 def _install_mcp_interactive(pre_filter_tag: str = "") -> None:
     """Browse and install MCP servers from the merged registry."""
     from ..mcp.registry import (
-        MCPServerEntry,
         get_merged_registry,
-        install_mcp_server,
     )
     from ..mcp.client import _load_user_config
 
