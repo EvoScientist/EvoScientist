@@ -49,6 +49,40 @@ def is_ccproxy_available() -> bool:
     return _ccproxy_exe() is not None
 
 
+def _is_editable_install() -> bool:
+    """Return True if EvoScientist was installed in editable/development mode.
+
+    Checks all matching distributions because a stale ``.egg-info`` in the
+    project root can shadow the real ``dist-info`` in site-packages.
+    """
+    try:
+        import json
+        import importlib.metadata as _meta
+
+        for dist in _meta.distributions():
+            name = dist.metadata.get("Name", "")
+            if name.lower() != "evoscientist":
+                continue
+            direct_url = dist.read_text("direct_url.json")
+            if direct_url is not None:
+                data = json.loads(direct_url)
+                if data.get("dir_info", {}).get("editable", False) is True:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _oauth_install_hint() -> str:
+    """Return the appropriate install command depending on install method."""
+    if _is_editable_install():
+        return (
+            "uv sync --extra oauth "
+            "or pip install -e '.[oauth]'"
+        )
+    return "pip install 'evoscientist[oauth]'"
+
+
 def _summarize_auth_output(raw: str) -> str:
     """Extract key fields from ccproxy auth status output into a one-line summary.
 
@@ -356,8 +390,7 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     if not is_ccproxy_available():
         raise RuntimeError(
             "ccproxy is required for OAuth mode but not found. "
-            "Install it with: uv sync --extra oauth "
-            "or pip install 'evoscientist[oauth]'"
+            f"Install it with: {_oauth_install_hint()}"
         )
 
     # Check auth for each provider that uses OAuth
