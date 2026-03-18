@@ -356,7 +356,8 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     if not is_ccproxy_available():
         raise RuntimeError(
             "ccproxy is required for OAuth mode but not found. "
-            "Install it with: pip install 'evoscientist[oauth]'"
+            "Install it with: uv sync --extra oauth "
+            "or pip install 'evoscientist[oauth]'"
         )
 
     # Check auth for each provider that uses OAuth

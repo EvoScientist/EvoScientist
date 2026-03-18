@@ -339,8 +339,13 @@ class TestMaybeStartCcproxy:
         config = MagicMock()
         config.anthropic_auth_mode = "api_key"
         config.openai_auth_mode = "oauth"
-        with pytest.raises(RuntimeError, match="not found"):
+        with pytest.raises(RuntimeError) as exc_info:
             maybe_start_ccproxy(config)
+
+        msg = str(exc_info.value)
+        assert "ccproxy is required for OAuth mode but not found" in msg
+        assert "uv sync --extra oauth" in msg
+        assert "pip install 'evoscientist[oauth]'" in msg
 
     @patch(
         "EvoScientist.ccproxy_manager.check_ccproxy_auth",
