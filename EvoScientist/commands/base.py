@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Protocol, Type, runtime_checkable
+
+
+@dataclass
+class Argument:
+    """Definition of a command argument."""
+
+    name: str
+    type: Type
+    description: str
+    required: bool = True
+
+
+@runtime_checkable
+class CommandUI(Protocol):
+    """Protocol for UI operations that commands can perform."""
+
+    @property
+    def supports_interactive(self) -> bool: ...
+
+    def append_system(self, text: str, style: str = "dim") -> None: ...
+    def mount_renderable(self, renderable: Any) -> None: ...
+
+    # Optional interactive operations
+    async def wait_for_thread_pick(
+        self, threads: list[dict], current_thread: str, title: str
+    ) -> str | None: ...
+    async def wait_for_skill_browse(
+        self, index: list[dict], installed_names: set[str], pre_filter_tag: str
+    ) -> list[str] | None: ...
+    def clear_chat(self) -> None: ...
+    def request_quit(self) -> None: ...
+    def start_new_session(self) -> None: ...
+    async def handle_session_resume(
+        self, thread_id: str, workspace_dir: str | None = None
+    ) -> None: ...
+    async def flush(self) -> None: ...
+
+
+@dataclass
+class CommandContext:
+    """Context passed to commands during execution."""
+
+    agent: Any
+    thread_id: str
+    ui: CommandUI
+    workspace_dir: str | None = None
+    checkpointer: Any = None
+    config: Any = None
+    # Add other fields as needed (e.g., current model, provider)
+
+
+class Command(ABC):
+    """Base class for all EvoScientist slash commands."""
+
+    name: str
+    alias: list[str] = []
+    description: str
+    arguments: list[Argument] = []
+
+    @abstractmethod
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        """Execute the command with given context and arguments."""
+        pass

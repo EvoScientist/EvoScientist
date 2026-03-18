@@ -292,13 +292,43 @@ class TestChunkText:
         assert all(len(c) <= 50 for c in chunks)
 
     def test_code_block_fence_split(self):
-        """[B-08] Code block fence splitting should not break mid-block."""
+        """[B-08] Code block fence splitting should not break mid-block without refencing."""
         code = "```python\nprint('hello')\nprint('world')\n```"
         text = "Before.\n\n" + code + "\n\nAfter some text here."
-        chunks = chunk_text(text, 40)
+        # Use a limit that forces a split inside the code block
+        chunks = chunk_text(text, 25)
+        
         # Verify we get multiple chunks and none are empty
         assert len(chunks) >= 2
         assert all(c.strip() for c in chunks)
+        
+        # Check that the code block was properly re-fenced
+        # The first chunk should open the block but not close it (if it splits mid-block)
+        # Actually, the new implementation adds closing fences to the split part and opens the next.
+        # Let's just check that all chunks are valid markdown and the code is preserved.
+        reconstructed = "".join(c for c in chunks).replace("```python\n", "").replace("\n```", "").replace("```\n", "")
+        assert "print('hello')" in reconstructed
+        assert "print('world')" in reconstructed
+        
+        # At least one chunk should have a re-fenced code block if it split
+        has_refence = any("```python\n" in c and c.count("```") == 2 for c in chunks)
+        assert has_refence, "No chunks were properly re-fenced"
+        
+        # It's possible it split exactly on the fence, so we can't assert has_refence strictly without knowing the exact cut,
+        # but we can assert that every chunk has balanced or correctly formatted fences.
+        for c in chunks:
+            if "```" in c:
+                assert c.count("```") % 2 == 0, f"Unbalanced fences in chunk: {c}"
+
+    def test_long_code_block_refencing(self):
+        """Verify that a very long code block is split and each chunk gets fences."""
+        code = "```js\n" + "line of code\n" * 10 + "```"
+        chunks = chunk_text(code, 50)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert chunk.startswith("```js\n") or chunk.startswith("```")
+            assert chunk.rstrip().endswith("```")
+            assert chunk.count("```") >= 2
 
     def test_code_block_preserved_when_fits(self):
         code = "```\ncode\n```"
