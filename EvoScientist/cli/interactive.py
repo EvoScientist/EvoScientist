@@ -122,7 +122,6 @@ _SLASH_COMMANDS = [
     ("/install-skill", "Add a skill from path or GitHub"),
     ("/uninstall-skill", "Remove an installed skill"),
     ("/install-skills", "Browse and install skills (optional: /install-skills <tag>)"),
-    ("/install-mcp", "Browse and install MCP servers"),
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
@@ -769,13 +768,6 @@ def cmd_interactive(
                         if user_input.lower().startswith("/install-skills"):
                             browse_args = user_input[len("/install-skills") :].strip()
                             _cmd_install_skills(browse_args)
-                            continue
-
-                        if user_input.lower().startswith("/install-mcp"):
-                            from .mcp_install_cmd import _cmd_install_mcp
-
-                            browse_args = user_input[len("/install-mcp") :].strip()
-                            _cmd_install_mcp(browse_args)
                             continue
 
                         if user_input.lower().startswith("/mcp"):
