@@ -1417,6 +1417,13 @@ def run_textual_interactive(
 
         def action_edit_queued(self) -> None:
             """Pop the last queued message back into input for editing."""
+            # Handle completion list selection (up key)
+            comp_widget = self.query_one("#completions", Static)
+            if comp_widget.display and self._comp_items:
+                self._comp_index = (self._comp_index - 1) % len(self._comp_items)
+                self._render_completions()
+                return
+
             # Skip if an ApprovalWidget, AskUserWidget, or ThreadPickerWidget has focus
             focused = self.focused
             if focused is not None:
@@ -1443,6 +1450,13 @@ def run_textual_interactive(
 
         def action_down_delegate(self) -> None:
             """Delegate down key to focused ApprovalWidget, AskUserWidget, or ThreadPickerWidget."""
+            # Handle completion list selection (down key)
+            comp_widget = self.query_one("#completions", Static)
+            if comp_widget.display and self._comp_items:
+                self._comp_index = (self._comp_index + 1) % len(self._comp_items)
+                self._render_completions()
+                return
+
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
@@ -1487,23 +1501,26 @@ def run_textual_interactive(
                 event.prevent_default()
                 event.stop()
                 self._comp_index = (self._comp_index + 1) % len(self._comp_items)
-                self._apply_selected_completion()
+                self._render_completions()
             elif event.key == "up":
                 event.prevent_default()
                 event.stop()
                 self._comp_index = (self._comp_index - 1) % len(self._comp_items)
-                self._apply_selected_completion()
+                self._render_completions()
             elif event.key == "enter" and self._comp_index >= 0:
                 event.prevent_default()
                 event.stop()
+                self._apply_selected_completion()
                 self._hide_completions()
 
         def _apply_selected_completion(self) -> None:
+            """Apply the currently selected completion to the input field."""
+            if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
+                return
             selected_cmd = self._comp_items[self._comp_index][0]
             prompt = self.query_one("#prompt", Input)
             prompt.value = selected_cmd + " "
             prompt.cursor_position = len(prompt.value)
-            self._render_completions()
 
         def _hide_completions(self) -> None:
             self._comp_items = []

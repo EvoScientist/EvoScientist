@@ -59,11 +59,17 @@ def _paste_native() -> str | None:
             result = subprocess.run(
                 ["powershell", "-command", "Get-Clipboard"],
                 capture_output=True,
-                text=True,
                 timeout=2,
             )
             if result.returncode == 0:
-                return result.stdout.rstrip("\r\n")
+                # Try UTF-8 first, fall back to system encoding
+                for encoding in ("utf-8", "gbk", "cp936"):
+                    try:
+                        return result.stdout.decode(encoding).rstrip("\r\n")
+                    except UnicodeDecodeError:
+                        continue
+                # Last resort: decode with errors ignored
+                return result.stdout.decode("utf-8", errors="ignore").rstrip("\r\n")
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
     else:
