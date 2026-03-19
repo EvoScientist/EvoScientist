@@ -63,6 +63,80 @@ def strip_thinking_tags(content: str) -> str:
     return _THINKING_TAG_RE.sub("", content)
 
 
+# ---------------------------------------------------------------------------
+# Utility: flatten list-of-blocks content to a plain string.
+# OpenAI-compatible APIs (DeepSeek, SiliconFlow, etc.) reject assistant
+# messages whose content is a list rather than a string.
+# ---------------------------------------------------------------------------
+_SKIP_CONTENT_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
+
+
+def _flatten_message_content(content: Any) -> str | Any:
+    """Convert list-of-blocks content to a plain string.
+
+    - Extracts text from ``{"type": "text", "text": "..."}`` blocks.
+    - Skips ``thinking`` / ``reasoning`` / ``reasoning_content`` blocks.
+    - Returns string content unchanged.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") in _SKIP_CONTENT_TYPES:
+                continue
+            text = block.get("text")
+            if text:
+                parts.append(text)
+        elif isinstance(block, str):
+            parts.append(block)
+    return "\n\n".join(parts) if parts else ""
+
+
+# ---------------------------------------------------------------------------
+# Patch: wrap _generate / _agenerate on OpenAI-compatible models to flatten
+# list content to strings before the API call, preventing "invalid type:
+# sequence, expected a string" errors from strict APIs like DeepSeek.
+# ---------------------------------------------------------------------------
+def _patch_openai_compat_content(model: Any) -> None:
+    """Wrap ``_generate`` / ``_agenerate`` to flatten message content to strings.
+
+    Follows the same monkey-patching pattern as ``_patch_anthropic_proxy_compat``.
+    """
+    import functools
+
+    from langchain_core.messages import BaseMessage
+
+    def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+        for msg in messages:
+            if isinstance(msg.content, list):
+                msg.content = _flatten_message_content(msg.content)
+        return messages
+
+    orig_generate = getattr(model, "_generate", None)
+    if orig_generate is None:
+        return
+
+    @functools.wraps(orig_generate)
+    def _patched_generate(messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+        return orig_generate(_sanitize_messages(messages), *args, **kwargs)
+
+    model._generate = _patched_generate
+
+    orig_agenerate = getattr(model, "_agenerate", None)
+    if orig_agenerate is not None:
+
+        @functools.wraps(orig_agenerate)
+        async def _patched_agenerate(
+            messages: list[BaseMessage], *args: Any, **kwargs: Any
+        ) -> Any:
+            return await orig_agenerate(_sanitize_messages(messages), *args, **kwargs)
+
+        model._agenerate = _patched_agenerate
+
+
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
