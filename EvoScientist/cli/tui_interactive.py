@@ -306,6 +306,7 @@ def run_textual_interactive(
             self._ask_user_future: asyncio.Future | None = None
             self._picker_future: asyncio.Future | None = None
             self._browser_future: asyncio.Future | None = None
+            self._mcp_browser_future: asyncio.Future | None = None
             self._history_suggester = HistorySuggester(get_config_dir() / "history")
 
         # ── CommandUI implementation ─────────────────────────
@@ -349,6 +350,23 @@ def run_textual_interactive(
             browser.focus()
 
             return await self._wait_for_skill_browse(browser)
+
+        async def wait_for_mcp_browse(
+            self, servers: list, installed_names: set[str], pre_filter_tag: str
+        ) -> list | None:
+            from .widgets.mcp_browser import MCPBrowserWidget
+
+            container = self.query_one("#chat", VerticalScroll)
+            browser = MCPBrowserWidget(
+                servers,
+                installed_names,
+                pre_filter_tag=pre_filter_tag,
+            )
+            await container.mount(browser)
+            container.scroll_end(animate=False)
+            browser.focus()
+
+            return await self._wait_for_mcp_browse(browser)
 
         def clear_chat(self) -> None:
             container = self.query_one("#chat", VerticalScroll)
@@ -593,6 +611,33 @@ def run_textual_interactive(
             """Handle SkillBrowserWidget.Cancelled message."""
             if self._browser_future and not self._browser_future.done():
                 self._browser_future.set_result(None)
+
+        # ── MCP browser ───────────────────────────────────────
+
+        async def _wait_for_mcp_browse(self, browser_widget) -> list | None:
+            """Wait for user to complete MCP server browsing."""
+            self._mcp_browser_future = asyncio.get_event_loop().create_future()
+            try:
+                return await asyncio.wait_for(self._mcp_browser_future, timeout=300)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                return None
+            finally:
+                self._mcp_browser_future = None
+                try:
+                    browser_widget.remove()
+                except Exception:
+                    pass
+                self.query_one("#prompt", Input).focus()
+
+        def on_mcpbrowser_widget_confirmed(self, event) -> None:  # type: ignore[override]
+            """Handle MCPBrowserWidget.Confirmed message."""
+            if self._mcp_browser_future and not self._mcp_browser_future.done():
+                self._mcp_browser_future.set_result(event.entries)
+
+        def on_mcpbrowser_widget_cancelled(self, event) -> None:  # type: ignore[override]
+            """Handle MCPBrowserWidget.Cancelled message."""
+            if self._mcp_browser_future and not self._mcp_browser_future.done():
+                self._mcp_browser_future.set_result(None)
 
         # ── Streaming core ─────────────────────────────────────
 
@@ -1537,6 +1582,7 @@ def run_textual_interactive(
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1547,6 +1593,9 @@ def run_textual_interactive(
                     focused.action_cancel()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_cancel()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_cancel()
                     return
             if self._queued_messages:
@@ -1560,6 +1609,7 @@ def run_textual_interactive(
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1573,6 +1623,9 @@ def run_textual_interactive(
                     focused.action_move_up()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_move_up()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_up()
                     return
             if self._queued_messages:
@@ -1589,6 +1642,7 @@ def run_textual_interactive(
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1602,6 +1656,9 @@ def run_textual_interactive(
                     focused.action_move_down()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_move_down()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_down()
                     return
 

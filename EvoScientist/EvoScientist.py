@@ -19,6 +19,7 @@ Usage:
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -88,18 +89,18 @@ def _ensure_chat_model():
 # =============================================================================
 
 
-def _mcp_config_signature() -> str:
-    """Return a stable signature for the effective MCP config."""
+def _load_mcp_config_once() -> tuple[str, dict]:
+    """Load MCP config and return ``(signature, config)``."""
     from .mcp.client import load_mcp_config
 
     cfg = load_mcp_config()
     if not cfg:
-        return ""
+        return "", {}
     try:
-        return json.dumps(cfg, sort_keys=True, ensure_ascii=True)
+        sig = json.dumps(cfg, sort_keys=True, ensure_ascii=True)
     except TypeError:
-        # Fallback for non-JSON-serializable values (should be rare)
-        return repr(cfg)
+        sig = repr(cfg)
+    return sig, cfg
 
 
 def _load_mcp_tools_cached() -> dict[str, list]:
@@ -108,7 +109,7 @@ def _load_mcp_tools_cached() -> dict[str, list]:
 
     from .mcp import load_mcp_tools
 
-    cfg_key = _mcp_config_signature()
+    cfg_key, cfg = _load_mcp_config_once()
     if not cfg_key:
         _MCP_TOOLS_CACHE_KEY = ""
         _MCP_TOOLS_CACHE_VALUE = {}
@@ -117,7 +118,7 @@ def _load_mcp_tools_cached() -> dict[str, list]:
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
         return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
 
-    loaded = load_mcp_tools()
+    loaded = load_mcp_tools(config=cfg)
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     return {k: list(v) for k, v in loaded.items()}
@@ -155,7 +156,9 @@ def _build_base_kwargs(base_backend, base_middleware):
     from .utils import load_subagents
     from .tools import tavily_search, think_tool, skill_manager
 
-    tool_registry = {"think_tool": think_tool, "tavily_search": tavily_search}
+    tool_registry = {"think_tool": think_tool}
+    if os.environ.get("TAVILY_API_KEY"):
+        tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
     subs = load_subagents(
@@ -189,7 +192,9 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware):
     if not mcp_by_agent:
         return _build_base_kwargs(base_backend, base_middleware)
 
-    tool_registry = {"think_tool": think_tool, "tavily_search": tavily_search}
+    tool_registry = {"think_tool": think_tool}
+    if os.environ.get("TAVILY_API_KEY"):
+        tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
     # Fresh tool registry — start from base tools + MCP tools
