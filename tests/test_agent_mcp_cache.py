@@ -23,7 +23,7 @@ class TestMcpToolCaching:
             lambda: {"srv": {"transport": "stdio", "command": "demo"}},
         )
 
-        def fake_load_mcp_tools():
+        def fake_load_mcp_tools(config=None):
             calls["load"] += 1
             return {"main": [tool]}
 
@@ -44,7 +44,7 @@ class TestMcpToolCaching:
         def fake_load_config():
             return state["cfg"]
 
-        def fake_load_mcp_tools():
+        def fake_load_mcp_tools(config=None):
             calls["load"] += 1
             return {"main": [f"tool-v{calls['load']}"]}
 
@@ -57,3 +57,39 @@ class TestMcpToolCaching:
 
         assert calls["load"] == 2
         assert first != second
+
+    def test_load_mcp_config_called_once_per_cache_miss(self, monkeypatch):
+        """load_mcp_config should be called exactly once per cache miss,
+        not twice (once for the signature and once inside load_mcp_tools)."""
+        calls = {"config": 0}
+
+        def counting_load_config():
+            calls["config"] += 1
+            return {"srv": {"transport": "stdio", "command": "demo"}}
+
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client.load_mcp_config", counting_load_config
+        )
+        monkeypatch.setattr(
+            "EvoScientist.mcp.load_mcp_tools", lambda config=None: {"main": []}
+        )
+
+        agent_module._load_mcp_tools_cached()
+        assert calls["config"] == 1
+
+    def test_cached_config_passed_to_load_mcp_tools(self, monkeypatch):
+        """load_mcp_tools should receive the pre-loaded config dict."""
+        received = {}
+
+        def fake_load_config():
+            return {"srv": {"transport": "stdio", "command": "demo"}}
+
+        def fake_load_mcp_tools(config=None):
+            received["config"] = config
+            return {"main": []}
+
+        monkeypatch.setattr("EvoScientist.mcp.client.load_mcp_config", fake_load_config)
+        monkeypatch.setattr("EvoScientist.mcp.load_mcp_tools", fake_load_mcp_tools)
+
+        agent_module._load_mcp_tools_cached()
+        assert received["config"] == {"srv": {"transport": "stdio", "command": "demo"}}

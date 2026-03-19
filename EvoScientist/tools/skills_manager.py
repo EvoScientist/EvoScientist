@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -39,6 +40,8 @@ from pathlib import Path
 import yaml
 
 from .. import paths
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -278,6 +281,31 @@ def install_skill(source: str, dest_dir: str | None = None) -> dict:
     if _is_github_url(source):
         return _install_from_github(source, dest_dir)
     else:
+        # Check if local path exists
+        source_path = Path(source).expanduser().resolve()
+        if not source_path.exists():
+            # Fallback: try resolving as a virtual workspace path
+            from ..paths import resolve_virtual_path
+
+            try:
+                if resolve_virtual_path(source).exists():
+                    return _install_from_local(source, dest_dir)
+            except Exception:
+                pass
+
+            # If not local and not a GitHub URL, try remote lookup in EvoSkills
+            # This handles /install-skill skill-name shorthand
+            try:
+                index = fetch_remote_skill_index()
+                for skill in index:
+                    if skill["name"].lower() == source.lower():
+                        _logger.info(
+                            f"Skill '{source}' found in remote index. Installing..."
+                        )
+                        return _install_from_github(skill["install_source"], dest_dir)
+            except Exception as e:
+                _logger.warning(f"Failed to fetch remote index for fallback: {e}")
+
         return _install_from_local(source, dest_dir)
 
 

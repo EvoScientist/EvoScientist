@@ -16,6 +16,15 @@ from .client import (
     build_mcp_edit_fields,
     VALID_TRANSPORTS,
 )
+from .registry import (
+    MCPServerEntry,
+    fetch_marketplace_index,
+    find_server_by_name,
+    get_all_tags,
+    get_installed_names,
+    install_mcp_server,
+    install_mcp_servers,
+)
 
 __all__ = [
     "load_mcp_config",
@@ -29,4 +38,12 @@ __all__ = [
     "build_mcp_add_kwargs",
     "build_mcp_edit_fields",
     "VALID_TRANSPORTS",
+    # Registry
+    "MCPServerEntry",
+    "fetch_marketplace_index",
+    "find_server_by_name",
+    "get_all_tags",
+    "get_installed_names",
+    "install_mcp_server",
+    "install_mcp_servers",
 ]
