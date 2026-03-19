@@ -602,20 +602,12 @@ def _step_provider(config: EvoScientistConfig) -> str:
         Selected provider name.
     """
     choices = [
+        # Direct providers
         Choice(title="Anthropic (Claude models — API / OAuth)", value="anthropic"),
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
         Choice(
             title="MiniMax (M2 — M2.7 models, 204K context, thinking)", value="minimax"
-        ),
-        Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
-        Choice(
-            title="SiliconFlow (third party — GLM, Kimi, MiniMax, etc.)",
-            value="siliconflow",
-        ),
-        Choice(
-            title="OpenRouter (third party — Grok, Gemini, Qwen, etc.)",
-            value="openrouter",
         ),
         Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
         Choice(
@@ -630,7 +622,18 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="DashScope (阿里云 — Qwen models)",
             value="dashscope",
         ),
+        # Local
         Choice(title="Ollama (local models)", value="ollama"),
+        # Third-party / aggregator
+        Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
+        Choice(
+            title="SiliconFlow (aggregator — GLM, Kimi, MiniMax, etc.)",
+            value="siliconflow",
+        ),
+        Choice(
+            title="OpenRouter (aggregator — Grok, Gemini, Qwen, etc.)",
+            value="openrouter",
+        ),
         Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
