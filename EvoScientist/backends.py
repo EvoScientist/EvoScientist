@@ -85,6 +85,67 @@ def _has_traversal_component(command: str) -> bool:
     return False
 
 
+def _collect_executable_positions(command: str) -> set[int]:
+    """Return the string offsets of executable tokens (first token per segment).
+
+    These are command names/paths that appear in executable position (e.g.
+    ``/usr/bin/python`` in ``/usr/bin/python script.py``) and should not be
+    treated as dangerous operand paths.  Also covers the argument position
+    right after ``pip install`` / ``pip3 install`` (package path).
+    """
+    offsets: set[int] = set()
+    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", command):
+        for pipe_seg in segment.split("|"):
+            pipe_seg_stripped = pipe_seg.strip()
+            if not pipe_seg_stripped:
+                continue
+            # Offset of this pipe segment within *command*
+            seg_start = command.find(pipe_seg_stripped)
+            try:
+                tokens = shlex.split(pipe_seg_stripped)
+            except ValueError:
+                tokens = pipe_seg_stripped.split()
+            if not tokens:
+                continue
+            # First token is the executable itself — mark its offset
+            offsets.add(seg_start)
+            # pip install <path> — mark the install-target token
+            if len(tokens) >= 3 and tokens[0] in ("pip", "pip3") and tokens[1] == "install":
+                # Find position of the 3rd token (the package arg) onwards
+                rest = pipe_seg_stripped
+                for t in tokens[:2]:
+                    idx = rest.find(t)
+                    rest = rest[idx + len(t) :]
+                pkg_offset = seg_start + (len(pipe_seg_stripped) - len(rest.lstrip()))
+                offsets.add(pkg_offset)
+    return offsets
+
+
+def _extract_all_paths(command: str) -> list[str]:
+    """Extract potential file paths from a command, including inside quoted strings.
+
+    Scans both shell tokens and string literals (single/double quoted) to find
+    paths that start with system prefixes like /Users/, /etc/, /tmp/, etc.
+    Skips paths in executable position (command name) and pip install targets.
+    """
+    exe_offsets = _collect_executable_positions(command)
+    paths: list[str] = []
+    # Pattern: match absolute paths starting with / followed by word chars, dots,
+    # dashes, slashes. Looks inside quotes and unquoted tokens alike.
+    # Excludes URL-like patterns (preceded by ://)
+    path_re = re.compile(
+        r'(?<![:=/\w])'       # not preceded by :, =, /, or word char (avoid URLs, env vars)
+        r'(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)'
+        r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
+    )
+    for m in path_re.finditer(command):
+        # Skip paths that land at an executable-position offset
+        if m.start(1) in exe_offsets:
+            continue
+        paths.append(m.group(1))
+    return paths
+
+
 def validate_command(command: str) -> str | None:
     """
     Validate a shell command for safety.
@@ -116,6 +177,17 @@ def validate_command(command: str) -> str | None:
                 f"Command blocked: '{base_cmd}' is not allowed in sandbox mode. "
                 f"Only standard development commands are permitted."
             )
+
+    # Check for absolute system paths (including inside quoted strings).
+    # This catches attacks like: python -c "os.remove('/Users/foo/file')"
+    escaped_paths = _extract_all_paths(command)
+    if escaped_paths:
+        path_sample = escaped_paths[0]
+        return (
+            f"Command blocked: contains absolute system path '{path_sample}'. "
+            f"All file operations must use relative paths within the workspace. "
+            f"Use relative paths (e.g., './file.py') instead."
+        )
 
     return None
 
