@@ -5,16 +5,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from EvoScientist.channels.base import ChannelError, OutboundMessage
 from EvoScientist.channels.feishu.channel import (
     FeishuChannel,
     FeishuConfig,
     _markdown_to_feishu_post,
-    _parse_inline_text,
     _parse_inline_elements,
+    _parse_inline_text,
 )
-from EvoScientist.channels.base import ChannelError, OutboundMessage
-
-
 from tests.conftest import run_async as _run
 
 

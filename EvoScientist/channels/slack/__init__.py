@@ -1,5 +1,5 @@
+from ..channel_manager import _parse_csv, register_channel
 from .channel import SlackChannel, SlackConfig
-from ..channel_manager import register_channel, _parse_csv
 
 __all__ = ["SlackChannel", "SlackConfig"]
 
@@ -7,7 +7,7 @@ __all__ = ["SlackChannel", "SlackConfig"]
 def create_from_config(config) -> SlackChannel:
     allowed = _parse_csv(config.slack_allowed_senders)
     channels = _parse_csv(config.slack_allowed_channels)
-    proxy = config.slack_proxy if config.slack_proxy else None
+    proxy = config.slack_proxy or None
     return SlackChannel(
         SlackConfig(
             bot_token=config.slack_bot_token,

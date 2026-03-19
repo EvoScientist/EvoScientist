@@ -52,11 +52,11 @@ def skill_manager(
         Result message
     """
     from .skills_manager import (
+        fetch_remote_skill_index,
+        get_skill_info,
         install_skill,
         list_skills,
         uninstall_skill,
-        get_skill_info,
-        fetch_remote_skill_index,
     )
 
     if action == "install":

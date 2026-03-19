@@ -31,9 +31,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Annotated, NotRequired, cast
-
-from pydantic import BaseModel, Field
+from typing import TYPE_CHECKING, Annotated, Any, NotRequired, cast
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -46,10 +44,11 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import AnyMessage, HumanMessage, filter_messages
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.runtime import Runtime
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from langchain.chat_models import BaseChatModel
     from deepagents.backends.protocol import BACKEND_TYPES, BackendProtocol
+    from langchain.chat_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +234,7 @@ def _get_thread_id(runtime: Runtime) -> str:
             thread_id = config.get("configurable", {}).get("thread_id")
             if thread_id is not None:
                 return str(thread_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("Failed to resolve thread_id from runtime config")
     return "default"
 
@@ -333,7 +332,7 @@ def _merge_memory(existing_md: str, extracted: dict[str, Any]) -> str:
             if value and value != "null":
                 # Replace the line  "- **Label**: ..." with new value
                 pattern = rf"(- \*\*{label}\*\*: ).*"
-                result = re.sub(pattern, lambda m: m.group(1) + value, result)
+                result = re.sub(pattern, lambda m, v=value: m.group(1) + v, result)
 
     # --- Research Preferences ---
     prefs = extracted.get("research_preferences")
@@ -350,7 +349,7 @@ def _merge_memory(existing_md: str, extracted: dict[str, Any]) -> str:
             value = prefs.get(key)
             if value and value != "null":
                 pattern = rf"(- \*\*{label}\*\*: ).*"
-                result = re.sub(pattern, lambda m: m.group(1) + value, result)
+                result = re.sub(pattern, lambda m, v=value: m.group(1) + v, result)
 
     # --- Experiment History (append) ---
     exp = extracted.get("experiment_conclusion")
@@ -532,7 +531,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 and responses[0].error is None
             ):
                 return responses[0].content.decode("utf-8")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("Failed to read memory at %s: %s", self._memory_path, e)
         return ""
 
@@ -545,7 +544,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 and responses[0].error is None
             ):
                 return responses[0].content.decode("utf-8")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("Failed to read memory at %s: %s", self._memory_path, e)
         return ""
 
@@ -560,7 +559,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 result = backend.write(self._memory_path, new_content)
             if result and result.error:
                 logger.warning("Failed to write memory: %s", result.error)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Exception writing memory: %s", e)
 
     async def _awrite_memory(
@@ -575,7 +574,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 result = await backend.awrite(self._memory_path, new_content)
             if result and result.error:
                 logger.warning("Failed to write memory: %s", result.error)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Exception writing memory: %s", e)
 
     # -- threshold check -----------------------------------------------------
@@ -650,7 +649,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         # field cleared) over bind() which only adds invocation kwargs.
         try:
             return model.model_copy(update=updates)
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Fallback for non-Pydantic or unusual model classes
             return model.bind(**{k: v for k, v in updates.items() if v is not None})
 
@@ -667,7 +666,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             )
             result = structured_model.invoke(prompt)
             return result.model_dump(exclude_none=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Memory extraction failed: %s", e)
             return {}
 
@@ -684,7 +683,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             )
             result = await structured_model.ainvoke(prompt)
             return result.model_dump(exclude_none=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Memory extraction failed: %s", e)
             return {}
 
@@ -705,7 +704,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 backend = self._get_backend(state, request.runtime)
                 memory_content = self._read_memory(backend)
                 _CURRENT_MEMORY.set(memory_content)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.debug("Failed to load memory during modify_request: %s", e)
         # Use placeholder when memory file doesn't exist yet
         if not memory_content:
@@ -823,6 +822,7 @@ def create_memory_middleware(
         Configured EvoMemoryMiddleware instance.
     """
     from deepagents.backends import FilesystemBackend
+
     from ..paths import MEMORY_DIR as _DEFAULT_MEMORY_DIR
 
     if memory_dir is None:

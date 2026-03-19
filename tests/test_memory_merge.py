@@ -2,7 +2,7 @@
 
 import pytest
 
-from EvoScientist.middleware.memory import _merge_memory, DEFAULT_MEMORY_TEMPLATE
+from EvoScientist.middleware.memory import DEFAULT_MEMORY_TEMPLATE, _merge_memory
 
 
 class TestMergeMemoryBackslashSafety:

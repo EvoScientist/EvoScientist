@@ -34,7 +34,7 @@ class RetryInfo:
 
 async def retry_async(
     fn: Callable[[], Awaitable[T]],
-    config: RetryConfig = RetryConfig(),
+    config: RetryConfig | None = None,
     *,
     should_retry: Callable[[Exception, int], bool] | None = None,
     retry_after_s: Callable[[Exception], float | None] | None = None,
@@ -48,20 +48,10 @@ async def retry_async(
     fn:
         Zero-argument async factory — called on every attempt so the
         awaitable is always fresh.
-    config:
-        Retry timing / attempt parameters.
-    should_retry:
-        ``(exception, attempt) -> bool``.  Return ``False`` to abort
-        immediately.  When *None* every exception is retried.
-    retry_after_s:
-        ``(exception) -> seconds | None``.  If the server provides a
-        ``Retry-After`` value (e.g. HTTP 429), return it here.  The
-        actual delay will be ``max(server_value, min_delay_s)``.
-    on_retry:
-        Optional callback invoked before each retry sleep.
-    label:
-        Human-readable label included in :class:`RetryInfo`.
     """
+    if config is None:
+        config = RetryConfig()
+
     last_exc: Exception | None = None
     for attempt in range(1, config.attempts + 1):
         try:
@@ -105,7 +95,7 @@ async def retry_async(
             await asyncio.sleep(delay)
 
     # Should never reach here, but satisfy the type checker.
-    assert last_exc is not None  # noqa: S101
+    assert last_exc is not None
     raise last_exc
 
 

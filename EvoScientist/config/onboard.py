@@ -7,7 +7,6 @@ workspace settings, and agent parameters. Uses flow-style arrow-key selection UI
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,19 +14,19 @@ from pathlib import Path
 import questionary
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.styles import Style
-from prompt_toolkit.validation import Validator, ValidationError
+from prompt_toolkit.validation import ValidationError, Validator
 from questionary import Choice
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from ..llm import get_models_for_provider
 from .settings import (
     EvoScientistConfig,
+    get_config_path,
     load_config,
     save_config,
-    get_config_path,
 )
-from ..llm import get_models_for_provider
 
 console = Console()
 
@@ -136,8 +135,8 @@ class IntegerValidator(Validator):
                 raise ValidationError(
                     message=f"Must be between {self.min_value} and {self.max_value}"
                 )
-        except ValueError:
-            raise ValidationError(message="Must be a valid integer")
+        except ValueError as e:
+            raise ValidationError(message="Must be a valid integer") from e
 
 
 class ChoiceValidator(Validator):
@@ -225,9 +224,9 @@ def validate_nvidia_key(api_key: str) -> tuple[bool, str]:
     try:
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
-        llm = ChatNVIDIA(api_key=api_key, model="meta/llama-3.1-8b-instruct")
-        llm.available_models
+        ChatNVIDIA(api_key=api_key, model="meta/llama-3.1-8b-instruct")
         return True, "Valid"
+
     except Exception as e:
         error_str = str(e).lower()
         if (
@@ -272,6 +271,35 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
             or "unauthorized" in error_str
             or "invalid" in error_str
             or "api key" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
+def validate_minimax_key(api_key: str) -> tuple[bool, str]:
+    """Validate a MiniMax API key by making a test request.
+
+    Uses the Anthropic-compatible endpoint at api.minimaxi.com.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url="https://api.minimaxi.com/anthropic",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if any(
+            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
         ):
             return False, "Invalid API key"
         return False, f"Error: {e}"
@@ -574,17 +602,12 @@ def _step_provider(config: EvoScientistConfig) -> str:
         Selected provider name.
     """
     choices = [
+        # Direct providers
         Choice(title="Anthropic (Claude models — API / OAuth)", value="anthropic"),
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
-        Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
         Choice(
-            title="SiliconFlow (third party — GLM, Kimi, MiniMax, etc.)",
-            value="siliconflow",
-        ),
-        Choice(
-            title="OpenRouter (third party — Grok, Gemini, Qwen, etc.)",
-            value="openrouter",
+            title="MiniMax (M2 — M2.7 models, 204K context, thinking)", value="minimax"
         ),
         Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
         Choice(
@@ -599,7 +622,18 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="DashScope (阿里云 — Qwen models)",
             value="dashscope",
         ),
+        # Local
         Choice(title="Ollama (local models)", value="ollama"),
+        # Third-party / aggregator
+        Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
+        Choice(
+            title="SiliconFlow (aggregator — GLM, Kimi, MiniMax, etc.)",
+            value="siliconflow",
+        ),
+        Choice(
+            title="OpenRouter (aggregator — Grok, Gemini, Qwen, etc.)",
+            value="openrouter",
+        ),
         Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
@@ -636,6 +670,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Anthropic",
             config.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
             validate_anthropic_key,
+        ),
+        "minimax": (
+            "MiniMax",
+            config.minimax_api_key or os.environ.get("MINIMAX_API_KEY", ""),
+            validate_minimax_key,
         ),
         "nvidia": (
             "NVIDIA",
@@ -740,7 +779,7 @@ def _prompt_and_validate_api_key(
         valid, msg = validate_fn(key_to_validate)
         if valid:
             console.print(f"\r  [green]\u2713 {msg}[/green]      ")
-            return new_key if new_key else None
+            return new_key or None
         else:
             console.print(f"\r  [red]\u2717 {msg}[/red]      ")
             if not new_key:
@@ -756,7 +795,7 @@ def _prompt_and_validate_api_key(
                 raise KeyboardInterrupt()
             return new_key if save_anyway else None
 
-    return new_key if new_key else None
+    return new_key or None
 
 
 def _prompt_ccproxy_port(config: EvoScientistConfig) -> None:
@@ -783,7 +822,7 @@ def _prompt_ccproxy_port(config: EvoScientistConfig) -> None:
         ccproxy_port = current_port
         console.print(f"  [dim]Using default port: {ccproxy_port}[/dim]")
 
-    setattr(config, "ccproxy_port", ccproxy_port)
+    config.ccproxy_port = ccproxy_port
     console.print(
         f"  [green]✓ ccproxy will run on http://127.0.0.1:{ccproxy_port}[/green]"
     )
@@ -825,7 +864,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key", "oauth", or "auto".
     """
-    from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
+    from ..ccproxy_manager import check_ccproxy_auth, is_ccproxy_available
 
     ccproxy_available = is_ccproxy_available()
 
@@ -921,7 +960,7 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key" or "oauth".
     """
-    from ..ccproxy_manager import is_ccproxy_available, check_ccproxy_auth
+    from ..ccproxy_manager import check_ccproxy_auth, is_ccproxy_available
 
     ccproxy_available = is_ccproxy_available()
 
@@ -1046,7 +1085,7 @@ def _step_base_url(config: EvoScientistConfig, current_value: str | None = None)
     """
     current = current_value if current_value is not None else ""
     hint = f"Current: {current}" if current else ""
-    default = current if current else ""
+    default = current or ""
 
     url = questionary.text(
         f"Base URL{' (' + hint + ', Enter to keep)' if hint else ''}:",
@@ -1072,7 +1111,7 @@ def _step_ollama_base_url(config: EvoScientistConfig) -> tuple[str, list[str]]:
         Tuple of (base_url, detected_model_names).
     """
     current = config.ollama_base_url or os.environ.get("OLLAMA_BASE_URL", "")
-    default = current if current else "http://localhost:11434"
+    default = current or "http://localhost:11434"
 
     url = questionary.text(
         f"Ollama base URL (Enter for {default}):",
@@ -1548,136 +1587,48 @@ def _step_skills() -> list[str]:
     return installed
 
 
-_RECOMMENDED_MCP_SERVERS = [
-    # ── Built-in ──
-    {
-        "label": "Sequential Thinking  (structured reasoning for non-reasoning models)",
-        "name": "sequential-thinking",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-    },
-    {
-        "label": "Docs by LangChain  (documentation for building agents)",
-        "name": "docs-langchain",
-        "url": "https://docs.langchain.com/mcp",
-    },
-    # ── Search & Knowledge ──
-    {
-        "label": "Perplexity  (AI-powered web search — requires PERPLEXITY_API_KEY)",
-        "name": "perplexity",
-        "command": "npx",
-        "args": ["-y", "@perplexity-ai/mcp-server"],
-        "env": {"PERPLEXITY_API_KEY": "${PERPLEXITY_API_KEY}"},
-        "env_key": "PERPLEXITY_API_KEY",
-        "env_hint": "export PERPLEXITY_API_KEY=pplx-... (get one at perplexity.ai/settings/api)",
-    },
-    {
-        "label": "Context7  (fast documentation lookup — API key unlocks higher rate limits)",
-        "name": "context7",
-        "command": "npx",
-        "args": ["-y", "@upstash/context7-mcp"],
-        "env": {"CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"},
-        "env_key": "CONTEXT7_API_KEY",
-        "env_hint": "export CONTEXT7_API_KEY=... (optional — unlocks higher rate limits)",
-        "env_optional": True,
-    },
-    # ── Research ──
-    {
-        "label": "DeepWiki  (search & read GitHub repo documentation)",
-        "name": "deepwiki",
-        "url": "https://mcp.deepwiki.com/mcp",
-    },
-    {
-        "label": "ArXiv  (search & fetch academic papers from arXiv)",
-        "name": "arxiv",
-        "pip_package": "arxiv-mcp-server",
-        "command": "arxiv-mcp-server",
-        "args": [],
-    },
-]
-
-
-def _pip_install_hint() -> str:
-    """Human-readable install command for error messages."""
-    if shutil.which("uv"):
-        return "uv pip install"
-    return "pip install"
-
-
-def _install_pip_package(package: str) -> bool:
-    """Silently install a pip package.
-
-    Tries ``uv pip install`` first (works reliably in uv-managed
-    environments where ``pip`` may not be available), then falls back
-    to ``python -m pip install``.
-
-    Returns:
-        True if installation succeeded.
-    """
-    # Build candidate command lists: uv first (if available), then pip.
-    commands: list[list[str]] = []
-    if shutil.which("uv"):
-        commands.append(["uv", "pip", "install", "-q", package])
-    commands.append([sys.executable, "-m", "pip", "install", "-q", package])
-
-    for cmd in commands:
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode == 0:
-                # Invalidate import caches so newly-installed packages are
-                # discoverable in the current process without a restart.
-                import importlib
-
-                importlib.invalidate_caches()
-                return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return False
-
-
 def _step_mcp_servers() -> list[str]:
     """Step 8: Optionally install recommended MCP servers.
 
     Shows a checkbox list of recommended servers. Already-configured servers
     are shown as disabled so users don't accidentally override them.
-    Selected ones are added to the user MCP config via ``add_mcp_server()``.
+    Selected ones are added to the user MCP config via ``install_mcp_server()``.
 
     Handles env-key prompts, pip package installs, and URL-based servers.
 
     Returns:
         List of server names that were installed.
     """
-    from ..mcp.client import _load_user_config, add_mcp_server
+    from ..mcp.client import _load_user_config
+    from ..mcp.registry import fetch_marketplace_index, install_mcp_server
 
+    try:
+        all_servers = fetch_marketplace_index()
+    except Exception:
+        all_servers = []
+    servers = [s for s in all_servers if "onboarding" in s.tags]
     existing_config = _load_user_config()
 
     choices = []
-    for srv in _RECOMMENDED_MCP_SERVERS:
-        if srv["name"] in existing_config:
+    for srv in servers:
+        if srv.name in existing_config:
             choices.append(
                 Choice(
                     title=[
-                        ("", srv["label"]),
+                        ("", srv.label),
                         ("class:instruction", "  (already configured)"),
                     ],
-                    value=srv["name"],
+                    value=srv.name,
                     disabled=True,
                 )
             )
         else:
-            choices.append(Choice(title=srv["label"], value=srv["name"]))
+            choices.append(Choice(title=srv.label, value=srv.name))
 
-    all_installed = all(
-        srv["name"] in existing_config for srv in _RECOMMENDED_MCP_SERVERS
-    )
+    all_installed = all(srv.name in existing_config for srv in servers)
     if all_installed:
         console.print(
-            "  [green]✓ All recommended MCP servers are already configured.[/green]"
+            "  [green]\u2713 All recommended MCP servers are already configured.[/green]"
         )
         return []
 
@@ -1694,17 +1645,13 @@ def _step_mcp_servers() -> list[str]:
         return []
 
     # Check if any selected servers require npx
-    needs_npx = any(
-        srv.get("command") == "npx"
-        for srv in _RECOMMENDED_MCP_SERVERS
-        if srv["name"] in selected
-    )
+    needs_npx = any(srv.command == "npx" for srv in servers if srv.name in selected)
     if needs_npx:
         if not _ensure_npx("some MCP servers require Node.js"):
             npx_servers = {
-                srv["name"]
-                for srv in _RECOMMENDED_MCP_SERVERS
-                if srv["name"] in selected and srv.get("command") == "npx"
+                srv.name
+                for srv in servers
+                if srv.name in selected and srv.command == "npx"
             }
             selected = [s for s in selected if s not in npx_servers]
             if npx_servers:
@@ -1716,48 +1663,15 @@ def _step_mcp_servers() -> list[str]:
 
     installed = []
     for name in selected:
-        srv = next(s for s in _RECOMMENDED_MCP_SERVERS if s["name"] == name)
+        srv = next(s for s in servers if s.name == name)
         try:
-            # Prompt for required API keys
-            env_key = srv.get("env_key")
-            if env_key:
-                is_optional = srv.get("env_optional", False)
-                hint = srv.get("env_hint", "")
-                if is_optional:
-                    console.print(f"  [dim]{hint}[/dim]")
-                else:
-                    console.print(f"  [yellow]⚠ Requires {env_key}[/yellow]")
-                    console.print(f"  [dim]{hint}[/dim]")
-                    if not os.environ.get(env_key):
-                        console.print(
-                            f"  [dim]Set it before running EvoScientist: export {env_key}=...[/dim]"
-                        )
-
-            # Install pip package if needed
-            pip_pkg = srv.get("pip_package")
-            if pip_pkg:
-                console.print(f"  [dim]Installing {pip_pkg}...[/dim]")
-                if not _install_pip_package(pip_pkg):
-                    _print_step_result(
-                        "MCP",
-                        f"{name} — {_pip_install_hint()} {pip_pkg} failed",
-                        success=False,
-                    )
-                    continue
-
-            # Add to MCP config
-            if "url" in srv:
-                add_mcp_server(name, "streamable_http", url=srv["url"])
+            if install_mcp_server(srv):
+                _print_step_result("MCP", f"{name}")
+                installed.append(name)
             else:
-                add_mcp_server(
-                    name,
-                    "stdio",
-                    command=srv["command"],
-                    args=srv.get("args", []),
-                    env=srv.get("env"),
+                _print_step_result(
+                    "MCP", f"{name} — installation failed", success=False
                 )
-            _print_step_result("MCP", f"{name}")
-            installed.append(name)
         except Exception as e:
             _print_step_result("MCP", f"{name} — {e}", success=False)
 
@@ -1823,8 +1737,9 @@ def _install_ccproxy() -> bool:
         True if installation succeeded and ccproxy is available.
     """
     from ..ccproxy_manager import is_ccproxy_available
+    from ..mcp.registry import install_pip_package
 
-    ok = _install_pip_package("evoscientist[oauth]")
+    ok = install_pip_package("evoscientist[oauth]")
     if not ok:
         console.print("  [red]✗ Installation failed.[/red]")
         return False
@@ -2068,6 +1983,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         updates["imessage_enabled"] = False
         return updates
 
+    from ..mcp.registry import install_pip_package, pip_install_hint
+
     # Build a lookup for channel definitions
     _ch_lookup = {
         v: (v, d, fields, imp, extra) for v, d, fields, imp, extra in _CHANNELS
@@ -2101,13 +2018,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     qmark=f"  {QMARK}",
                 ).ask()
                 if install_now is None:
-                    raise KeyboardInterrupt()
+                    raise KeyboardInterrupt() from None
                 if install_now:
                     console.print(f"  [dim]Installing {_pkg_display}...[/dim]")
                     if _pip_pkgs:
-                        _ok = all(_install_pip_package(p) for p in _pip_pkgs)
+                        _ok = all(install_pip_package(p) for p in _pip_pkgs)
                     else:
-                        _ok = _install_pip_package(f"evoscientist[{pip_extra}]")
+                        _ok = install_pip_package(f"evoscientist[{pip_extra}]")
                     if _ok:
                         # Verify the import actually works now
                         try:
@@ -2124,7 +2041,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     else:
                         console.print("  [red]✗ Installation failed.[/red]")
                         console.print(
-                            f"  [dim]Run manually:[/dim] {_pip_install_hint()} {_pkg_display}"
+                            f"  [dim]Run manually:[/dim] {pip_install_hint()} {_pkg_display}"
                         )
             if not _pkg_ready:
                 continue
@@ -2479,6 +2396,7 @@ def run_onboard(skip_validation: bool = False) -> bool:
         # and for Anthropic/OpenAI pure OAuth — key provided by ccproxy)
         _PROVIDER_KEY_ATTR = {
             "anthropic": "anthropic_api_key",
+            "minimax": "minimax_api_key",
             "nvidia": "nvidia_api_key",
             "google-genai": "google_api_key",
             "siliconflow": "siliconflow_api_key",

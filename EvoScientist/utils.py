@@ -5,6 +5,7 @@ notebooks, and lightweight configuration loaders used by the agent runtime.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -173,7 +175,15 @@ def load_subagents(
             subagent["skills"] = spec["skills"]
 
         if "tools" in spec:
-            subagent["tools"] = [tool_registry[t] for t in spec["tools"]]
+            resolved = []
+            for t in spec["tools"]:
+                if t in tool_registry:
+                    resolved.append(tool_registry[t])
+                else:
+                    logger.warning(
+                        "Subagent %r: tool %r not in registry, skipping", name, t
+                    )
+            subagent["tools"] = resolved
 
         return subagent
 

@@ -30,9 +30,9 @@ Options:
 import argparse
 import logging
 
-from .channel import WeChatChannel, WeComConfig, WeChatMPConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import WeChatChannel, WeChatMPConfig, WeComConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

@@ -9,7 +9,8 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from rich.console import Console, Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -19,17 +20,17 @@ from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
 from ..paths import resolve_virtual_path
+from .diff_format import build_edit_diff
+from .events import stream_agent_events
 from .formatter import ToolResultFormatter
 from .state import (
+    _INTERNAL_TOOLS,
     StreamState,
     SubAgentState,
     _build_todo_stats,
     _parse_todo_items,
-    _INTERNAL_TOOLS,
 )
 from .utils import DisplayLimits, ToolStatus, format_tool_compact, is_success
-from .diff_format import build_edit_diff
-from .events import stream_agent_events
 
 # ---------------------------------------------------------------------------
 # Shared globals

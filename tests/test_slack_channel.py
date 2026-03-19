@@ -2,10 +2,8 @@
 
 import pytest
 
-from EvoScientist.channels.slack.channel import SlackChannel, SlackConfig
 from EvoScientist.channels.base import ChannelError
-
-
+from EvoScientist.channels.slack.channel import SlackChannel, SlackConfig
 from tests.conftest import run_async as _run
 
 

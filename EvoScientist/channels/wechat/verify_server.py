@@ -89,7 +89,7 @@ class VerifyServer:
         try:
             await asyncio.wait_for(self._verified.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     @property

@@ -5,13 +5,12 @@ using Tavily for URL discovery and fetching full webpage content.
 """
 
 import asyncio
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from langchain_core.tools import InjectedToolArg, tool
 from markdownify import markdownify
 from tavily import TavilyClient
-from typing_extensions import Annotated
 
 # Lazy initialization - only create client when needed
 _tavily_client = None
@@ -49,7 +48,7 @@ async def fetch_webpage_content(url: str, timeout: float = 10.0) -> str:
             response.raise_for_status()
             return markdownify(response.text)
     except Exception as e:
-        return f"Error fetching content from {url}: {str(e)}"
+        return f"Error fetching content from {url}: {e!s}"
 
 
 @tool(parse_docstring=True)
@@ -94,7 +93,7 @@ async def tavily_search(
 
         # Format results
         result_texts = []
-        for result, content in zip(results, contents):
+        for result, content in zip(results, contents, strict=False):
             result_text = f"""## {result["title"]}
 **URL:** {result["url"]}
 
@@ -109,4 +108,4 @@ async def tavily_search(
 {"".join(result_texts)}"""
 
     except Exception as e:
-        return f"Search failed: {str(e)}"
+        return f"Search failed: {e!s}"

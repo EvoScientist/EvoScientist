@@ -12,8 +12,8 @@ Channels no longer need per-file format functions — they just declare
 from __future__ import annotations
 
 import re
-from typing import Callable
-
+from collections.abc import Callable
+from typing import ClassVar
 
 # ═════════════════════════════════════════════════════════════════════
 # Markdown conversion engine (formerly markdown_utils.py)
@@ -236,37 +236,37 @@ class UnifiedFormatter:
     Instantiated once per channel based on its ``capabilities.format_type``.
     """
 
-    _PROFILES: dict[str, dict] = {
-        "html": dict(
-            code_block_formatter=_html_code_block,
-            inline_code_formatter=_html_inline_code,
-            inline_rules=_HTML_INLINE_RULES,
-            escape_fn=_escape_html,
-        ),
-        "slack_mrkdwn": dict(
-            code_block_formatter=_slack_code_block,
-            inline_code_formatter=_slack_inline_code,
-            inline_rules=_SLACK_INLINE_RULES,
-            escape_fn=None,
-        ),
-        "discord": dict(
-            code_block_formatter=_discord_code_block,
-            inline_code_formatter=_discord_inline_code,
-            inline_rules=_DISCORD_INLINE_RULES,
-            escape_fn=None,
-        ),
-        "markdown": dict(
-            code_block_formatter=_md_code_block,
-            inline_code_formatter=_md_inline_code,
-            inline_rules=_MD_INLINE_RULES,
-            escape_fn=None,
-        ),
-        "plain": dict(
-            code_block_formatter=_plain_code_block,
-            inline_code_formatter=_plain_inline_code,
-            inline_rules=_PLAIN_INLINE_RULES,
-            escape_fn=None,
-        ),
+    _PROFILES: ClassVar[dict[str, dict]] = {
+        "html": {
+            "code_block_formatter": _html_code_block,
+            "inline_code_formatter": _html_inline_code,
+            "inline_rules": _HTML_INLINE_RULES,
+            "escape_fn": _escape_html,
+        },
+        "slack_mrkdwn": {
+            "code_block_formatter": _slack_code_block,
+            "inline_code_formatter": _slack_inline_code,
+            "inline_rules": _SLACK_INLINE_RULES,
+            "escape_fn": None,
+        },
+        "discord": {
+            "code_block_formatter": _discord_code_block,
+            "inline_code_formatter": _discord_inline_code,
+            "inline_rules": _DISCORD_INLINE_RULES,
+            "escape_fn": None,
+        },
+        "markdown": {
+            "code_block_formatter": _md_code_block,
+            "inline_code_formatter": _md_inline_code,
+            "inline_rules": _MD_INLINE_RULES,
+            "escape_fn": None,
+        },
+        "plain": {
+            "code_block_formatter": _plain_code_block,
+            "inline_code_formatter": _plain_inline_code,
+            "inline_rules": _PLAIN_INLINE_RULES,
+            "escape_fn": None,
+        },
     }
 
     def __init__(self, format_type: str = "plain") -> None:
@@ -290,6 +290,6 @@ class UnifiedFormatter:
         return convert_markdown(text, **self._profile)
 
     @classmethod
-    def for_channel(cls, format_type: str) -> "UnifiedFormatter":
+    def for_channel(cls, format_type: str) -> UnifiedFormatter:
         """Factory: create a formatter for the given format type."""
         return cls(format_type)

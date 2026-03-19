@@ -18,7 +18,6 @@ import logging
 import time
 from typing import Any
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -192,6 +191,7 @@ class WebSocketMixin:
     async def _ws_loop(self) -> None:
         """Main WebSocket loop with auto-reconnect."""
         import os
+
         import aiohttp
 
         while getattr(self, "_running", False):

@@ -25,27 +25,27 @@ import pytest
 from EvoScientist.channels.base import (
     Channel,
     ChannelError,
-    OutboundMessage,
     InboundMessage,
+    OutboundMessage,
     RawIncoming,
     chunk_text,
 )
 from EvoScientist.channels.bus.events import (
     InboundMessage as BusInbound,
+)
+from EvoScientist.channels.bus.events import (
     OutboundMessage as BusOutbound,
 )
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
+from EvoScientist.channels.formatter import convert_markdown
 from EvoScientist.channels.middleware import DedupCache
 from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
-from EvoScientist.channels.formatter import convert_markdown
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
-
 from tests.conftest import run_async as _run
 
 
@@ -249,7 +249,7 @@ class TestRetryAsync:
         )
         # With 50% jitter, not all delays should be identical
         if len(delays) > 1:
-            assert len(set(f"{d:.4f}" for d in delays)) > 1
+            assert len({f"{d:.4f}" for d in delays}) > 1
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -297,23 +297,28 @@ class TestChunkText:
         text = "Before.\n\n" + code + "\n\nAfter some text here."
         # Use a limit that forces a split inside the code block
         chunks = chunk_text(text, 25)
-        
+
         # Verify we get multiple chunks and none are empty
         assert len(chunks) >= 2
         assert all(c.strip() for c in chunks)
-        
+
         # Check that the code block was properly re-fenced
         # The first chunk should open the block but not close it (if it splits mid-block)
         # Actually, the new implementation adds closing fences to the split part and opens the next.
         # Let's just check that all chunks are valid markdown and the code is preserved.
-        reconstructed = "".join(c for c in chunks).replace("```python\n", "").replace("\n```", "").replace("```\n", "")
+        reconstructed = (
+            "".join(c for c in chunks)
+            .replace("```python\n", "")
+            .replace("\n```", "")
+            .replace("```\n", "")
+        )
         assert "print('hello')" in reconstructed
         assert "print('world')" in reconstructed
-        
+
         # At least one chunk should have a re-fenced code block if it split
         has_refence = any("```python\n" in c and c.count("```") == 2 for c in chunks)
         assert has_refence, "No chunks were properly re-fenced"
-        
+
         # It's possible it split exactly on the fence, so we can't assert has_refence strictly without knowing the exact cut,
         # but we can assert that every chunk has balanced or correctly formatted fences.
         for c in chunks:
@@ -1433,10 +1438,10 @@ class TestInboundConsumer:
         async def _test():
             consumer = self._make_consumer()
             # Start and immediately stop
-            asyncio.create_task(consumer.run())
+            task = asyncio.create_task(consumer.run())
             await asyncio.sleep(0.1)
             await consumer.stop()
-            await asyncio.sleep(0.1)
+            await task
             assert consumer._stopping is True
 
         _run(_test())

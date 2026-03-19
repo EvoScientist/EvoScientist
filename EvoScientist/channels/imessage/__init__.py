@@ -9,28 +9,28 @@ Requirements:
 - Messages.app logged into iCloud
 """
 
+from ..channel_manager import _parse_csv, register_channel
 from .channel_rpc import IMessageChannelRpc as IMessageChannel
 from .channel_rpc import IMessageConfig
-from .probe import probe_imessage, ProbeResult
+from .probe import ProbeResult, probe_imessage
 from .targets import (
-    parse_target,
-    normalize_handle,
-    normalize_e164,
-    IMessageTarget,
     IMessageService,
+    IMessageTarget,
+    normalize_e164,
+    normalize_handle,
+    parse_target,
 )
-from ..channel_manager import register_channel, _parse_csv
 
 __all__ = [
     "IMessageChannel",
     "IMessageConfig",
-    "probe_imessage",
-    "ProbeResult",
-    "parse_target",
-    "normalize_handle",
-    "normalize_e164",
-    "IMessageTarget",
     "IMessageService",
+    "IMessageTarget",
+    "ProbeResult",
+    "normalize_e164",
+    "normalize_handle",
+    "parse_target",
+    "probe_imessage",
 ]
 
 

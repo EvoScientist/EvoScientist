@@ -1,38 +1,29 @@
 """Tests for the /compact command (compact_conversation helper)."""
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-
-@pytest.fixture
-def _run():
-    """Helper to run async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop.run_until_complete
-    loop.close()
+from tests.conftest import run_async as _run
 
 
 class TestCompactGuards:
     """Guard conditions that return early without touching the middleware."""
 
-    def test_no_agent(self, _run):
+    def test_no_agent(self):
         from EvoScientist.cli.commands import compact_conversation
 
         result = _run(compact_conversation(agent=None, thread_id="abc"))
         assert result.status == "noop"
         assert "Nothing to compact" in result.message
 
-    def test_no_thread_id(self, _run):
+    def test_no_thread_id(self):
         from EvoScientist.cli.commands import compact_conversation
 
         result = _run(compact_conversation(agent=MagicMock(), thread_id=None))
         assert result.status == "noop"
         assert "Nothing to compact" in result.message
 
-    def test_empty_messages(self, _run):
+    def test_empty_messages(self):
         from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
@@ -43,7 +34,7 @@ class TestCompactGuards:
         assert result.status == "noop"
         assert "no messages" in result.message
 
-    def test_state_read_failure(self, _run):
+    def test_state_read_failure(self):
         from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
@@ -57,7 +48,7 @@ class TestCompactGuards:
 class TestCompactCutoffZero:
     """When cutoff == 0, conversation is within retention budget."""
 
-    def test_nothing_to_compact_short_conversation(self, _run):
+    def test_nothing_to_compact_short_conversation(self):
         from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
@@ -102,7 +93,7 @@ class TestCompactCutoffZero:
 class TestCompactNegligibleSavings:
     """When cutoff > 0 but savings are too small to be worth it."""
 
-    def test_skip_when_few_messages_and_low_tokens(self, _run):
+    def test_skip_when_few_messages_and_low_tokens(self):
         from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
@@ -151,10 +142,11 @@ class TestCompactNegligibleSavings:
         # No LLM call should have been made
         mock_middleware_inst._acreate_summary.assert_not_called()
 
-    def test_still_compacts_when_few_messages_but_high_tokens(self, _run):
+    def test_still_compacts_when_few_messages_but_high_tokens(self):
         """2 messages but they account for >2% of tokens — should compact."""
-        from EvoScientist.cli.commands import compact_conversation
         from langchain_core.messages import HumanMessage
+
+        from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
         msgs = [MagicMock() for _ in range(10)]
@@ -210,9 +202,10 @@ class TestCompactNegligibleSavings:
 class TestCompactSuccess:
     """Normal compaction flow."""
 
-    def test_successful_compaction(self, _run):
-        from EvoScientist.cli.commands import compact_conversation
+    def test_successful_compaction(self):
         from langchain_core.messages import HumanMessage
+
+        from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
         msgs = [MagicMock() for _ in range(20)]
@@ -279,10 +272,11 @@ class TestCompactSuccess:
         assert "_summarization_event" in event_data
         assert event_data["_summarization_event"]["cutoff_index"] == 15
 
-    def test_offload_failure_non_fatal(self, _run):
+    def test_offload_failure_non_fatal(self):
         """Offload failure should not prevent compaction."""
-        from EvoScientist.cli.commands import compact_conversation
         from langchain_core.messages import HumanMessage
+
+        from EvoScientist.cli.commands import compact_conversation
 
         agent = MagicMock()
         msgs = [MagicMock() for _ in range(10)]

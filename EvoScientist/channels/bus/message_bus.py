@@ -10,7 +10,7 @@ Deduplication is handled at the Channel level (single dedup point).
 
 import asyncio
 import logging
-from typing import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 from .events import InboundMessage, OutboundMessage
 
@@ -72,7 +72,7 @@ class MessageBus:
                     self.outbound.get(),
                     timeout=1.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             subscribers = self._outbound_subscribers.get(msg.channel, [])
             if not subscribers:

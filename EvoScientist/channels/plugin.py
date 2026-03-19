@@ -15,7 +15,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from .capabilities import ChannelCapabilities
 
-
 # ── Channel metadata ─────────────────────────────────────────────────
 
 

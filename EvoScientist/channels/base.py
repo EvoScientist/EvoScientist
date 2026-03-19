@@ -4,23 +4,23 @@ This module defines the Channel interface that all messaging channels
 (iMessage, WeChat, etc.) must implement.
 """
 
-from abc import ABC, abstractmethod
 import asyncio
 import logging
 import re
+from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable as CallableABC
+from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Callable as CallableABC
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from ..paths import MEDIA_DIR
-
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
 from .formatter import UnifiedFormatter
-from .plugin import ChannelPlugin, ChannelMeta
+from .plugin import ChannelMeta, ChannelPlugin
 
 _logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def chunk_text(text: str, limit: int) -> list[str]:
         # Effective limit is reduced if we need to add fences
         # We reserve ~20 chars for fences (```lang\n and \n```)
         effective_limit = limit - (20 if in_code_block else 0)
-        
+
         if len(remaining) <= effective_limit:
             segment = remaining
             best = len(remaining)
@@ -69,13 +69,13 @@ def chunk_text(text: str, limit: int) -> list[str]:
                 pos = segment.rfind("\n\n")
                 if pos > 0:
                     best = pos
-                
+
                 # Line
                 if best == -1:
                     pos = segment.rfind("\n")
                     if pos > 0:
                         best = pos
-                
+
                 # Word
                 if best == -1:
                     pos = segment.rfind(" ")
@@ -91,12 +91,12 @@ def chunk_text(text: str, limit: int) -> list[str]:
                 best = effective_limit
 
         chunk_raw = remaining[:best].rstrip()
-        
+
         # Track state transitions within this raw segment
         starts_in_code = in_code_block
         current_lang = code_block_lang
-        
-        # We use a simple count of ``` to toggle state. 
+
+        # We use a simple count of ``` to toggle state.
         # Note: This handles both opening and closing fences.
         fences = list(re.finditer(r"```(\w*)", chunk_raw))
         for f in fences:
@@ -106,17 +106,17 @@ def chunk_text(text: str, limit: int) -> list[str]:
             else:
                 in_code_block = False
                 code_block_lang = ""
-        
+
         ends_in_code = in_code_block
 
         # Build the final chunk with necessary fences
         prefix = f"```{current_lang}\n" if starts_in_code else ""
         suffix = "\n```" if ends_in_code else ""
-            
+
         final_chunk = prefix + chunk_raw + suffix
         if final_chunk.strip():
             chunks.append(final_chunk)
-            
+
         remaining = remaining[best:].lstrip("\n")
 
     return chunks
@@ -326,7 +326,7 @@ class Channel(ChannelPlugin, ABC):
         self._message_was_mentioned: dict[str, bool] = {}
 
         # Retry configuration (auto-resolved from channel name)
-        from .retry import RetryConfig, DEFAULT_RETRY, RETRY_PRESETS
+        from .retry import DEFAULT_RETRY, RETRY_PRESETS, RetryConfig
 
         self._retry_config: RetryConfig = RETRY_PRESETS.get(self.name, DEFAULT_RETRY)
 
@@ -349,11 +349,11 @@ class Channel(ChannelPlugin, ABC):
         5. MentionGatingMiddleware — filter by mention policy
         """
         from .middleware import (
-            DedupMiddleware,
             AllowListMiddleware,
-            PairingMiddleware,
+            DedupMiddleware,
             GroupHistoryMiddleware,
             MentionGatingMiddleware,
+            PairingMiddleware,
         )
 
         middlewares = []
@@ -454,7 +454,7 @@ class Channel(ChannelPlugin, ABC):
             try:
                 msg = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 yield msg
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     def _acquire_send_lock(self, chat_id: str) -> asyncio.Lock:

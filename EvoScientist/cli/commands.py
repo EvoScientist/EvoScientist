@@ -7,20 +7,19 @@ import re
 from datetime import datetime
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
+from rich.markup import escape
 from rich.table import Table
 
-from rich.markup import escape
-
-from ..stream.display import console
 from ..paths import ensure_dirs, set_workspace_root
-from ._app import app, config_app, mcp_app, channel_app
+from ..stream.display import console
+from ._app import app, channel_app, config_app, mcp_app
 from ._constants import build_metadata
 from .agent import (
-    _deduplicate_run_name,
     _create_session_workspace,
+    _deduplicate_run_name,
     _load_agent,
     _shorten_path,
 )
@@ -33,16 +32,15 @@ from .channel import (
     channel_ask_user_prompt,
     channel_hitl_prompt,
 )
-from .tui_runtime import run_streaming
+from .interactive import cmd_interactive, cmd_run
 from .mcp_ui import (
-    _mcp_list_servers,
     _mcp_add_server_from_kwargs,
     _mcp_edit_server_fields,
+    _mcp_list_servers,
     _mcp_remove_server,
     _show_mcp_config,
 )
-from .interactive import cmd_interactive, cmd_run
-
+from .tui_runtime import run_streaming
 
 # =============================================================================
 # Onboard command
@@ -119,15 +117,15 @@ class CompactResult:
     """
 
     __slots__ = (
-        "status",
         "message",
         "messages_compacted",
         "messages_kept",
-        "tokens_before",
+        "pct_decrease",
+        "status",
         "tokens_after",
+        "tokens_before",
         "tokens_summarized",
         "tokens_summary",
-        "pct_decrease",
     )
 
     def __init__(
@@ -243,12 +241,13 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
             "noop", "Nothing to compact — no messages in conversation."
         )
 
-    from ..EvoScientist import _ensure_chat_model, _get_default_backend
     from deepagents.middleware.summarization import (
         SummarizationEvent,
         SummarizationMiddleware,
         compute_summarization_defaults,
     )
+
+    from ..EvoScientist import _ensure_chat_model, _get_default_backend
 
     try:
         model = _ensure_chat_model()
@@ -476,7 +475,7 @@ def serve(
     no_thinking: bool = typer.Option(
         False, "--no-thinking", help="Disable thinking relay to channels"
     ),
-    workdir: Optional[str] = typer.Option(
+    workdir: str | None = typer.Option(
         None, "--workdir", help="Override workspace directory"
     ),
     auto_approve: bool = typer.Option(
@@ -499,7 +498,7 @@ def serve(
 
     nest_asyncio.apply()
 
-    from ..config import get_effective_config, apply_config_to_env
+    from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides = {}
     if auto_approve:
@@ -522,7 +521,7 @@ def serve(
                 atexit.register(stop_ccproxy, _ccproxy_proc_serve)
         except RuntimeError as exc:
             console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from exc
 
     if not config.channel_enabled:
         console.print("[red]No channels configured.[/red]")
@@ -594,7 +593,7 @@ def config_callback(ctx: typer.Context):
 @config_app.command("list")
 def config_list():
     """List all configuration values"""
-    from ..config import list_config, get_config_path
+    from ..config import get_config_path, list_config
 
     config_data = list_config()
 
@@ -658,7 +657,7 @@ def config_reset(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
     """Reset configuration to defaults"""
-    from ..config import reset_config, get_config_path
+    from ..config import get_config_path, reset_config
 
     config_path = get_config_path()
 
@@ -707,7 +706,7 @@ def mcp_list():
 
 @mcp_app.command("config")
 def mcp_config(
-    name: Optional[str] = typer.Argument(None, help="Server name (omit to show all)"),
+    name: str | None = typer.Argument(None, help="Server name (omit to show all)"),
 ):
     """Show detailed configuration for MCP servers
 
@@ -728,32 +727,41 @@ def mcp_config(
 
 @mcp_app.command("add")
 def mcp_add(
-    name: str = typer.Argument(..., help="Server name"),
-    target: str = typer.Argument(..., help="Command (stdio) or URL (http/sse)"),
-    args: Optional[list[str]] = typer.Argument(
-        None, help="Extra args for stdio command"
-    ),
-    transport: Optional[str] = typer.Option(
-        None, "--transport", "-T", help="Transport type (default: auto-detect)"
-    ),
-    tools: Optional[str] = typer.Option(
-        None,
-        "--tools",
-        "-t",
-        help="Comma-separated tool allowlist (supports wildcards: *_exa, read_*)",
-    ),
-    expose_to: Optional[str] = typer.Option(
-        None, "--expose-to", "-e", help="Comma-separated target agents"
-    ),
-    header: Optional[list[str]] = typer.Option(
-        None, "--header", "-H", help="HTTP header as Key:Value (repeatable)"
-    ),
-    env: Optional[list[str]] = typer.Option(
-        None, "--env", help="Env var as KEY=VALUE for stdio (repeatable)"
-    ),
-    env_ref: Optional[list[str]] = typer.Option(
-        None, "--env-ref", help="Env var name as ${NAME} runtime ref (repeatable)"
-    ),
+    name: Annotated[str, typer.Argument(help="Server name")],
+    target: Annotated[str, typer.Argument(help="Command (stdio) or URL (http/sse)")],
+    args: Annotated[
+        list[str] | None, typer.Argument(help="Extra args for stdio command")
+    ] = None,
+    transport: Annotated[
+        str | None,
+        typer.Option("--transport", "-T", help="Transport type (default: auto-detect)"),
+    ] = None,
+    tools: Annotated[
+        str | None,
+        typer.Option(
+            "--tools",
+            "-t",
+            help="Comma-separated tool allowlist (supports wildcards: *_exa, read_*)",
+        ),
+    ] = None,
+    expose_to: Annotated[
+        str | None,
+        typer.Option("--expose-to", "-e", help="Comma-separated target agents"),
+    ] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option("--header", "-H", help="HTTP header as Key:Value (repeatable)"),
+    ] = None,
+    env: Annotated[
+        list[str] | None,
+        typer.Option("--env", help="Env var as KEY=VALUE for stdio (repeatable)"),
+    ] = None,
+    env_ref: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--env-ref", help="Env var name as ${NAME} runtime ref (repeatable)"
+        ),
+    ] = None,
 ):
     """Add an MCP server to user config
 
@@ -803,34 +811,40 @@ def mcp_add(
 
 @mcp_app.command("edit")
 def mcp_edit(
-    name: str = typer.Argument(..., help="Server name to edit"),
-    transport: Optional[str] = typer.Option(
-        None, "--transport", help="New transport type"
-    ),
-    command: Optional[str] = typer.Option(
-        None, "--command", help="New command (stdio)"
-    ),
-    url: Optional[str] = typer.Option(
-        None, "--url", help="New URL (http/sse/websocket)"
-    ),
-    tools: Optional[str] = typer.Option(
-        None,
-        "--tools",
-        "-t",
-        help="Comma-separated tool allowlist, supports wildcards ('none' to clear)",
-    ),
-    expose_to: Optional[str] = typer.Option(
-        None,
-        "--expose-to",
-        "-e",
-        help="Comma-separated target agents ('none' to clear)",
-    ),
-    header: Optional[list[str]] = typer.Option(
-        None, "--header", "-H", help="HTTP header as Key:Value (repeatable)"
-    ),
-    env: Optional[list[str]] = typer.Option(
-        None, "--env", help="Env var as KEY=VALUE for stdio (repeatable)"
-    ),
+    name: Annotated[str, typer.Argument(help="Server name to edit")],
+    transport: Annotated[
+        str | None, typer.Option("--transport", help="New transport type")
+    ] = None,
+    command: Annotated[
+        str | None, typer.Option("--command", help="New command (stdio)")
+    ] = None,
+    url: Annotated[
+        str | None, typer.Option("--url", help="New URL (http/sse/websocket)")
+    ] = None,
+    tools: Annotated[
+        str | None,
+        typer.Option(
+            "--tools",
+            "-t",
+            help="Comma-separated tool allowlist, supports wildcards ('none' to clear)",
+        ),
+    ] = None,
+    expose_to: Annotated[
+        str | None,
+        typer.Option(
+            "--expose-to",
+            "-e",
+            help="Comma-separated target agents ('none' to clear)",
+        ),
+    ] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option("--header", "-H", help="HTTP header as Key:Value (repeatable)"),
+    ] = None,
+    env: Annotated[
+        list[str] | None,
+        typer.Option("--env", help="Env var as KEY=VALUE for stdio (repeatable)"),
+    ] = None,
 ):
     """Edit an existing MCP server in user config
 
@@ -866,6 +880,25 @@ def mcp_remove(
         raise typer.Exit(1)
 
 
+@mcp_app.command("install")
+def mcp_install(
+    source: Annotated[
+        str | None, typer.Argument(help="Server name or tag filter")
+    ] = None,
+):
+    """Browse and install MCP servers from the registry and marketplace
+
+    \b
+    Examples:
+      evosci mcp install                       # Interactive browser
+      evosci mcp install search                # Filter by 'search' tag
+      evosci mcp install sequential-thinking   # Install by name
+    """
+    from .mcp_install_cmd import _cmd_install_mcp
+
+    _cmd_install_mcp(source or "")
+
+
 # =============================================================================
 # Main callback (default behavior)
 # =============================================================================
@@ -880,7 +913,7 @@ def _version_callback(value: bool):
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
-    version: Optional[bool] = typer.Option(
+    version: bool | None = typer.Option(
         None,
         "-V",
         "--version",
@@ -888,25 +921,25 @@ def _main_callback(
         is_eager=True,
         help="Show version and exit.",
     ),
-    mode: Optional[str] = typer.Option(
+    mode: str | None = typer.Option(
         None,
         "-m",
         "--mode",
         help="Workspace mode: 'daemon' (persistent, default) or 'run' (isolated per-session)",
     ),
-    name: Optional[str] = typer.Option(
+    name: str | None = typer.Option(
         None,
         "-n",
         "--name",
         help="Name for this run (used as directory name instead of timestamp; requires --mode run)",
     ),
-    prompt: Optional[str] = typer.Option(
+    prompt: str | None = typer.Option(
         None, "-p", "--prompt", help="Query to execute (single-shot mode)"
     ),
-    thread_id: Optional[str] = typer.Option(
+    thread_id: str | None = typer.Option(
         None, "--thread-id", help="Thread ID for conversation persistence"
     ),
-    workdir: Optional[str] = typer.Option(
+    workdir: str | None = typer.Option(
         None, "--workdir", help="Override workspace directory for this session"
     ),
     use_cwd: bool = typer.Option(
@@ -925,12 +958,12 @@ def _main_callback(
         "--ask-user",
         help="Enable agent to ask clarifying questions about your research preferences",
     ),
-    auth_mode: Optional[str] = typer.Option(
+    auth_mode: str | None = typer.Option(
         None,
         "--auth-mode",
         help="Auth mode for Anthropic/OpenAI: api_key (default) or oauth (ccproxy).",
     ),
-    ui: Optional[str] = typer.Option(
+    ui: str | None = typer.Option(
         None,
         "--ui",
         help="UI backend: tui (default) or cli.",
@@ -942,7 +975,7 @@ def _main_callback(
         return
 
     # Load and apply configuration
-    from ..config import get_effective_config, apply_config_to_env
+    from ..config import apply_config_to_env, get_effective_config
 
     # Build CLI overrides dict
     cli_overrides = {}
@@ -980,7 +1013,7 @@ def _main_callback(
                 atexit.register(stop_ccproxy, _ccproxy_proc)
         except RuntimeError as exc:
             console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from exc
 
     show_thinking = config.show_thinking if not no_thinking else False
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)
@@ -1084,7 +1117,8 @@ def _main_callback(
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
-        from ..sessions import get_checkpointer, generate_thread_id
+
+        from ..sessions import generate_thread_id, get_checkpointer
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:

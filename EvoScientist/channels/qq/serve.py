@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import QQChannel, QQConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import QQChannel, QQConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

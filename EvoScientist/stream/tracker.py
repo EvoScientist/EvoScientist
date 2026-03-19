@@ -6,7 +6,6 @@ Handles tool_use blocks where arguments arrive in fragments via input_json_delta
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, Optional
 
 
 @dataclass
@@ -15,7 +14,7 @@ class ToolCallInfo:
 
     id: str
     name: str
-    args: Dict = field(default_factory=dict)
+    args: dict = field(default_factory=dict)
     emitted: bool = False
     args_complete: bool = False
     _json_buffer: str = ""
@@ -35,14 +34,14 @@ class ToolCallTracker:
     """
 
     def __init__(self):
-        self._calls: Dict[str, ToolCallInfo] = {}
-        self._last_tool_id: Optional[str] = None
+        self._calls: dict[str, ToolCallInfo] = {}
+        self._last_tool_id: str | None = None
 
     def update(
         self,
         tool_id: str,
-        name: Optional[str] = None,
-        args: Optional[Dict] = None,
+        name: str | None = None,
+        args: dict | None = None,
         args_complete: bool = False,
     ) -> None:
         """Update tool call info (accumulative)."""
@@ -96,7 +95,7 @@ class ToolCallTracker:
         if tool_id in self._calls:
             self._calls[tool_id].emitted = True
 
-    def get(self, tool_id: str) -> Optional[ToolCallInfo]:
+    def get(self, tool_id: str) -> ToolCallInfo | None:
         """Get tool call info by ID."""
         return self._calls.get(tool_id)
 

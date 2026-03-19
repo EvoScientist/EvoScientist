@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import DiscordChannel, DiscordConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import DiscordChannel, DiscordConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

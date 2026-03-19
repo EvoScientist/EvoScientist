@@ -2,10 +2,8 @@
 
 import pytest
 
-from EvoScientist.channels.telegram.channel import TelegramChannel, TelegramConfig
 from EvoScientist.channels.base import ChannelError
-
-
+from EvoScientist.channels.telegram.channel import TelegramChannel, TelegramConfig
 from tests.conftest import run_async as _run
 
 

@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import EmailChannel, EmailConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import EmailChannel, EmailConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

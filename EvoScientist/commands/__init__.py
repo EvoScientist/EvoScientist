@@ -7,11 +7,11 @@ from .manager import CommandManager, manager
 
 __all__ = [
     "Argument",
+    "ChannelCommandUI",
     "Command",
     "CommandContext",
-    "CommandUI",
-    "manager",
     "CommandManager",
-    "ChannelCommandUI",
+    "CommandUI",
     "implementation",
+    "manager",
 ]

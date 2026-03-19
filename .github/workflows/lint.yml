@@ -17,5 +17,7 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
       - name: Install dependencies
         run: uv sync --dev
-      - name: Run ruff
-        run: uv run ruff check .
+      - name: Run ruff linter
+        run: uv run ruff check --output-format=github .
+      - name: Run ruff format
+        run: uv run ruff format --check .

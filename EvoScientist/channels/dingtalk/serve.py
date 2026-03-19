@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import DingTalkChannel, DingTalkConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import DingTalkChannel, DingTalkConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

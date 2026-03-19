@@ -5,8 +5,9 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+from typing import ClassVar
 
-from ..base import Channel, RawIncoming, ChannelError
+from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import QQ as QQ_CAPS
 from ..config import BaseChannelConfig
 
@@ -64,7 +65,7 @@ class QQChannel(Channel):
 
     def __init__(self, config: QQConfig):
         super().__init__(config)
-        self._client: "botpy.Client | None" = None
+        self._client: botpy.Client | None = None
         self._bot_task: asyncio.Task | None = None
         self._processed_ids: deque = deque(maxlen=1000)
         self._msg_seq: dict[str, int] = {}  # msg_id -> next seq number
@@ -210,7 +211,7 @@ class QQChannel(Channel):
     # ── Media send ────────────────────────────────────────────────
 
     # qq-botpy file_type constants: 1=image, 2=video, 3=audio
-    _FILE_TYPE_MAP = {
+    _FILE_TYPE_MAP: ClassVar[dict[str, int]] = {
         ".jpg": 1,
         ".jpeg": 1,
         ".png": 1,

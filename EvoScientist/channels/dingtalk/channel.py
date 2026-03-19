@@ -3,15 +3,16 @@
 import asyncio
 import json
 import logging
-from urllib.parse import quote_plus
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
+from urllib.parse import quote_plus
 
-from ..base import Channel, RawIncoming, ChannelError
+from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import DINGTALK as DINGTALK_CAPS
-from ..mixins import WebSocketMixin, TokenMixin
 from ..config import BaseChannelConfig
+from ..mixins import TokenMixin, WebSocketMixin
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
 
     # ── Media send ────────────────────────────────────────────────
 
-    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+    _IMAGE_EXTS: ClassVar[set[str]] = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 
     async def _send_media_impl(
         self,

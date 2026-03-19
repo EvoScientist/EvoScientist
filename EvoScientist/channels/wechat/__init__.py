@@ -29,16 +29,16 @@ Usage in config:
     wechat_webhook_port = 9001
 """
 
-from .channel import WeChatChannel, WeComConfig, WeChatMPConfig
-from ..channel_manager import register_channel, _parse_csv
+from ..channel_manager import _parse_csv, register_channel
+from .channel import WeChatChannel, WeChatMPConfig, WeComConfig
 
-__all__ = ["WeChatChannel", "WeComConfig", "WeChatMPConfig"]
+__all__ = ["WeChatChannel", "WeChatMPConfig", "WeComConfig"]
 
 
 def create_from_config(config) -> WeChatChannel:
     backend = config.wechat_backend or "wecom"
     allowed = _parse_csv(config.wechat_allowed_senders)
-    proxy = config.wechat_proxy if config.wechat_proxy else None
+    proxy = config.wechat_proxy or None
     port = int(config.wechat_webhook_port or 9001)
 
     if backend == "wechatmp":

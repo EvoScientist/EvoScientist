@@ -7,7 +7,6 @@ phone numbers and email addresses, similar to OpenClaw's approach.
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Union
 
 
 class IMessageService(Enum):
@@ -51,7 +50,7 @@ class HandleTarget:
     service: IMessageService = IMessageService.AUTO
 
 
-IMessageTarget = Union[ChatIdTarget, ChatGuidTarget, ChatIdentifierTarget, HandleTarget]
+IMessageTarget = ChatIdTarget | ChatGuidTarget | ChatIdentifierTarget | HandleTarget
 
 
 # Prefix constants
@@ -202,8 +201,8 @@ def parse_target(raw: str) -> IMessageTarget:
             try:
                 chat_id = int(value)
                 return ChatIdTarget(chat_id=chat_id)
-            except ValueError:
-                raise ValueError(f"Invalid chat_id: {value}")
+            except ValueError as e:
+                raise ValueError(f"Invalid chat_id: {value}") from e
 
     # Check chat_guid prefixes
     for prefix in CHAT_GUID_PREFIXES:

@@ -3,15 +3,14 @@
 from unittest.mock import patch
 
 from EvoScientist.llm import (
-    MODELS,
     DEFAULT_MODEL,
+    MODELS,
     get_chat_model,
+    get_model_info,
     get_models_for_provider,
     list_models,
-    get_model_info,
 )
 from EvoScientist.llm.models import _MODEL_ENTRIES
-
 
 # =============================================================================
 # Test MODELS registry
@@ -29,6 +28,7 @@ class TestModelsRegistry:
         assert "anthropic" in providers
         assert "openai" in providers
         assert "google-genai" in providers
+        assert "minimax" in providers
         assert "nvidia" in providers
         assert "siliconflow" in providers
         assert "openrouter" in providers
@@ -43,6 +43,7 @@ class TestModelsRegistry:
             "anthropic",
             "openai",
             "google-genai",
+            "minimax",
             "nvidia",
             "siliconflow",
             "openrouter",
@@ -477,6 +478,120 @@ class TestThirdPartyRouting:
             == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         assert call_kwargs["api_key"] == "ds-key-456"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_routes_through_anthropic(self, mock_init, monkeypatch):
+        """MiniMax provider should route through Anthropic with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
+
+        get_chat_model("MiniMax-M2.5", provider="minimax")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
+        assert call_kwargs["api_key"] == "mm-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_gets_thinking(self, mock_init, monkeypatch):
+        """MiniMax provider should get auto-thinking (thinking-capable via Anthropic)."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model("MiniMax-M2.5", provider="minimax")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "thinking" in call_kwargs
+        assert "reasoning" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_short_name_resolution(self, mock_init, monkeypatch):
+        """MiniMax short names should resolve to correct model IDs."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model("minimax-m2.5", provider="minimax")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "MiniMax-M2.5"
+        assert call_kwargs["model_provider"] == "anthropic"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_highspeed_model(self, mock_init, monkeypatch):
+        """MiniMax M2.5-highspeed model should resolve correctly."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model("minimax-m2.5-highspeed", provider="minimax")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "MiniMax-M2.5-highspeed"
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_anthropic_via_routed_dict(self, mock_init, monkeypatch):
+        """custom-anthropic should work via _ANTHROPIC_ROUTED_PROVIDERS dict."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://my-claude.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "ca-key-789")
+
+        get_chat_model("claude-sonnet-4-6", provider="custom-anthropic")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert call_kwargs["base_url"] == "https://my-claude.example.com"
+        assert call_kwargs["api_key"] == "ca-key-789"
+        # custom-anthropic is NOT thinking-capable → thinking skipped
+        assert "thinking" not in call_kwargs
+
+
+# =============================================================================
+# Test MiniMax provider
+# =============================================================================
+
+
+class TestMiniMaxProvider:
+    def test_minimax_in_anthropic_routed_providers(self):
+        """MiniMax should be registered in _ANTHROPIC_ROUTED_PROVIDERS."""
+        from EvoScientist.llm.models import _ANTHROPIC_ROUTED_PROVIDERS
+
+        assert "minimax" in _ANTHROPIC_ROUTED_PROVIDERS
+        base_url, api_key_env = _ANTHROPIC_ROUTED_PROVIDERS["minimax"]
+        assert base_url == "https://api.minimaxi.com/anthropic"
+        assert api_key_env == "MINIMAX_API_KEY"
+
+    def test_minimax_not_in_openai_routed_providers(self):
+        """MiniMax should NOT be in _OPENAI_ROUTED_PROVIDERS (moved to Anthropic)."""
+        from EvoScientist.llm.models import _OPENAI_ROUTED_PROVIDERS
+
+        assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
+
+    def test_minimax_models_registered(self):
+        """MiniMax should have 4 direct model entries in _MODEL_ENTRIES."""
+        minimax_models = get_models_for_provider("minimax")
+        assert len(minimax_models) == 4
+        model_names = {name for name, _ in minimax_models}
+        assert "minimax-m2.7" in model_names
+        assert "minimax-m2.7-highspeed" in model_names
+        assert "minimax-m2.5" in model_names
+        assert "minimax-m2.5-highspeed" in model_names
+
+    def test_minimax_model_ids_correct(self):
+        """MiniMax model IDs should match the official API model names."""
+        minimax_models = get_models_for_provider("minimax")
+        model_dict = dict(minimax_models)
+        assert model_dict["minimax-m2.7"] == "MiniMax-M2.7"
+        assert model_dict["minimax-m2.5"] == "MiniMax-M2.5"
+        assert model_dict["minimax-m2.5-highspeed"] == "MiniMax-M2.5-highspeed"
+
+    def test_minimax_short_name_in_models_dict(self):
+        """MiniMax short names should be accessible via the MODELS dict."""
+        # Note: MODELS dict uses last-entry-wins, so direct minimax entries
+        # may be overridden by nvidia/siliconflow/openrouter entries.
+        # Use get_models_for_provider() for provider-specific lookups.
+        minimax_models = get_models_for_provider("minimax")
+        assert len(minimax_models) > 0
 
 
 # =============================================================================

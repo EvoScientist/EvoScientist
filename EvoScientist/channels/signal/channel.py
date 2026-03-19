@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..base import Channel, RawIncoming, ChannelError
+from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import SIGNAL as SIGNAL_CAPS
 from ..config import BaseChannelConfig
 
@@ -94,7 +94,7 @@ class SignalChannel(Channel):
     async def _ensure_daemon(self) -> None:
         """Start signal-cli daemon if not already running."""
         try:
-            reader, writer = await asyncio.wait_for(
+            _reader, writer = await asyncio.wait_for(
                 asyncio.open_connection("localhost", self.config.rpc_port),
                 timeout=2,
             )
@@ -102,7 +102,7 @@ class SignalChannel(Channel):
             await writer.wait_closed()
             logger.info("signal-cli daemon already running")
             return
-        except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
+        except (TimeoutError, ConnectionRefusedError, OSError):
             pass
 
         # Start daemon
@@ -129,13 +129,13 @@ class SignalChannel(Channel):
             raise ChannelError(
                 f"signal-cli not found at '{self.config.cli_path}'. "
                 "Install: https://github.com/AsamK/signal-cli"
-            )
+            ) from None
 
         # Wait for daemon to be ready
         for _ in range(30):
             await asyncio.sleep(1)
             try:
-                reader, writer = await asyncio.open_connection(
+                _reader, writer = await asyncio.open_connection(
                     "localhost",
                     self.config.rpc_port,
                 )
@@ -156,7 +156,7 @@ class SignalChannel(Channel):
                 self.config.rpc_port,
             )
         except Exception as e:
-            raise ChannelError(f"Cannot connect to signal-cli: {e}")
+            raise ChannelError(f"Cannot connect to signal-cli: {e}") from e
 
     async def _listen_loop(self) -> None:
         """Listen for incoming JSON RPC notifications and responses."""
@@ -437,7 +437,7 @@ class SignalChannel(Channel):
 
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending_rpcs.pop(rpc_id, None)
             logger.warning(f"Signal RPC '{method}' timed out after {timeout}s")
             return None

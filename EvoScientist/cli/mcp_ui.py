@@ -186,6 +186,7 @@ def _show_mcp_config(name: str = "", *, show_blank_line: bool = True) -> str:
 def _cmd_mcp_add(args_str: str) -> None:
     """Handle ``/mcp add ...``."""
     import shlex
+
     from ..mcp import parse_mcp_add_args
 
     if not args_str.strip():
@@ -230,6 +231,7 @@ def _cmd_mcp_add(args_str: str) -> None:
 def _cmd_mcp_edit(args_str: str) -> None:
     """Handle ``/mcp edit <name> --field value ...``."""
     import shlex
+
     from ..mcp import parse_mcp_edit_args
 
     if not args_str.strip():
@@ -291,6 +293,10 @@ def _cmd_mcp(args: str) -> None:
         _cmd_mcp_remove(subargs)
     elif subcmd == "config":
         _cmd_mcp_config(subargs)
+    elif subcmd == "install":
+        from .mcp_install_cmd import _cmd_install_mcp
+
+        _cmd_install_mcp(subargs)
     else:
         console.print("[bold]MCP commands:[/bold]")
         console.print("  /mcp              List configured servers")
@@ -299,4 +305,5 @@ def _cmd_mcp(args: str) -> None:
         console.print("  /mcp add ...      Add a server")
         console.print("  /mcp edit ...     Edit an existing server")
         console.print("  /mcp remove ...   Remove a server")
+        console.print("  /mcp install ...  Browse and install servers")
         console.print()

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from importlib import import_module
 
-
 _EXPORTS: dict[str, tuple[str, str]] = {
     # Agent graph (lazy to avoid expensive initialization at import time)
     "EvoScientist_agent": (".EvoScientist", "EvoScientist_agent"),

@@ -13,8 +13,9 @@ import asyncio
 import logging
 import uuid
 from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, TypeVar
+from typing import Any, TypeVar
 
 from .base import Channel
 from .bus import MessageBus
@@ -307,7 +308,7 @@ class InboundConsumer:
                         self.bus.consume_inbound(),
                         timeout=1.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 except asyncio.CancelledError:
                     break
@@ -577,7 +578,7 @@ class InboundConsumer:
                         pending.event.wait(),
                         timeout=_HITL_APPROVAL_TIMEOUT,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Auto-approve on timeout
                     pending.decision = "approve"
                 finally:
@@ -606,7 +607,7 @@ class InboundConsumer:
                 )
                 # continue to next HITL round
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._metrics.total_timeouts += 1
             logger.error(
                 f"Inference timeout ({self._inference_timeout}s idle) "
@@ -678,7 +679,7 @@ class InboundConsumer:
         self._pending_ask_user_replies[session_key] = pending
         try:
             await asyncio.wait_for(pending.event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             self._pending_ask_user_replies.pop(session_key, None)

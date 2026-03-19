@@ -23,18 +23,18 @@ import hashlib
 import json
 import logging
 import re
-from typing import Any, TYPE_CHECKING
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from aiohttp import web
 
-from ..base import Channel, RawIncoming, ChannelError
+from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import FEISHU as FEISHU_CAPS
-from ..mixins import WebhookMixin, TokenMixin
 from ..config import BaseChannelConfig
+from ..mixins import TokenMixin, WebhookMixin
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +284,7 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
             resp = await self._http_client.post(url, json=body)
             data = resp.json()
         except Exception as e:
-            raise ChannelError(f"Failed to get Feishu access token: {e}")
+            raise ChannelError(f"Failed to get Feishu access token: {e}") from e
 
         if data.get("code") != 0:
             raise ChannelError(f"Feishu auth error: {data.get('msg', 'unknown')}")
@@ -294,13 +294,13 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
 
     async def start(self) -> None:
         try:
-            from aiohttp import web  # noqa: F401
             import httpx  # noqa: F401
+            from aiohttp import web  # noqa: F401
         except ImportError:
             raise ChannelError(
                 "aiohttp or httpx not installed. "
                 "Install with: pip install aiohttp httpx"
-            )
+            ) from None
 
         if not self.config.app_id:
             raise ChannelError("Feishu app_id is required")
@@ -394,7 +394,14 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
 
     # ── Media helpers ──────────────────────────────────────────────
 
-    _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+    _IMAGE_EXTENSIONS: ClassVar[set[str]] = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".webp",
+    }
 
     async def _download_media(
         self,
@@ -611,7 +618,7 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
 
     # ── Webhook event handler ─────────────────────────────────────
 
-    async def _handle_event(self, request) -> "web.Response":
+    async def _handle_event(self, request) -> web.Response:
         """Handle POST /webhook/event from Feishu."""
         from aiohttp import web
 

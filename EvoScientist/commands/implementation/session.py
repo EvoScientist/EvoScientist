@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.table import Table
 
 from ..base import Argument, Command, CommandContext
@@ -77,7 +79,7 @@ class ResumeCommand(Command):
 
     name = "/resume"
     description = "Resume a previous session"
-    arguments = [
+    arguments: ClassVar[list[Argument]] = [
         Argument(
             name="thread_id",
             type=str,
@@ -178,7 +180,7 @@ class DeleteCommand(Command):
 
     name = "/delete"
     description = "Delete a saved session"
-    arguments = [
+    arguments: ClassVar[list[Argument]] = [
         Argument(
             name="thread_id",
             type=str,
@@ -255,7 +257,7 @@ class ExitCommand(Command):
     """Quit EvoScientist."""
 
     name = "/exit"
-    alias = ["/quit", "/q"]
+    alias: ClassVar[list[str]] = ["/quit", "/q"]
     description = "Quit EvoScientist"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

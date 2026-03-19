@@ -20,9 +20,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import FeishuChannel, FeishuConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import FeishuChannel, FeishuConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

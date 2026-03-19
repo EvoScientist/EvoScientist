@@ -9,15 +9,15 @@ Usage in config:
     dingtalk_client_secret = "your_app_secret"
 """
 
+from ..channel_manager import _parse_csv, register_channel
 from .channel import DingTalkChannel, DingTalkConfig
-from ..channel_manager import register_channel, _parse_csv
 
 __all__ = ["DingTalkChannel", "DingTalkConfig"]
 
 
 def create_from_config(config) -> DingTalkChannel:
     allowed = _parse_csv(config.dingtalk_allowed_senders)
-    proxy = config.dingtalk_proxy if config.dingtalk_proxy else None
+    proxy = config.dingtalk_proxy or None
     return DingTalkChannel(
         DingTalkConfig(
             client_id=config.dingtalk_client_id,

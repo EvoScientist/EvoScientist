@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import TelegramChannel, TelegramConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import TelegramChannel, TelegramConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

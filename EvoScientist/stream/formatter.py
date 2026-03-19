@@ -7,15 +7,16 @@ Detects content type (success/error/json/markdown/text) and formats accordingly.
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List
+from typing import Any
 
+from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
-from rich.markdown import Markdown
 
-from .utils import SUCCESS_PREFIX, FAILURE_PREFIX, is_success as _is_success, truncate
+from .utils import FAILURE_PREFIX, SUCCESS_PREFIX, truncate
+from .utils import is_success as _is_success
 
 
 class ContentType(Enum):
@@ -33,7 +34,7 @@ class FormattedResult:
     """Formatted result container."""
 
     content_type: ContentType
-    elements: List[Any]  # Rich renderable elements
+    elements: list[Any]  # Rich renderable elements
     success: bool = True
 
 
@@ -125,7 +126,7 @@ class ToolResultFormatter:
         md_patterns = ["```", "**", "##", "- **"]
         return content.startswith("#") or any(p in content for p in md_patterns)
 
-    def _format_success(self, name: str, content: str, max_length: int) -> List[Any]:
+    def _format_success(self, name: str, content: str, max_length: int) -> list[Any]:
         display = truncate(content, max_length)
         return [
             Panel(
@@ -135,7 +136,7 @@ class ToolResultFormatter:
             )
         ]
 
-    def _format_error(self, name: str, content: str, max_length: int) -> List[Any]:
+    def _format_error(self, name: str, content: str, max_length: int) -> list[Any]:
         display = truncate(content, max_length)
         return [
             Panel(
@@ -145,7 +146,7 @@ class ToolResultFormatter:
             )
         ]
 
-    def _format_json(self, name: str, content: str, max_length: int) -> List[Any]:
+    def _format_json(self, name: str, content: str, max_length: int) -> list[Any]:
         json_content = content
         if content.startswith(SUCCESS_PREFIX):
             json_content = self._extract_body(content)
@@ -161,7 +162,7 @@ class ToolResultFormatter:
         except (json.JSONDecodeError, ValueError):
             return self._format_text(name, content, max_length)
 
-    def _format_markdown(self, name: str, content: str, max_length: int) -> List[Any]:
+    def _format_markdown(self, name: str, content: str, max_length: int) -> list[Any]:
         display = truncate(content, max_length)
         return [
             Panel(
@@ -171,7 +172,7 @@ class ToolResultFormatter:
             )
         ]
 
-    def _format_text(self, name: str, content: str, max_length: int) -> List[Any]:
+    def _format_text(self, name: str, content: str, max_length: int) -> list[Any]:
         display = truncate(content, max_length)
         return [
             Text(f"{name}:", style="cyan bold"),

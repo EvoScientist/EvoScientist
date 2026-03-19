@@ -6,18 +6,17 @@ from unittest.mock import patch
 import pytest
 
 from EvoScientist.tools.skills_manager import (
-    _parse_skill_md,
-    _parse_github_url,
     _is_github_url,
+    _parse_github_url,
+    _parse_skill_md,
     _validate_skill_dir,
+    fetch_remote_skill_index,
+    get_all_tags,
     install_skill,
     list_skills,
     list_skills_by_tag,
-    get_all_tags,
     uninstall_skill,
-    fetch_remote_skill_index,
 )
-
 
 # =============================================================================
 # Fixtures

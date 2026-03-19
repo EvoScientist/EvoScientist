@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.table import Table
 
 from ..base import Argument, Command, CommandContext
@@ -60,12 +62,12 @@ class SkillsCommand(Command):
         )
 
 
-class InstallSkillCommand(Command):
+class InstallSkill(Command):
     """Add a skill from path or GitHub."""
 
-    name = "/install-skill"
-    description = "Add a skill from path or GitHub"
-    arguments = [
+    name: ClassVar[str] = "/install-skill"
+    description: ClassVar[str] = "Add a skill from path or GitHub"
+    arguments: ClassVar[list[Argument]] = [
         Argument(
             name="source",
             type=str,
@@ -106,12 +108,14 @@ class InstallSkillCommand(Command):
             ctx.ui.append_system(f"Failed: {result['error']}", style="red")
 
 
-class InstallSkillsCommand(Command):
+class InstallSkills(Command):
     """Browse and install skills."""
 
-    name = "/install-skills"
-    description = "Browse and install skills (optional: /install-skills <tag>)"
-    arguments = [
+    name: ClassVar[str] = "/install-skills"
+    description: ClassVar[str] = (
+        "Browse and install skills (optional: /install-skills <tag>)"
+    )
+    arguments: ClassVar[list[Argument]] = [
         Argument(
             name="tag", type=str, description="Tag to filter skills by", required=False
         )
@@ -208,12 +212,12 @@ class InstallSkillsCommand(Command):
             ctx.ui.append_system("No skills were installed.", style="yellow")
 
 
-class UninstallSkillCommand(Command):
+class UninstallSkill(Command):
     """Remove an installed skill."""
 
-    name = "/uninstall-skill"
-    description = "Remove an installed skill"
-    arguments = [
+    name: ClassVar[str] = "/uninstall-skill"
+    description: ClassVar[str] = "Remove an installed skill"
+    arguments: ClassVar[list[Argument]] = [
         Argument(
             name="name",
             type=str,
@@ -241,6 +245,6 @@ class UninstallSkillCommand(Command):
 
 # Register skill commands
 manager.register(SkillsCommand())
-manager.register(InstallSkillCommand())
-manager.register(InstallSkillsCommand())
-manager.register(UninstallSkillCommand())
+manager.register(InstallSkill())
+manager.register(InstallSkills())
+manager.register(UninstallSkill())

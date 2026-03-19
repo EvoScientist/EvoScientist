@@ -3,4 +3,4 @@
 from .events import InboundMessage, OutboundMessage
 from .message_bus import MessageBus
 
-__all__ = ["MessageBus", "InboundMessage", "OutboundMessage"]
+__all__ = ["InboundMessage", "MessageBus", "OutboundMessage"]

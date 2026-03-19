@@ -4,14 +4,15 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 from ..base import (
-    Channel,
-    RawIncoming,
-    ChannelError,
+    AUDIO_EXTS,
     IMAGE_EXTS,
     VIDEO_EXTS,
-    AUDIO_EXTS,
+    Channel,
+    ChannelError,
+    RawIncoming,
 )
 from ..capabilities import TELEGRAM as TELEGRAM_CAPS
 from ..config import BaseChannelConfig
@@ -55,9 +56,10 @@ class TelegramChannel(Channel):
             raise ChannelError(
                 "python-telegram-bot not installed. "
                 "Install with: pip install evoscientist[telegram]"
-            )
+            ) from None
 
         builder = ApplicationBuilder().token(self.config.bot_token)
+
         if self.config.proxy:
             builder = builder.proxy(self.config.proxy).get_updates_proxy(
                 self.config.proxy
@@ -124,7 +126,7 @@ class TelegramChannel(Channel):
 
         await self._send_with_format_fallback(_send, formatted_text, raw_text)
 
-    _MEDIA_SENDERS = {
+    _MEDIA_SENDERS: ClassVar[dict] = {
         IMAGE_EXTS: ("send_photo", "photo"),
         VIDEO_EXTS: ("send_video", "video"),
         AUDIO_EXTS: ("send_audio", "audio"),
@@ -285,7 +287,7 @@ class TelegramChannel(Channel):
             )
         )
 
-    _MIME_TO_EXT = {
+    _MIME_TO_EXT: ClassVar[dict[str, str]] = {
         "image/jpeg": ".jpg",
         "image/png": ".png",
         "image/gif": ".gif",
@@ -296,7 +298,7 @@ class TelegramChannel(Channel):
         "video/mp4": ".mp4",
         "video/quicktime": ".mov",
     }
-    _TYPE_TO_EXT = {
+    _TYPE_TO_EXT: ClassVar[dict[str, str]] = {
         "image": ".jpg",
         "voice": ".ogg",
         "audio": ".mp3",

@@ -172,8 +172,10 @@ def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT
         )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"git clone timed out after {_CLONE_TIMEOUT}s for {repo}")
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"git clone timed out after {_CLONE_TIMEOUT}s for {repo}"
+        ) from e
     if result.returncode != 0:
         raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
 

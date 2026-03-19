@@ -10,7 +10,6 @@ from EvoScientist.channels.imessage.channel_rpc import (
 )
 from EvoScientist.channels.qq.channel import QQChannel, QQConfig
 from EvoScientist.channels.signal.channel import SignalChannel, SignalConfig
-
 from tests.conftest import run_async as _run
 
 

@@ -36,7 +36,7 @@ async def standalone_outbound_dispatcher(
                 bus.consume_outbound(),
                 timeout=1.0,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
         except asyncio.CancelledError:
             break

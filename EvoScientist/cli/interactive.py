@@ -9,49 +9,55 @@ from typing import Any
 
 import typer  # type: ignore[import-untyped]
 from prompt_toolkit import PromptSession  # type: ignore[import-untyped]
-from prompt_toolkit.completion import Completer, Completion  # type: ignore[import-untyped]
-from prompt_toolkit.history import FileHistory  # type: ignore[import-untyped]
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory  # type: ignore[import-untyped]
+from prompt_toolkit.auto_suggest import (
+    AutoSuggestFromHistory,  # type: ignore[import-untyped]
+)
+from prompt_toolkit.completion import (  # type: ignore[import-untyped]
+    Completer,
+    Completion,
+)
 from prompt_toolkit.formatted_text import HTML  # type: ignore[import-untyped]
+from prompt_toolkit.history import FileHistory  # type: ignore[import-untyped]
 from prompt_toolkit.shortcuts import CompleteStyle  # type: ignore[import-untyped]
 from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untyped]
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+import EvoScientist.cli.channel as _ch_mod
+
 from ..sessions import (
+    _format_relative_time,
+    delete_thread,
+    find_similar_threads,
     generate_thread_id,
     get_checkpointer,
+    get_thread_messages,
+    get_thread_metadata,
     list_threads,
     thread_exists,
-    find_similar_threads,
-    delete_thread,
-    get_thread_metadata,
-    get_thread_messages,
-    _format_relative_time,
 )
 from ..stream.display import console
-from .tui_runtime import run_streaming, resolve_ui_backend
-from .tui_interactive import run_textual_interactive
-from ._constants import WELCOME_SLOGANS, LOGO_LINES, LOGO_GRADIENT, build_metadata
-from .agent import _shorten_path, _create_session_workspace, _load_agent
+from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
+from .agent import _create_session_workspace, _load_agent, _shorten_path
 from .channel import (
     ChannelMessage,
+    _auto_start_channel,
     _channels_is_running,
     _cmd_channel,
     _cmd_channel_stop,
-    _auto_start_channel,
     _message_queue,
     _set_channel_response,
 )
-import EvoScientist.cli.channel as _ch_mod
 from .mcp_ui import _cmd_mcp
 from .skills_cmd import (
-    _cmd_list_skills,
     _cmd_install_skill,
-    _cmd_uninstall_skill,
     _cmd_install_skills,
+    _cmd_list_skills,
+    _cmd_uninstall_skill,
 )
+from .tui_interactive import run_textual_interactive
+from .tui_runtime import resolve_ui_backend, run_streaming
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -71,7 +77,7 @@ def print_banner(
     ui_backend: str | None = None,
 ):
     """Print welcome banner with ASCII art logo, info line, and hint."""
-    for line, color in zip(LOGO_LINES, LOGO_GRADIENT):
+    for line, color in zip(LOGO_LINES, LOGO_GRADIENT, strict=False):
         console.print(Text(line, style=f"{color} bold"))
     info = Text()
     info.append("  ", style="dim")
@@ -395,7 +401,7 @@ def cmd_interactive(
 
             lefts = [t.get("preview", "") or t["thread_id"] for t in threads]
             col_width = max(_display_width(s) for s in lefts) + 4
-            for t, left_text in zip(threads, lefts):
+            for t, left_text in zip(threads, lefts, strict=False):
                 tid = t["thread_id"]
                 when = _format_relative_time(t.get("updated_at"))
                 label = f"{_pad_to_width(left_text, col_width)}({tid} {when})"
@@ -906,7 +912,7 @@ def cmd_run(
             console.print(
                 "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
             )
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
         else:
             console.print(f"[red]Error: {e}[/red]")
             raise

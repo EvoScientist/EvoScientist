@@ -9,7 +9,7 @@ Adapted from upstream ``deepagents_cli/sessions.py``.
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -137,8 +137,8 @@ def _format_relative_time(iso_ts: str | None) -> str:
     try:
         dt = datetime.fromisoformat(iso_ts)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
         delta = now - dt
         seconds = int(delta.total_seconds())
         if seconds < 60:

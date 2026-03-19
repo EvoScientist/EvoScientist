@@ -11,74 +11,74 @@ Provides:
 - Display functions: Rich rendering for streaming and final output
 """
 
-from .emitter import StreamEventEmitter, StreamEvent
-from .tracker import ToolCallTracker, ToolCallInfo
-from .formatter import ToolResultFormatter, ContentType, FormattedResult
+from .diff_format import build_edit_diff, format_diff_rich
+from .display import (
+    _astream_to_console,
+    console,
+    create_streaming_display,
+    display_final_results,
+    format_tool_result_compact,
+    formatter,
+)
+from .emitter import StreamEvent, StreamEventEmitter
+from .events import stream_agent_events
+from .formatter import ContentType, FormattedResult, ToolResultFormatter
+from .state import StreamState, SubAgentState, _build_todo_stats, _parse_todo_items
+from .tracker import ToolCallInfo, ToolCallTracker
 from .utils import (
-    SUCCESS_PREFIX,
     FAILURE_PREFIX,
-    ToolStatus,
+    SUCCESS_PREFIX,
     DisplayLimits,
+    ToolStatus,
+    count_lines,
+    format_tool_compact,
+    format_tree_output,
+    get_status_symbol,
     has_args,
     is_success,
     truncate,
-    format_tool_compact,
-    format_tree_output,
-    count_lines,
     truncate_with_line_hint,
-    get_status_symbol,
-)
-from .state import SubAgentState, StreamState, _parse_todo_items, _build_todo_stats
-from .events import stream_agent_events
-from .diff_format import build_edit_diff, format_diff_rich
-from .display import (
-    console,
-    formatter,
-    format_tool_result_compact,
-    create_streaming_display,
-    display_final_results,
-    _astream_to_console,
 )
 
 __all__ = [
-    # Emitter
-    "StreamEventEmitter",
-    "StreamEvent",
-    # Tracker
-    "ToolCallTracker",
-    "ToolCallInfo",
-    # Formatter
-    "ToolResultFormatter",
-    "ContentType",
-    "FormattedResult",
+    "FAILURE_PREFIX",
     # Utils
     "SUCCESS_PREFIX",
-    "FAILURE_PREFIX",
-    "ToolStatus",
+    "ContentType",
     "DisplayLimits",
-    "has_args",
-    "is_success",
-    "truncate",
-    "format_tool_compact",
-    "format_tree_output",
-    "count_lines",
-    "truncate_with_line_hint",
-    "get_status_symbol",
+    "FormattedResult",
+    "StreamEvent",
+    # Emitter
+    "StreamEventEmitter",
+    "StreamState",
     # State
     "SubAgentState",
-    "StreamState",
-    "_parse_todo_items",
+    "ToolCallInfo",
+    # Tracker
+    "ToolCallTracker",
+    # Formatter
+    "ToolResultFormatter",
+    "ToolStatus",
+    "_astream_to_console",
     "_build_todo_stats",
-    # Events
-    "stream_agent_events",
+    "_parse_todo_items",
     # Diff formatting
     "build_edit_diff",
-    "format_diff_rich",
     # Display
     "console",
-    "formatter",
-    "format_tool_result_compact",
+    "count_lines",
     "create_streaming_display",
     "display_final_results",
-    "_astream_to_console",
+    "format_diff_rich",
+    "format_tool_compact",
+    "format_tool_result_compact",
+    "format_tree_output",
+    "formatter",
+    "get_status_symbol",
+    "has_args",
+    "is_success",
+    # Events
+    "stream_agent_events",
+    "truncate",
+    "truncate_with_line_hint",
 ]

@@ -4,11 +4,10 @@ import re
 from pathlib import Path
 
 from EvoScientist.backends import (
-    validate_command,
-    convert_virtual_paths_in_command,
     CustomSandboxBackend,
+    convert_virtual_paths_in_command,
+    validate_command,
 )
-
 
 # === validate_command ===
 

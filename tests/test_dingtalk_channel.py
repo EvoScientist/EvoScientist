@@ -5,10 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from EvoScientist.channels.dingtalk.channel import DingTalkChannel, DingTalkConfig
 from EvoScientist.channels.base import ChannelError, OutboundMessage
-
-
+from EvoScientist.channels.dingtalk.channel import DingTalkChannel, DingTalkConfig
 from tests.conftest import run_async as _run
 
 
@@ -285,11 +283,11 @@ class TestDingTalkProbe:
     def test_missing_client_id(self):
         from EvoScientist.channels.dingtalk.probe import validate_dingtalk
 
-        ok, msg = _run(validate_dingtalk("", "secret"))
+        ok, _msg = _run(validate_dingtalk("", "secret"))
         assert ok is False
 
     def test_missing_client_secret(self):
         from EvoScientist.channels.dingtalk.probe import validate_dingtalk
 
-        ok, msg = _run(validate_dingtalk("id", ""))
+        ok, _msg = _run(validate_dingtalk("id", ""))
         assert ok is False

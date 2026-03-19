@@ -1,6 +1,6 @@
 """Shared constants and utilities for CLI and TUI modules."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..sessions import AGENT_NAME
 
@@ -35,7 +35,7 @@ def build_metadata(workspace_dir: str | None, model: str | None) -> dict:
     """Build metadata dict for LangGraph checkpoint persistence."""
     return {
         "agent_name": AGENT_NAME,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "workspace_dir": workspace_dir or "",
         "model": model or "",
     }

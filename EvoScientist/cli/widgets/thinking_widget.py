@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from rich.panel import Panel
 from rich.text import Text
-
 from textual.events import Click
 from textual.widgets import Static
 

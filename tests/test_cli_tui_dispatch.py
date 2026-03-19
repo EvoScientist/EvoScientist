@@ -6,12 +6,12 @@ from EvoScientist.cli.interactive import cmd_interactive
 def test_cmd_interactive_dispatches_to_textual(monkeypatch):
     captured: dict[str, object] = {}
 
-    def _fake_resolve_ui_backend(value, *, warn_fallback=False):  # noqa: ANN001
+    def _fake_resolve_ui_backend(value, *, warn_fallback=False):
         captured["resolved_input"] = value
         captured["warn_fallback"] = warn_fallback
         return "tui"
 
-    def _fake_run_textual_interactive(**kwargs):  # noqa: ANN003
+    def _fake_run_textual_interactive(**kwargs):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(

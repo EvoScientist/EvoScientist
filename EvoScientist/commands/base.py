@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Protocol, Type, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 
 @dataclass
@@ -10,7 +10,7 @@ class Argument:
     """Definition of a command argument."""
 
     name: str
-    type: Type
+    type: type
     description: str
     required: bool = True
 
@@ -32,6 +32,9 @@ class CommandUI(Protocol):
     async def wait_for_skill_browse(
         self, index: list[dict], installed_names: set[str], pre_filter_tag: str
     ) -> list[str] | None: ...
+    async def wait_for_mcp_browse(
+        self, servers: list, installed_names: set[str], pre_filter_tag: str
+    ) -> list | None: ...
     def clear_chat(self) -> None: ...
     def request_quit(self) -> None: ...
     def start_new_session(self) -> None: ...
@@ -58,9 +61,9 @@ class Command(ABC):
     """Base class for all EvoScientist slash commands."""
 
     name: str
-    alias: list[str] = []
+    alias: ClassVar[list[str]] = []
     description: str
-    arguments: list[Argument] = []
+    arguments: ClassVar[list[Argument]] = []
 
     @abstractmethod
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

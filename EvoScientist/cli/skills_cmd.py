@@ -8,8 +8,8 @@ from .agent import _shorten_path
 
 def _cmd_list_skills() -> None:
     """List all available skills (user and system)."""
-    from ..tools.skills_manager import list_skills
     from ..paths import USER_SKILLS_DIR
+    from ..tools.skills_manager import list_skills
 
     skills = list_skills(include_system=True)
 

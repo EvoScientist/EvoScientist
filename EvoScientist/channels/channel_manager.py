@@ -16,10 +16,11 @@ import json
 import logging
 import pkgutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .base import Channel, OutboundMessage
 from .bus import MessageBus
@@ -352,7 +353,7 @@ class _HealthServer:
                 self._process_request(reader, writer),
                 timeout=self._CONNECTION_TIMEOUT,
             )
-        except (asyncio.TimeoutError, ConnectionError, OSError):
+        except (TimeoutError, ConnectionError, OSError):
             pass
         finally:
             try:
@@ -448,7 +449,7 @@ def _parse_csv(value: str) -> set[str] | None:
     if not value or not value.strip():
         return None
     items = {s.strip() for s in value.split(",") if s.strip()}
-    return items if items else None
+    return items or None
 
 
 def register_channel(name: str, factory: ChannelFactory) -> None:
@@ -596,7 +597,7 @@ class ChannelManager:
         self._shared_webhook_server: SharedWebhookServer | None = None
 
     @classmethod
-    def from_config(cls, config, bus: MessageBus | None = None) -> "ChannelManager":
+    def from_config(cls, config, bus: MessageBus | None = None) -> ChannelManager:
         """Create a ChannelManager from application config.
 
         Parses ``config.channel_enabled`` (comma-separated channel types),
@@ -820,7 +821,7 @@ class ChannelManager:
                     self.bus.consume_outbound(),
                     timeout=1.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break

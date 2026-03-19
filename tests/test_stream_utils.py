@@ -1,15 +1,14 @@
 """Tests for EvoScientist/stream/utils.py pure functions."""
 
 from EvoScientist.stream.utils import (
-    is_success,
-    format_tool_compact,
-    truncate,
-    has_args,
-    count_lines,
-    truncate_with_line_hint,
     _shorten_path,
+    count_lines,
+    format_tool_compact,
+    has_args,
+    is_success,
+    truncate,
+    truncate_with_line_hint,
 )
-
 
 # === is_success ===
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.text import Text
-
 from textual.binding import Binding, BindingType
 from textual.containers import Container
 from textual.message import Message
@@ -164,7 +163,9 @@ class ThreadPickerWidget(Widget):
         self.call_later(self.focus)
 
     def _update_rows(self) -> None:
-        for i, (thread, widget) in enumerate(zip(self._threads, self._row_widgets)):
+        for i, (thread, widget) in enumerate(
+            zip(self._threads, self._row_widgets, strict=False)
+        ):
             is_current = thread["thread_id"] == self._current_thread
             text = build_row_text(
                 thread, selected=(i == self._selected), current=is_current

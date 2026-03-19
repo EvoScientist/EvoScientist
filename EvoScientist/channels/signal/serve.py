@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import SignalChannel, SignalConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import SignalChannel, SignalConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

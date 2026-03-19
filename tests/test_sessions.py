@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import UTC
 from unittest.mock import patch
 
 from EvoScientist.sessions import (
@@ -18,15 +19,13 @@ from EvoScientist.sessions import (
     list_threads,
     thread_exists,
 )
-
-
 from tests.conftest import run_async as _run
 
 
 class TestGenerateThreadId(unittest.TestCase):
     def test_length(self):
         tid = generate_thread_id()
-        self.assertEqual(len(tid), 8)
+        assert len(tid) == 8
 
     def test_hex(self):
         tid = generate_thread_id()
@@ -34,58 +33,58 @@ class TestGenerateThreadId(unittest.TestCase):
 
     def test_uniqueness(self):
         ids = {generate_thread_id() for _ in range(100)}
-        self.assertEqual(len(ids), 100)
+        assert len(ids) == 100
 
 
 class TestGetDbPath(unittest.TestCase):
     def test_uses_config_dir(self):
         path = get_db_path()
-        self.assertTrue(str(path).endswith("sessions.db"))
-        self.assertIn(".config", str(path))
-        self.assertIn("evoscientist", str(path))
+        assert str(path).endswith("sessions.db")
+        assert ".config" in str(path)
+        assert "evoscientist" in str(path)
 
 
 class TestFormatRelativeTime(unittest.TestCase):
     def test_none(self):
-        self.assertEqual(_format_relative_time(None), "")
+        assert _format_relative_time(None) == ""
 
     def test_invalid(self):
-        self.assertEqual(_format_relative_time("not-a-date"), "")
+        assert _format_relative_time("not-a-date") == ""
 
     def test_recent(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         result = _format_relative_time(now)
-        self.assertIn("just now", result)
+        assert "just now" in result
 
     def test_minutes(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        ts = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         result = _format_relative_time(ts)
-        self.assertIn("min ago", result)
+        assert "min ago" in result
 
     def test_hours(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
         result = _format_relative_time(ts)
-        self.assertIn("hour", result)
+        assert "hour" in result
 
     def test_days(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        ts = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        ts = (datetime.now(UTC) - timedelta(days=3)).isoformat()
         result = _format_relative_time(ts)
-        self.assertIn("day", result)
+        assert "day" in result
 
     def test_months(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        ts = (datetime.now(timezone.utc) - timedelta(days=65)).isoformat()
+        ts = (datetime.now(UTC) - timedelta(days=65)).isoformat()
         result = _format_relative_time(ts)
-        self.assertIn("month", result)
+        assert "month" in result
 
 
 class TestThreadFunctions(unittest.TestCase):
@@ -184,44 +183,44 @@ class TestThreadFunctions(unittest.TestCase):
     def test_list_threads(self):
         threads = _run(list_threads(limit=10))
         # Should only contain EvoScientist threads
-        self.assertEqual(len(threads), 3)
+        assert len(threads) == 3
         # Most recent first
-        self.assertEqual(threads[0]["thread_id"], "def00001")
+        assert threads[0]["thread_id"] == "def00001"
 
     def test_list_threads_with_message_count(self):
         threads = _run(list_threads(limit=10, include_message_count=True))
-        self.assertIn("message_count", threads[0])
+        assert "message_count" in threads[0]
 
     def test_thread_exists_true(self):
-        self.assertTrue(_run(thread_exists("abc12345")))
+        assert _run(thread_exists("abc12345"))
 
     def test_thread_exists_false(self):
-        self.assertFalse(_run(thread_exists("nonexist")))
+        assert not _run(thread_exists("nonexist"))
 
     def test_find_similar(self):
         similar = _run(find_similar_threads("abc1"))
-        self.assertEqual(len(similar), 2)
-        self.assertIn("abc12345", similar)
-        self.assertIn("abc12399", similar)
+        assert len(similar) == 2
+        assert "abc12345" in similar
+        assert "abc12399" in similar
 
     def test_find_similar_no_match(self):
         similar = _run(find_similar_threads("xyz"))
-        self.assertEqual(len(similar), 0)
+        assert len(similar) == 0
 
     def test_get_most_recent(self):
         recent = _run(get_most_recent())
-        self.assertIsNotNone(recent)
-        self.assertEqual(recent, "def00001")
+        assert recent is not None
+        assert recent == "def00001"
 
     def test_get_thread_metadata(self):
         meta = _run(get_thread_metadata("abc12345"))
-        self.assertIsNotNone(meta)
-        self.assertEqual(meta["workspace_dir"], "/tmp/ws_abc12345")
-        self.assertEqual(meta["model"], "claude-sonnet-4-5")
+        assert meta is not None
+        assert meta["workspace_dir"] == "/tmp/ws_abc12345"
+        assert meta["model"] == "claude-sonnet-4-5"
 
     def test_get_thread_metadata_missing(self):
         meta = _run(get_thread_metadata("nonexist"))
-        self.assertIsNone(meta)
+        assert meta is None
 
     def test_delete_thread(self):
         # Insert a thread to delete
@@ -243,29 +242,29 @@ class TestThreadFunctions(unittest.TestCase):
 
         _run(_insert())
 
-        self.assertTrue(_run(thread_exists("todelete")))
-        self.assertTrue(_run(delete_thread("todelete")))
-        self.assertFalse(_run(thread_exists("todelete")))
+        assert _run(thread_exists("todelete"))
+        assert _run(delete_thread("todelete"))
+        assert not _run(thread_exists("todelete"))
 
     def test_delete_nonexistent(self):
-        self.assertFalse(_run(delete_thread("nope1234")))
+        assert not _run(delete_thread("nope1234"))
 
     # -- Agent isolation: OtherAgent data should never be visible --
 
     def test_thread_exists_ignores_other_agent(self):
-        self.assertFalse(_run(thread_exists("zzz99999")))
+        assert not _run(thread_exists("zzz99999"))
 
     def test_find_similar_ignores_other_agent(self):
         similar = _run(find_similar_threads("zzz"))
-        self.assertEqual(len(similar), 0)
+        assert len(similar) == 0
 
     def test_get_metadata_ignores_other_agent(self):
         meta = _run(get_thread_metadata("zzz99999"))
-        self.assertIsNone(meta)
+        assert meta is None
 
     def test_delete_ignores_other_agent(self):
         # Should not delete OtherAgent's data
-        self.assertFalse(_run(delete_thread("zzz99999")))
+        assert not _run(delete_thread("zzz99999"))
 
     def test_delete_thread_preserves_other_agent_writes(self):
         """Deleting a shared thread_id must only remove writes linked to
@@ -330,8 +329,8 @@ class TestThreadFunctions(unittest.TestCase):
                 return [r[0] for r in rows]
 
         remaining = _run(_check())
-        self.assertIn("cp_other_shared", remaining)
-        self.assertNotIn("cp_evo_shared", remaining)
+        assert "cp_other_shared" in remaining
+        assert "cp_evo_shared" not in remaining
 
 
 if __name__ == "__main__":

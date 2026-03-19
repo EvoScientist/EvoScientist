@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from .channel import SlackChannel, SlackConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from .channel import SlackChannel, SlackConfig
 
 logging.basicConfig(
     level=logging.DEBUG,

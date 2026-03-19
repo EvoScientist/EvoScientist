@@ -46,6 +46,7 @@ dev = [
     "pytest-timeout>=2.4",
     "ruff>=0.5",
     "build>=1.0",
+    "pre-commit>=3.5.0",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +56,7 @@ dev = [
     "pytest-timeout>=2.4",
     "ruff>=0.5",
     "build>=1.0",
+    "pre-commit>=3.5.0",
 ]
 telegram = ["python-telegram-bot>=21.0"]
 discord = ["discord.py>=2.3"]
@@ -97,3 +99,65 @@ testpaths = ["tests"]
 filterwarnings = [
     "ignore::UserWarning:langchain_nvidia_ai_endpoints",
 ]
+
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+
+line-length = 88
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle (Error & Warning)
+    "F",       # Pyflakes (Logical errors)
+    "I",       # isort (Import sorting)
+    "B",       # flake8-bugbear (Common bugs)
+    "C4",      # flake8-comprehensions (List/Dict perf)
+    "UP",      # pyupgrade (Modern Python syntax)
+    "PT",      # flake8-pytest-style (If using Pytest)
+    "PLE",     # Pylint Error
+    "RUF",     # Ruff specific rules
+    "FURB",    # Refurb rules
+]
+ignore = [
+    "E501", # Formatter takes care of that
+]
+fixable = ["ALL"]
+unfixable = []
+allowed-confusables = ["–", "❯"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = false

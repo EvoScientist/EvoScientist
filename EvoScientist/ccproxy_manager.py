@@ -56,8 +56,8 @@ def _is_editable_install() -> bool:
     project root can shadow the real ``dist-info`` in site-packages.
     """
     try:
-        import json
         import importlib.metadata as _meta
+        import json
 
         for dist in _meta.distributions():
             name = dist.metadata.get("Name", "")
@@ -76,10 +76,7 @@ def _is_editable_install() -> bool:
 def _oauth_install_hint() -> str:
     """Return the appropriate install command depending on install method."""
     if _is_editable_install():
-        return (
-            "uv sync --extra oauth "
-            "or pip install -e '.[oauth]'"
-        )
+        return "uv sync --extra oauth or pip install -e '.[oauth]'"
     return "pip install 'evoscientist[oauth]'"
 
 
@@ -189,7 +186,7 @@ def start_ccproxy(port: int) -> subprocess.Popen:
         The Popen handle for the ccproxy process.
 
     Raises:
-        RuntimeError: If ccproxy fails to become healthy within 10 seconds.
+        RuntimeError: If ccproxy fails to become healthy within 30 seconds.
         FileNotFoundError: If ccproxy binary is not found.
     """
     exe = _ccproxy_exe() or "ccproxy"
@@ -315,10 +312,13 @@ def _patch_ccproxy_oauth_header() -> None:
         # Ask that Python where ccproxy's adapter lives
         result = subprocess.run(
             [
-                python_exe, "-c",
+                python_exe,
+                "-c",
                 "import inspect, ccproxy.plugins.claude_api.adapter as m; print(inspect.getfile(m))",
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return
@@ -345,10 +345,10 @@ def _patch_ccproxy_oauth_header() -> None:
             text,
         )
         # Step 2: insert correct assignment after the cli_headers block
-        insert_after = 'filtered_headers[lk] = value\n'
+        insert_after = "filtered_headers[lk] = value\n"
         replacement = (
-            'filtered_headers[lk] = value\n\n'
-            '        # oauth-2025-04-20: required for OAuth Bearer token auth (Anthropic 2026-03)\n'
+            "filtered_headers[lk] = value\n\n"
+            "        # oauth-2025-04-20: required for OAuth Bearer token auth (Anthropic 2026-03)\n"
             '        filtered_headers["anthropic-beta"] = "oauth-2025-04-20"\n'
         )
         patched = patched.replace(insert_after, replacement, 1)

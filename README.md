@@ -88,7 +88,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 ## ✨ Features
 - **🤖 Multi-Agent Team** — 6 sub-agents (plan, research, code, debug, analyze, write) working in concert.
 - **🧠 Persistent Memory** — Context, preferences, and findings survive across sessions.
-- **🌐 Multi-Provider** — Anthropic, OpenAI, Google, NVIDIA — one config to switch.
+- **🌐 Multi-Provider** — Anthropic, OpenAI, Google, MiniMax, NVIDIA — one config to switch.
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
@@ -155,6 +155,11 @@ uv pip install git+https://github.com/EvoScientist/EvoScientist.git
 git clone https://github.com/EvoScientist/EvoScientist.git
 cd EvoScientist
 uv sync --dev
+```
+
+enable pre-commit hooks:
+```bash
+uv run pre-commit install
 ```
 
 <details>
@@ -227,10 +232,11 @@ Set at least one LLM provider key and (optionally) a search key:
 
 ```bash
 # Pick one LLM provider
-export ANTHROPIC_API_KEY="sk-..."   # Claude — console.anthropic.com
-export OPENAI_API_KEY="sk-..."      # GPT   — platform.openai.com
-export GOOGLE_API_KEY="AI..."       # Gemini — aistudio.google.com/api-keys
-export NVIDIA_API_KEY="nvapi-..."   # NIM   — build.nvidia.com
+export ANTHROPIC_API_KEY="sk-..."   # Claude  — console.anthropic.com
+export OPENAI_API_KEY="sk-..."      # GPT    — platform.openai.com
+export GOOGLE_API_KEY="AI..."       # Gemini  — aistudio.google.com/api-keys
+export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com (Anthropic-compatible)
+export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
 
 # Web search (optional)
 export TAVILY_API_KEY="tvly-..."    # app.tavily.com
@@ -522,6 +528,8 @@ We welcome contributions from developers, researchers, and AI coding agents at a
 
 - [Discord](https://discord.gg/AZ9ZMXkunY) — Ask questions, share findings, and collaborate with researchers and developers in real-time.
 - [WeChat](https://github.com/EvoScientist/EvoScientist/blob/main/.github/assets/cn_info.md) — Connect with our Chinese-speaking research community.
+
+  <img src=".github/assets/wechat_group.jpeg" alt="WeChat QR Code" width="200"/>
 
 Every contribution brings us one step closer to a future where AI accelerates scientific breakthroughs for all of humanity.
 

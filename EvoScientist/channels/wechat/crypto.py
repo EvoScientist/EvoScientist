@@ -60,7 +60,7 @@ def _aes_decrypt(key: bytes, iv: bytes, ciphertext: bytes) -> bytes:
             raise ImportError(
                 "WeChat message decryption requires pycryptodome or pyaes. "
                 "Install with: pip install pycryptodome"
-            )
+            ) from None
 
 
 def _aes_encrypt(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
@@ -80,7 +80,7 @@ def _aes_encrypt(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
             raise ImportError(
                 "WeChat message encryption requires pycryptodome or pyaes. "
                 "Install with: pip install pycryptodome"
-            )
+            ) from None
 
 
 class WeChatCrypto:

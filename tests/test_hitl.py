@@ -1,11 +1,10 @@
 """Tests for HITL (Human-in-the-Loop) approval mechanism."""
 
 import asyncio
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from EvoScientist.stream.emitter import StreamEventEmitter, StreamEvent
+from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
 from EvoScientist.stream.state import StreamState
-
 
 # =============================================================================
 # StreamEventEmitter.interrupt()
@@ -161,8 +160,8 @@ class TestResolveHitlApproval:
             disp._session_auto_approve = original
 
     def test_config_auto_approve(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:
@@ -185,8 +184,8 @@ class TestResolveHitlApproval:
             disp._session_auto_approve = original
 
     def test_non_execute_tool_auto_approves(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:
@@ -209,8 +208,8 @@ class TestResolveHitlApproval:
             disp._session_auto_approve = original
 
     def test_execute_with_matching_allow_list(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:
@@ -233,8 +232,8 @@ class TestResolveHitlApproval:
             disp._session_auto_approve = original
 
     def test_execute_not_in_allow_list_prompts(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:
@@ -310,6 +309,7 @@ class TestInterruptEventParsing:
     def test_interrupt_from_updates_mode(self):
         """__interrupt__ in updates mode yields interrupt event."""
         from langchain_core.messages import AIMessageChunk
+
         from EvoScientist.stream.events import stream_agent_events
 
         mock_agent = MagicMock()
@@ -512,9 +512,9 @@ class TestConsumerHitlHelpers:
 class TestChannelHitlIntercept:
     def test_register_and_set_hitl_reply(self):
         from EvoScientist.cli.channel import (
+            _pop_hitl_reply,
             _register_hitl_wait,
             _try_set_hitl_reply,
-            _pop_hitl_reply,
         )
 
         event = _register_hitl_wait("telegram", "chat123")
@@ -541,8 +541,8 @@ class TestChannelHitlIntercept:
 
     def test_hitl_reply_timeout(self):
         from EvoScientist.cli.channel import (
-            _register_hitl_wait,
             _pop_hitl_reply,
+            _register_hitl_wait,
         )
 
         event = _register_hitl_wait("telegram", "timeout_chat")
@@ -561,8 +561,8 @@ class TestChannelHitlIntercept:
 
 class TestResolveHitlApprovalWithPromptFn:
     def test_prompt_fn_called_for_execute(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:
@@ -589,8 +589,8 @@ class TestResolveHitlApprovalWithPromptFn:
             disp._session_auto_approve = original
 
     def test_prompt_fn_not_called_for_auto_approve(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:
@@ -615,8 +615,8 @@ class TestResolveHitlApprovalWithPromptFn:
             disp._session_auto_approve = original
 
     def test_prompt_fn_not_called_for_non_execute(self):
-        from EvoScientist.stream.display import _resolve_hitl_approval
         import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
 
         original = disp._session_auto_approve
         try:

@@ -1,8 +1,8 @@
 """Tests for the ask_user middleware, stream events, state, and UI helpers."""
 
-import pytest
 from unittest.mock import patch
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Middleware data types

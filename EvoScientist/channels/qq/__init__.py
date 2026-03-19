@@ -8,8 +8,8 @@ Usage in config:
     qq_app_secret = "your_app_secret"
 """
 
+from ..channel_manager import _parse_csv, register_channel
 from .channel import QQChannel, QQConfig
-from ..channel_manager import register_channel, _parse_csv
 
 __all__ = ["QQChannel", "QQConfig"]
 

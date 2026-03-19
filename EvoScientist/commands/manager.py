@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import shlex
-from typing import Dict, List, Tuple
 
 from .base import Command, CommandContext
 
@@ -13,11 +12,11 @@ class CommandManager:
     """Manages slash command registration and execution."""
 
     def __init__(self) -> None:
-        self._commands: Dict[str, Command] = {}
+        self._commands: dict[str, Command] = {}
 
     def register(self, command: Command) -> None:
         """Register a command and its aliases."""
-        names = [command.name] + command.alias
+        names = [command.name, *command.alias]
         for name in names:
             name = name.lower()
             if not name.startswith("/"):
@@ -28,7 +27,7 @@ class CommandManager:
         """Lookup a command by name."""
         return self._commands.get(name.lower())
 
-    def list_commands(self) -> List[Tuple[str, str]]:
+    def list_commands(self) -> list[tuple[str, str]]:
         """List all registered command names and descriptions."""
         seen = set()
         results = []
@@ -38,7 +37,7 @@ class CommandManager:
                 seen.add(cmd)
         return results
 
-    def get_all_commands(self) -> List[Command]:
+    def get_all_commands(self) -> list[Command]:
         """Return all registered command instances."""
         seen = set()
         results = []

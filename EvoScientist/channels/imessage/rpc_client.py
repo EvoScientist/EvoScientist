@@ -7,8 +7,9 @@ similar to OpenClaw's approach.
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class ImsgRpcClient:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._closed = asyncio.Event()
 
     async def start(self) -> None:
@@ -75,7 +77,7 @@ class ImsgRpcClient:
         )
 
         self._reader_task = asyncio.create_task(self._read_loop())
-        asyncio.create_task(self._stderr_loop())
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
         logger.info(f"Started imsg rpc (pid={self._process.pid})")
 
     async def stop(self) -> None:
@@ -93,10 +95,17 @@ class ImsgRpcClient:
             except asyncio.CancelledError:
                 pass
 
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+
         try:
             self._process.terminate()
             await asyncio.wait_for(self._process.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._process.kill()
             await self._process.wait()
 
@@ -150,9 +159,9 @@ class ImsgRpcClient:
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(request_id, None)
-            raise Exception(f"RPC request timeout: {method}")
+            raise Exception(f"RPC request timeout: {method}") from None
 
     async def _read_loop(self) -> None:
         """Read and process responses from stdout."""
@@ -209,7 +218,7 @@ class ImsgRpcClient:
             if future is None:
                 return
 
-            if "error" in data and data["error"]:
+            if data.get("error"):
                 error = data["error"]
                 msg = error.get("message", "RPC error")
                 future.set_exception(Exception(msg))

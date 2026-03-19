@@ -1,12 +1,11 @@
 """Tests for StreamState, SubAgentState, and display helpers from cli.py."""
 
 from EvoScientist.cli import (
-    SubAgentState,
     StreamState,
-    _parse_todo_items,
+    SubAgentState,
     _build_todo_stats,
+    _parse_todo_items,
 )
-
 
 # =============================================================================
 # SubAgentState

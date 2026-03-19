@@ -137,9 +137,7 @@ class AskUserWidget(Widget):
         if total == 1:
             title = ">>> Quick check-in from EvoScientist <<<"
         else:
-            title = ">>> Question 1/{} — Quick check-in from EvoScientist <<<".format(
-                total
-            )
+            title = f">>> Question 1/{total} — Quick check-in from EvoScientist <<<"
 
         self._title_w = Static(title, classes="ask-title")
         yield self._title_w

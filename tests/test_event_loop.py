@@ -3,7 +3,7 @@
 import asyncio
 from unittest.mock import Mock, patch
 
-from EvoScientist.stream.display import _get_event_loop, _create_event_loop
+from EvoScientist.stream.display import _create_event_loop, _get_event_loop
 
 
 class TestCreateEventLoop:

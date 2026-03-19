@@ -49,7 +49,7 @@ def test_resolve_ui_backend_keeps_tui_when_available(monkeypatch):
 class _BrokenBackend:
     name: str = "tui"
 
-    def run_streaming(self, **kwargs):  # noqa: ANN003, ANN201
+    def run_streaming(self, **kwargs):
         raise RuntimeError("boom")
 
 
@@ -59,7 +59,7 @@ def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
     )
 
     class _RichStub:
-        def run_streaming(self, **kwargs):  # noqa: ANN003, ANN201
+        def run_streaming(self, **kwargs):
             return "fallback-ok"
 
     monkeypatch.setattr(

@@ -9,7 +9,6 @@ from __future__ import annotations
 import importlib
 import unittest
 
-
 # ---------------------------------------------------------------------------
 # Textual might not be installed — skip entire module if missing
 # ---------------------------------------------------------------------------
@@ -429,14 +428,14 @@ class TestWidgetImports(unittest.TestCase):
 
     def test_all_imports(self):
         from EvoScientist.cli.widgets import (
-            LoadingWidget,
-            ThinkingWidget,
             AssistantMessage,
-            ToolCallWidget,
+            LoadingWidget,
             SubAgentWidget,
-            TodoWidget,
-            UserMessage,
             SystemMessage,
+            ThinkingWidget,
+            TodoWidget,
+            ToolCallWidget,
+            UserMessage,
         )
 
         # All should be classes
@@ -484,8 +483,9 @@ class TestClipboardPaste(unittest.TestCase):
 
         with patch.dict("sys.modules", {"pyperclip": mock_pyperclip}):
             # Re-import to pick up the mock
-            from EvoScientist.cli import clipboard
             import importlib
+
+            from EvoScientist.cli import clipboard
 
             importlib.reload(clipboard)
 
@@ -499,8 +499,9 @@ class TestClipboardPaste(unittest.TestCase):
         from unittest.mock import patch
 
         with patch.dict("sys.modules", {"pyperclip": None}):
-            from EvoScientist.cli import clipboard
             import importlib
+
+            from EvoScientist.cli import clipboard
 
             importlib.reload(clipboard)
 

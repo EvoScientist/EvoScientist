@@ -10,21 +10,17 @@ import asyncio
 import logging
 import queue
 import random
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 from rich.console import Group
 from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
-from .channel import (
-    ChannelMessage,
-    _channels_is_running,
-    _channels_running_list,
-    _channels_stop,
-    _auto_start_channel,
-    _message_queue,
-    _set_channel_response,
-)
+
+from ..commands import CommandContext
+from ..commands import manager as cmd_manager
+from ..config.settings import get_config_dir
 from ..sessions import (
     find_similar_threads,
     generate_thread_id,
@@ -33,13 +29,19 @@ from ..sessions import (
     get_thread_metadata,
     thread_exists,
 )
-from ..config.settings import get_config_dir
 from ..stream.events import stream_agent_events
-from ..stream.state import StreamState, _INTERNAL_TOOLS
+from ..stream.state import _INTERNAL_TOOLS, StreamState
+from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
+from .channel import (
+    ChannelMessage,
+    _auto_start_channel,
+    _channels_is_running,
+    _channels_running_list,
+    _channels_stop,
+    _message_queue,
+    _set_channel_response,
+)
 from .history_suggester import HistorySuggester
-
-from ..commands import manager as cmd_manager, CommandContext
-from ._constants import LOGO_LINES, LOGO_GRADIENT, WELCOME_SLOGANS, build_metadata
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ def _build_welcome_banner(
         channels: List of (name, ok, detail) tuples for the channels panel.
     """
     banner = Text()
-    for line, color in zip(LOGO_LINES, LOGO_GRADIENT):
+    for line, color in zip(LOGO_LINES, LOGO_GRADIENT, strict=False):
         banner.append(f"{line}\n", style=f"bold {color}")
 
     # Info line — matches CLI print_banner format
@@ -179,16 +181,16 @@ def run_textual_interactive(
 
         from .clipboard import copy_selection_to_clipboard, get_clipboard_text
         from .widgets import (
-            LoadingWidget,
-            ThinkingWidget,
-            SummarizationWidget,
             AssistantMessage,
-            ToolCallWidget,
+            LoadingWidget,
             SubAgentWidget,
-            TodoWidget,
-            UserMessage,
+            SummarizationWidget,
             SystemMessage,
+            ThinkingWidget,
+            TodoWidget,
+            ToolCallWidget,
             UsageWidget,
+            UserMessage,
         )
     except Exception as e:  # pragma: no cover - runtime fallback path
         raise RuntimeError(
@@ -265,7 +267,7 @@ def run_textual_interactive(
             padding: 0 1;
         }
         """
-        BINDINGS = [
+        BINDINGS: ClassVar[list[Binding]] = [
             Binding("ctrl+c", "request_quit", "Quit", show=False),
             Binding("ctrl+v", "paste_clipboard", "Paste", show=False),
             Binding("up", "edit_queued", show=False, priority=True),
@@ -306,7 +308,9 @@ def run_textual_interactive(
             self._ask_user_future: asyncio.Future | None = None
             self._picker_future: asyncio.Future | None = None
             self._browser_future: asyncio.Future | None = None
+            self._mcp_browser_future: asyncio.Future | None = None
             self._history_suggester = HistorySuggester(get_config_dir() / "history")
+            self._background_tasks: set[asyncio.Task] = set()
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -350,6 +354,23 @@ def run_textual_interactive(
 
             return await self._wait_for_skill_browse(browser)
 
+        async def wait_for_mcp_browse(
+            self, servers: list, installed_names: set[str], pre_filter_tag: str
+        ) -> list | None:
+            from .widgets.mcp_browser import MCPBrowserWidget
+
+            container = self.query_one("#chat", VerticalScroll)
+            browser = MCPBrowserWidget(
+                servers,
+                installed_names,
+                pre_filter_tag=pre_filter_tag,
+            )
+            await container.mount(browser)
+            container.scroll_end(animate=False)
+            browser.focus()
+
+            return await self._wait_for_mcp_browse(browser)
+
         def clear_chat(self) -> None:
             container = self.query_one("#chat", VerticalScroll)
             welcome = self.query_one("#welcome", Static)
@@ -376,11 +397,11 @@ def run_textual_interactive(
                 _ch_mod._cli_thread_id = self._conversation_tid
             self._render_welcome()
             self._render_status()
-            self.append_system(
-                f"New session: {self._conversation_tid}", style="green"
-            )
+            self.append_system(f"New session: {self._conversation_tid}", style="green")
 
-        async def handle_session_resume(self, thread_id: str, workspace_dir: str | None = None) -> None:
+        async def handle_session_resume(
+            self, thread_id: str, workspace_dir: str | None = None
+        ) -> None:
             if workspace_dir:
                 self._workspace_dir = workspace_dir
 
@@ -502,7 +523,7 @@ def run_textual_interactive(
             self._approval_future = asyncio.get_event_loop().create_future()
             try:
                 return await asyncio.wait_for(self._approval_future, timeout=300)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 return None
             finally:
                 self._approval_future = None
@@ -524,7 +545,7 @@ def run_textual_interactive(
 
             try:
                 result = await asyncio.wait_for(self._ask_user_future, timeout=300)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 ask_w.action_cancel()
                 return {"status": "cancelled"}
             finally:
@@ -546,7 +567,7 @@ def run_textual_interactive(
             self._picker_future = asyncio.get_event_loop().create_future()
             try:
                 return await asyncio.wait_for(self._picker_future, timeout=120)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 return None
             finally:
                 self._picker_future = None
@@ -574,7 +595,7 @@ def run_textual_interactive(
             self._browser_future = asyncio.get_event_loop().create_future()
             try:
                 return await asyncio.wait_for(self._browser_future, timeout=300)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 return None
             finally:
                 self._browser_future = None
@@ -593,6 +614,33 @@ def run_textual_interactive(
             """Handle SkillBrowserWidget.Cancelled message."""
             if self._browser_future and not self._browser_future.done():
                 self._browser_future.set_result(None)
+
+        # ── MCP browser ───────────────────────────────────────
+
+        async def _wait_for_mcp_browse(self, browser_widget) -> list | None:
+            """Wait for user to complete MCP server browsing."""
+            self._mcp_browser_future = asyncio.get_event_loop().create_future()
+            try:
+                return await asyncio.wait_for(self._mcp_browser_future, timeout=300)
+            except (TimeoutError, asyncio.CancelledError):
+                return None
+            finally:
+                self._mcp_browser_future = None
+                try:
+                    browser_widget.remove()
+                except Exception:
+                    pass
+                self.query_one("#prompt", Input).focus()
+
+        def on_mcpbrowser_widget_confirmed(self, event) -> None:  # type: ignore[override]
+            """Handle MCPBrowserWidget.Confirmed message."""
+            if self._mcp_browser_future and not self._mcp_browser_future.done():
+                self._mcp_browser_future.set_result(event.entries)
+
+        def on_mcpbrowser_widget_cancelled(self, event) -> None:  # type: ignore[override]
+            """Handle MCPBrowserWidget.Cancelled message."""
+            if self._mcp_browser_future and not self._mcp_browser_future.done():
+                self._mcp_browser_future.set_result(None)
 
         # ── Streaming core ─────────────────────────────────────
 
@@ -1037,7 +1085,7 @@ def run_textual_interactive(
                                     )
                                     _ask_fn = channel_ask_user_fn
                                     result = await asyncio.to_thread(
-                                        lambda: _ask_fn(event),
+                                        lambda f=_ask_fn, e=event: f(e),
                                     )
                                 else:
                                     # Interactive TUI: display widget, collect via arrow keys
@@ -1055,7 +1103,9 @@ def run_textual_interactive(
                                     except Exception:
                                         pass
                                     _prompt.disabled = False
-                                from langgraph.types import Command  # type: ignore[import-untyped]
+                                from langgraph.types import (
+                                    Command,  # type: ignore[import-untyped]
+                                )
 
                                 _stream_input = Command(resume=result)
                                 _hitl_resuming = True
@@ -1067,7 +1117,9 @@ def run_textual_interactive(
 
                             # HITL: check session auto-approve first
                             if self._hitl_auto_approve:
-                                from langgraph.types import Command  # type: ignore[import-untyped]
+                                from langgraph.types import (
+                                    Command,  # type: ignore[import-untyped]
+                                )
 
                                 _stream_input = Command(
                                     resume={
@@ -1090,7 +1142,9 @@ def run_textual_interactive(
                                     action_reqs,
                                 )
                                 if decisions is not None:
-                                    from langgraph.types import Command  # type: ignore[import-untyped]
+                                    from langgraph.types import (
+                                        Command,  # type: ignore[import-untyped]
+                                    )
 
                                     _stream_input = Command(
                                         resume={"decisions": decisions}
@@ -1123,7 +1177,9 @@ def run_textual_interactive(
                             if decided_event and decided_event.decisions is not None:
                                 if decided_event.auto_approve_session:
                                     self._hitl_auto_approve = True
-                                from langgraph.types import Command  # type: ignore[import-untyped]
+                                from langgraph.types import (
+                                    Command,  # type: ignore[import-untyped]
+                                )
 
                                 _stream_input = Command(
                                     resume={"decisions": decided_event.decisions}
@@ -1392,7 +1448,7 @@ def run_textual_interactive(
                 return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
 
             from ..commands.channel_ui import ChannelCommandUI
-            
+
             # Handle slash commands from channel
             if msg.content.strip().startswith("/"):
                 ctx = CommandContext(
@@ -1412,7 +1468,9 @@ def run_textual_interactive(
                         f"[{msg.channel_type}: Executed command from {msg.sender}]",
                         style="dim",
                     )
-                    _set_channel_response(msg.msg_id, f"Command executed: {msg.content}")
+                    _set_channel_response(
+                        msg.msg_id, f"Command executed: {msg.content}"
+                    )
                     self._busy = False
                     self._render_status()
                     prompt_widget.disabled = False
@@ -1474,7 +1532,9 @@ def run_textual_interactive(
                 # Launch as independent task to free the message pump.
                 # Commands like /resume mount interactive widgets that need
                 # the pump to process key events and message bubbling.
-                asyncio.ensure_future(self._handle_command(text))
+                _task = asyncio.create_task(self._handle_command(text))
+                self._background_tasks.add(_task)
+                _task.add_done_callback(self._background_tasks.discard)
                 return
 
             self._history_suggester.append_entry(text)
@@ -1537,6 +1597,7 @@ def run_textual_interactive(
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1549,17 +1610,28 @@ def run_textual_interactive(
                 if isinstance(focused, SkillBrowserWidget):
                     focused.action_cancel()
                     return
+                if isinstance(focused, MCPBrowserWidget):
+                    focused.action_cancel()
+                    return
             if self._queued_messages:
                 self._queued_messages.pop()
                 self._render_queue_indicator()
 
         def action_edit_queued(self) -> None:
             """Pop the last queued message back into input for editing."""
+            # Handle completion list selection (up key)
+            comp_widget = self.query_one("#completions", Static)
+            if comp_widget.display and self._comp_items:
+                self._comp_index = (self._comp_index - 1) % len(self._comp_items)
+                self._render_completions()
+                return
+
             # Skip if an ApprovalWidget, AskUserWidget, ThreadPickerWidget, or SkillBrowserWidget has focus
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1573,6 +1645,9 @@ def run_textual_interactive(
                     focused.action_move_up()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_move_up()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_up()
                     return
             if self._queued_messages:
@@ -1585,10 +1660,18 @@ def run_textual_interactive(
 
         def action_down_delegate(self) -> None:
             """Delegate down key to focused interactive widget."""
+            # Handle completion list selection (down key)
+            comp_widget = self.query_one("#completions", Static)
+            if comp_widget.display and self._comp_items:
+                self._comp_index = (self._comp_index + 1) % len(self._comp_items)
+                self._render_completions()
+                return
+
             focused = self.focused
             if focused is not None:
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.ask_user_widget import AskUserWidget
+                from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -1602,6 +1685,9 @@ def run_textual_interactive(
                     focused.action_move_down()
                     return
                 if isinstance(focused, SkillBrowserWidget):
+                    focused.action_move_down()
+                    return
+                if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_down()
                     return
 
@@ -1633,23 +1719,26 @@ def run_textual_interactive(
                 event.prevent_default()
                 event.stop()
                 self._comp_index = (self._comp_index + 1) % len(self._comp_items)
-                self._apply_selected_completion()
+                self._render_completions()
             elif event.key == "up":
                 event.prevent_default()
                 event.stop()
                 self._comp_index = (self._comp_index - 1) % len(self._comp_items)
-                self._apply_selected_completion()
+                self._render_completions()
             elif event.key == "enter" and self._comp_index >= 0:
                 event.prevent_default()
                 event.stop()
+                self._apply_selected_completion()
                 self._hide_completions()
 
         def _apply_selected_completion(self) -> None:
+            """Apply the currently selected completion to the input field."""
+            if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
+                return
             selected_cmd = self._comp_items[self._comp_index][0]
             prompt = self.query_one("#prompt", Input)
             prompt.value = selected_cmd + " "
             prompt.cursor_position = len(prompt.value)
-            self._render_completions()
 
         def _hide_completions(self) -> None:
             self._comp_items = []
@@ -1841,6 +1930,7 @@ def run_textual_interactive(
     ) -> None:
         """Check tool calls for media files and forward to channel."""
         import os
+
         from ..paths import resolve_virtual_path
 
         arg_key = "path" if tool_name == "write_file" else "file_path"

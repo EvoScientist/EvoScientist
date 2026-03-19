@@ -9,8 +9,8 @@ Usage in config:
     ...
 """
 
+from ..channel_manager import _parse_csv, register_channel
 from .channel import EmailChannel, EmailConfig
-from ..channel_manager import register_channel, _parse_csv
 
 __all__ = ["EmailChannel", "EmailConfig"]
 

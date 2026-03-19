@@ -12,11 +12,11 @@ for the main thread to set a response via ``_set_channel_response()``.
 import asyncio
 import logging
 import queue
-import time
 import threading
+import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from rich.panel import Panel
 from rich.table import Table
@@ -263,11 +263,11 @@ def channel_hitl_prompt(
 
     Returns approval decisions list on approve/auto, or None on reject/timeout.
     """
+    from ..channels.bus.events import OutboundMessage
     from ..channels.consumer import (
         _format_approval_prompt,
         _parse_approval_reply,
     )
-    from ..channels.bus.events import OutboundMessage
 
     # Check session auto-approve (set by a previous "3" reply)
     session_key = f"{msg.channel_type}:{msg.chat_id}"
@@ -333,11 +333,11 @@ def channel_hitl_prompt(
 # Module-level channel state (bus mode)
 # ---------------------------------------------------------------------------
 
-_manager: Optional[Any] = None  # ChannelManager
-_bus_loop: Optional[asyncio.AbstractEventLoop] = None
-_bus_thread: Optional[threading.Thread] = None
+_manager: Any | None = None  # ChannelManager
+_bus_loop: asyncio.AbstractEventLoop | None = None
+_bus_thread: threading.Thread | None = None
 _cli_agent: Any = None  # shared agent reference (same as CLI)
-_cli_thread_id: Optional[str] = None  # shared thread_id (same conversation)
+_cli_thread_id: str | None = None  # shared thread_id (same conversation)
 
 
 def _channels_is_running(channel_type: str | None = None) -> bool:
@@ -495,10 +495,11 @@ async def _bus_inbound_consumer(bus, manager) -> None:
     Task-based: each inbound message is handled in its own asyncio task
     so the consumer loop stays responsive for HITL approval replies.
     """
+    _tasks: set[asyncio.Task] = set()
     while True:
         try:
             msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
         except asyncio.CancelledError:
             break
@@ -512,7 +513,9 @@ async def _bus_inbound_consumer(bus, manager) -> None:
             continue
 
         # Regular message — handle in a separate task
-        asyncio.create_task(_handle_bus_message(bus, manager, msg))
+        _task = asyncio.create_task(_handle_bus_message(bus, manager, msg))
+        _tasks.add(_task)
+        _task.add_done_callback(_tasks.discard)
 
 
 async def _handle_bus_message(bus, manager, msg) -> None:

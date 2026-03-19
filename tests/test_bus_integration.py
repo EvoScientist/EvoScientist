@@ -7,12 +7,10 @@ thread to set a response via ``_set_channel_response()``.
 
 import asyncio
 
+from EvoScientist.channels.base import Channel, OutgoingMessage
 from EvoScientist.channels.bus.events import InboundMessage
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
-from EvoScientist.channels.base import Channel, OutgoingMessage
-
-
 from tests.conftest import run_async as _run
 
 
@@ -52,7 +50,7 @@ class FakeChannel(Channel):
             try:
                 msg = await asyncio.wait_for(self._queue.get(), timeout=0.5)
                 yield msg
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return
 
     async def send(self, message: OutgoingMessage) -> bool:

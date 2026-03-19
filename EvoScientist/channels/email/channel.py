@@ -21,10 +21,10 @@ from email.mime.text import MIMEText
 from email.utils import parseaddr
 from pathlib import Path
 
-from ..base import Channel, RawIncoming, ChannelError
+from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import EMAIL as EMAIL_CAPS
-from ..mixins import PollingMixin
 from ..config import BaseChannelConfig
+from ..mixins import PollingMixin
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,9 @@ def _decode_hdr(raw: str) -> str:
 
 
 def _strip_html(text: str) -> str:
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-    text = re.sub(r"<p[^>]*>", "\n", text, flags=re.I)
-    text = re.sub(r"</p>", "\n", text, flags=re.I)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text).strip()
 
@@ -116,7 +116,7 @@ class EmailChannel(Channel, PollingMixin):
             self._imap.login(cfg.imap_username, cfg.imap_password)
             self._imap.select(cfg.imap_mailbox)
         except Exception as e:
-            raise ChannelError(f"IMAP failed: {e}")
+            raise ChannelError(f"IMAP failed: {e}") from e
 
     def _reconnect_imap(self) -> None:
         try:

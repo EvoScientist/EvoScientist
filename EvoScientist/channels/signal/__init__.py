@@ -7,8 +7,8 @@ Usage in config:
     signal_phone_number = "+1234567890"
 """
 
+from ..channel_manager import _parse_csv, register_channel
 from .channel import SignalChannel, SignalConfig
-from ..channel_manager import register_channel, _parse_csv
 
 __all__ = ["SignalChannel", "SignalConfig"]
 

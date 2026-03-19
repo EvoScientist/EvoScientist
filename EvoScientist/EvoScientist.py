@@ -19,13 +19,14 @@ Usage:
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
-from .config import get_effective_config, apply_config_to_env
-from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
 from . import paths as _paths_mod
+from .config import apply_config_to_env, get_effective_config
 from .paths import set_active_workspace, set_workspace_root
+from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
 
 # Suppress noisy warnings from deepagents skill loader (non-string frontmatter fields, etc.)
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
@@ -88,18 +89,18 @@ def _ensure_chat_model():
 # =============================================================================
 
 
-def _mcp_config_signature() -> str:
-    """Return a stable signature for the effective MCP config."""
+def _load_mcp_config_once() -> tuple[str, dict]:
+    """Load MCP config and return ``(signature, config)``."""
     from .mcp.client import load_mcp_config
 
     cfg = load_mcp_config()
     if not cfg:
-        return ""
+        return "", {}
     try:
-        return json.dumps(cfg, sort_keys=True, ensure_ascii=True)
+        sig = json.dumps(cfg, sort_keys=True, ensure_ascii=True)
     except TypeError:
-        # Fallback for non-JSON-serializable values (should be rare)
-        return repr(cfg)
+        sig = repr(cfg)
+    return sig, cfg
 
 
 def _load_mcp_tools_cached() -> dict[str, list]:
@@ -108,7 +109,7 @@ def _load_mcp_tools_cached() -> dict[str, list]:
 
     from .mcp import load_mcp_tools
 
-    cfg_key = _mcp_config_signature()
+    cfg_key, cfg = _load_mcp_config_once()
     if not cfg_key:
         _MCP_TOOLS_CACHE_KEY = ""
         _MCP_TOOLS_CACHE_VALUE = {}
@@ -117,7 +118,7 @@ def _load_mcp_tools_cached() -> dict[str, list]:
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
         return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
 
-    loaded = load_mcp_tools()
+    loaded = load_mcp_tools(config=cfg)
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     return {k: list(v) for k, v in loaded.items()}
@@ -152,10 +153,12 @@ def _build_prompt_refs() -> dict:
 
 def _build_base_kwargs(base_backend, base_middleware):
     """Build agent kwargs *without* MCP (fast, no subprocess spawning)."""
+    from .tools import skill_manager, tavily_search, think_tool
     from .utils import load_subagents
-    from .tools import tavily_search, think_tool, skill_manager
 
-    tool_registry = {"think_tool": think_tool, "tavily_search": tavily_search}
+    tool_registry = {"think_tool": think_tool}
+    if os.environ.get("TAVILY_API_KEY"):
+        tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
     subs = load_subagents(
@@ -164,16 +167,16 @@ def _build_base_kwargs(base_backend, base_middleware):
         prompt_refs=_build_prompt_refs(),
     )
     _inject_subagent_middleware(subs)
-    return dict(
-        name="EvoScientist",
-        model=_ensure_chat_model(),
-        tools=list(base_tools),
-        backend=base_backend,
-        subagents=subs,
-        middleware=base_middleware,
-        system_prompt=get_system_prompt(),
-        skills=["/skills/"],
-    )
+    return {
+        "name": "EvoScientist",
+        "model": _ensure_chat_model(),
+        "tools": list(base_tools),
+        "backend": base_backend,
+        "subagents": subs,
+        "middleware": base_middleware,
+        "system_prompt": get_system_prompt(),
+        "skills": ["/skills/"],
+    }
 
 
 def load_mcp_and_build_kwargs(base_backend, base_middleware):
@@ -182,14 +185,16 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware):
     Re-connects to MCP servers only when the effective MCP config changes.
     Falls back to base kwargs if no MCP configured.
     """
+    from .tools import skill_manager, tavily_search, think_tool
     from .utils import load_subagents
-    from .tools import tavily_search, think_tool, skill_manager
 
     mcp_by_agent = _load_mcp_tools_cached()
     if not mcp_by_agent:
         return _build_base_kwargs(base_backend, base_middleware)
 
-    tool_registry = {"think_tool": think_tool, "tavily_search": tavily_search}
+    tool_registry = {"think_tool": think_tool}
+    if os.environ.get("TAVILY_API_KEY"):
+        tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
     # Fresh tool registry — start from base tools + MCP tools
@@ -213,16 +218,16 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware):
         if sa_tools := mcp_by_agent.get(sa["name"], []):
             sa.setdefault("tools", []).extend(sa_tools)
 
-    return dict(
-        name="EvoScientist",
-        model=_ensure_chat_model(),
-        tools=base_tools + mcp_main,
-        backend=base_backend,
-        subagents=subs,
-        middleware=base_middleware,
-        system_prompt=get_system_prompt(),
-        skills=["/skills/"],
-    )
+    return {
+        "name": "EvoScientist",
+        "model": _ensure_chat_model(),
+        "tools": base_tools + mcp_main,
+        "backend": base_backend,
+        "subagents": subs,
+        "middleware": base_middleware,
+        "system_prompt": get_system_prompt(),
+        "skills": ["/skills/"],
+    }
 
 
 # =============================================================================
@@ -232,7 +237,8 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware):
 
 def _get_default_backend():
     """Build the default composite backend from current paths."""
-    from deepagents.backends import FilesystemBackend, CompositeBackend
+    from deepagents.backends import CompositeBackend, FilesystemBackend
+
     from .backends import CustomSandboxBackend, MergedReadOnlyBackend
 
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
@@ -264,7 +270,7 @@ def _get_default_backend():
 
 def _get_default_middleware():
     """Build the default middleware list."""
-    from .middleware import create_memory_middleware, ToolErrorHandlerMiddleware
+    from .middleware import ToolErrorHandlerMiddleware, create_memory_middleware
 
     cfg = _ensure_config()
     memory_dir = str(_paths_mod.MEMORY_DIR)
@@ -331,15 +337,18 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
     import os as _os
 
     from deepagents import create_deep_agent
-    from deepagents.backends import FilesystemBackend, CompositeBackend
-    from .backends import CustomSandboxBackend, MergedReadOnlyBackend
-    from .middleware import create_memory_middleware, ToolErrorHandlerMiddleware
+    from deepagents.backends import CompositeBackend, FilesystemBackend
+
     from . import paths as _paths
+    from .backends import CustomSandboxBackend, MergedReadOnlyBackend
+    from .middleware import ToolErrorHandlerMiddleware, create_memory_middleware
 
     cfg = _ensure_config(config)
 
     if checkpointer is None:
-        from langgraph.checkpoint.memory import InMemorySaver  # type: ignore[import-untyped]
+        from langgraph.checkpoint.memory import (
+            InMemorySaver,  # type: ignore[import-untyped]
+        )
 
         checkpointer = InMemorySaver()
 

@@ -19,9 +19,9 @@ Examples:
 import argparse
 import logging
 
-from . import IMessageChannel, IMessageConfig
 from ..bus import MessageBus
 from ..standalone import run_standalone
+from . import IMessageChannel, IMessageConfig
 
 logger = logging.getLogger(__name__)
 

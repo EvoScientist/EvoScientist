@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..base import Channel, RawIncoming, ChannelError
+from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import DISCORD as DISCORD_CAPS
 from ..config import BaseChannelConfig
 
@@ -36,6 +36,7 @@ class DiscordChannel(Channel):
         # Cache message objects for ACK reactions
         self._message_cache: dict[str, object] = {}
         self._MESSAGE_CACHE_MAX = 200
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         try:
@@ -44,7 +45,7 @@ class DiscordChannel(Channel):
             raise ChannelError(
                 "discord.py not installed. "
                 "Install with: pip install evoscientist[discord]"
-            )
+            ) from None
 
         if not self.config.bot_token:
             raise ChannelError("Discord bot token is required")
@@ -93,15 +94,17 @@ class DiscordChannel(Channel):
                 self._ready.set()  # unblock the waiter so it doesn't hang
 
         logger.info("Discord connect: launching gateway task")
-        asyncio.create_task(_guarded_start())
+        _task = asyncio.create_task(_guarded_start())
+        self._background_tasks.add(_task)
+        _task.add_done_callback(self._background_tasks.discard)
 
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=60)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise ChannelError(
                 "Discord bot failed to connect within 60s. "
                 "Check network/proxy connectivity to gateway.discord.gg"
-            )
+            ) from None
 
         if self._start_task_error:
             raise ChannelError(

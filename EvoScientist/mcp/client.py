@@ -18,7 +18,6 @@ from typing import Any
 
 import yaml
 
-
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -639,7 +638,7 @@ async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
         raise ImportError(
             "MCP servers are configured but langchain-mcp-adapters is not installed.\n"
             "Install with: pip install langchain-mcp-adapters"
-        )
+        ) from None
 
     connections = _build_connections(config)
     if not connections:
@@ -660,12 +659,17 @@ async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
     return server_tools
 
 
-async def aload_mcp_tools() -> dict[str, list]:
+async def aload_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, list]:
     """Async version of :func:`load_mcp_tools`.
 
     Prefer this when already inside an async context (e.g. Jupyter, async CLI).
+
+    Args:
+        config: Optional pre-loaded MCP config dict.  When ``None``,
+            loads from ``~/.config/evoscientist/mcp.yaml``.
     """
-    config = load_mcp_config()
+    if config is None:
+        config = load_mcp_config()
     if not config:
         return {}
     try:
@@ -676,7 +680,7 @@ async def aload_mcp_tools() -> dict[str, list]:
     return _route_tools(config, server_tools)
 
 
-def load_mcp_tools() -> dict[str, list]:
+def load_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, list]:
     """Load MCP tools and return them grouped by target agent.
 
     This is the main synchronous entry point. It:
@@ -685,12 +689,19 @@ def load_mcp_tools() -> dict[str, list]:
     3. Filters tools per server allowlist
     4. Routes tools to target agents
 
+    Args:
+        config: Optional pre-loaded MCP config dict.  When ``None``,
+            loads from ``~/.config/evoscientist/mcp.yaml``.  Passing a
+            pre-loaded config avoids duplicate env-var interpolation
+            warnings when the caller has already loaded the config.
+
     Returns:
         Dict mapping agent name -> list of LangChain ``BaseTool`` objects.
         Key ``"main"`` = main agent. Other keys = subagent names.
         Returns empty dict if no MCP servers are configured.
     """
-    config = load_mcp_config()
+    if config is None:
+        config = load_mcp_config()
     if not config:
         return {}
 

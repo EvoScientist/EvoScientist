@@ -7,19 +7,18 @@ import pytest
 import yaml
 
 from EvoScientist.mcp.client import (
-    _interpolate_env,
-    _filter_tools,
-    _route_tools,
-    _resolve_command,
     _build_connections,
-    load_mcp_config,
+    _filter_tools,
+    _interpolate_env,
+    _resolve_command,
+    _route_tools,
     add_mcp_server,
     edit_mcp_server,
-    remove_mcp_server,
+    load_mcp_config,
     parse_mcp_add_args,
     parse_mcp_edit_args,
+    remove_mcp_server,
 )
-
 
 # ---- _interpolate_env ----
 
@@ -48,7 +47,7 @@ class TestInterpolateEnv:
 # ---- load_mcp_config ----
 
 
-@pytest.fixture()
+@pytest.fixture
 def mcp_config_file(monkeypatch, tmp_path):
     """Point USER_MCP_CONFIG to a temp file for isolated testing."""
     cfg = tmp_path / "mcp.yaml"
@@ -126,7 +125,9 @@ class TestResolveCommand:
         fake_exe.chmod(0o755)
 
         monkeypatch.setattr("shutil.which", lambda _: None)
-        monkeypatch.setattr("EvoScientist.mcp.client.sys.executable", str(bin_dir / "python"))
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client.sys.executable", str(bin_dir / "python")
+        )
 
         assert _resolve_command("my-mcp-tool") == str(fake_exe)
 
@@ -474,7 +475,7 @@ class TestRouteTools:
 # ---- add_mcp_server / remove_mcp_server ----
 
 
-@pytest.fixture()
+@pytest.fixture
 def user_mcp_dir(tmp_path, monkeypatch):
     """Redirect user MCP config to a temp directory."""
     cfg_dir = tmp_path / "config"
@@ -555,7 +556,8 @@ class TestAddMcpServer:
         add_mcp_server("a", "stdio", command="cmd1")
         add_mcp_server("b", "http", url="http://x")
         data = yaml.safe_load(user_mcp_dir.read_text())
-        assert "a" in data and "b" in data
+        assert "a" in data
+        assert "b" in data
 
 
 class TestRemoveMcpServer:
