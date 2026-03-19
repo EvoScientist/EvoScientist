@@ -1560,9 +1560,13 @@ def _step_mcp_servers() -> list[str]:
         List of server names that were installed.
     """
     from ..mcp.client import _load_user_config
-    from ..mcp.registry import get_builtin_servers, install_mcp_server
+    from ..mcp.registry import fetch_marketplace_index, install_mcp_server
 
-    servers = get_builtin_servers()
+    try:
+        all_servers = fetch_marketplace_index()
+    except Exception:
+        all_servers = []
+    servers = [s for s in all_servers if "onboarding" in s.tags]
     existing_config = _load_user_config()
 
     choices = []

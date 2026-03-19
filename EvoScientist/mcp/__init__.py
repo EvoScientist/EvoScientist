@@ -18,11 +18,12 @@ from .client import (
 )
 from .registry import (
     MCPServerEntry,
-    get_builtin_servers,
-    get_merged_registry,
     fetch_marketplace_index,
-    load_servers_from_yaml,
+    find_server_by_name,
+    get_all_tags,
+    get_installed_names,
     install_mcp_server,
+    install_mcp_servers,
 )
 
 __all__ = [
@@ -39,9 +40,10 @@ __all__ = [
     "VALID_TRANSPORTS",
     # Registry
     "MCPServerEntry",
-    "get_builtin_servers",
-    "get_merged_registry",
     "fetch_marketplace_index",
-    "load_servers_from_yaml",
+    "find_server_by_name",
+    "get_all_tags",
+    "get_installed_names",
     "install_mcp_server",
+    "install_mcp_servers",
 ]

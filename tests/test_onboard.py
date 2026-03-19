@@ -723,21 +723,40 @@ class TestStepChannels:
 
 
 class TestStepMcpServersNpxFailure:
+    def _make_test_servers(self):
+        from EvoScientist.mcp.registry import MCPServerEntry
+
+        return [
+            MCPServerEntry(
+                name="npx-server",
+                label="NPX Server",
+                tags=["onboarding"],
+                command="npx",
+                args=["-y", "test-server"],
+            ),
+            MCPServerEntry(
+                name="url-server",
+                label="URL Server",
+                tags=["onboarding"],
+                transport="streamable_http",
+                url="https://example.com/mcp",
+            ),
+        ]
+
     def test_npx_failure_skips_npx_servers(self):
         """When _ensure_npx returns False, npx-dependent servers must be skipped."""
         from EvoScientist.config.onboard import _step_mcp_servers
-        from EvoScientist.mcp.registry import get_builtin_servers
 
-        servers = get_builtin_servers()
-
-        # Pick server names: one npx-based, one non-npx (URL-based)
-        npx_name = next(s.name for s in servers if s.command == "npx")
-        url_name = next(s.name for s in servers if s.url)
+        servers = self._make_test_servers()
 
         with (
             patch(
+                "EvoScientist.mcp.registry.fetch_marketplace_index",
+                return_value=servers,
+            ),
+            patch(
                 "EvoScientist.config.onboard._checkbox_ask",
-                return_value=[npx_name, url_name],
+                return_value=["npx-server", "url-server"],
             ),
             patch("EvoScientist.config.onboard._ensure_npx", return_value=False),
             patch("EvoScientist.config.onboard._check_npx", return_value=False),
@@ -749,22 +768,24 @@ class TestStepMcpServersNpxFailure:
 
         # The npx server must NOT have been added
         added_names = [call.args[0] for call in mock_add.call_args_list]
-        assert npx_name not in added_names
+        assert "npx-server" not in added_names
         # The URL server should still be added
-        assert url_name in added_names
-        assert url_name in result
-        assert npx_name not in result
+        assert "url-server" in added_names
+        assert "url-server" in result
+        assert "npx-server" not in result
 
     def test_npx_failure_returns_empty_when_all_npx(self):
         """When all selected servers are npx-based and npx fails, return []."""
         from EvoScientist.config.onboard import _step_mcp_servers
-        from EvoScientist.mcp.registry import get_builtin_servers
 
-        servers = get_builtin_servers()
+        servers = self._make_test_servers()
         npx_names = [s.name for s in servers if s.command == "npx"]
-        assert len(npx_names) >= 1, "Test requires at least one npx server"
 
         with (
+            patch(
+                "EvoScientist.mcp.registry.fetch_marketplace_index",
+                return_value=servers,
+            ),
             patch("EvoScientist.config.onboard._checkbox_ask", return_value=npx_names),
             patch("EvoScientist.config.onboard._ensure_npx", return_value=False),
             patch("EvoScientist.config.onboard._check_npx", return_value=False),
