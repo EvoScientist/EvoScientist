@@ -1,9 +1,10 @@
 """LLM model configuration based on LangChain init_chat_model.
 
 This module provides a unified interface for creating chat model instances
-with support for multiple providers (Anthropic, OpenAI, Google GenAI, MiniMax,
-NVIDIA, SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, Ollama, and
-custom OpenAI-compatible endpoints) and convenient short names for common models.
+with support for multiple providers (Anthropic, OpenAI, Google GenAI, MiniMax
+(Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, ZhipuAI, Volcengine,
+DashScope, Ollama, and custom OpenAI/Anthropic-compatible endpoints) and
+convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ def strip_thinking_tags(content: str) -> str:
     return _THINKING_TAG_RE.sub("", content)
 
 
-_MINIMAX_BASE_URL = "https://api.minimax.io/v1"
+_MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -71,10 +72,9 @@ _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-# Third-party providers routed through the OpenAI provider with a custom base_url.
+# Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
-_THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
-    "minimax": (_MINIMAX_BASE_URL, "MINIMAX_API_KEY"),
+_OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
@@ -86,6 +86,16 @@ _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
         "CUSTOM_OPENAI_API_KEY",
     ),  # base_url from CUSTOM_OPENAI_BASE_URL env
 }
+
+# Providers routed through the Anthropic provider with a custom base_url.
+# Maps provider name → (base_url or None, env var for API key).
+_ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
+    "minimax": (_MINIMAX_ANTHROPIC_BASE_URL, "MINIMAX_API_KEY"),
+    "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
+}
+
+# Anthropic-routed providers that support extended thinking.
+_THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
@@ -108,6 +118,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # OpenAI
     ("gpt-5.4", "gpt-5.4-2026-03-05", "openai"),
+    ("gpt-5.4-mini", "gpt-5.4-mini", "openai"),
+    ("gpt-5.4-nano", "gpt-5.4-nano", "openai"),
     ("gpt-5.3-codex", "gpt-5.3-codex", "openai"),
     ("gpt-5.2-codex", "gpt-5.2-codex", "openai"),
     ("gpt-5.2", "gpt-5.2-2025-12-11", "openai"),
@@ -127,7 +139,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash", "gemini-2.5-flash", "google-genai"),
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
-    # MiniMax (direct API — api.minimax.io)
+    # MiniMax (direct API — Anthropic-compatible at api.minimaxi.com)
+    ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
+    ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
     ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
     ("minimax-m2.5-highspeed", "MiniMax-M2.5-highspeed", "minimax"),
     # NVIDIA
@@ -204,6 +218,7 @@ def _apply_auto_config(
     model_id: str,
     is_third_party: bool,
     kwargs: dict[str, Any],
+    original_provider: str | None = None,
 ) -> None:
     """Auto-enable provider-specific features (thinking, reasoning, etc.).
 
@@ -212,11 +227,17 @@ def _apply_auto_config(
     """
     # Anthropic: extended thinking
     if provider == "anthropic" and "thinking" not in kwargs:
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-        _is_proxy = "127.0.0.1" in base_url or "localhost" in base_url
-        if is_third_party or _is_proxy:
-            # ccproxy manages thinking internally; don't set it here
-            # to avoid 422 errors with thinking content blocks in history
+        _supports_thinking = original_provider in _THINKING_CAPABLE_PROVIDERS
+        # Only check ANTHROPIC_BASE_URL for proxy detection on native Anthropic
+        # (routed providers have their own base_url set in kwargs already).
+        if not is_third_party:
+            base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+            _is_proxy = "127.0.0.1" in base_url or "localhost" in base_url
+        else:
+            _is_proxy = False
+        if _is_proxy or (is_third_party and not _supports_thinking):
+            # ccproxy / generic third-party: skip thinking to avoid
+            # 422 errors with thinking content blocks in history
             pass
         elif model_id.endswith("4-6"):
             kwargs["thinking"] = {"type": "adaptive"}
@@ -298,8 +319,11 @@ def get_chat_model(
                 provider = "anthropic"  # Default fallback
 
     # Anthropic base_url override (e.g. ccproxy at localhost:8000/api/v1)
-    _is_third_party = provider in _THIRD_PARTY_PROVIDERS
+    _is_third_party = (
+        provider in _OPENAI_ROUTED_PROVIDERS or provider in _ANTHROPIC_ROUTED_PROVIDERS
+    )
     _is_openai_proxy = False
+    _original_provider: str | None = None
     if provider == "anthropic":
         base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
         if base_url:
@@ -325,9 +349,9 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
 
-    # Third-party providers → route through OpenAI provider with base_url
-    elif provider in _THIRD_PARTY_PROVIDERS:
-        base_url_default, api_key_env = _THIRD_PARTY_PROVIDERS[provider]
+    # OpenAI-routed providers → route through OpenAI provider with base_url
+    elif provider in _OPENAI_ROUTED_PROVIDERS:
+        base_url_default, api_key_env = _OPENAI_ROUTED_PROVIDERS[provider]
         if provider == "custom-openai":
             base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "")
             if not base_url:
@@ -349,26 +373,35 @@ def get_chat_model(
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
         provider = "openai"
-    elif provider == "custom-anthropic":
-        base_url = os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", "")
-        if not base_url:
-            raise ValueError(
-                "CUSTOM_ANTHROPIC_BASE_URL environment variable is required when using "
-                "the 'custom-anthropic' provider. Please set it to your "
-                "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
-            )
-        kwargs["base_url"] = base_url.rstrip("/")
-        api_key = os.environ.get("CUSTOM_ANTHROPIC_API_KEY", "")
+
+    # Anthropic-routed providers → route through Anthropic provider with base_url
+    elif provider in _ANTHROPIC_ROUTED_PROVIDERS:
+        base_url_default, api_key_env = _ANTHROPIC_ROUTED_PROVIDERS[provider]
+        if provider == "custom-anthropic":
+            base_url = os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", "")
+            if not base_url:
+                raise ValueError(
+                    "CUSTOM_ANTHROPIC_BASE_URL environment variable is required when using "
+                    "the 'custom-anthropic' provider. Please set it to your "
+                    "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
+                )
+            base_url = base_url.rstrip("/")
+        else:
+            base_url = base_url_default
+        if base_url:
+            kwargs["base_url"] = base_url
+        api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
-        _is_third_party = True  # skip thinking in _apply_auto_config
+        _original_provider = provider
         provider = "anthropic"
+
     elif provider == "ollama":
         base_url = os.environ.get("OLLAMA_BASE_URL", "")
         if base_url:
             kwargs["base_url"] = base_url
 
-    _apply_auto_config(provider, model_id, _is_third_party, kwargs)
+    _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
 
     chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 

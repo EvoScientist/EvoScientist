@@ -1,7 +1,7 @@
 """Integration tests for MiniMax direct provider.
 
 These tests validate that the MiniMax provider can connect to the real
-MiniMax API (api.minimax.io/v1) and produce chat completions.
+MiniMax API (api.minimaxi.com/anthropic) and produce chat completions.
 
 Requires MINIMAX_API_KEY environment variable to be set.
 """
@@ -42,3 +42,10 @@ class TestMiniMaxIntegration:
         response = model.invoke("What is 2+2? Answer with just the number.")
         assert response.content
         assert "4" in response.content
+
+    def test_minimax_m27_chat_completion(self):
+        """Test that MiniMax M2.7 can produce a chat completion."""
+        model = get_chat_model("minimax-m2.7", provider="minimax", temperature=0)
+        response = model.invoke("Reply with exactly: test")
+        assert response.content
+        assert len(response.content) > 0
