@@ -110,7 +110,11 @@ def _collect_executable_positions(command: str) -> set[int]:
             # First token is the executable itself — mark its offset
             offsets.add(seg_start)
             # pip install <path> — mark the install-target token
-            if len(tokens) >= 3 and tokens[0] in ("pip", "pip3") and tokens[1] == "install":
+            if (
+                len(tokens) >= 3
+                and tokens[0] in ("pip", "pip3")
+                and tokens[1] == "install"
+            ):
                 # Find position of the 3rd token (the package arg) onwards
                 rest = pipe_seg_stripped
                 for t in tokens[:2]:
@@ -134,8 +138,8 @@ def _extract_all_paths(command: str) -> list[str]:
     # dashes, slashes. Looks inside quotes and unquoted tokens alike.
     # Excludes URL-like patterns (preceded by ://)
     path_re = re.compile(
-        r'(?<![:=/\w])'       # not preceded by :, =, /, or word char (avoid URLs, env vars)
-        r'(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)'
+        r"(?<![:=/.\w])"  # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+        r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
     for m in path_re.finditer(command):
@@ -472,17 +476,9 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Then delegates to LocalShellBackend.execute() for actual execution.
         """
-        # Validate command safety
-        error = validate_command(command)
-        if error:
-            return ExecuteResponse(
-                output=error,
-                exit_code=1,
-                truncated=False,
-            )
-
         # Replace literal workspace-root absolute paths with ./
-        # Catches cases where the agent uses the exact real path.
+        # Must happen BEFORE validation so workspace paths (e.g. /tmp/...)
+        # are sanitized before the system-path check fires.
         ws = str(self.cwd).rstrip("/") + "/"
         if ws in command:
             command = command.replace(ws, "./")
@@ -492,6 +488,15 @@ class CustomSandboxBackend(LocalShellBackend):
             command = convert_virtual_paths_in_command(
                 command=command,
                 workspace_name=Path(str(self.cwd)).name,
+            )
+
+        # Validate command safety (after path sanitization)
+        error = validate_command(command)
+        if error:
+            return ExecuteResponse(
+                output=error,
+                exit_code=1,
+                truncated=False,
             )
 
         # Delegate to parent for subprocess execution

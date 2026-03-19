@@ -395,12 +395,16 @@ class TestAbsolutePathDetection:
 
     def test_python_os_remove(self):
         """python -c with os.remove targeting system path."""
-        result = validate_command("python -c \"import os; os.remove('/Users/foo/file')\"")
+        result = validate_command(
+            "python -c \"import os; os.remove('/Users/foo/file')\""
+        )
         assert result is not None
         assert "absolute system path" in result.lower()
 
     def test_python_shutil_rmtree(self):
-        result = validate_command("python -c \"import shutil; shutil.rmtree('/home/user/project')\"")
+        result = validate_command(
+            "python -c \"import shutil; shutil.rmtree('/home/user/project')\""
+        )
         assert result is not None
         assert "/home/" in result
 
@@ -473,6 +477,7 @@ class TestAbsolutePathDetection:
         # dd itself is blocked by BLOCKED_COMMANDS, but the /dev path
         # should not trigger the absolute-path check due to = prefix
         from EvoScientist.backends import _extract_all_paths
+
         assert _extract_all_paths("if=/dev/zero") == []
 
     def test_safe_system_executable(self):
@@ -494,7 +499,10 @@ class TestAbsolutePathDetection:
         assert validate_command("echo hello | /usr/bin/grep pattern") is None
 
     def test_safe_executable_in_chain(self):
-        assert validate_command("/usr/bin/python3 a.py && /opt/homebrew/bin/node b.js") is None
+        assert (
+            validate_command("/usr/bin/python3 a.py && /opt/homebrew/bin/node b.js")
+            is None
+        )
 
     def test_dangerous_second_arg_still_blocked(self):
         """System path as a non-executable argument should still be blocked."""
