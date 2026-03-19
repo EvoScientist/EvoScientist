@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DiscordConfig(BaseChannelConfig):
     bot_token: str = ""
-    text_chunk_limit: int = 4096
+    text_chunk_limit: int = 2000
 
 
 class DiscordChannel(Channel):
