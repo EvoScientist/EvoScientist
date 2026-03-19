@@ -19,6 +19,7 @@ Usage:
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -155,7 +156,9 @@ def _build_base_kwargs(base_backend, base_middleware):
     from .utils import load_subagents
     from .tools import tavily_search, think_tool, skill_manager
 
-    tool_registry = {"think_tool": think_tool, "tavily_search": tavily_search}
+    tool_registry = {"think_tool": think_tool}
+    if os.environ.get("TAVILY_API_KEY"):
+        tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
     subs = load_subagents(
@@ -189,7 +192,9 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware):
     if not mcp_by_agent:
         return _build_base_kwargs(base_backend, base_middleware)
 
-    tool_registry = {"think_tool": think_tool, "tavily_search": tavily_search}
+    tool_registry = {"think_tool": think_tool}
+    if os.environ.get("TAVILY_API_KEY"):
+        tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
     # Fresh tool registry — start from base tools + MCP tools
