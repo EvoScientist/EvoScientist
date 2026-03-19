@@ -36,6 +36,7 @@ class TestModelsRegistry:
         assert "zhipu-code" in providers
         assert "volcengine" in providers
         assert "dashscope" in providers
+        assert "deepseek" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -52,6 +53,7 @@ class TestModelsRegistry:
             "dashscope",
             "custom-openai",
             "custom-anthropic",
+            "deepseek",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"

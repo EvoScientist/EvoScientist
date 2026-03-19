@@ -2,7 +2,7 @@
 
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, NVIDIA,
-SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, Ollama, and custom
+SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, DeepSeek, Ollama, and custom
 OpenAI-compatible endpoints) and convenient short names for common models.
 """
 
@@ -72,7 +72,12 @@ _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # Third-party providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
+_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+# Third-party providers routed through the OpenAI provider with a custom base_url.
+# Maps provider name → (base_url or None, env var for API key).
 _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
+    "deepseek": (_DEEPSEEK_BASE_URL, "DEEPSEEK_API_KEY"),
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
@@ -171,6 +176,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
     ("qwen-max", "qwen-max", "dashscope"),
     ("qwq-plus", "qwq-plus", "dashscope"),
+    # DeepSeek
+    ("deepseek-r1", "deepseek-reasoner", "deepseek"),
+    ("deepseek-v3", "deepseek-chat", "deepseek"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).
