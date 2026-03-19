@@ -230,7 +230,7 @@ Set at least one LLM provider key and (optionally) a search key:
 export ANTHROPIC_API_KEY="sk-..."   # Claude  — console.anthropic.com
 export OPENAI_API_KEY="sk-..."      # GPT    — platform.openai.com
 export GOOGLE_API_KEY="AI..."       # Gemini  — aistudio.google.com/api-keys
-export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com
+export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com (Anthropic-compatible)
 export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
 
 # Web search (optional)

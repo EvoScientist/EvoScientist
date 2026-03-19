@@ -279,6 +279,8 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
 def validate_minimax_key(api_key: str) -> tuple[bool, str]:
     """Validate a MiniMax API key by making a test request.
 
+    Uses the Anthropic-compatible endpoint at api.minimaxi.com.
+
     Returns:
         Tuple of (is_valid, message).
     """
@@ -286,20 +288,18 @@ def validate_minimax_key(api_key: str) -> tuple[bool, str]:
         return True, "Skipped (no key provided)"
 
     try:
-        import openai
+        import anthropic
 
-        client = openai.OpenAI(
-            api_key=api_key, base_url="https://api.minimax.io/v1"
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url="https://api.minimaxi.com/anthropic",
         )
         client.models.list()
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
+        if any(
+            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
         ):
             return False, "Invalid API key"
         return False, f"Error: {e}"
@@ -602,18 +602,12 @@ def _step_provider(config: EvoScientistConfig) -> str:
         Selected provider name.
     """
     choices = [
+        # Direct providers
         Choice(title="Anthropic (Claude models — API / OAuth)", value="anthropic"),
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
-        Choice(title="MiniMax (M2.5 models — 204K context)", value="minimax"),
-        Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
         Choice(
-            title="SiliconFlow (third party — GLM, Kimi, MiniMax, etc.)",
-            value="siliconflow",
-        ),
-        Choice(
-            title="OpenRouter (third party — Grok, Gemini, Qwen, etc.)",
-            value="openrouter",
+            title="MiniMax (M2 — M2.7 models, 204K context, thinking)", value="minimax"
         ),
         Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
         Choice(
@@ -628,7 +622,18 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="DashScope (阿里云 — Qwen models)",
             value="dashscope",
         ),
+        # Local
         Choice(title="Ollama (local models)", value="ollama"),
+        # Third-party / aggregator
+        Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
+        Choice(
+            title="SiliconFlow (aggregator — GLM, Kimi, MiniMax, etc.)",
+            value="siliconflow",
+        ),
+        Choice(
+            title="OpenRouter (aggregator — Grok, Gemini, Qwen, etc.)",
+            value="openrouter",
+        ),
         Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
@@ -1640,9 +1645,7 @@ def _step_mcp_servers() -> list[str]:
         return []
 
     # Check if any selected servers require npx
-    needs_npx = any(
-        srv.command == "npx" for srv in servers if srv.name in selected
-    )
+    needs_npx = any(srv.command == "npx" for srv in servers if srv.name in selected)
     if needs_npx:
         if not _ensure_npx("some MCP servers require Node.js"):
             npx_servers = {
@@ -1666,7 +1669,9 @@ def _step_mcp_servers() -> list[str]:
                 _print_step_result("MCP", f"{name}")
                 installed.append(name)
             else:
-                _print_step_result("MCP", f"{name} — installation failed", success=False)
+                _print_step_result(
+                    "MCP", f"{name} — installation failed", success=False
+                )
         except Exception as e:
             _print_step_result("MCP", f"{name} — {e}", success=False)
 
