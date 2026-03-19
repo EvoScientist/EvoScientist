@@ -449,6 +449,12 @@ def get_chat_model(
 
     chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
+    # Flatten list content to strings for OpenAI-compatible providers
+    # (DeepSeek, SiliconFlow, OpenRouter, custom-openai, etc.) and
+    # native OpenAI through a proxy, to avoid "sequence expected string" errors.
+    if _is_third_party or _is_openai_proxy:
+        _patch_openai_compat_content(chat_model)
+
     return chat_model
 
 
