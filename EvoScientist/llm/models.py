@@ -1,9 +1,9 @@
 """LLM model configuration based on LangChain init_chat_model.
 
 This module provides a unified interface for creating chat model instances
-with support for multiple providers (Anthropic, OpenAI, Google GenAI, NVIDIA,
-SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, Ollama, and custom
-OpenAI-compatible endpoints) and convenient short names for common models.
+with support for multiple providers (Anthropic, OpenAI, Google GenAI, MiniMax,
+NVIDIA, SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, Ollama, and
+custom OpenAI-compatible endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ def strip_thinking_tags(content: str) -> str:
     return _THINKING_TAG_RE.sub("", content)
 
 
+_MINIMAX_BASE_URL = "https://api.minimax.io/v1"
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -73,6 +74,7 @@ _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 # Third-party providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
 _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
+    "minimax": (_MINIMAX_BASE_URL, "MINIMAX_API_KEY"),
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
@@ -125,6 +127,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash", "gemini-2.5-flash", "google-genai"),
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
+    # MiniMax (direct API — api.minimax.io)
+    ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
+    ("minimax-m2.5-highspeed", "MiniMax-M2.5-highspeed", "minimax"),
     # NVIDIA
     ("nemotron-super", "nvidia/nemotron-3-super-120b-a12b", "nvidia"),
     ("nemotron-nano", "nvidia/nemotron-3-nano-30b-a3b", "nvidia"),

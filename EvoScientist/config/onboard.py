@@ -277,6 +277,35 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_minimax_key(api_key: str) -> tuple[bool, str]:
+    """Validate a MiniMax API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key, base_url="https://api.minimax.io/v1"
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
 def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
     """Validate a SiliconFlow API key by making a test request.
 
@@ -577,6 +606,7 @@ def _step_provider(config: EvoScientistConfig) -> str:
         Choice(title="Anthropic (Claude models — API / OAuth)", value="anthropic"),
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
+        Choice(title="MiniMax (M2.5 models — 204K context)", value="minimax"),
         Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
         Choice(
             title="SiliconFlow (third party — GLM, Kimi, MiniMax, etc.)",
@@ -636,6 +666,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Anthropic",
             config.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
             validate_anthropic_key,
+        ),
+        "minimax": (
+            "MiniMax",
+            config.minimax_api_key or os.environ.get("MINIMAX_API_KEY", ""),
+            validate_minimax_key,
         ),
         "nvidia": (
             "NVIDIA",
@@ -2479,6 +2514,7 @@ def run_onboard(skip_validation: bool = False) -> bool:
         # and for Anthropic/OpenAI pure OAuth — key provided by ccproxy)
         _PROVIDER_KEY_ATTR = {
             "anthropic": "anthropic_api_key",
+            "minimax": "minimax_api_key",
             "nvidia": "nvidia_api_key",
             "google-genai": "google_api_key",
             "siliconflow": "siliconflow_api_key",
