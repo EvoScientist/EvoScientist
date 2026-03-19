@@ -281,6 +281,15 @@ class Channel(ChannelPlugin, ABC):
 
         self.config = config
 
+        # Cache STT config at startup to avoid loading it on every message
+        from ..config.settings import load_config as _load_cfg
+        _global = _load_cfg()
+        self._stt_enabled: bool = _global.stt_enabled
+        self._stt_language: str = _global.stt_language
+        self._stt_model: str = _global.stt_model
+        self._stt_device: str = _global.stt_device
+        self._stt_compute_type: str = _global.stt_compute_type
+
         # Auto-configure formatter from capabilities
         self._formatter = UnifiedFormatter.for_channel(self.capabilities.format_type)
         self._queue: asyncio.Queue[InboundMessage] = asyncio.Queue(
@@ -937,37 +946,40 @@ class Channel(ChannelPlugin, ABC):
         If STT is enabled and the message contains audio files, each audio
         file is transcribed and the result is prepended to ``raw.text``.
         """
-        if raw.media_files:
-            from ..config.settings import load_config
+        if raw.media_files and self._stt_enabled:
             from ..stt import is_audio_file, transcribe_file
 
-            cfg = load_config()
-            if cfg.stt_enabled:
-                transcripts: list[str] = []
-                transcribed_files: set[str] = set()
-                for fp in raw.media_files:
-                    if is_audio_file(fp):
-                        text = await transcribe_file(
-                            fp,
-                            language=cfg.stt_language,
-                        )
-                        if text:
-                            transcripts.append(text)
-                            transcribed_files.add(fp)
-                            _logger.info(
-                                f"[STT] {self.name}: {fp} → {text[:80]}..."
-                            )
-                if transcripts:
-                    prefix = "\n".join(transcripts)
-                    raw.text = (
-                        (prefix + "\n" + raw.text).strip() if raw.text else prefix
+            transcripts: list[str] = []
+            transcribed_files: set[str] = set()
+            for fp in raw.media_files:
+                if is_audio_file(fp):
+                    text = await transcribe_file(
+                        fp,
+                        language=self._stt_language,
+                        model=self._stt_model,
+                        device=self._stt_device,
+                        compute_type=self._stt_compute_type,
                     )
-                    # Remove annotations for transcribed files so agent
-                    # doesn't try to process the audio file itself
-                    raw.content_annotations = [
-                        a for a in raw.content_annotations
-                        if not any(fp in a for fp in transcribed_files)
-                    ]
+                    if text:
+                        transcripts.append(text)
+                        transcribed_files.add(fp)
+                        _logger.info(
+                            f"[STT] {self.name}: {fp} → {text[:80]}..."
+                        )
+            if transcripts:
+                prefix = "\n".join(transcripts)
+                raw.text = (
+                    (prefix + "\n" + raw.text).strip() if raw.text else prefix
+                )
+                # Remove annotations for transcribed files (exact path match)
+                # so the agent does not attempt to process the audio file itself
+                raw.content_annotations = [
+                    a for a in raw.content_annotations
+                    if not any(
+                        fp == a or a.endswith(f": {fp}]") or a == f"[voice: {fp}]"
+                        for fp in transcribed_files
+                    )
+                ]
 
         msg = await self._build_inbound_async(raw)
         if msg is None:

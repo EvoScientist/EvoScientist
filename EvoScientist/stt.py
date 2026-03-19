@@ -1,15 +1,17 @@
 """Speech-to-text transcription.
 
-Language → model mapping:
+Default language → model mapping (all via faster-whisper):
   "zh"   → Systran/faster-whisper-small  (language=zh, ~250MB)
   "en"   → Systran/faster-whisper-small.en (~250MB, en-only)
   "auto" → Systran/faster-whisper-small   (~250MB, multilingual auto-detect)
 
-Install:
-  pip install 'EvoScientist[stt]'   # faster-whisper only
+All three parameters can be overridden via config:
+  stt_model        — any HuggingFace faster-whisper model id
+  stt_device       — "cpu" (default) or "cuda"
+  stt_compute_type — "int8" (default), "float16", "float32", etc.
 
-Note: FunASR/SenseVoiceSmall backend planned for zh but currently skipped
-due to llvmlite build failures on macOS Python 3.12.
+Install:
+  pip install 'EvoScientist[stt]'
 """
 
 from __future__ import annotations
@@ -24,38 +26,33 @@ _AUDIO_EXTS = frozenset({
     ".ogg", ".mp3", ".m4a", ".wav", ".flac", ".opus", ".weba", ".webm",
 })
 
-# Language → HuggingFace model id (all via faster-whisper)
+# Default language → HuggingFace model id
 STT_MODELS: dict[str, str] = {
     "zh":   "Systran/faster-whisper-small",
     "en":   "Systran/faster-whisper-small.en",
     "auto": "Systran/faster-whisper-small",
 }
 
-# Cached engines keyed by language
-_engines: dict[str, "_BaseEngine"] = {}
+# Single cached engine — re-created only when settings change
+_engine: "_WhisperEngine | None" = None
+_engine_key: tuple[str, str, str] | None = None  # (model_id, device, compute_type)
 
 
-# ── Engine base + implementations ────────────────────────────────────
+# ── Engine ────────────────────────────────────────────────────────────
 
 
-class _BaseEngine:
-    def transcribe(self, file_path: str) -> str:
-        raise NotImplementedError
+class _WhisperEngine:
+    """faster-whisper transcription engine."""
 
-
-class _WhisperEngine(_BaseEngine):
-    """faster-whisper backend for 'en' and 'auto' languages."""
-
-    def __init__(self, model_id: str, language: str) -> None:
+    def __init__(self, model_id: str, device: str, compute_type: str) -> None:
         from faster_whisper import WhisperModel  # type: ignore[import]
 
-        self._model = WhisperModel(model_id, device="cpu", compute_type="int8")
-        self._language: str | None = None if language == "auto" else language
+        self._model = WhisperModel(model_id, device=device, compute_type=compute_type)
 
-    def transcribe(self, file_path: str) -> str:
+    def transcribe(self, file_path: str, language: str | None) -> str:
         segments, _ = self._model.transcribe(
             file_path,
-            language=self._language,
+            language=language,
             beam_size=5,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
@@ -65,13 +62,18 @@ class _WhisperEngine(_BaseEngine):
         return " ".join(parts).strip()
 
 
-
-def _get_engine(language: str) -> _BaseEngine:
-    if language not in _engines:
-        model_id = STT_MODELS.get(language, STT_MODELS["auto"])
-        logger.info(f"[STT] Loading model for language='{language}': {model_id}")
-        _engines[language] = _WhisperEngine(model_id, language)
-    return _engines[language]
+def _get_engine(
+    model_id: str,
+    device: str = "cpu",
+    compute_type: str = "int8",
+) -> _WhisperEngine:
+    global _engine, _engine_key
+    key = (model_id, device, compute_type)
+    if _engine is None or _engine_key != key:
+        logger.info(f"[STT] Loading model '{model_id}' device={device} compute={compute_type}")
+        _engine = _WhisperEngine(model_id, device, compute_type)
+        _engine_key = key
+    return _engine
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -82,22 +84,34 @@ def is_audio_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in _AUDIO_EXTS
 
 
-async def transcribe_file(file_path: str, language: str = "auto") -> str | None:
+async def transcribe_file(
+    file_path: str,
+    language: str = "auto",
+    model: str = "",
+    device: str = "cpu",
+    compute_type: str = "int8",
+) -> str | None:
     """Transcribe an audio file asynchronously.
 
-    Selects the backend automatically based on *language*:
-      - ``"zh"`` → FunASR SenseVoiceSmall
-      - ``"en"`` → faster-whisper-small.en
-      - ``"auto"`` (default) → faster-whisper-small (multilingual)
+    Args:
+        file_path:    Path to the audio file.
+        language:     Language hint — ``"zh"``, ``"en"``, or ``"auto"`` (default).
+        model:        Override the HuggingFace model id. Empty = use STT_MODELS mapping.
+        device:       Inference device — ``"cpu"`` (default) or ``"cuda"``.
+        compute_type: Quantisation — ``"int8"`` (default), ``"float16"``, etc.
 
     Returns the transcript string, or ``None`` on error / silence.
     """
     if not is_audio_file(file_path):
         return None
     try:
-        engine = _get_engine(language)
-        loop = asyncio.get_event_loop()
-        result: str = await loop.run_in_executor(None, engine.transcribe, file_path)
+        model_id = model or STT_MODELS.get(language, STT_MODELS["auto"])
+        lang: str | None = None if language == "auto" else language
+        engine = _get_engine(model_id, device, compute_type)
+        loop = asyncio.get_running_loop()
+        result: str = await loop.run_in_executor(
+            None, engine.transcribe, file_path, lang
+        )
         return result or None
     except ImportError as e:
         logger.warning(

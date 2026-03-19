@@ -201,7 +201,10 @@ class EvoScientistConfig:
 
     # STT (Speech-to-Text) Settings
     stt_enabled: bool = False
-    stt_language: str = "auto"  # "auto" | "zh" | "en"
+    stt_language: str = "auto"      # "auto" | "zh" | "en"
+    stt_model: str = ""             # override model id; empty = auto-select by language
+    stt_device: str = "cpu"         # "cpu" | "cuda"
+    stt_compute_type: str = "int8"  # "int8" | "float16" | "float32"
 
 
 # =============================================================================
