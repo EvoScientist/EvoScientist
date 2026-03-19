@@ -533,6 +533,8 @@ Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu 
 - [Discord](https://discord.gg/AZ9ZMXkunY) — 实时提问、分享发现，与研究者和开发者协作交流。
 - [微信](https://github.com/EvoScientist/EvoScientist/blob/main/.github/assets/cn_info.md) — 加入中文社区，与国内研究者和开发者交流。
 
+  <img src=".github/assets/wechat_group.jpeg" alt="微信群二维码" width="200"/>
+
 每一份贡献，都让我们离 AI 驱动科学突破、造福全人类的未来更近一步。
 
 <a href="https://github.com/EvoScientist/EvoScientist/graphs/contributors">
