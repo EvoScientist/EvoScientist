@@ -361,6 +361,33 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_deepseek_key(api_key: str) -> tuple[bool, str]:
+    """Validate a DeepSeek API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
 def validate_zhipu_key(api_key: str) -> tuple[bool, str]:
     """Validate a ZhipuAI API key by making a test request.
 
@@ -622,6 +649,10 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="DashScope (阿里云 — Qwen models)",
             value="dashscope",
         ),
+        Choice(
+            title="DeepSeek (DeepSeek-R1, DeepSeek-V3)",
+            value="deepseek",
+        ),
         # Local
         Choice(title="Ollama (local models)", value="ollama"),
         # Third-party / aggregator
@@ -695,6 +726,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "OpenRouter",
             config.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", ""),
             validate_openrouter_key,
+        ),
+        "deepseek": (
+            "DeepSeek",
+            config.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
+            validate_deepseek_key,
         ),
         "zhipu": (
             "ZhipuAI",
@@ -2401,6 +2437,7 @@ def run_onboard(skip_validation: bool = False) -> bool:
             "google-genai": "google_api_key",
             "siliconflow": "siliconflow_api_key",
             "openrouter": "openrouter_api_key",
+            "deepseek": "deepseek_api_key",
             "zhipu": "zhipu_api_key",
             "zhipu-code": "zhipu_api_key",
             "volcengine": "volcengine_api_key",

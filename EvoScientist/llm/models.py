@@ -67,20 +67,23 @@ def strip_thinking_tags(content: str) -> str:
     return _THINKING_TAG_RE.sub("", content)
 
 
-# ---------------------------------------------------------------------------
-# Utility: flatten list-of-blocks content to a plain string.
-# OpenAI-compatible APIs (DeepSeek, SiliconFlow, etc.) reject assistant
-# messages whose content is a list rather than a string.
-# ---------------------------------------------------------------------------
 _SKIP_CONTENT_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
 
 
 def _flatten_message_content(content: Any) -> str | Any:
     """Convert list-of-blocks content to a plain string.
 
-    - Extracts text from ``{"type": "text", "text": "..."}`` blocks.
-    - Skips ``thinking`` / ``reasoning`` / ``reasoning_content`` blocks.
-    - Returns string content unchanged.
+    OpenAI-compatible APIs (DeepSeek, SiliconFlow, etc.) reject assistant
+    messages whose ``content`` is a list rather than a string.
+
+    Args:
+        content: Message content — either a string, a list of content blocks
+            (dicts with ``type`` and ``text`` keys), or another type.
+
+    Returns:
+        A plain string with text blocks joined by double newlines.
+        Thinking/reasoning blocks are skipped.  Non-list input is
+        returned unchanged.
     """
     if isinstance(content, str):
         return content
@@ -99,32 +102,38 @@ def _flatten_message_content(content: Any) -> str | Any:
     return "\n\n".join(parts) if parts else ""
 
 
-# ---------------------------------------------------------------------------
-# Patch: wrap _generate / _agenerate on OpenAI-compatible models to flatten
-# list content to strings before the API call, preventing "invalid type:
-# sequence, expected a string" errors from strict APIs like DeepSeek.
-# ---------------------------------------------------------------------------
 def _patch_openai_compat_content(model: Any) -> None:
-    """Wrap ``_generate`` / ``_agenerate`` to flatten message content to strings.
+    """Flatten list content to strings before OpenAI-compatible API calls.
 
-    Follows the same monkey-patching pattern as ``_patch_anthropic_proxy_compat``.
+    Wraps ``_generate`` / ``_agenerate`` to prevent "invalid type: sequence,
+    expected a string" errors from strict APIs like DeepSeek.  Follows the
+    same monkey-patching pattern as ``_patch_anthropic_proxy_compat``.
+
+    Args:
+        model: A LangChain chat model instance to patch in-place.
     """
+    import copy
     import functools
 
     from langchain_core.messages import BaseMessage
 
     def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+        out: list[BaseMessage] = []
         for msg in messages:
             if isinstance(msg.content, list):
+                msg = copy.copy(msg)
                 msg.content = _flatten_message_content(msg.content)
-        return messages
+            out.append(msg)
+        return out
 
     orig_generate = getattr(model, "_generate", None)
     if orig_generate is None:
         return
 
     @functools.wraps(orig_generate)
-    def _patched_generate(messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+    def _patched_generate(
+        messages: list[BaseMessage], *args: Any, **kwargs: Any
+    ) -> Any:
         return orig_generate(_sanitize_messages(messages), *args, **kwargs)
 
     model._generate = _patched_generate

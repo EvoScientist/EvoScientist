@@ -69,6 +69,7 @@ class EvoScientistConfig:
     minimax_api_key: str = ""
     siliconflow_api_key: str = ""
     openrouter_api_key: str = ""
+    deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
     dashscope_api_key: str = ""
@@ -349,6 +350,7 @@ _ENV_MAPPINGS = {
     "minimax_api_key": "MINIMAX_API_KEY",
     "siliconflow_api_key": "SILICONFLOW_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
+    "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
     "dashscope_api_key": "DASHSCOPE_API_KEY",
@@ -434,6 +436,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["SILICONFLOW_API_KEY"] = config.siliconflow_api_key
     if config.openrouter_api_key and not os.environ.get("OPENROUTER_API_KEY"):
         os.environ["OPENROUTER_API_KEY"] = config.openrouter_api_key
+    if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
+        os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):
         os.environ["ZHIPU_API_KEY"] = config.zhipu_api_key
     if config.volcengine_api_key and not os.environ.get("VOLCENGINE_API_KEY"):
