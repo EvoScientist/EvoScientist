@@ -11,6 +11,8 @@ import fnmatch
 import logging
 import os
 import re
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -492,6 +494,24 @@ def load_mcp_config() -> dict[str, Any]:
     return _interpolate_value(data)
 
 
+def _resolve_command(command: str) -> str:
+    """Resolve a stdio command to its full path.
+
+    Checks PATH first, then the current Python environment's bin directory
+    (handles conda/venv envs where newly installed binaries may not be on PATH).
+    Returns the original command string if not found (let the OS report the error).
+    """
+    if os.path.isabs(command):
+        return command
+    found = shutil.which(command)
+    if found:
+        return found
+    candidate = os.path.join(os.path.dirname(sys.executable), command)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return command
+
+
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Convert YAML config to ``MultiServerMCPClient`` connections format.
 
@@ -505,7 +525,7 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if transport == "stdio":
             conn: dict[str, Any] = {
                 "transport": "stdio",
-                "command": server.get("command", ""),
+                "command": _resolve_command(server.get("command", "")),
                 "args": server.get("args", []),
             }
             if "env" in server:

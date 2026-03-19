@@ -2,8 +2,8 @@
 
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, NVIDIA,
-SiliconFlow, OpenRouter, ZhipuAI, Ollama, and custom OpenAI-compatible endpoints) and
-convenient short names for common models.
+SiliconFlow, OpenRouter, ZhipuAI, Volcengine, DashScope, Ollama, and custom
+OpenAI-compatible endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -67,6 +67,8 @@ _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+_VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # Third-party providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -75,6 +77,8 @@ _THIRD_PARTY_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
     "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
+    "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
+    "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -145,12 +149,28 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
+    ("glm-5-turbo", "z-ai/glm-5-turbo", "openrouter"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
     ("glm-5", "glm-5", "zhipu-code"),
+    ("glm-5-turbo", "glm-5-turbo", "zhipu-code"),
     ("glm-4.7", "glm-4.7", "zhipu-code"),
     # Zhipu (智谱 — general endpoint, default for simple lookups)
     ("glm-5", "glm-5", "zhipu"),
+    ("glm-5-turbo", "glm-5-turbo", "zhipu"),
     ("glm-4.7", "glm-4.7", "zhipu"),
+    # Volcengine (火山引擎 — Doubao models)
+    ("doubao-seed-2.0-pro", "doubao-seed-2-0-pro-260215", "volcengine"),
+    ("doubao-seed-2.0-lite", "doubao-seed-2-0-lite-260215", "volcengine"),
+    ("doubao-seed-2.0-mini", "doubao-seed-2-0-mini-260215", "volcengine"),
+    ("doubao-seed-2.0-code", "doubao-seed-2-0-code-preview-260215", "volcengine"),
+    ("doubao-seed-1.6", "doubao-seed-1.6", "volcengine"),
+    ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
+    ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
+    # DashScope (阿里云 — Qwen models)
+    ("qwen3-coder", "qwen3-coder-plus", "dashscope"),
+    ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
+    ("qwen-max", "qwen-max", "dashscope"),
+    ("qwq-plus", "qwq-plus", "dashscope"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).
@@ -204,9 +224,7 @@ def _apply_auto_config(
         base_url = os.environ.get("OPENAI_BASE_URL", "")
         _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
         if _is_openai_proxy:
-            # ccproxy forces store=False. Setting `reasoning` triggers
-            # langchain-openai's Responses API path, which produces
-            # rs_ summary items that 404 on multi-turn. Skip entirely.
+            # Skip reasoning kwarg for ccproxy — not needed and may cause issues.
             pass
         else:
             kwargs["reasoning"] = {"effort": "high", "summary": "auto"}
@@ -292,8 +310,12 @@ def get_chat_model(
             kwargs["base_url"] = base_url
             _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
             if _is_openai_proxy:
-                kwargs.setdefault("streaming", False)  # ccproxy streaming incompatible
-                kwargs.setdefault("use_responses_api", False)  # force Chat Completions
+                kwargs.setdefault(
+                    "streaming", False
+                )  # ccproxy streaming format incompatible with langchain-openai
+                kwargs.setdefault(
+                    "use_responses_api", True
+                )  # ccproxy Chat Completions does not support tool calling; Responses API does
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key

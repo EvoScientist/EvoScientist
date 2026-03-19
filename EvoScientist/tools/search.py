@@ -8,13 +8,10 @@ import asyncio
 from typing import Literal
 
 import httpx
-from dotenv import load_dotenv
 from langchain_core.tools import InjectedToolArg, tool
 from markdownify import markdownify
 from tavily import TavilyClient
 from typing_extensions import Annotated
-
-load_dotenv(override=True)
 
 # Lazy initialization - only create client when needed
 _tavily_client = None

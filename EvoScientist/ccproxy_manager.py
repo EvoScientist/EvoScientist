@@ -15,14 +15,10 @@ import os
 import shutil
 import subprocess
 import time
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    pass
+from EvoScientist.config import EvoScientistConfig
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_PORT = 8000
 
 
 # =============================================================================
@@ -30,9 +26,61 @@ _DEFAULT_PORT = 8000
 # =============================================================================
 
 
+def _ccproxy_exe() -> str | None:
+    """Return the path to the ccproxy binary, or None if not found.
+
+    Checks PATH first, then the current Python environment's bin directory
+    (handles conda envs where newly installed binaries may not be visible
+    to shutil.which immediately after pip install).
+    """
+    found = shutil.which("ccproxy")
+    if found:
+        return found
+    import sys as _sys
+
+    candidate = os.path.join(os.path.dirname(_sys.executable), "ccproxy")
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return None
+
+
 def is_ccproxy_available() -> bool:
-    """Check whether the ``ccproxy`` CLI binary is on PATH."""
-    return shutil.which("ccproxy") is not None
+    """Check whether the ``ccproxy`` CLI binary is available."""
+    return _ccproxy_exe() is not None
+
+
+def _is_editable_install() -> bool:
+    """Return True if EvoScientist was installed in editable/development mode.
+
+    Checks all matching distributions because a stale ``.egg-info`` in the
+    project root can shadow the real ``dist-info`` in site-packages.
+    """
+    try:
+        import json
+        import importlib.metadata as _meta
+
+        for dist in _meta.distributions():
+            name = dist.metadata.get("Name", "")
+            if name.lower() != "evoscientist":
+                continue
+            direct_url = dist.read_text("direct_url.json")
+            if direct_url is not None:
+                data = json.loads(direct_url)
+                if data.get("dir_info", {}).get("editable", False) is True:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _oauth_install_hint() -> str:
+    """Return the appropriate install command depending on install method."""
+    if _is_editable_install():
+        return (
+            "uv sync --extra oauth "
+            "or pip install -e '.[oauth]'"
+        )
+    return "pip install 'evoscientist[oauth]'"
 
 
 def _summarize_auth_output(raw: str) -> str:
@@ -77,23 +125,36 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
         (is_valid, message) tuple.
     """
     try:
+        exe = _ccproxy_exe() or "ccproxy"
         result = subprocess.run(
-            ["ccproxy", "auth", "status", provider],
+            [exe, "auth", "status", provider],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        # ccproxy auth status exits 0 when authed
-        if result.returncode == 0:
-            summary = _summarize_auth_output(result.stdout)
-            return True, summary or "Authenticated"
-        # On failure, include stderr for diagnostics
-        raw = (result.stdout + result.stderr).strip()
-        # Strip ANSI escapes for cleaner error messages
         import re as _re
 
+        raw = (result.stdout + result.stderr).strip()
         clean = _re.sub(r"\x1b\[[0-9;]*m", "", raw)
-        return False, clean or "Not authenticated"
+
+        # Filter out structlog warning/noise lines, keep only status lines
+        status_lines = [
+            line
+            for line in clean.splitlines()
+            if line.strip()
+            and not _re.match(r"\d{4}-\d{2}-\d{2}", line.strip())
+            and "warning" not in line.lower()
+            and "plugin" not in line.lower()
+        ]
+        status_msg = " ".join(status_lines).strip()
+
+        # ccproxy auth status may exit 0 even when not authenticated —
+        # detect failure by checking output content
+        if result.returncode != 0 or "not authenticated" in clean.lower():
+            return False, status_msg or "Not authenticated"
+
+        summary = _summarize_auth_output(result.stdout)
+        return True, summary or "Authenticated"
     except FileNotFoundError:
         return False, "ccproxy not found"
     except subprocess.TimeoutExpired:
@@ -107,18 +168,18 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
 # =============================================================================
 
 
-def is_ccproxy_running(port: int = _DEFAULT_PORT) -> bool:
+def is_ccproxy_running(port: int) -> bool:
     """Check if ccproxy is already serving on the given port."""
     import httpx
 
     try:
-        resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2.0)
-        return resp.status_code < 500
+        resp = httpx.get(f"http://127.0.0.1:{port}/health/live", timeout=2.0)
+        return resp.status_code == 200
     except (httpx.ConnectError, httpx.TimeoutException, OSError):
         return False
 
 
-def start_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen:
+def start_ccproxy(port: int) -> subprocess.Popen:
     """Start ccproxy serve as a background process.
 
     Args:
@@ -131,14 +192,15 @@ def start_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen:
         RuntimeError: If ccproxy fails to become healthy within 10 seconds.
         FileNotFoundError: If ccproxy binary is not found.
     """
+    exe = _ccproxy_exe() or "ccproxy"
     proc = subprocess.Popen(
-        ["ccproxy", "serve", "--port", str(port)],
+        [exe, "serve", "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    # Wait for health
-    deadline = time.monotonic() + 10
+    # Wait for health (ccproxy can take up to ~11s on first start)
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(
@@ -154,7 +216,7 @@ def start_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
         proc.kill()
-    raise RuntimeError("ccproxy did not become healthy within 10 seconds")
+    raise RuntimeError("ccproxy did not become healthy within 30 seconds")
 
 
 def stop_ccproxy(proc: subprocess.Popen | None) -> None:
@@ -174,7 +236,7 @@ def stop_ccproxy(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def ensure_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen | None:
+def ensure_ccproxy(port: int) -> subprocess.Popen | None:
     """Ensure ccproxy is running — reuse existing or start new.
 
     Returns:
@@ -191,7 +253,7 @@ def ensure_ccproxy(port: int = _DEFAULT_PORT) -> subprocess.Popen | None:
 # =============================================================================
 
 
-def setup_ccproxy_env(port: int = _DEFAULT_PORT) -> None:
+def setup_ccproxy_env(port: int) -> None:
     """Set environment variables for Anthropic ccproxy routing.
 
     Force-sets ``ANTHROPIC_BASE_URL`` and ``ANTHROPIC_API_KEY`` so that
@@ -204,7 +266,7 @@ def setup_ccproxy_env(port: int = _DEFAULT_PORT) -> None:
     os.environ["ANTHROPIC_API_KEY"] = "ccproxy-oauth"
 
 
-def setup_codex_env(port: int = _DEFAULT_PORT) -> None:
+def setup_codex_env(port: int) -> None:
     """Set environment variables for OpenAI/Codex ccproxy routing.
 
     Force-sets ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY`` so that
@@ -223,7 +285,86 @@ def setup_codex_env(port: int = _DEFAULT_PORT) -> None:
 # =============================================================================
 
 
-def maybe_start_ccproxy(config: object) -> subprocess.Popen | None:
+def _patch_ccproxy_oauth_header() -> None:
+    """Auto-patch ccproxy's adapter to send the correct OAuth beta header.
+
+    ccproxy 0.2.4 hardcodes ``computer-use-2025-01-24`` as the
+    ``anthropic-beta`` header, which causes two problems:
+    - Missing ``oauth-2025-04-20`` → 401 from Anthropic
+    - ``computer-use-2025-01-24`` incompatible with OAuth auth → 400
+
+    The ccproxy binary may use a different Python environment than the one
+    running EvoScientist, so we resolve the adapter path via the ccproxy
+    binary's shebang line rather than the current Python's import system.
+
+    This patch is idempotent and places the header AFTER cli_headers so it
+    cannot be overridden.
+    """
+    import pathlib
+    import re
+
+    try:
+        ccproxy_bin = _ccproxy_exe()
+        if not ccproxy_bin:
+            return
+
+        # Find the Python interpreter used by the ccproxy binary via shebang
+        shebang = pathlib.Path(ccproxy_bin).read_text().splitlines()[0]
+        python_exe = shebang.lstrip("#!").strip()
+
+        # Ask that Python where ccproxy's adapter lives
+        result = subprocess.run(
+            [
+                python_exe, "-c",
+                "import inspect, ccproxy.plugins.claude_api.adapter as m; print(inspect.getfile(m))",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return
+        src_file = pathlib.Path(result.stdout.strip())
+        if not src_file.exists():
+            return
+
+        text = src_file.read_text()
+
+        # Check if already correctly patched (oauth header set after cli_headers)
+        correct = 'filtered_headers["anthropic-beta"] = "oauth-2025-04-20"'
+        cli_marker = "cli_headers = self._collect_cli_headers()"
+        if correct in text:
+            # Verify it's placed after cli_headers
+            if text.index(correct) > text.index(cli_marker):
+                return  # Already correctly patched
+
+        # Move/replace anthropic-beta assignment to after cli_headers loop,
+        # and set only oauth-2025-04-20 (computer-use-* is incompatible).
+        # Step 1: remove any existing filtered_headers["anthropic-beta"] line
+        patched = re.sub(
+            r'\s*filtered_headers\["anthropic-beta"\]\s*=\s*"[^"]*"\n',
+            "\n",
+            text,
+        )
+        # Step 2: insert correct assignment after the cli_headers block
+        insert_after = 'filtered_headers[lk] = value\n'
+        replacement = (
+            'filtered_headers[lk] = value\n\n'
+            '        # oauth-2025-04-20: required for OAuth Bearer token auth (Anthropic 2026-03)\n'
+            '        filtered_headers["anthropic-beta"] = "oauth-2025-04-20"\n'
+        )
+        patched = patched.replace(insert_after, replacement, 1)
+
+        if patched == text:
+            return
+
+        src_file.write_text(patched)
+        for pyc in src_file.parent.glob("__pycache__/adapter*.pyc"):
+            pyc.unlink(missing_ok=True)
+        logger.info("Auto-patched ccproxy adapter: set anthropic-beta=oauth-2025-04-20")
+    except Exception as exc:
+        logger.warning("Could not auto-patch ccproxy adapter: %s", exc)
+
+
+def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     """High-level: conditionally start ccproxy based on config.
 
     Checks ``config.anthropic_auth_mode`` and ``config.openai_auth_mode``:
@@ -249,7 +390,7 @@ def maybe_start_ccproxy(config: object) -> subprocess.Popen | None:
     if not is_ccproxy_available():
         raise RuntimeError(
             "ccproxy is required for OAuth mode but not found. "
-            "Install it with: pip install 'evoscientist[oauth]'"
+            f"Install it with: {_oauth_install_hint()}"
         )
 
     # Check auth for each provider that uses OAuth
@@ -269,17 +410,24 @@ def maybe_start_ccproxy(config: object) -> subprocess.Popen | None:
                 "Run: ccproxy auth login codex"
             )
 
+    port = config.ccproxy_port
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Invalid ccproxy port: {port}. Must be between 1 and 65535.")
+
+    # Auto-patch ccproxy adapter to fix OAuth header compatibility
+    _patch_ccproxy_oauth_header()
+
     # Start ccproxy (single process serves both providers)
-    proc = ensure_ccproxy()
+    proc = ensure_ccproxy(port)
 
     # Set environment for each OAuth provider
     if anthropic_oauth:
-        setup_ccproxy_env()
+        setup_ccproxy_env(port)
     if openai_oauth:
-        setup_codex_env()
+        setup_codex_env(port)
 
     if proc:
-        logger.info("Started ccproxy on port %d", _DEFAULT_PORT)
+        logger.info("Started ccproxy on port %d", port)
     else:
-        logger.info("Reusing existing ccproxy on port %d", _DEFAULT_PORT)
+        logger.info("Reusing existing ccproxy on port %d", port)
     return proc
