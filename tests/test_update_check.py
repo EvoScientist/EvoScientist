@@ -11,10 +11,10 @@ from EvoScientist.update_check import (
     is_update_available,
 )
 
-# ── _parse_version ──────────────────────────────────────────
-
 
 class TestParseVersion:
+    """Tests for _parse_version."""
+
     def test_basic(self):
         assert _parse_version("1.2.3") == (1, 2, 3)
 
@@ -33,10 +33,9 @@ class TestParseVersion:
         assert _parse_version("0.0.2") == _parse_version("0.0.2")
 
 
-# ── get_latest_version ──────────────────────────────────────
-
-
 class TestGetLatestVersion:
+    """Tests for get_latest_version."""
+
     def test_fresh_cache_hit(self, tmp_path):
         cache_file = tmp_path / "latest_version.json"
         cache_file.write_text(
@@ -115,10 +114,9 @@ class TestGetLatestVersion:
             assert get_latest_version() == "1.5.0"
 
 
-# ── is_update_available ─────────────────────────────────────
-
-
 class TestIsUpdateAvailable:
+    """Tests for is_update_available."""
+
     def test_newer_version_available(self):
         with (
             patch("EvoScientist.update_check.get_latest_version", return_value="9.9.9"),
