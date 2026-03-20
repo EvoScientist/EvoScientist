@@ -1252,8 +1252,8 @@ def run_textual_interactive(
                     response = (state.response_text or "").strip()
 
                 except asyncio.CancelledError:
-                    # Ctrl+C cancellation
-                    pass
+                    # Ctrl+C cancellation — re-raise so _run_turn can handle it
+                    raise
                 except Exception as exc:
                     error_msg = str(exc)
                     if (
@@ -1346,7 +1346,7 @@ def run_textual_interactive(
                 await self._stream_with_widgets(user_text)
             except asyncio.CancelledError:
                 cancelled = True
-                self._append_system("Interrupted.", style="yellow")
+                self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._busy = False
                 self._run_task = None
@@ -1871,7 +1871,9 @@ def run_textual_interactive(
                     self._busy = False
                     self.query_one("#prompt", Input).focus()
                     self._render_status()
-                    self._append_system("Interrupted.", style="yellow")
+                    self._append_system(
+                        "\nInterrupted by user", style="dim italic #ffe082"
+                    )
                 return
             # Double Ctrl+C to quit
             if self._quit_pending:
