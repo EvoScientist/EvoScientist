@@ -4,7 +4,7 @@
 
 | Recipe                                                     | Description                                                                     |
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
-| [macOS 24/7 Deployment](recipes/deployment-macos-24h.md)   | Run EvoScientist as an always-on service on macOS with ccproxy + Telegram + STT |
+| [macOS 24/7 Deployment](recipes/deployment-macos-24h.md)   | Run EvoScientist as an always-on service on macOS with OAuth + Telegram + STT   |
 
 ## Contributing a Recipe
 
