@@ -181,12 +181,18 @@ class TestStreamAgentEventsSubagentText:
             (
                 ("ns:task:id1:agent",),
                 "messages",
-                (_make_ai_chunk("Instance-1 text."), {"lc_agent_name": "research-agent"}),
+                (
+                    _make_ai_chunk("Instance-1 text."),
+                    {"lc_agent_name": "research-agent"},
+                ),
             ),
             (
                 ("ns:task:id2:agent",),
                 "messages",
-                (_make_ai_chunk("Instance-2 text."), {"lc_agent_name": "research-agent"}),
+                (
+                    _make_ai_chunk("Instance-2 text."),
+                    {"lc_agent_name": "research-agent"},
+                ),
             ),
             (
                 ("ns:task:id1:agent",),
@@ -204,7 +210,11 @@ class TestStreamAgentEventsSubagentText:
         assert all(e["subagent"] == "research-agent" for e in sa_text)
 
         # But instance_ids differ between the two namespaces
-        id1_events = [e for e in sa_text if "Instance-1" in e["content"] or "More from 1" in e["content"]]
+        id1_events = [
+            e
+            for e in sa_text
+            if "Instance-1" in e["content"] or "More from 1" in e["content"]
+        ]
         id2_events = [e for e in sa_text if "Instance-2" in e["content"]]
         assert len(id1_events) == 2
         assert len(id2_events) == 1
@@ -615,10 +625,30 @@ class TestConsumerSameNameInterleaved:
         with numbered suffixes.
         """
         events = [
-            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-1", "content": "Instance-1 sentence A."},
-            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-2", "content": "Instance-2 sentence X."},
-            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-1", "content": " Instance-1 sentence B."},
-            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-2", "content": " Instance-2 sentence Y."},
+            {
+                "type": "subagent_text",
+                "subagent": "research-agent",
+                "instance_id": "inst-1",
+                "content": "Instance-1 sentence A.",
+            },
+            {
+                "type": "subagent_text",
+                "subagent": "research-agent",
+                "instance_id": "inst-2",
+                "content": "Instance-2 sentence X.",
+            },
+            {
+                "type": "subagent_text",
+                "subagent": "research-agent",
+                "instance_id": "inst-1",
+                "content": " Instance-1 sentence B.",
+            },
+            {
+                "type": "subagent_text",
+                "subagent": "research-agent",
+                "instance_id": "inst-2",
+                "content": " Instance-2 sentence Y.",
+            },
             {"type": "done", "content": ""},
         ]
         consumer, bus, fake_stream = _make_consumer(events)
@@ -640,8 +670,14 @@ class TestConsumerSameNameInterleaved:
                 outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 # Fixed: instances are now properly separated with numbered labels
-                assert "[research-agent #1]: Instance-1 sentence A. Instance-1 sentence B." in outbound.content
-                assert "[research-agent #2]: Instance-2 sentence X. Instance-2 sentence Y." in outbound.content
+                assert (
+                    "[research-agent #1]: Instance-1 sentence A. Instance-1 sentence B."
+                    in outbound.content
+                )
+                assert (
+                    "[research-agent #2]: Instance-2 sentence X. Instance-2 sentence Y."
+                    in outbound.content
+                )
 
                 await consumer.stop()
                 await task
