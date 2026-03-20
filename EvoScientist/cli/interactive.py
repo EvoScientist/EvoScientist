@@ -18,6 +18,7 @@ from prompt_toolkit.completion import (  # type: ignore[import-untyped]
 )
 from prompt_toolkit.formatted_text import HTML  # type: ignore[import-untyped]
 from prompt_toolkit.history import FileHistory  # type: ignore[import-untyped]
+from prompt_toolkit.key_binding import KeyBindings  # type: ignore[import-untyped]
 from prompt_toolkit.shortcuts import CompleteStyle  # type: ignore[import-untyped]
 from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untyped]
 from rich.markup import escape
@@ -108,9 +109,16 @@ def print_banner(
     info.append("\n  ", style="dim")
     info.append("Directory: ", style="dim")
     info.append(dir_display, style="magenta")
-    info.append("\n  Type ", style="#ffe082")
+    _nl_key = "Option+Enter" if sys.platform == "darwin" else "Ctrl+J"
+    info.append("\n  Enter ", style="#ffe082")
+    info.append("send", style="#ffe082 bold")
+    info.append(f" \u2022 {_nl_key} ", style="#ffe082")
+    info.append("newline", style="#ffe082 bold")
+    info.append(" \u2022 Type ", style="#ffe082")
     info.append("/", style="#ffe082 bold")
     info.append(" for commands", style="#ffe082")
+    info.append(" \u2022 Ctrl+C ", style="#ffe082")
+    info.append("interrupt", style="#ffe082 bold")
     console.print(info)
 
 
@@ -245,6 +253,18 @@ def cmd_interactive(
     config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     history_file = str(config_dir / "history")
+
+    # Key bindings: Enter submits, Alt+Enter (Option+Enter) inserts newline
+    _kb = KeyBindings()
+
+    @_kb.add("escape", "enter")  # Alt+Enter / Option+Enter on macOS
+    def _insert_newline(event):
+        event.current_buffer.insert_text("\n")
+
+    @_kb.add("enter")
+    def _submit(event):
+        event.current_buffer.validate_and_handle()
+
     session = PromptSession(
         history=FileHistory(history_file),
         auto_suggest=AutoSuggestFromHistory(),
@@ -252,6 +272,8 @@ def cmd_interactive(
         complete_style=CompleteStyle.COLUMN,
         complete_while_typing=True,
         style=_COMPLETION_STYLE,
+        multiline=True,
+        key_bindings=_kb,
     )
 
     def _print_separator():
