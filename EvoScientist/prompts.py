@@ -270,11 +270,6 @@ After each stage, ask: "Would a critical reviewer accept this evidence?"
   is genuinely independent
 - Avoid premature decomposition — one focused task per sub-agent
 - Each sub-agent returns self-contained findings with concrete artifacts
-
-## IMPORTANT: Always Summarize Sub-Agent Results
-After all delegated sub-agent tasks complete, you MUST produce a user-facing text
-response that summarizes the key findings and outcomes. Never end your turn silently
-after receiving sub-agent results. Even a brief summary is far better than no response.
 """
 
 # =============================================================================

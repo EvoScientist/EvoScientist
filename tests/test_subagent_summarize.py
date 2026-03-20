@@ -719,20 +719,16 @@ class TestConsumerSameNameInterleaved:
 
 
 class TestDelegationPromptSummarize:
-    def test_delegation_strategy_contains_summarize_guidance(self):
-        from EvoScientist.prompts import DELEGATION_STRATEGY
+    def test_framework_task_tool_contains_summarize_guidance(self):
+        """The upstream TASK_TOOL_DESCRIPTION already instructs the LLM to summarize."""
+        from deepagents.middleware.subagents import TASK_TOOL_DESCRIPTION
 
-        assert "Always Summarize Sub-Agent Results" in DELEGATION_STRATEGY
+        assert "not visible to the user" in TASK_TOOL_DESCRIPTION
+        assert "summary of the result" in TASK_TOOL_DESCRIPTION
 
-    def test_delegation_strategy_requires_user_facing_response(self):
-        from EvoScientist.prompts import DELEGATION_STRATEGY
+    def test_framework_task_system_prompt_contains_reconcile_step(self):
+        """The upstream TASK_SYSTEM_PROMPT includes a reconcile/synthesize step."""
+        from deepagents.middleware.subagents import TASK_SYSTEM_PROMPT
 
-        assert (
-            "user-facing text" in DELEGATION_STRATEGY.lower()
-            or "user-facing" in DELEGATION_STRATEGY
-        )
-
-    def test_delegation_strategy_forbids_silent_end(self):
-        from EvoScientist.prompts import DELEGATION_STRATEGY
-
-        assert "Never end your turn silently" in DELEGATION_STRATEGY
+        assert "Reconcile" in TASK_SYSTEM_PROMPT
+        assert "synthesize" in TASK_SYSTEM_PROMPT.lower()

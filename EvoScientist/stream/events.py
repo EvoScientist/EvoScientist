@@ -504,7 +504,7 @@ async def stream_agent_events(
                             ).data
                         # Emit sub-agent text for fallback extraction
                         # (not displayed in TUI, but available to consumers)
-                        if ev.type == "text":
+                        elif ev.type == "text":
                             yield emitter.subagent_text(
                                 subagent,
                                 ev.data.get("content", ""),
