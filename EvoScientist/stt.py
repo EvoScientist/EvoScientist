@@ -34,7 +34,7 @@ STT_MODELS: dict[str, str] = {
 }
 
 # Single cached engine — re-created only when settings change
-_engine: "_WhisperEngine | None" = None
+_engine: _WhisperEngine | None = None
 _engine_key: tuple[str, str, str] | None = None  # (model_id, device, compute_type)
 
 

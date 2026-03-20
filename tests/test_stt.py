@@ -14,12 +14,11 @@ import pytest
 from EvoScientist.stt import STT_MODELS, is_audio_file, transcribe_file
 from tests.conftest import run_async
 
-
 # ── is_audio_file ─────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "path, expected",
+    ("path", "expected"),
     [
         ("voice.ogg", True),
         ("audio.mp3", True),
@@ -129,8 +128,9 @@ def test_transcribe_custom_model_override():
 
 
 def test_transcribe_missing_dep_returns_none():
-    import EvoScientist.stt as stt_mod
     import sys
+
+    import EvoScientist.stt as stt_mod
 
     stt_mod._engine = None
     saved = sys.modules.pop("faster_whisper", None)
