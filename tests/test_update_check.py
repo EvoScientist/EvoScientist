@@ -48,10 +48,12 @@ class TestGetLatestVersion:
     def test_stale_cache_fetches_pypi(self, tmp_path):
         cache_file = tmp_path / "latest_version.json"
         cache_file.write_text(
-            json.dumps({
-                "version": "0.0.1",
-                "checked_at": time.time() - CACHE_TTL - 1,
-            })
+            json.dumps(
+                {
+                    "version": "0.0.1",
+                    "checked_at": time.time() - CACHE_TTL - 1,
+                }
+            )
         )
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps(

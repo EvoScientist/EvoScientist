@@ -483,7 +483,9 @@ def run_textual_interactive(
                 severity="warning",
                 timeout=10,
             )
-            self.run_worker(self._check_for_updates, exclusive=True, group="update-check")
+            self.run_worker(
+                self._check_for_updates, exclusive=True, group="update-check"
+            )
             # Auto-start channels
             self._start_channels()
 
@@ -1556,7 +1558,9 @@ def run_textual_interactive(
 
         # ── Input handling ─────────────────────────────────────
 
-        async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
+        async def on_chat_text_area_submitted(
+            self, event: ChatTextArea.Submitted
+        ) -> None:
             text = event.value.strip()
             prompt = self.query_one("#prompt", ChatTextArea)
             prompt.value = ""
