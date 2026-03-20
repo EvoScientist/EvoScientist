@@ -111,9 +111,11 @@ class TestStreamAgentEventsSubagentText:
         # Non-empty namespace signals a sub-agent
         mock_agent = AsyncMock()
         mock_agent.astream = MagicMock(
-            return_value=_async_iter([
-                (("sub:research",), "messages", (subagent_chunk, {})),
-            ])
+            return_value=_async_iter(
+                [
+                    (("sub:research",), "messages", (subagent_chunk, {})),
+                ]
+            )
         )
         events = _collect_events(mock_agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
@@ -125,9 +127,11 @@ class TestStreamAgentEventsSubagentText:
         chunk = _make_ai_chunk("Main agent reply.")
         mock_agent = AsyncMock()
         mock_agent.astream = MagicMock(
-            return_value=_async_iter([
-                ((), "messages", (chunk, {})),
-            ])
+            return_value=_async_iter(
+                [
+                    ((), "messages", (chunk, {})),
+                ]
+            )
         )
         events = _collect_events(mock_agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
@@ -212,8 +216,16 @@ class TestConsumerSubagentTextFallback:
     def test_subagent_text_used_when_no_final_content(self):
         """When the main agent produces no text, sub-agent text becomes the response."""
         events = [
-            {"type": "subagent_text", "subagent": "research", "content": "Found 3 relevant papers."},
-            {"type": "subagent_text", "subagent": "research", "content": " Key insight: X is Y."},
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "content": "Found 3 relevant papers.",
+            },
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "content": " Key insight: X is Y.",
+            },
             {"type": "done", "content": ""},
         ]
         consumer, bus, fake_stream = _make_consumer(events)
@@ -232,11 +244,11 @@ class TestConsumerSubagentTextFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-                assert outbound.content == "Found 3 relevant papers. Key insight: X is Y."
+                assert (
+                    outbound.content == "Found 3 relevant papers. Key insight: X is Y."
+                )
                 assert outbound.channel == "stub"
 
                 await consumer.stop()
@@ -247,7 +259,11 @@ class TestConsumerSubagentTextFallback:
     def test_final_content_takes_priority_over_subagent_text(self):
         """When the main agent produces text, sub-agent text is ignored."""
         events = [
-            {"type": "subagent_text", "subagent": "research", "content": "Sub-agent detail."},
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "content": "Sub-agent detail.",
+            },
             {"type": "text", "content": "Here is my summary."},
             {"type": "done", "content": ""},
         ]
@@ -267,9 +283,7 @@ class TestConsumerSubagentTextFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 assert outbound.content == "Here is my summary."
 
@@ -299,9 +313,7 @@ class TestConsumerSubagentTextFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 assert outbound.content == "No response"
 
@@ -313,7 +325,11 @@ class TestConsumerSubagentTextFallback:
     def test_done_content_overrides_subagent_text(self):
         """Done event with content takes priority over sub-agent text buffer."""
         events = [
-            {"type": "subagent_text", "subagent": "research", "content": "Sub-agent work."},
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "content": "Sub-agent work.",
+            },
             {"type": "done", "content": "Final summary from done event."},
         ]
         consumer, bus, fake_stream = _make_consumer(events)
@@ -332,9 +348,7 @@ class TestConsumerSubagentTextFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 assert outbound.content == "Final summary from done event."
 
@@ -409,9 +423,21 @@ class TestConsumerParallelSubagentFallback:
     def test_parallel_agents_grouped_with_attribution(self):
         """Multiple sub-agents produce grouped, attributed output."""
         events = [
-            {"type": "subagent_text", "subagent": "research", "content": "Found papers."},
-            {"type": "subagent_text", "subagent": "analysis", "content": "Metric is high."},
-            {"type": "subagent_text", "subagent": "research", "content": " Key insight."},
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "content": "Found papers.",
+            },
+            {
+                "type": "subagent_text",
+                "subagent": "analysis",
+                "content": "Metric is high.",
+            },
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "content": " Key insight.",
+            },
             {"type": "done", "content": ""},
         ]
         consumer, bus, fake_stream = _make_consumer(events)
@@ -430,9 +456,7 @@ class TestConsumerParallelSubagentFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 assert "[research]: Found papers. Key insight." in outbound.content
                 assert "[analysis]: Metric is high." in outbound.content
@@ -464,9 +488,7 @@ class TestConsumerParallelSubagentFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 assert outbound.content == "Only agent."
                 assert "[research]" not in outbound.content
@@ -498,9 +520,7 @@ class TestConsumerParallelSubagentFallback:
                 await bus.publish_inbound(msg)
 
                 task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(
-                    bus.consume_outbound(), timeout=5.0
-                )
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
                 # Single agent (unknown), no prefix
                 assert outbound.content == "No agent name."
@@ -520,8 +540,10 @@ class TestDelegationPromptSummarize:
     def test_delegation_strategy_requires_user_facing_response(self):
         from EvoScientist.prompts import DELEGATION_STRATEGY
 
-        assert "user-facing text" in DELEGATION_STRATEGY.lower() or \
-               "user-facing" in DELEGATION_STRATEGY
+        assert (
+            "user-facing text" in DELEGATION_STRATEGY.lower()
+            or "user-facing" in DELEGATION_STRATEGY
+        )
 
     def test_delegation_strategy_forbids_silent_end(self):
         from EvoScientist.prompts import DELEGATION_STRATEGY
