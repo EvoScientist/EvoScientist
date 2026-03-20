@@ -97,6 +97,21 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def subagent_text(
+        subagent: str, content: str, instance_id: str = ""
+    ) -> StreamEvent:
+        """Text content from a sub-agent (for fallback extraction)."""
+        return StreamEvent(
+            "subagent_text",
+            {
+                "type": "subagent_text",
+                "subagent": subagent,
+                "content": content,
+                "instance_id": instance_id,
+            },
+        )
+
+    @staticmethod
     def subagent_end(name: str) -> StreamEvent:
         """Sub-agent delegation completed."""
         return StreamEvent("subagent_end", {"type": "subagent_end", "name": name})

@@ -502,7 +502,14 @@ async def stream_agent_events(
                                 ev.data["args"],
                                 ev.data.get("id", ""),
                             ).data
-                        # Skip text/thinking from sub-agents (too noisy)
+                        # Emit sub-agent text for fallback extraction
+                        # (not displayed in TUI, but available to consumers)
+                        elif ev.type == "text":
+                            yield emitter.subagent_text(
+                                subagent,
+                                ev.data.get("content", ""),
+                                instance_id=tracker_key,
+                            ).data
 
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
                         for tc in msg.tool_calls:
