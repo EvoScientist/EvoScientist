@@ -94,7 +94,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
 
 > [!TIP]
-> Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other AI coding agents like Claude Code, Cursor, and OpenClaw.
+> Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other CLI coding agents.
 
 ## 🔥 News
 - **[13 Mar 2026]** 🚀 [**EvoScientist**](https://github.com/EvoScientist/EvoScientist) officially debuts!
@@ -221,8 +221,8 @@ EvoSci onboard
 ```
 
 > [!TIP]
-> It walks you through provider selection, key validation, model choice, and workspace mode. 
-> Supports OAuth sign-in for [Claude Code](https://claude.com/product/claude-code) and [Codex CLI](https://developers.openai.com/codex/cli/) users — no API key needed.
+> It walks you through provider selection, key validation, model choice, and workspace mode.
+> Supports OAuth sign-in for CLI coding agent subscribers — no API key needed.
 
 ![onboard](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_onboard.png)
 
@@ -440,7 +440,7 @@ Coming soon:
 - [x] 👋 Human-in-the-loop action approval
 - [x] 🦾 Agent-initiated human clarification
 - [x] 📑 Technical report on the way
-- [x] 🔐 OAuth sign-in (Anthropic, OpenAI, etc.)
+- [x] 🔐 OAuth sign-in (CLI coding agent subscribers)
 - [ ] 📺 Web app with workspace UI
 - [ ] 📹 Demo and tutorial in the works
 - [ ] 📊 Benchmark suite to be released
