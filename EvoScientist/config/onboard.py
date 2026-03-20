@@ -7,6 +7,7 @@ workspace settings, and agent parameters. Uses flow-style arrow-key selection UI
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1421,12 +1422,18 @@ _RECOMMENDED_SKILLS = [
 def _check_npx() -> bool:
     """Check if npx is available on the system.
 
+    Uses shutil.which() to resolve the executable path, which correctly
+    finds .cmd/.bat wrappers on Windows (e.g., npx.cmd).
+
     Returns:
         True if npx is found and working.
     """
+    npx = shutil.which("npx")
+    if not npx:
+        return False
     try:
         result = subprocess.run(
-            ["npx", "--version"],
+            [npx, "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1460,6 +1467,13 @@ def _detect_node_install_method() -> tuple[str, str]:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
+    # Windows: winget (built-in on Win 10+) or chocolatey
+    if sys.platform == "win32":
+        if shutil.which("winget"):
+            return "winget", "winget install OpenJS.NodeJS.LTS"
+        if shutil.which("choco"):
+            return "choco", "choco install nodejs-lts -y"
+
     return "manual", "https://nodejs.org"
 
 
@@ -1472,9 +1486,11 @@ def _install_node(method: str, command: str) -> bool:
     if method == "manual":
         return False
 
+    parts = command.split()
+    exe = shutil.which(parts[0]) or parts[0]
     try:
         proc = subprocess.run(
-            command.split(),
+            [exe, *parts[1:]],
             capture_output=True,
             text=True,
             timeout=120,

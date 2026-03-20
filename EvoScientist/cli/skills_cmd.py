@@ -1,4 +1,4 @@
-"""Slash commands for skill management: /skills, /install-skill, /uninstall-skill, /install-skills."""
+"""Slash commands for skill management: /skills, /install-skill, /uninstall-skill, /evoskills."""
 
 from pathlib import Path
 

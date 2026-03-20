@@ -111,9 +111,9 @@ class InstallSkill(Command):
 class InstallSkills(Command):
     """Browse and install skills."""
 
-    name: ClassVar[str] = "/install-skills"
+    name: ClassVar[str] = "/evoskills"
     description: ClassVar[str] = (
-        "Browse and install skills (optional: /install-skills <tag>)"
+        "Browse and install EvoSkills (optional: /evoskills <tag>)"
     )
     arguments: ClassVar[list[Argument]] = [
         Argument(

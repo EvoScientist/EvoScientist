@@ -1,4 +1,4 @@
-"""Inline skill browser widget for /install-skills in TUI.
+"""Inline skill browser widget for /evoskills in TUI.
 
 Two-phase keyboard-driven widget:
   Phase 1 — tag picker (arrow keys + Enter to select, or Esc for all)
