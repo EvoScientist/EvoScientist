@@ -5,8 +5,10 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widgets import Static
 
+from .timestamp_mixin import TimestampClickMixin
 
-class SystemMessage(Static):
+
+class SystemMessage(TimestampClickMixin, Static):
     """Displays a system/status message (replaces ``_append_system``)."""
 
     DEFAULT_CSS = """

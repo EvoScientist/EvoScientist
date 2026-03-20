@@ -656,8 +656,8 @@ def cmd_interactive(
             # Startup hint
             console.print(
                 Text(
-                    "  EvoScientist is your research buddy — "
-                    "tell it about your taste before cooking some meal!",
+                    "  EvoScientist is your research buddy.\n"
+                    "  Tell it about your taste before cooking some meal!",
                     style="yellow",
                 )
             )
@@ -685,7 +685,7 @@ def cmd_interactive(
 
             def _show_update_hint() -> None:
                 try:
-                    from ..update_check import is_update_available, _installed_version
+                    from ..update_check import _installed_version, is_update_available
 
                     available, latest = is_update_available()
                     if available:

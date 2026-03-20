@@ -2,17 +2,14 @@
 
 import json
 import time
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from EvoScientist.update_check import (
+    CACHE_TTL,
     _parse_version,
     get_latest_version,
     is_update_available,
-    CACHE_TTL,
 )
-
 
 # ── _parse_version ──────────────────────────────────────────
 
@@ -134,7 +131,7 @@ class TestIsUpdateAvailable:
             patch("EvoScientist.update_check.get_latest_version", return_value="0.0.2"),
             patch("EvoScientist.update_check._installed_version", return_value="0.0.2"),
         ):
-            available, latest = is_update_available()
+            available, _latest = is_update_available()
             assert available is False
 
     def test_older_pypi_version(self):
@@ -142,7 +139,7 @@ class TestIsUpdateAvailable:
             patch("EvoScientist.update_check.get_latest_version", return_value="0.0.1"),
             patch("EvoScientist.update_check._installed_version", return_value="0.0.2"),
         ):
-            available, latest = is_update_available()
+            available, _latest = is_update_available()
             assert available is False
 
     def test_pypi_unreachable(self):
@@ -156,5 +153,5 @@ class TestIsUpdateAvailable:
             patch("EvoScientist.update_check.get_latest_version", return_value="abc"),
             patch("EvoScientist.update_check._installed_version", return_value="0.0.2"),
         ):
-            available, latest = is_update_available()
+            available, _latest = is_update_available()
             assert available is False

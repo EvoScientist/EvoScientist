@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from rich.text import Text
 from textual.containers import Vertical
 from textual.events import Click
@@ -9,6 +11,7 @@ from textual.widgets import Static
 
 from ...stream.diff_format import build_edit_diff
 from ...stream.utils import format_tool_compact
+from .timestamp_mixin import show_timestamp_toast
 
 _SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
@@ -63,6 +66,7 @@ class ToolCallWidget(Vertical):
         self._tool_name = tool_name
         self._tool_args = tool_args or {}
         self._tool_id = tool_id
+        self._created_at: float = time.time()
         self._status = "running"
         self._result_content = ""
         self._diff_markup: str | None = None  # cached full diff for toggle
@@ -232,8 +236,9 @@ class ToolCallWidget(Vertical):
             output_w.add_class("--visible")
 
     def on_click(self, event: Click) -> None:
-        """Toggle collapsed output on click."""
+        """Toggle collapsed output on click, or show timestamp."""
         if self._status == "running" or not self._result_content.strip():
+            show_timestamp_toast(self)
             return
         output_w = self.query_one(".tool-output", Static)
 
@@ -251,6 +256,7 @@ class ToolCallWidget(Vertical):
             return
 
         if not self._should_collapse():
+            show_timestamp_toast(self)
             return  # Short output is always visible, nothing to toggle
         if self._collapsed:
             # Expand

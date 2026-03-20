@@ -464,8 +464,8 @@ def run_textual_interactive(
                 )
             # Startup notifications
             self.notify(
-                "EvoScientist is your research buddy — "
-                "tell it about your taste before cooking some meal!",
+                "EvoScientist is your research buddy.\n"
+                "Tell it about your taste before cooking some meal!",
                 severity="warning",
                 timeout=10,
             )
@@ -478,7 +478,7 @@ def run_textual_interactive(
         async def _check_for_updates(self) -> None:
             """Check PyPI for a newer EvoScientist version and notify."""
             try:
-                from ..update_check import is_update_available, _installed_version
+                from ..update_check import _installed_version, is_update_available
 
                 available, latest = await asyncio.to_thread(is_update_available)
                 if available:
@@ -490,7 +490,7 @@ def run_textual_interactive(
                         timeout=15,
                     )
             except Exception:
-                logger.debug("Background update check failed", exc_info=True)
+                _channel_logger.debug("Background update check failed", exc_info=True)
 
         # ── Channel integration ────────────────────────────────
 

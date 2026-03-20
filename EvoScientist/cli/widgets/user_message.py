@@ -5,8 +5,10 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widgets import Static
 
+from .timestamp_mixin import TimestampClickMixin
 
-class UserMessage(Static):
+
+class UserMessage(TimestampClickMixin, Static):
     """Displays user input with a blue prompt marker."""
 
     DEFAULT_CSS = """

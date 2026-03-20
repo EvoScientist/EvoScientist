@@ -5,8 +5,10 @@ from __future__ import annotations
 from textual.containers import Vertical
 from textual.widgets import Markdown
 
+from .timestamp_mixin import TimestampClickMixin
 
-class AssistantMessage(Vertical):
+
+class AssistantMessage(TimestampClickMixin, Vertical):
     """Displays the assistant's final Markdown response.
 
     Mount once, then call :meth:`append_content` for each text chunk.
