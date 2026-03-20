@@ -87,6 +87,16 @@ class TestSubagentTextEmitter:
         ev = StreamEventEmitter.subagent_text("agent", "")
         assert ev.data["content"] == ""
 
+    def test_instance_id_defaults_to_empty(self):
+        ev = StreamEventEmitter.subagent_text("agent", "content")
+        assert ev.data["instance_id"] == ""
+
+    def test_instance_id_included_when_provided(self):
+        ev = StreamEventEmitter.subagent_text(
+            "agent", "content", instance_id="tracker:abc"
+        )
+        assert ev.data["instance_id"] == "tracker:abc"
+
     def test_included_in_all_events_type_check(self):
         """subagent_text must pass the same invariant as other emitters."""
         ev = StreamEventEmitter.subagent_text("s", "c")
@@ -371,7 +381,7 @@ class TestJoinSubagentText:
 
     def test_single_agent_no_prefix(self):
         """One sub-agent: return raw text without [name]: prefix."""
-        buffers = {"research": ["Found papers.", " Key insight."]}
+        buffers = {"research": ("research", ["Found papers.", " Key insight."])}
         result = _join_subagent_text(buffers)
         assert result == "Found papers. Key insight."
         assert "[research]" not in result
@@ -379,8 +389,8 @@ class TestJoinSubagentText:
     def test_multiple_agents_with_prefix(self):
         """Multiple sub-agents: each section gets [name]: prefix."""
         buffers = {
-            "research": ["Paper A is relevant."],
-            "analysis": ["Metric X is high."],
+            "research": ("research", ["Paper A is relevant."]),
+            "analysis": ("analysis", ["Metric X is high."]),
         }
         result = _join_subagent_text(buffers)
         assert "[research]: Paper A is relevant." in result
@@ -390,8 +400,8 @@ class TestJoinSubagentText:
     def test_multiple_agents_chunk_concatenation(self):
         """Chunks within the same agent are joined without separator."""
         buffers = {
-            "agent-a": ["chunk1", "chunk2"],
-            "agent-b": ["chunk3"],
+            "agent-a": ("agent-a", ["chunk1", "chunk2"]),
+            "agent-b": ("agent-b", ["chunk3"]),
         }
         result = _join_subagent_text(buffers)
         assert "[agent-a]: chunk1chunk2" in result
@@ -399,17 +409,32 @@ class TestJoinSubagentText:
 
     def test_single_agent_empty_chunks(self):
         """Single agent with empty chunks returns empty string."""
-        buffers = {"agent": [""]}
+        buffers = {"agent": ("agent", [""])}
         assert _join_subagent_text(buffers) == ""
 
     def test_multiple_agents_preserves_order(self):
         """Agent sections appear in insertion order."""
-        buffers = {"beta": ["B"], "alpha": ["A"], "gamma": ["G"]}
+        buffers = {
+            "beta-key": ("beta", ["B"]),
+            "alpha-key": ("alpha", ["A"]),
+            "gamma-key": ("gamma", ["G"]),
+        }
         result = _join_subagent_text(buffers)
         beta_pos = result.index("[beta]")
         alpha_pos = result.index("[alpha]")
         gamma_pos = result.index("[gamma]")
         assert beta_pos < alpha_pos < gamma_pos
+
+    def test_same_name_instances_numbered(self):
+        """Multiple instances of the same agent type get numbered labels."""
+        buffers = {
+            "inst-1": ("research-agent", ["Instance 1 text."]),
+            "inst-2": ("research-agent", ["Instance 2 text."]),
+        }
+        result = _join_subagent_text(buffers)
+        assert "[research-agent #1]: Instance 1 text." in result
+        assert "[research-agent #2]: Instance 2 text." in result
+        assert "\n\n" in result
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -524,6 +549,84 @@ class TestConsumerParallelSubagentFallback:
 
                 # Single agent (unknown), no prefix
                 assert outbound.content == "No agent name."
+
+                await consumer.stop()
+                await task
+
+        _run(_test())
+
+
+class TestConsumerSameNameInterleaved:
+    """Two instances of the same agent type with interleaved chunks."""
+
+    def test_same_name_interleaved_chunks_separated_by_instance_id(self):
+        """Two research-agent instances with different instance_ids are properly separated.
+
+        With the instance_id fix, chunks are keyed by instance_id so
+        each instance's text is buffered independently and labelled
+        with numbered suffixes.
+        """
+        events = [
+            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-1", "content": "Instance-1 sentence A."},
+            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-2", "content": "Instance-2 sentence X."},
+            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-1", "content": " Instance-1 sentence B."},
+            {"type": "subagent_text", "subagent": "research-agent", "instance_id": "inst-2", "content": " Instance-2 sentence Y."},
+            {"type": "done", "content": ""},
+        ]
+        consumer, bus, fake_stream = _make_consumer(events)
+
+        async def _test():
+            with patch(
+                "EvoScientist.stream.events.stream_agent_events",
+                new=fake_stream,
+            ):
+                msg = BusInbound(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="test",
+                )
+                await bus.publish_inbound(msg)
+
+                task = asyncio.create_task(consumer.run())
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+
+                # Fixed: instances are now properly separated with numbered labels
+                assert "[research-agent #1]: Instance-1 sentence A. Instance-1 sentence B." in outbound.content
+                assert "[research-agent #2]: Instance-2 sentence X. Instance-2 sentence Y." in outbound.content
+
+                await consumer.stop()
+                await task
+
+        _run(_test())
+
+    def test_same_name_no_instance_id_still_concatenated(self):
+        """Without instance_id (legacy events), same-name chunks still merge into one buffer."""
+        events = [
+            {"type": "subagent_text", "subagent": "research-agent", "content": "A."},
+            {"type": "subagent_text", "subagent": "research-agent", "content": " B."},
+            {"type": "done", "content": ""},
+        ]
+        consumer, bus, fake_stream = _make_consumer(events)
+
+        async def _test():
+            with patch(
+                "EvoScientist.stream.events.stream_agent_events",
+                new=fake_stream,
+            ):
+                msg = BusInbound(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="test",
+                )
+                await bus.publish_inbound(msg)
+
+                task = asyncio.create_task(consumer.run())
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+
+                # Single instance (no instance_id), no prefix
+                assert outbound.content == "A. B."
 
                 await consumer.stop()
                 await task

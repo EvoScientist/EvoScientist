@@ -506,7 +506,9 @@ async def stream_agent_events(
                         # (not displayed in TUI, but available to consumers)
                         if ev.type == "text":
                             yield emitter.subagent_text(
-                                subagent, ev.data.get("content", "")
+                                subagent,
+                                ev.data.get("content", ""),
+                                instance_id=tracker_key,
                             ).data
 
                     if hasattr(msg, "tool_calls") and msg.tool_calls:

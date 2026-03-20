@@ -78,20 +78,34 @@ def _format_todo_list(todos: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _join_subagent_text(buffers: dict[str, list[str]]) -> str:
+def _join_subagent_text(buffers: dict[str, tuple[str, list[str]]]) -> str:
     """Join sub-agent text buffers into a single fallback string.
 
-    When only one sub-agent produced text, return its content directly.
-    When multiple sub-agents produced text, prefix each section with the
-    agent name so the user can distinguish them.
+    *buffers* maps ``instance_id`` → ``(display_name, chunks)``.
+
+    When only one instance produced text, return its content directly.
+    When multiple instances share the same display name, number them
+    (e.g. ``[research-agent #1]``, ``[research-agent #2]``).
     """
     if not buffers:
         return ""
     if len(buffers) == 1:
-        return "".join(next(iter(buffers.values())))
-    return "\n\n".join(
-        f"[{name}]: {''.join(chunks)}" for name, chunks in buffers.items()
-    )
+        _display_name, chunks = next(iter(buffers.values()))
+        return "".join(chunks)
+
+    # Group by display_name to detect same-name instances
+    name_groups: dict[str, list[list[str]]] = {}
+    for _instance_id, (display_name, chunks) in buffers.items():
+        name_groups.setdefault(display_name, []).append(chunks)
+
+    sections: list[str] = []
+    for display_name, chunk_lists in name_groups.items():
+        if len(chunk_lists) == 1:
+            sections.append(f"[{display_name}]: {''.join(chunk_lists[0])}")
+        else:
+            for i, chs in enumerate(chunk_lists, 1):
+                sections.append(f"[{display_name} #{i}]: {''.join(chs)}")
+    return "\n\n".join(sections)
 
 
 def _should_auto_approve(action_requests: list[dict]) -> bool:
@@ -446,7 +460,7 @@ class InboundConsumer:
                 final_content = ""
                 thinking_buffer: list[str] = []
                 todo_sent = False
-                subagent_text_buffers: dict[str, list[str]] = {}
+                subagent_text_buffers: dict[str, tuple[str, list[str]]] = {}
                 thinking_sent = False
                 interrupt_data: dict | None = None
 
@@ -500,7 +514,10 @@ class InboundConsumer:
 
                     elif event_type == "subagent_text":
                         sa_name = event.get("subagent", "unknown")
-                        subagent_text_buffers.setdefault(sa_name, []).append(
+                        instance_id = event.get("instance_id") or sa_name
+                        if instance_id not in subagent_text_buffers:
+                            subagent_text_buffers[instance_id] = (sa_name, [])
+                        subagent_text_buffers[instance_id][1].append(
                             event.get("content", "")
                         )
 
