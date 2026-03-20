@@ -63,6 +63,7 @@ discord = ["discord.py>=2.3"]
 slack = ["slack-sdk>=3.27", "aiohttp>=3.9"]
 wechat = ["pycryptodome>=3.20"]
 qq = ["qq-botpy>=1.0"]
+stt = ["faster-whisper>=1.0"]
 oauth = ["ccproxy-api>=0.2.4"]
 all-channels = [
     "python-telegram-bot>=21.0",
