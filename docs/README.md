@@ -15,4 +15,3 @@ See the [Contributing Guide](../CONTRIBUTING.md) for general guidelines. When ad
 - **Include a README** with clear setup and usage instructions
 - **Keep it focused** — each recipe should demonstrate one deployment or integration scenario
 - **Add to the table** above so others can discover it
-- **Follow the structure** of existing recipes (see `recipes/deployment-macos-24h.md` as reference)
