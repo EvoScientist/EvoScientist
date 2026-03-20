@@ -283,6 +283,7 @@ class Channel(ChannelPlugin, ABC):
 
         # Cache STT config at startup to avoid loading it on every message
         from ..config.settings import load_config as _load_cfg
+
         _global = _load_cfg()
         self._stt_enabled: bool = _global.stt_enabled
         self._stt_language: str = _global.stt_language
@@ -963,18 +964,15 @@ class Channel(ChannelPlugin, ABC):
                     if text:
                         transcripts.append(text)
                         transcribed_files.add(fp)
-                        _logger.info(
-                            f"[STT] {self.name}: {fp} → {text[:80]}..."
-                        )
+                        _logger.info(f"[STT] {self.name}: {fp} → {text[:80]}...")
             if transcripts:
                 prefix = "\n".join(transcripts)
-                raw.text = (
-                    (prefix + "\n" + raw.text).strip() if raw.text else prefix
-                )
+                raw.text = (prefix + "\n" + raw.text).strip() if raw.text else prefix
                 # Remove annotations for transcribed files (exact path match)
                 # so the agent does not attempt to process the audio file itself
                 raw.content_annotations = [
-                    a for a in raw.content_annotations
+                    a
+                    for a in raw.content_annotations
                     if not any(
                         fp == a or a.endswith(f": {fp}]") or a == f"[voice: {fp}]"
                         for fp in transcribed_files

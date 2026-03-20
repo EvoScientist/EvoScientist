@@ -22,14 +22,23 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_AUDIO_EXTS = frozenset({
-    ".ogg", ".mp3", ".m4a", ".wav", ".flac", ".opus", ".weba", ".webm",
-})
+_AUDIO_EXTS = frozenset(
+    {
+        ".ogg",
+        ".mp3",
+        ".m4a",
+        ".wav",
+        ".flac",
+        ".opus",
+        ".weba",
+        ".webm",
+    }
+)
 
 # Default language → HuggingFace model id
 STT_MODELS: dict[str, str] = {
-    "zh":   "Systran/faster-whisper-small",
-    "en":   "Systran/faster-whisper-small.en",
+    "zh": "Systran/faster-whisper-small",
+    "en": "Systran/faster-whisper-small.en",
     "auto": "Systran/faster-whisper-small",
 }
 
@@ -70,7 +79,9 @@ def _get_engine(
     global _engine, _engine_key
     key = (model_id, device, compute_type)
     if _engine is None or _engine_key != key:
-        logger.info(f"[STT] Loading model '{model_id}' device={device} compute={compute_type}")
+        logger.info(
+            f"[STT] Loading model '{model_id}' device={device} compute={compute_type}"
+        )
         _engine = _WhisperEngine(model_id, device, compute_type)
         _engine_key = key
     return _engine

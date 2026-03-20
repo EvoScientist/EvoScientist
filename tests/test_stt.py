@@ -70,7 +70,11 @@ def _make_whisper_mock(text: str):
 def _patch_whisper(whisper_model):
     return patch.dict(
         "sys.modules",
-        {"faster_whisper": MagicMock(WhisperModel=MagicMock(return_value=whisper_model))},
+        {
+            "faster_whisper": MagicMock(
+                WhisperModel=MagicMock(return_value=whisper_model)
+            )
+        },
     )
 
 
@@ -118,7 +122,9 @@ def test_transcribe_custom_model_override():
 
     with patch.object(stt_mod._WhisperEngine, "__init__", patched_init):
         run_async(
-            transcribe_file("voice.ogg", language="auto", model="openai/whisper-large-v3")
+            transcribe_file(
+                "voice.ogg", language="auto", model="openai/whisper-large-v3"
+            )
         )
     stt_mod._engine = None
     assert captured_model_id == ["openai/whisper-large-v3"]
@@ -175,7 +181,9 @@ def test_enqueue_raw_stt_prepends_transcript():
     ch._stt_compute_type = "int8"
 
     raw = RawIncoming(
-        sender_id="123", chat_id="456", text="",
+        sender_id="123",
+        chat_id="456",
+        text="",
         media_files=["/tmp/voice.ogg"],
         content_annotations=["[voice: /tmp/voice.ogg]"],
         timestamp=datetime.now(),
@@ -183,7 +191,9 @@ def test_enqueue_raw_stt_prepends_transcript():
 
     async def _run():
         with (
-            patch("EvoScientist.stt.transcribe_file", new=AsyncMock(return_value="你好")),
+            patch(
+                "EvoScientist.stt.transcribe_file", new=AsyncMock(return_value="你好")
+            ),
             patch("EvoScientist.stt.is_audio_file", return_value=True),
         ):
             await ch._enqueue_raw(raw)
@@ -202,8 +212,11 @@ def test_enqueue_raw_stt_disabled_skips_transcription():
     ch._stt_enabled = False
 
     raw = RawIncoming(
-        sender_id="123", chat_id="456", text="",
-        media_files=["voice.ogg"], timestamp=datetime.now(),
+        sender_id="123",
+        chat_id="456",
+        text="",
+        media_files=["voice.ogg"],
+        timestamp=datetime.now(),
     )
 
     mock_transcribe = AsyncMock()
@@ -229,13 +242,19 @@ def test_enqueue_raw_stt_appends_to_existing_text():
     ch._stt_compute_type = "int8"
 
     raw = RawIncoming(
-        sender_id="123", chat_id="456", text="caption text",
-        media_files=["voice.ogg"], timestamp=datetime.now(),
+        sender_id="123",
+        chat_id="456",
+        text="caption text",
+        media_files=["voice.ogg"],
+        timestamp=datetime.now(),
     )
 
     async def _run():
         with (
-            patch("EvoScientist.stt.transcribe_file", new=AsyncMock(return_value="hello world")),
+            patch(
+                "EvoScientist.stt.transcribe_file",
+                new=AsyncMock(return_value="hello world"),
+            ),
             patch("EvoScientist.stt.is_audio_file", return_value=True),
         ):
             await ch._enqueue_raw(raw)
