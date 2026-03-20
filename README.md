@@ -107,6 +107,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - [📦 Installation](#-installation)
 - [🔑 Configuration](#-configuration)
 - [⚡ Quick Start](#-quick-start)
+- [🍪 Examples & Recipes](#-examples--recipes)
 - [🔌 MCP Integration](#-mcp-integration)
 - [📱 Channels](#-channels)
 - [📚 Acknowledgments](#-acknowledgments)
@@ -365,6 +366,14 @@ for state in EvoScientist_agent.stream(
 ```
 
 </details>
+
+<p align="right"><a href="#top">🔝Back to top</a></p>
+
+## 🍪 Examples & Recipes
+
+A curated collection of official examples, advanced usage patterns, and community-contributed recipes to help you get the most out of EvoScientist.
+
+👉 **[Browse all examples & recipes](docs/README.md)**
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 

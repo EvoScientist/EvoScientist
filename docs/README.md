@@ -1,4 +1,4 @@
-<h1 align="center">🧑‍🍳 Examples & Recipes</h1>
+<h1 align="center">🍪 Examples & Recipes</h1>
 
 <h3 align="center">Customize your EvoScientist — harness it, make it yours.</h3>
 
