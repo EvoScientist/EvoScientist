@@ -78,6 +78,22 @@ def _format_todo_list(todos: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _join_subagent_text(buffers: dict[str, list[str]]) -> str:
+    """Join sub-agent text buffers into a single fallback string.
+
+    When only one sub-agent produced text, return its content directly.
+    When multiple sub-agents produced text, prefix each section with the
+    agent name so the user can distinguish them.
+    """
+    if not buffers:
+        return ""
+    if len(buffers) == 1:
+        return "".join(next(iter(buffers.values())))
+    return "\n\n".join(
+        f"[{name}]: {''.join(chunks)}" for name, chunks in buffers.items()
+    )
+
+
 def _should_auto_approve(action_requests: list[dict]) -> bool:
     """Check if all action requests can be auto-approved via config.
 
@@ -430,7 +446,7 @@ class InboundConsumer:
                 final_content = ""
                 thinking_buffer: list[str] = []
                 todo_sent = False
-                subagent_text_buffer: list[str] = []
+                subagent_text_buffers: dict[str, list[str]] = {}
                 thinking_sent = False
                 interrupt_data: dict | None = None
 
@@ -483,7 +499,10 @@ class InboundConsumer:
                         final_content += event.get("content", "")
 
                     elif event_type == "subagent_text":
-                        subagent_text_buffer.append(event.get("content", ""))
+                        sa_name = event.get("subagent", "unknown")
+                        subagent_text_buffers.setdefault(sa_name, []).append(
+                            event.get("content", "")
+                        )
 
                     elif event_type == "done":
                         final_content = event.get("content", "") or final_content
@@ -512,7 +531,7 @@ class InboundConsumer:
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=final_content
-                        or "".join(subagent_text_buffer)
+                        or _join_subagent_text(subagent_text_buffers)
                         or "No response",
                         reply_to=msg.message_id or None,
                         metadata=msg.metadata,
