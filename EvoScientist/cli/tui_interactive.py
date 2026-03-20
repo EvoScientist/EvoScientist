@@ -462,8 +462,35 @@ def run_textual_interactive(
                         self._render_history(self._conversation_tid)
                     )
                 )
+            # Startup notifications
+            self.notify(
+                "EvoScientist is your research buddy — "
+                "tell it about your taste before cooking some meal!",
+                severity="warning",
+                timeout=10,
+            )
+            self.run_worker(self._check_for_updates, exclusive=True, group="update-check")
             # Auto-start channels
             self._start_channels()
+
+        # ── Update check ──────────────────────────────────────
+
+        async def _check_for_updates(self) -> None:
+            """Check PyPI for a newer EvoScientist version and notify."""
+            try:
+                from ..update_check import is_update_available, _installed_version
+
+                available, latest = await asyncio.to_thread(is_update_available)
+                if available:
+                    current = _installed_version()
+                    self.notify(
+                        f"Update available: v{latest} (current: v{current}).\n"
+                        "Run: uv tool upgrade EvoScientist",
+                        severity="information",
+                        timeout=15,
+                    )
+            except Exception:
+                logger.debug("Background update check failed", exc_info=True)
 
         # ── Channel integration ────────────────────────────────
 

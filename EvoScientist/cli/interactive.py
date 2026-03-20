@@ -653,6 +653,15 @@ def cmd_interactive(
 
             queue_task = asyncio.create_task(_check_channel_queue())
 
+            # Startup hint
+            console.print(
+                Text(
+                    "  EvoScientist is your research buddy — "
+                    "tell it about your taste before cooking some meal!",
+                    style="yellow",
+                )
+            )
+
             # Auto-start channel if enabled in config
             from ..config import load_config
 
@@ -668,6 +677,30 @@ def cmd_interactive(
                     _channel_cfg,
                     send_thinking=channel_send_thinking,
                 )
+
+            # Update check — non-blocking, runs in background thread
+            import concurrent.futures
+
+            _update_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+            def _show_update_hint() -> None:
+                try:
+                    from ..update_check import is_update_available, _installed_version
+
+                    available, latest = is_update_available()
+                    if available:
+                        current = _installed_version()
+                        console.print(
+                            Text(
+                                f"  Update available: v{latest} (current: v{current}).\n"
+                                "  Run: uv tool upgrade EvoScientist",
+                                style="yellow",
+                            )
+                        )
+                except Exception:
+                    pass
+
+            _update_executor.submit(_show_update_hint)
 
             # Slogan — after channels, right before user input
             console.print(
