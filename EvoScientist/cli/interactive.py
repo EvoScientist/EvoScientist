@@ -127,7 +127,7 @@ _SLASH_COMMANDS = [
     ("/skills", "List installed skills"),
     ("/install-skill", "Add a skill from path or GitHub"),
     ("/uninstall-skill", "Remove an installed skill"),
-    ("/install-skills", "Browse and install skills (optional: /install-skills <tag>)"),
+    ("/evoskills", "Browse and install EvoSkills (optional: /evoskills <tag>)"),
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
@@ -771,8 +771,8 @@ def cmd_interactive(
                             _cmd_uninstall_skill(name)
                             continue
 
-                        if user_input.lower().startswith("/install-skills"):
-                            browse_args = user_input[len("/install-skills") :].strip()
+                        if user_input.lower().startswith("/evoskills"):
+                            browse_args = user_input[len("/evoskills") :].strip()
                             _cmd_install_skills(browse_args)
                             continue
 
