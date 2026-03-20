@@ -429,6 +429,7 @@ class InboundConsumer:
             for _hitl_round in range(_MAX_HITL_ROUNDS):
                 final_content = ""
                 thinking_buffer: list[str] = []
+                subagent_text_buffer: list[str] = []
                 thinking_sent = False
                 interrupt_data: dict | None = None
 
@@ -479,6 +480,9 @@ class InboundConsumer:
                     elif event_type == "text":
                         final_content += event.get("content", "")
 
+                    elif event_type == "subagent_text":
+                        subagent_text_buffer.append(event.get("content", ""))
+
                     elif event_type == "done":
                         final_content = event.get("content", "") or final_content
 
@@ -505,7 +509,9 @@ class InboundConsumer:
                     outbound = OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=final_content or "No response",
+                        content=final_content
+                        or "".join(subagent_text_buffer)
+                        or "No response",
                         reply_to=msg.message_id or None,
                         metadata=msg.metadata,
                     )
