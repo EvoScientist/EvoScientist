@@ -11,24 +11,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessageChunk
 
 from EvoScientist.channels.base import Channel
-from EvoScientist.channels.bus.events import (
-    InboundMessage as BusInbound,
-    OutboundMessage as BusOutbound,
-)
+from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer, _join_subagent_text
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
 from EvoScientist.stream.events import stream_agent_events
-
 from tests.conftest import run_async as _run
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
