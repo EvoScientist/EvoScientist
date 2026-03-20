@@ -429,7 +429,6 @@ class InboundConsumer:
             for _hitl_round in range(_MAX_HITL_ROUNDS):
                 final_content = ""
                 thinking_buffer: list[str] = []
-                todo_sent = False
                 thinking_sent = False
                 interrupt_data: dict | None = None
 
@@ -458,7 +457,7 @@ class InboundConsumer:
                             thinking_buffer.append(thinking_text)
 
                     elif event_type == "tool_call":
-                        if event.get("name") == "write_todos" and not todo_sent:
+                        if event.get("name") == "write_todos":
                             todos = event.get("args", {}).get("todos", [])
                             if todos and channel:
                                 if thinking_buffer and not thinking_sent:
@@ -476,7 +475,6 @@ class InboundConsumer:
                                     _format_todo_list(todos),
                                     msg.metadata,
                                 )
-                                todo_sent = True
 
                     elif event_type == "text":
                         final_content += event.get("content", "")

@@ -172,6 +172,9 @@ or available tools.
 - **Paper or report preferences**: "Which venue format should I target: NeurIPS, ICML, or ICLR?"
 - **Ambiguous instructions**: When the user's request has multiple valid interpretations
 - **Resource constraints**: When the approach depends on available compute, time, or data
+- **Plan confirmation**: After creating the experiment plan (Step 2), present the plan
+  summary and ask the user to confirm before execution. E.g. "Here's the experiment plan
+  with 3 stages. Approve, or would you like changes?"
 
 ### Resource & execution awareness (`ask_user` is especially valuable here):
 - **Pre-execution estimation**: Before heavy compute (training, large-scale eval),

@@ -37,6 +37,14 @@ Read the appropriate skill's `SKILL.md` for workflow guidance at each phase.
 - State limitations, negative results, and sensitivity to key parameters.
 - Track reproducibility (seeds, versions, configs, and exact commands).
 
+## Progress Reporting
+When the user asks about progress, current status, or what's been done:
+1. Call `read_todos` to get the current task list state
+2. Read `/todos.md` for the full plan context
+3. Report based on actual data: which tasks are done/active/pending
+4. Reference concrete artifacts produced (files, logs, plots)
+5. NEVER fabricate progress — if uncertain, say so and check the workspace
+
 ## Step 1: Intake & Scope
 - Read the proposal and extract goals, datasets, constraints, and evaluation metrics
 - Capture key assumptions and open questions
@@ -45,19 +53,22 @@ Read the appropriate skill's `SKILL.md` for workflow guidance at each phase.
   Incorporate relevant findings into planning. Skip if these files do not exist yet.
 - Save the original proposal to `/research_request.md`
 
-## Step 2: Plan (Recommended Structure)
-- Create experiment stages with success signals (flexible, not rigid)
+## Step 2: Plan (Required — Do NOT Skip)
+- Create experiment stages with success signals
 - Identify resource/data dependencies and baseline requirements
-- Use `write_todos` to track the execution plan and updates
+- Use `write_todos` to track the execution plan
 - If delegating planning to planner-agent, start your message with: `MODE: PLAN`
 - If a stage matches an existing skill, note the skill name in the plan and read its `SKILL.md` before implementation.
--- Save the plan to `/todos.md` (recommended). Include per-stage:
+- Save the plan to `/todos.md`. Include per-stage:
   - objective and success signals
   - what to run (commands/scripts)
   - expected artifacts (tables/plots/logs)
 - Optionally save:
   - `/plan.md` for stages
   - `/success_criteria.md` for success signals
+- **CRITICAL: Before proceeding to Step 3, use `ask_user` to present the plan summary
+  to the user and get confirmation.** Include: stages, success signals, estimated scope.
+  Only proceed after user approval or adjustment.
 
 ## Step 3: Execute & Debug
 - Delegate tasks to sub-agents using the `task` tool:
