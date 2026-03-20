@@ -114,11 +114,7 @@ class TestStreamAgentEventsSubagentText:
 
     def test_subagent_text_emitted_for_subagent_chunks(self):
         """When a sub-agent produces text, subagent_text events should appear."""
-        # Sub-agent chunks come through LangGraph as 3-tuples with a non-root
-        # namespace path indicating a sub-agent.
         subagent_chunk = _make_ai_chunk("Sub-agent finding: X is significant.")
-        # 3-tuple: (namespace, mode, (msg, metadata))
-        # Non-empty namespace signals a sub-agent
         mock_agent = AsyncMock()
         mock_agent.astream = MagicMock(
             return_value=_async_iter(
@@ -129,8 +125,10 @@ class TestStreamAgentEventsSubagentText:
         )
         events = _collect_events(mock_agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
-        assert len(sa_text) >= 1
+        assert len(sa_text) == 1
         assert "Sub-agent finding" in sa_text[0]["content"]
+        # instance_id must be present and non-empty
+        assert sa_text[0].get("instance_id"), "instance_id must be a non-empty string"
 
     def test_subagent_text_not_emitted_for_main_agent(self):
         """Main agent text should produce 'text' events, not 'subagent_text'."""
@@ -165,6 +163,56 @@ class TestStreamAgentEventsSubagentText:
         assert "Part 1." in combined
         assert "Part 2." in combined
         assert "Part 3." in combined
+        # All chunks from the same namespace must share the same instance_id
+        ids = {e["instance_id"] for e in sa_text}
+        assert len(ids) == 1, f"Expected 1 unique instance_id, got {ids}"
+        assert all(e.get("instance_id") for e in sa_text)
+
+    def test_parallel_same_name_agents_get_distinct_instance_ids(self):
+        """Two sub-agents with the same display name but different namespaces
+        produce subagent_text events with different instance_id values.
+
+        This is the core of the interleaving fix: the consumer can tell
+        the two instances apart even though their 'subagent' field is
+        identical.
+        """
+        # Two different namespaces with task: IDs, same lc_agent_name
+        chunks = [
+            (
+                ("ns:task:id1:agent",),
+                "messages",
+                (_make_ai_chunk("Instance-1 text."), {"lc_agent_name": "research-agent"}),
+            ),
+            (
+                ("ns:task:id2:agent",),
+                "messages",
+                (_make_ai_chunk("Instance-2 text."), {"lc_agent_name": "research-agent"}),
+            ),
+            (
+                ("ns:task:id1:agent",),
+                "messages",
+                (_make_ai_chunk(" More from 1."), {"lc_agent_name": "research-agent"}),
+            ),
+        ]
+        mock_agent = AsyncMock()
+        mock_agent.astream = MagicMock(return_value=_async_iter(chunks))
+        events = _collect_events(mock_agent)
+        sa_text = [e for e in events if e.get("type") == "subagent_text"]
+        assert len(sa_text) == 3
+
+        # All events have the same subagent display name
+        assert all(e["subagent"] == "research-agent" for e in sa_text)
+
+        # But instance_ids differ between the two namespaces
+        id1_events = [e for e in sa_text if "Instance-1" in e["content"] or "More from 1" in e["content"]]
+        id2_events = [e for e in sa_text if "Instance-2" in e["content"]]
+        assert len(id1_events) == 2
+        assert len(id2_events) == 1
+
+        # Same namespace → same instance_id
+        assert id1_events[0]["instance_id"] == id1_events[1]["instance_id"]
+        # Different namespace → different instance_id
+        assert id1_events[0]["instance_id"] != id2_events[0]["instance_id"]
 
 
 # ═══════════════════════════════════════════════════════════════════
