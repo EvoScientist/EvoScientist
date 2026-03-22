@@ -1668,18 +1668,18 @@ def _install_tinytex(method: str, command: str) -> bool:
 
 
 def _print_latex_status(components: dict[str, bool]) -> None:
-    """Print a detailed status line for each LaTeX component."""
-    labels = {
-        "pdflatex": ("pdflatex", "compiler"),
-        "latexmk": ("latexmk", "build tool"),
-        "tlmgr": ("tlmgr", "package manager"),
-    }
-    for cmd, (name, role) in labels.items():
-        available = components.get(cmd, False)
-        if available:
-            console.print(f"  [green]✓ {name}[/green] [dim]({role})[/dim]")
+    """Print a single-line status showing all LaTeX components."""
+    parts: list[str] = []
+    for cmd, _role in (
+        ("pdflatex", "compiler"),
+        ("latexmk", "build tool"),
+        ("tlmgr", "package manager"),
+    ):
+        if components.get(cmd, False):
+            parts.append(f"[green]✓ {cmd}[/green]")
         else:
-            console.print(f"  [yellow]✗ {name} not found[/yellow] [dim]({role})[/dim]")
+            parts.append(f"[yellow]✗ {cmd}[/yellow]")
+    console.print("  " + "  ".join(parts))
 
 
 def _auto_install_latexmk() -> None:
