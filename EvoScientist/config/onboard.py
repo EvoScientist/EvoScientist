@@ -2140,25 +2140,78 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 raise KeyboardInterrupt()
             updates[field_name] = value.strip()
 
-        # Feishu optional fields (verification_token & encrypt_key)
+        # Feishu: subscription mode + optional fields
         if ch_name == "feishu":
-            console.print(
-                "  [dim]The following fields are optional (press Enter to skip):[/dim]"
-            )
-            for field_name, prompt_label in [
-                ("feishu_verification_token", "Verification Token (optional)"),
-                ("feishu_encrypt_key", "Encrypt Key (optional)"),
-            ]:
-                current = getattr(config, field_name, "")
-                value = questionary.text(
-                    f"{prompt_label}:",
-                    default=current,
-                    style=WIZARD_STYLE,
-                    qmark=f"  {QMARK}",
-                ).ask()
-                if value is None:
-                    raise KeyboardInterrupt()
-                updates[field_name] = value.strip()
+            mode_choices = [
+                Choice(
+                    title="Webhook (requires public IP / port forwarding)",
+                    value="webhook",
+                ),
+                Choice(
+                    title="WebSocket long connection (no public IP needed)",
+                    value="websocket",
+                ),
+            ]
+            sub_mode = questionary.select(
+                "Subscription mode:",
+                choices=mode_choices,
+                default="webhook",
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+                use_indicator=True,
+            ).ask()
+            if sub_mode is None:
+                raise KeyboardInterrupt()
+            updates["feishu_subscription_mode"] = sub_mode
+
+            if sub_mode == "websocket":
+                # WebSocket mode needs lark-oapi SDK
+                try:
+                    __import__("lark_oapi")
+                except ImportError:
+                    console.print(
+                        '  [yellow]✗ WebSocket mode requires "lark-oapi".[/yellow]'
+                    )
+                    install_sdk = questionary.confirm(
+                        'Install "lark-oapi>=1.4.0" now?',
+                        default=True,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if install_sdk is None:
+                        raise KeyboardInterrupt() from None
+                    if install_sdk:
+                        console.print('  [dim]Installing "lark-oapi"...[/dim]')
+                        if install_pip_package("lark-oapi>=1.4.0"):
+                            console.print(
+                                "  [green]✓ Installed successfully.[/green]"
+                            )
+                        else:
+                            console.print("  [red]✗ Installation failed.[/red]")
+                            console.print(
+                                f"  [dim]Run manually:[/dim] {pip_install_hint()} "
+                                '"lark-oapi>=1.4.0"'
+                            )
+            else:
+                # Webhook mode: prompt optional verification/encryption fields
+                console.print(
+                    "  [dim]The following fields are optional"
+                    " (press Enter to skip):[/dim]"
+                )
+                for field_name, prompt_label in [
+                    ("feishu_verification_token", "Verification Token (optional)"),
+                    ("feishu_encrypt_key", "Encrypt Key (optional)"),
+                ]:
+                    current = getattr(config, field_name, "")
+                    value = questionary.text(
+                        f"{prompt_label}:",
+                        default=current,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    updates[field_name] = value.strip()
 
         # Allowed senders (common for all channels)
         senders_field = f"{ch_name}_allowed_senders"

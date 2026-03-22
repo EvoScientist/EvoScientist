@@ -1,7 +1,8 @@
 """Tests for Feishu channel implementation."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -27,6 +28,7 @@ class TestFeishuConfig:
         assert config.text_chunk_limit == 4096
         assert config.feishu_domain == "https://open.feishu.cn"
         assert config.allowed_senders is None
+        assert config.subscription_mode == "webhook"
 
     def test_custom_values(self):
         config = FeishuConfig(
@@ -495,3 +497,121 @@ class TestFeishuProbe:
         ok, msg = _run(validate_feishu_credentials("id", ""))
         assert ok is False
         assert "app_secret" in msg
+
+
+class TestFeishuWebSocketMode:
+    """Tests for WebSocket (长连接) subscription mode."""
+
+    def test_config_subscription_mode_websocket(self):
+        config = FeishuConfig(
+            app_id="test-id",
+            app_secret="test-secret",
+            subscription_mode="websocket",
+        )
+        assert config.subscription_mode == "websocket"
+
+    def test_start_websocket_raises_without_lark_oapi(self):
+        config = FeishuConfig(
+            app_id="test-id",
+            app_secret="test-secret",
+            subscription_mode="websocket",
+        )
+        channel = FeishuChannel(config)
+        # Temporarily hide lark_oapi if it's installed
+        with patch.dict(sys.modules, {"lark_oapi": None}):
+            with pytest.raises(ChannelError, match="lark-oapi"):
+                _run(channel.start())
+
+    def test_start_webhook_mode_still_works(self):
+        """Ensure subscription_mode='webhook' still validates as before."""
+        config = FeishuConfig(
+            app_id="",
+            app_secret="test-secret",
+            subscription_mode="webhook",
+        )
+        channel = FeishuChannel(config)
+        with pytest.raises(ChannelError, match="app_id"):
+            _run(channel.start())
+
+    def test_on_lark_sdk_message_bridges_to_on_message(self):
+        """Test that _on_lark_sdk_message enqueues event dict via queue."""
+        import queue as queue_mod
+
+        config = FeishuConfig(app_id="test-app", app_secret="test-secret")
+        channel = FeishuChannel(config)
+        channel._running = True
+        channel._http_client = MagicMock()
+        channel._access_token = "fake-token"
+        channel._token_expires = 9999999999
+        channel._enqueue_raw = AsyncMock()
+        channel._ws_event_queue = queue_mod.Queue()
+
+        # Build a mock SDK event object matching lark_oapi structure
+        mock_sender_id = MagicMock()
+        mock_sender_id.open_id = "ou_test_ws"
+        mock_sender_id.user_id = "user_ws"
+
+        mock_sender = MagicMock()
+        mock_sender.sender_id = mock_sender_id
+        mock_sender.sender_type = "user"
+
+        mock_msg = MagicMock()
+        mock_msg.chat_id = "oc_ws_chat"
+        mock_msg.message_type = "text"
+        mock_msg.message_id = "msg_ws_1"
+        mock_msg.chat_type = "p2p"
+        mock_msg.content = json.dumps({"text": "hello from websocket"})
+        mock_msg.create_time = "1700000000000"
+        mock_msg.mentions = None
+
+        mock_event = MagicMock()
+        mock_event.message = mock_msg
+        mock_event.sender = mock_sender
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        # Call the SDK callback (sync, puts on queue)
+        channel._on_lark_sdk_message(mock_data)
+
+        # Verify event was queued
+        assert not channel._ws_event_queue.empty()
+        event_dict = channel._ws_event_queue.get_nowait()
+        assert event_dict["sender"]["sender_id"]["open_id"] == "ou_test_ws"
+        assert event_dict["message"]["chat_id"] == "oc_ws_chat"
+        assert event_dict["message"]["content"] == json.dumps(
+            {"text": "hello from websocket"}
+        )
+
+        # Verify the consumer processes it correctly
+        _run(channel._on_message(event_dict))
+        channel._enqueue_raw.assert_called_once()
+        raw = channel._enqueue_raw.call_args[0][0]
+        assert raw.text == "hello from websocket"
+        assert raw.sender_id == "ou_test_ws"
+        assert raw.is_group is False
+
+    def test_cleanup_websocket_mode(self):
+        config = FeishuConfig(
+            app_id="test-id",
+            app_secret="test-secret",
+            subscription_mode="websocket",
+        )
+        channel = FeishuChannel(config)
+        mock_client = MagicMock()
+        mock_client.aclose = AsyncMock()
+        channel._http_client = mock_client
+        channel._lark_ws_thread = MagicMock()
+        channel._main_loop = MagicMock()
+        channel._ws_event_queue = MagicMock()
+        channel._ws_consumer_task = None
+        channel._access_token = "fake-token"
+
+        _run(channel._cleanup())
+
+        mock_client.aclose.assert_called_once()
+        assert channel._http_client is None
+        assert channel._lark_ws_thread is None
+        assert channel._main_loop is None
+        assert channel._ws_event_queue is None
+        assert channel._access_token is None

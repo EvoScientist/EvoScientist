@@ -130,6 +130,7 @@ class EvoScientistConfig:
     feishu_allowed_senders: str = ""
     feishu_domain: str = "https://open.feishu.cn"
     feishu_proxy: str = ""
+    feishu_subscription_mode: str = "webhook"  # "webhook" | "websocket"
 
     # WeChat Settings
     wechat_backend: str = "wecom"

@@ -1,16 +1,20 @@
 """Feishu (飞书/Lark) channel implementation.
 
-Receives messages via an HTTP event subscription webhook (aiohttp),
-sends replies via Feishu Open API REST endpoints.
+Receives messages via HTTP event subscription webhook (aiohttp) or
+WebSocket long connection (lark-oapi SDK), sends replies via Feishu
+Open API REST endpoints.
 
 Feishu Open API docs: https://open.feishu.cn/document
 
 Authentication:
   - App ID + App Secret → tenant_access_token (2-hour TTL, auto-refreshed)
 
-Event subscription:
-  - URL verification challenge on first request
-  - ``im.message.receive_v1`` events for incoming messages
+Event subscription (two modes):
+  - **Webhook**: URL verification challenge on first request,
+    ``im.message.receive_v1`` events via HTTP POST callback.
+    Requires a publicly reachable URL.
+  - **WebSocket**: outbound long connection via ``lark-oapi`` SDK.
+    No public IP required.
 
 Send API:
   - ``POST /open-apis/im/v1/messages?receive_id_type=chat_id``
@@ -18,11 +22,14 @@ Send API:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import queue
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -240,6 +247,7 @@ class FeishuConfig(BaseChannelConfig):
     webhook_port: int = 9000
     text_chunk_limit: int = 4096
     feishu_domain: str = "https://open.feishu.cn"
+    subscription_mode: str = "webhook"  # "webhook" | "websocket"
 
 
 class FeishuChannel(Channel, WebhookMixin, TokenMixin):
@@ -262,6 +270,10 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
     def __init__(self, config: FeishuConfig):
         super().__init__(config)
         self._mention_names: list[str] = []  # bot mention keys from events
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._lark_ws_thread: threading.Thread | None = None
+        self._ws_event_queue: queue.Queue | None = None
+        self._ws_consumer_task: asyncio.Task | None = None
 
     # ── WebhookMixin overrides ────────────────────────────────────
 
@@ -293,6 +305,17 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
     # ── Lifecycle ─────────────────────────────────────────────────
 
     async def start(self) -> None:
+        if not self.config.app_id:
+            raise ChannelError("Feishu app_id is required")
+        if not self.config.app_secret:
+            raise ChannelError("Feishu app_secret is required")
+
+        if self.config.subscription_mode == "websocket":
+            await self._start_websocket_mode()
+        else:
+            await self._start_webhook_mode()
+
+    async def _start_webhook_mode(self) -> None:
         try:
             import httpx  # noqa: F401
             from aiohttp import web  # noqa: F401
@@ -301,11 +324,6 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
                 "aiohttp or httpx not installed. "
                 "Install with: pip install aiohttp httpx"
             ) from None
-
-        if not self.config.app_id:
-            raise ChannelError("Feishu app_id is required")
-        if not self.config.app_secret:
-            raise ChannelError("Feishu app_secret is required")
 
         # Start webhook server (sets up self._http_client)
         await self._start_webhook_server()
@@ -318,8 +336,149 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
             f"Feishu channel started (webhook on port {self.config.webhook_port})"
         )
 
+    async def _start_websocket_mode(self) -> None:
+        try:
+            import lark_oapi as lark
+        except ImportError:
+            raise ChannelError(
+                "lark-oapi not installed. "
+                "Install with: pip install 'lark-oapi>=1.4.0'"
+            ) from None
+
+        import httpx
+
+        proxy = getattr(self.config, "proxy", None) or None
+        self._http_client = httpx.AsyncClient(timeout=15, proxy=proxy)
+
+        # Verify credentials by fetching initial token
+        await self._refresh_token()
+
+        self._main_loop = asyncio.get_running_loop()
+
+        # Thread-safe queue: SDK thread puts events, main loop consumes
+        self._ws_event_queue = queue.Queue()
+        self._ws_consumer_task = asyncio.create_task(self._consume_ws_events())
+
+        # Build SDK event handler
+        handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(
+            self._on_lark_sdk_message
+        ).build()
+
+        ws_client = lark.ws.Client(
+            self.config.app_id,
+            self.config.app_secret,
+            event_handler=handler,
+            log_level=lark.LogLevel.WARNING,
+        )
+
+        def _run_ws():
+            # Workaround: nest_asyncio (used by the main process) patches
+            # the event loop policy globally but does NOT patch Handle._run
+            # for context re-entry (versions < 1.7).  The SDK creates its
+            # own event loop in this thread; its transport callbacks hit
+            #   RuntimeError: cannot enter context: … is already entered
+            # Fix: patch Handle._run to retry with a context copy.
+            _orig_handle_run = asyncio.Handle._run
+
+            def _safe_handle_run(self):
+                try:
+                    self._context.run(self._callback, *self._args)
+                except RuntimeError as exc:
+                    if "cannot enter context" not in str(exc):
+                        raise
+                    ctx = self._context.copy()
+                    ctx.run(self._callback, *self._args)
+
+            asyncio.Handle._run = _safe_handle_run
+            try:
+                ws_client.start()
+            finally:
+                asyncio.Handle._run = _orig_handle_run
+
+        self._lark_ws_thread = threading.Thread(target=_run_ws, daemon=True)
+        self._lark_ws_thread.start()
+
+        self._running = True
+        logger.info("Feishu channel started (WebSocket long connection mode)")
+
+    def _on_lark_sdk_message(self, data) -> None:
+        """Sync callback invoked in lark-oapi SDK thread.
+
+        Converts the SDK event object to a dict and puts it on a
+        thread-safe queue.  The ``_consume_ws_events`` task on the main
+        asyncio loop picks it up — no asyncio cross-thread calls needed,
+        avoiding the nest_asyncio + Python 3.11 contextvars conflict.
+        """
+        try:
+            event = data.event
+            msg = event.message
+            sender = event.sender
+
+            # Rebuild mentions list from SDK objects
+            mentions_list = []
+            if msg.mentions:
+                for m in msg.mentions:
+                    mention_dict: dict[str, Any] = {"key": m.key, "id": {}}
+                    if m.id:
+                        mention_dict["id"] = {
+                            "open_id": getattr(m.id, "open_id", ""),
+                            "user_id": getattr(m.id, "user_id", ""),
+                        }
+                    mentions_list.append(mention_dict)
+
+            event_dict = {
+                "sender": {
+                    "sender_id": {
+                        "open_id": sender.sender_id.open_id if sender.sender_id else "",
+                        "user_id": getattr(sender.sender_id, "user_id", "") if sender.sender_id else "",
+                    },
+                    "sender_type": sender.sender_type or "",
+                },
+                "message": {
+                    "chat_id": msg.chat_id or "",
+                    "message_type": msg.message_type or "",
+                    "message_id": msg.message_id or "",
+                    "chat_type": msg.chat_type or "",
+                    "content": msg.content or "{}",
+                    "create_time": msg.create_time or "",
+                    "mentions": mentions_list,
+                },
+            }
+
+            self._ws_event_queue.put(event_dict)
+        except Exception:
+            logger.exception("Feishu SDK message handler error")
+
+    async def _consume_ws_events(self) -> None:
+        """Main-loop task that drains the thread-safe event queue."""
+        while self._running:
+            try:
+                event_dict = self._ws_event_queue.get_nowait()
+                try:
+                    await self._on_message(event_dict)
+                except Exception:
+                    logger.exception("Feishu WS event processing error")
+            except queue.Empty:
+                await asyncio.sleep(0.05)
+
     async def _cleanup(self) -> None:
-        await self._stop_webhook_server()
+        if self.config.subscription_mode == "websocket":
+            if self._ws_consumer_task:
+                self._ws_consumer_task.cancel()
+                try:
+                    await self._ws_consumer_task
+                except asyncio.CancelledError:
+                    pass
+                self._ws_consumer_task = None
+            if self._http_client:
+                await self._http_client.aclose()
+                self._http_client = None
+            # Daemon thread exits with the process; no explicit stop needed
+            self._lark_ws_thread = None
+            self._main_loop = None
+            self._ws_event_queue = None
+        else:
+            await self._stop_webhook_server()
         self._access_token = None
         logger.info("Feishu channel stopped")
 

@@ -201,7 +201,7 @@ Mention detection is platform-specific:
 | Telegram | HTML | 4000 | S/R | R | R | R | | 4s | emoji | | G | @ | yes | | yes | yes |
 | Discord | Discord | 2000 | S/R | | | | | 8s | emoji | yes | G | @ | yes | | yes | yes |
 | Slack | Mrkdwn | 4000 | S/R | | | | | post | emoji | yes | G | @ | yes | | yes | yes |
-| Feishu | Post | 4096 | S/R | R | R | | | | emoji | | G | @ | no | 2h | yes | yes |
+| Feishu      | Post | 4096 | S/R | R | R | | | | emoji | | G | @ | ws mode | 2h | yes | yes |
 | WeChat | MD | 4096 | S/R | R | | R | R | recall | | | G | @ | no | 2h | yes | yes |
 | DingTalk | MD | 4096 | S/R | R | | | R | | | | G | @ | yes | 2h | yes | yes |
 | QQ | Plain | 4096 | S/R | | | | | | | | G | @ | yes | | | yes |
@@ -218,7 +218,7 @@ Legend: **S** = send, **R** = receive, **G** = group chat, **@** = @mention dete
 | Telegram    | HTTPS     | Long polling (`getUpdates`)            | --            |
 | Discord     | WebSocket | Gateway events (`discord.py`)          | --            |
 | Slack       | WebSocket | Socket Mode (`slack-sdk`)              | --            |
-| Feishu      | HTTP      | Webhook `POST /webhook/event`          | 9000         |
+| Feishu      | HTTP/WS   | Webhook or WebSocket long connection    | 9000/--      |
 | WeChat      | HTTP      | Webhook `POST /wechat/callback`        | 9001         |
 | DingTalk    | WebSocket | Stream Mode (DingTalk gateway)         | --            |
 | QQ          | WebSocket | Bot Gateway (`qq-botpy`)               | --            |
@@ -456,12 +456,40 @@ slack_proxy: ""
 
 1. Go to [Feishu Open Platform](https://open.feishu.cn/app) (international: [Lark Developer](https://open.larksuite.com/app)) -> create a custom app.
 2. Copy the **App ID** and **App Secret**.
-3. Left menu **Event Subscriptions** -> set request URL to `http://your-host:9000/webhook/event` -> copy **Verification Token** and **Encrypt Key**.
+3. Left menu **Event Subscriptions**:
+   - **Webhook mode**: set request URL to `http://your-host:9000/webhook/event` -> copy **Verification Token** and **Encrypt Key**.
+   - **WebSocket mode**: select **长连接** (Long Connection) as the subscription method. No URL needed.
 4. Add event: `im.message.receive_v1` (receive messages).
 5. Left menu **Permissions** -> enable `im:message:send_as_bot`.
 6. Create a version and publish.
 
-> Webhook must be publicly reachable. For local dev, use `ngrok http 9000`.
+> **Webhook mode** requires a publicly reachable URL. For local dev, use `ngrok http 9000` or [natapp](https://natapp.cn/) (recommended for China).
+
+#### Subscription Modes
+
+Feishu supports two subscription modes:
+
+| Mode | Transport | Public IP? | Best For |
+|------|-----------|:----------:|----------|
+| `webhook` (default) | HTTP POST callback | Yes | Servers with public IP / cloud deployment |
+| `websocket` | WebSocket long connection | **No** | Local dev, behind NAT/firewall, China (no ngrok needed) |
+
+**WebSocket mode** uses the official `lark-oapi` SDK to maintain an outbound WebSocket connection to Feishu servers. No public IP, port forwarding, or tunnel is required.
+
+To use WebSocket mode:
+
+```bash
+# Install the SDK
+pip install 'evoscientist[feishu]'
+
+# Via config file
+feishu_subscription_mode: "websocket"
+
+# Via CLI (standalone)
+python -m EvoScientist.channels.feishu.serve --app-id ID --app-secret SECRET --mode websocket
+```
+
+> **Note:** In WebSocket mode, `feishu_verification_token`, `feishu_encrypt_key`, and `feishu_webhook_port` are not used — the SDK handles authentication and encryption internally.
 
 **Configuration:**
 
@@ -469,6 +497,7 @@ slack_proxy: ""
 channel_enabled: "feishu"
 feishu_app_id: "cli_xxxxxxx"
 feishu_app_secret: "xxxxxxxxxxxxxxxxxx"
+feishu_subscription_mode: "webhook"   # or "websocket"
 feishu_webhook_port: 9000
 feishu_allowed_senders: ""         # open_id
 feishu_domain: "https://open.feishu.cn"
@@ -483,6 +512,7 @@ feishu_proxy: ""
 | `feishu_allowed_senders` | `str` | `""` | Comma-separated open_ids |
 | `feishu_domain` | `str` | `"https://open.feishu.cn"` | API domain (use `https://open.larksuite.com` for Lark) |
 | `feishu_proxy` | `str` | `""` | HTTPS proxy URL |
+| `feishu_subscription_mode` | `str` | `"webhook"` | `"webhook"` or `"websocket"` (WebSocket long connection, no public IP) |
 
 **Env vars:** `EVOSCIENTIST_FEISHU_APP_ID`, `EVOSCIENTIST_FEISHU_APP_SECRET`, `EVOSCIENTIST_FEISHU_WEBHOOK_PORT`, `EVOSCIENTIST_FEISHU_DOMAIN`
 
@@ -860,7 +890,7 @@ pip install evoscientist[telegram]  # or discord, slack, feishu, etc.
 **Webhook channels (Feishu, WeChat) not receiving messages**
 
 1. Ensure the webhook URL is publicly reachable (not behind NAT without port forwarding)
-2. For local development, use a tunnel: `ngrok http 9000`
+2. For local development, use a tunnel: `ngrok http 9000` or [natapp](https://natapp.cn/) for China
 3. Verify the callback URL matches exactly (including path: `/webhook/event` for Feishu, `/wechat/callback` for WeChat)
 4. Check that signature verification tokens match between the platform config and your local config
 

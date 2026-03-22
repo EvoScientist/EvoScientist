@@ -76,6 +76,12 @@ def parse_args():
         help="Allowed sender (Feishu open_id). Can be used multiple times.",
     )
     parser.add_argument(
+        "--mode",
+        choices=["webhook", "websocket"],
+        default="webhook",
+        help="Subscription mode: webhook (default) or websocket (long connection, no public IP needed)",
+    )
+    parser.add_argument(
         "--agent",
         action="store_true",
         help="Use EvoScientist agent as handler (default: echo)",
@@ -100,6 +106,7 @@ def main():
         webhook_port=args.webhook_port,
         feishu_domain=args.domain,
         allowed_senders=set(args.allowed_senders) if args.allowed_senders else None,
+        subscription_mode=args.mode,
     )
 
     send_thinking = args.thinking and args.agent

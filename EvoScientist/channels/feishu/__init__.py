@@ -17,6 +17,7 @@ def create_from_config(config) -> FeishuChannel:
             allowed_senders=allowed,
             feishu_domain=config.feishu_domain,
             proxy=proxy,
+            subscription_mode=getattr(config, "feishu_subscription_mode", "webhook"),
         )
     )
 
