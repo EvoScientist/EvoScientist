@@ -341,8 +341,7 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
             import lark_oapi as lark
         except ImportError:
             raise ChannelError(
-                "lark-oapi not installed. "
-                "Install with: pip install 'lark-oapi>=1.4.0'"
+                "lark-oapi not installed. Install with: pip install 'lark-oapi>=1.4.0'"
             ) from None
 
         import httpx
@@ -360,9 +359,11 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
         self._ws_consumer_task = asyncio.create_task(self._consume_ws_events())
 
         # Build SDK event handler
-        handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(
-            self._on_lark_sdk_message
-        ).build()
+        handler = (
+            lark.EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(self._on_lark_sdk_message)
+            .build()
+        )
 
         ws_client = lark.ws.Client(
             self.config.app_id,
@@ -430,7 +431,9 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
                 "sender": {
                     "sender_id": {
                         "open_id": sender.sender_id.open_id if sender.sender_id else "",
-                        "user_id": getattr(sender.sender_id, "user_id", "") if sender.sender_id else "",
+                        "user_id": getattr(sender.sender_id, "user_id", "")
+                        if sender.sender_id
+                        else "",
                     },
                     "sender_type": sender.sender_type or "",
                 },

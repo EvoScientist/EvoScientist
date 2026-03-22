@@ -2183,9 +2183,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     if install_sdk:
                         console.print('  [dim]Installing "lark-oapi"...[/dim]')
                         if install_pip_package("lark-oapi>=1.4.0"):
-                            console.print(
-                                "  [green]✓ Installed successfully.[/green]"
-                            )
+                            console.print("  [green]✓ Installed successfully.[/green]")
                         else:
                             console.print("  [red]✗ Installation failed.[/red]")
                             console.print(
