@@ -462,7 +462,9 @@ def run_textual_interactive(
         def on_mount(self) -> None:
             self._render_welcome()
             self._render_status()
-            self.query_one("#prompt", ChatTextArea).focus()
+            prompt = self.query_one("#prompt", ChatTextArea)
+            prompt.before_submit = self._handle_completion_enter
+            prompt.focus()
             # Show resume status
             if self._resume_warning:
                 self._append_system(self._resume_warning, style="yellow")
@@ -1799,18 +1801,28 @@ def run_textual_interactive(
             self._comp_index = (self._comp_index + 1) % len(self._comp_items)
             self._apply_selected_completion()
 
-        def on_key(self, event: Any) -> None:
+        def _handle_completion_enter(self) -> bool:
+            """Called by ChatTextArea before submitting on Enter.
+
+            If a completion is active and an item is selected, apply it
+            and suppress the submit.  If the list is visible but nothing
+            is selected (index == -1), select the first item instead of
+            submitting the raw prefix.
+
+            Returns:
+                True to suppress submit, False to allow it.
+            """
             comp_widget = self.query_one("#completions", Static)
             if not (comp_widget.display and self._comp_items):
-                return
+                return False
 
-            # Up/down are handled by priority bindings (action_edit_queued /
-            # action_down_delegate) — only enter needs on_key handling.
-            if event.key == "enter" and self._comp_index >= 0:
-                event.prevent_default()
-                event.stop()
-                self._apply_selected_completion()
-                self._hide_completions()
+            # If no item highlighted yet, select the first one
+            if self._comp_index < 0:
+                self._comp_index = 0
+
+            self._apply_selected_completion()
+            self._hide_completions()
+            return True
 
         def _apply_selected_completion(self) -> None:
             """Apply the currently selected completion to the input field."""

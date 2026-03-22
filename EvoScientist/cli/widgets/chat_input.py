@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from typing import ClassVar
 
 from textual import events
@@ -17,6 +18,10 @@ class ChatTextArea(TextArea):
     Emits :class:`ChatTextArea.Submitted` when the user presses Enter
     with non-empty text.  Modifier+Enter (Option+Enter on macOS,
     Ctrl+J everywhere) inserts a literal newline instead.
+
+    An optional *before_submit* callback can be set to intercept Enter
+    before submission.  If it returns ``True`` the submit is suppressed
+    (the callback handled the event itself).
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -58,6 +63,7 @@ class ChatTextArea(TextArea):
         *,
         placeholder: str = "",
         id: str | None = None,
+        before_submit: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(
             id=id,
@@ -66,6 +72,7 @@ class ChatTextArea(TextArea):
             soft_wrap=True,
         )
         self._placeholder = placeholder
+        self.before_submit: Callable[[], bool] | None = before_submit
 
     @property
     def value(self) -> str:
@@ -84,10 +91,18 @@ class ChatTextArea(TextArea):
         self.insert("\n")
 
     async def _on_key(self, event: events.Key) -> None:
-        """Handle Enter as submit."""
+        """Handle Enter as submit.
+
+        If *before_submit* is set and returns ``True``, the submit is
+        suppressed (the callback already handled the Enter press, e.g.
+        to apply a completion selection).
+        """
         if event.key == "enter":
             event.prevent_default()
             event.stop()
+            # Let the host intercept Enter (e.g. for completion selection)
+            if self.before_submit and self.before_submit():
+                return
             value = self.text.strip()
             if value:
                 self.post_message(self.Submitted(value))

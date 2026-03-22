@@ -21,9 +21,9 @@ from EvoScientist.config.onboard import (
 
 
 class TestConstants:
-    def test_steps_has_ten_items(self):
-        """Test that STEPS contains exactly 10 steps."""
-        assert len(STEPS) == 10
+    def test_steps_has_eleven_items(self):
+        """Test that STEPS contains exactly 11 steps."""
+        assert len(STEPS) == 11
         assert STEPS == [
             "UI",
             "Provider",
@@ -34,6 +34,7 @@ class TestConstants:
             "Thinking",
             "Skills",
             "MCP Servers",
+            "LaTeX",
             "Channels",
         ]
 
@@ -839,6 +840,7 @@ class TestRunOnboard:
             patch("EvoScientist.config.onboard.load_config") as mock_load,
             patch("EvoScientist.config.onboard.save_config") as mock_save,
             patch("EvoScientist.config.onboard.console"),
+            patch("EvoScientist.config.onboard._step_tinytex"),
         ):
             # Setup mock config
             mock_load.return_value = EvoScientistConfig()
@@ -877,6 +879,7 @@ class TestRunOnboard:
             patch("EvoScientist.config.onboard.questionary") as mock_q,
             patch("EvoScientist.config.onboard.load_config") as mock_load,
             patch("EvoScientist.config.onboard.console"),
+            patch("EvoScientist.config.onboard._step_tinytex"),
         ):
             mock_load.return_value = EvoScientistConfig()
 
@@ -896,6 +899,7 @@ class TestRunOnboard:
             patch("EvoScientist.config.onboard.load_config") as mock_load,
             patch("EvoScientist.config.onboard.save_config") as mock_save,
             patch("EvoScientist.config.onboard.console"),
+            patch("EvoScientist.config.onboard._step_tinytex"),
         ):
             mock_load.return_value = EvoScientistConfig()
 
@@ -920,3 +924,507 @@ class TestRunOnboard:
 
         assert result is False
         mock_save.assert_not_called()
+
+
+# =============================================================================
+# Test TinyTeX helpers
+# =============================================================================
+
+
+class TestCheckLatexComponents:
+    """Tests for _check_latex_components()."""
+
+    def test_all_available(self):
+        """All three components found → all True."""
+        from EvoScientist.config.onboard import _check_latex_components
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+        ):
+            mock_sh.which.return_value = "/usr/local/bin/cmd"
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            mock_sp.run.return_value = Mock(returncode=0)
+            result = _check_latex_components()
+            assert result == {"pdflatex": True, "latexmk": True, "tlmgr": True}
+
+    def test_only_pdflatex(self):
+        """Only pdflatex available."""
+        from EvoScientist.config.onboard import _check_latex_components
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+        ):
+            mock_sh.which.side_effect = lambda cmd: (
+                "/usr/local/bin/pdflatex" if cmd == "pdflatex" else None
+            )
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            mock_sp.run.return_value = Mock(returncode=0)
+            result = _check_latex_components()
+            assert result == {
+                "pdflatex": True,
+                "latexmk": False,
+                "tlmgr": False,
+            }
+
+    def test_none_available(self):
+        """Nothing found → all False."""
+        from EvoScientist.config.onboard import _check_latex_components
+
+        with patch("EvoScientist.config.onboard.shutil") as mock_sh:
+            mock_sh.which.return_value = None
+            result = _check_latex_components()
+            assert result == {
+                "pdflatex": False,
+                "latexmk": False,
+                "tlmgr": False,
+            }
+
+
+class TestAutoInstallLatexmk:
+    """Tests for _auto_install_latexmk()."""
+
+    def test_success(self):
+        """tlmgr install latexmk succeeds."""
+        from EvoScientist.config.onboard import _auto_install_latexmk
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+            patch("EvoScientist.config.onboard.console") as mock_con,
+        ):
+            mock_sh.which.side_effect = lambda cmd: f"/usr/local/bin/{cmd}"
+            mock_sp.run.return_value = Mock(returncode=0)
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            _auto_install_latexmk()
+            success_printed = any(
+                "latexmk installed" in str(c) for c in mock_con.print.call_args_list
+            )
+            assert success_printed
+
+    def test_tlmgr_not_found(self):
+        """tlmgr not on PATH → does nothing."""
+        from EvoScientist.config.onboard import _auto_install_latexmk
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_sh.which.return_value = None
+            _auto_install_latexmk()
+            mock_sp.run.assert_not_called()
+
+    def test_install_fails(self):
+        """tlmgr install returns nonzero → warns."""
+        from EvoScientist.config.onboard import _auto_install_latexmk
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+            patch("EvoScientist.config.onboard.console") as mock_con,
+        ):
+            mock_sh.which.side_effect = lambda cmd: (
+                "/usr/local/bin/tlmgr" if cmd == "tlmgr" else None
+            )
+            mock_sp.run.return_value = Mock(returncode=1)
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            _auto_install_latexmk()
+            warn_printed = any(
+                "Failed" in str(c) for c in mock_con.print.call_args_list
+            )
+            assert warn_printed
+
+
+class TestCheckTinytex:
+    """Tests for _check_tinytex()."""
+
+    def test_found_pdflatex(self):
+        """pdflatex found and working → True."""
+        from EvoScientist.config.onboard import _check_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+        ):
+            mock_sh.which.return_value = "/usr/local/bin/pdflatex"
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            mock_sp.run.return_value = Mock(returncode=0)
+            assert _check_tinytex() is True
+
+    def test_tlmgr_only_not_enough(self):
+        """pdflatex missing but tlmgr found → False (pdflatex is required)."""
+        from EvoScientist.config.onboard import _check_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+        ):
+            mock_sh.which.side_effect = lambda cmd: (
+                "/usr/local/bin/tlmgr" if cmd == "tlmgr" else None
+            )
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            mock_sp.run.return_value = Mock(returncode=0)
+            assert _check_tinytex() is False
+
+    def test_not_found(self):
+        """Neither pdflatex nor tlmgr found → False."""
+        from EvoScientist.config.onboard import _check_tinytex
+
+        with patch("EvoScientist.config.onboard.shutil") as mock_sh:
+            mock_sh.which.return_value = None
+            assert _check_tinytex() is False
+
+    def test_version_timeout(self):
+        """Command found but --version times out → False."""
+        from EvoScientist.config.onboard import _check_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+        ):
+            mock_sh.which.return_value = "/usr/local/bin/pdflatex"
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            mock_sp.run.side_effect = subprocess.TimeoutExpired("pdflatex", 10)
+            assert _check_tinytex() is False
+
+    def test_version_nonzero(self):
+        """Command found but --version returns nonzero → False."""
+        from EvoScientist.config.onboard import _check_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+        ):
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            mock_sp.run.return_value = Mock(returncode=1)
+            # pdflatex fails, tlmgr not found
+            mock_sh.which.side_effect = lambda cmd: (
+                "/usr/local/bin/pdflatex" if cmd == "pdflatex" else None
+            )
+            assert _check_tinytex() is False
+
+
+class TestDetectTinytexInstallMethod:
+    """Tests for _detect_tinytex_install_method()."""
+
+    def test_macos_with_curl(self):
+        """macOS with curl → curl method."""
+        from EvoScientist.config.onboard import _detect_tinytex_install_method
+
+        with (
+            patch("EvoScientist.config.onboard.sys") as mock_sys,
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+        ):
+            mock_sys.platform = "darwin"
+            mock_sh.which.side_effect = lambda cmd: (
+                "/usr/bin/curl" if cmd == "curl" else None
+            )
+            method, command = _detect_tinytex_install_method()
+            assert method == "curl"
+            assert "install-bin-unix.sh" in command
+
+    def test_linux_wget_fallback(self):
+        """Linux without curl, with wget → wget method."""
+        from EvoScientist.config.onboard import _detect_tinytex_install_method
+
+        with (
+            patch("EvoScientist.config.onboard.sys") as mock_sys,
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+        ):
+            mock_sys.platform = "linux"
+            mock_sh.which.side_effect = lambda cmd: (
+                "/usr/bin/wget" if cmd == "wget" else None
+            )
+            method, command = _detect_tinytex_install_method()
+            assert method == "wget"
+            assert "install-bin-unix.sh" in command
+
+    def test_windows_choco(self):
+        """Windows with choco → choco method."""
+        from EvoScientist.config.onboard import _detect_tinytex_install_method
+
+        with (
+            patch("EvoScientist.config.onboard.sys") as mock_sys,
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+        ):
+            mock_sys.platform = "win32"
+            mock_sh.which.side_effect = lambda cmd: (
+                "C:\\choco\\choco.exe" if cmd == "choco" else None
+            )
+            method, command = _detect_tinytex_install_method()
+            assert method == "choco"
+            assert "tinytex" in command
+
+    def test_windows_scoop(self):
+        """Windows with scoop (no choco) → scoop method."""
+        from EvoScientist.config.onboard import _detect_tinytex_install_method
+
+        with (
+            patch("EvoScientist.config.onboard.sys") as mock_sys,
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+        ):
+            mock_sys.platform = "win32"
+            mock_sh.which.side_effect = lambda cmd: (
+                "C:\\scoop\\scoop.exe" if cmd == "scoop" else None
+            )
+            method, command = _detect_tinytex_install_method()
+            assert method == "scoop"
+            assert "tinytex" in command
+
+    def test_no_tools(self):
+        """No tools available → manual method."""
+        from EvoScientist.config.onboard import _detect_tinytex_install_method
+
+        with (
+            patch("EvoScientist.config.onboard.sys") as mock_sys,
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+        ):
+            mock_sys.platform = "linux"
+            mock_sh.which.return_value = None
+            method, command = _detect_tinytex_install_method()
+            assert method == "manual"
+            assert "yihui.org" in command
+
+
+class TestInstallTinytex:
+    """Tests for _install_tinytex()."""
+
+    def test_curl_install_success(self):
+        """curl install succeeds → True."""
+        from EvoScientist.config.onboard import _install_tinytex
+
+        with patch("EvoScientist.config.onboard.subprocess") as mock_sp:
+            mock_sp.run.return_value = Mock(returncode=0)
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            assert _install_tinytex("curl", "curl -sL ... | sh") is True
+            mock_sp.run.assert_called_once()
+            # Verify shell=True was used for pipe commands
+            _, kwargs = mock_sp.run.call_args
+            assert kwargs.get("shell") is True
+
+    def test_curl_install_timeout(self):
+        """curl install times out → False."""
+        from EvoScientist.config.onboard import _install_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_sp.run.side_effect = subprocess.TimeoutExpired("curl", 300)
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            assert _install_tinytex("curl", "curl -sL ... | sh") is False
+
+    def test_choco_install_success(self):
+        """choco install succeeds → True."""
+        from EvoScientist.config.onboard import _install_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.subprocess") as mock_sp,
+            patch("EvoScientist.config.onboard.shutil") as mock_sh,
+        ):
+            mock_sh.which.return_value = "C:\\choco\\choco.exe"
+            mock_sp.run.return_value = Mock(returncode=0)
+            mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+            assert _install_tinytex("choco", "choco install tinytex -y") is True
+
+    def test_manual_returns_false(self):
+        """manual method → False immediately."""
+        from EvoScientist.config.onboard import _install_tinytex
+
+        assert _install_tinytex("manual", "https://yihui.org/tinytex/") is False
+
+
+class TestStepTinytex:
+    """Tests for _step_tinytex()."""
+
+    def test_user_declines_prepare(self):
+        """User says No to 'Prepare LaTeX environment?' → skipped."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._print_step_skipped") as mock_ps,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_q.confirm.return_value.ask.return_value = False
+            _step_tinytex()
+            mock_ps.assert_called_once_with("LaTeX", "skipped")
+
+    def test_already_installed_all_components(self):
+        """User says Yes, all components available → prints detailed status."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                return_value={
+                    "pdflatex": True,
+                    "latexmk": True,
+                    "tlmgr": True,
+                },
+            ),
+            patch("EvoScientist.config.onboard._print_latex_status") as mock_status,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_q.confirm.return_value.ask.return_value = True
+            _step_tinytex()
+            mock_status.assert_called_once()
+
+    def test_already_installed_missing_latexmk(self):
+        """pdflatex + tlmgr present but latexmk missing → auto-installs."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        with (
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                return_value={
+                    "pdflatex": True,
+                    "latexmk": False,
+                    "tlmgr": True,
+                },
+            ),
+            patch("EvoScientist.config.onboard._print_latex_status"),
+            patch("EvoScientist.config.onboard._auto_install_latexmk") as mock_auto,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_q.confirm.return_value.ask.return_value = True
+            _step_tinytex()
+            mock_auto.assert_called_once()
+
+    def test_user_installs_successfully(self):
+        """Yes → not found → confirms install → succeeds → re-check passes."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
+        all_true = {"pdflatex": True, "latexmk": True, "tlmgr": True}
+        with (
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                side_effect=[all_false, all_true],
+            ),
+            patch(
+                "EvoScientist.config.onboard._detect_tinytex_install_method",
+                return_value=("curl", "curl ... | sh"),
+            ),
+            patch(
+                "EvoScientist.config.onboard._install_tinytex",
+                return_value=True,
+            ),
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._print_step_result") as mock_pr,
+            patch("EvoScientist.config.onboard._print_latex_status"),
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_q.confirm.return_value.ask.return_value = True
+            _step_tinytex()
+            mock_pr.assert_called_once_with("LaTeX", "TinyTeX installed")
+
+    def test_user_declines_install(self):
+        """Yes to prepare → not found → declines install → skipped."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
+        with (
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                return_value=all_false,
+            ),
+            patch(
+                "EvoScientist.config.onboard._detect_tinytex_install_method",
+                return_value=("curl", "curl ... | sh"),
+            ),
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._print_step_skipped") as mock_ps,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            # First confirm (prepare) = True, second confirm (install) = False
+            mock_q.confirm.return_value.ask.side_effect = [True, False]
+            _step_tinytex()
+            mock_ps.assert_called_once_with("LaTeX", "skipped")
+
+    def test_install_fails(self):
+        """Yes → not found → confirms install → install fails."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
+        with (
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                return_value=all_false,
+            ),
+            patch(
+                "EvoScientist.config.onboard._detect_tinytex_install_method",
+                return_value=("curl", "curl ... | sh"),
+            ),
+            patch(
+                "EvoScientist.config.onboard._install_tinytex",
+                return_value=False,
+            ),
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._print_step_result") as mock_pr,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            mock_q.confirm.return_value.ask.return_value = True
+            _step_tinytex()
+            mock_pr.assert_called_once_with(
+                "LaTeX", "installation failed", success=False
+            )
+
+    def test_installed_but_not_in_path(self):
+        """Install succeeds but pdflatex not yet in PATH → warns user."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
+        with (
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                side_effect=[all_false, all_false],
+            ),
+            patch(
+                "EvoScientist.config.onboard._detect_tinytex_install_method",
+                return_value=("curl", "curl ... | sh"),
+            ),
+            patch(
+                "EvoScientist.config.onboard._install_tinytex",
+                return_value=True,
+            ),
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._print_step_result") as mock_pr,
+            patch("EvoScientist.config.onboard.console") as mock_con,
+        ):
+            mock_q.confirm.return_value.ask.return_value = True
+            _step_tinytex()
+            path_warning_printed = any(
+                "PATH" in str(call) for call in mock_con.print.call_args_list
+            )
+            assert path_warning_printed
+            mock_pr.assert_called_once_with(
+                "LaTeX", "installed (restart terminal for PATH)"
+            )
+
+    def test_manual_method(self):
+        """Yes to prepare → not found → manual method → prints URL, no install prompt."""
+        from EvoScientist.config.onboard import _step_tinytex
+
+        all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
+        with (
+            patch(
+                "EvoScientist.config.onboard._check_latex_components",
+                return_value=all_false,
+            ),
+            patch(
+                "EvoScientist.config.onboard._detect_tinytex_install_method",
+                return_value=("manual", "https://yihui.org/tinytex/"),
+            ),
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._print_step_skipped") as mock_ps,
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            # Only one confirm call (prepare=True), no second confirm for manual
+            mock_q.confirm.return_value.ask.return_value = True
+            _step_tinytex()
+            mock_ps.assert_called_once_with("LaTeX", "manual install needed")
