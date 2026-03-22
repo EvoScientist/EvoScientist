@@ -304,11 +304,18 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
+    _VALID_SUBSCRIPTION_MODES = ("webhook", "websocket")
+
     async def start(self) -> None:
         if not self.config.app_id:
             raise ChannelError("Feishu app_id is required")
         if not self.config.app_secret:
             raise ChannelError("Feishu app_secret is required")
+        if self.config.subscription_mode not in self._VALID_SUBSCRIPTION_MODES:
+            raise ChannelError(
+                f"Invalid feishu_subscription_mode: {self.config.subscription_mode!r}. "
+                f"Must be one of {self._VALID_SUBSCRIPTION_MODES}"
+            )
 
         if self.config.subscription_mode == "websocket":
             await self._start_websocket_mode()
@@ -356,6 +363,10 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
 
         # Thread-safe queue: SDK thread puts events, main loop consumes
         self._ws_event_queue = queue.Queue()
+
+        # Set _running BEFORE creating consumer task — the task checks
+        # `while self._running` and would exit immediately otherwise.
+        self._running = True
         self._ws_consumer_task = asyncio.create_task(self._consume_ws_events())
 
         # Build SDK event handler
@@ -393,13 +404,18 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
             asyncio.Handle._run = _safe_handle_run
             try:
                 ws_client.start()
+            except Exception:
+                logger.exception(
+                    "Feishu WebSocket SDK thread exited unexpectedly. "
+                    "The channel will no longer receive messages. "
+                    "Check app_id/app_secret and connection limits."
+                )
             finally:
                 asyncio.Handle._run = _orig_handle_run
 
         self._lark_ws_thread = threading.Thread(target=_run_ws, daemon=True)
         self._lark_ws_thread.start()
 
-        self._running = True
         logger.info("Feishu channel started (WebSocket long connection mode)")
 
     def _on_lark_sdk_message(self, data) -> None:

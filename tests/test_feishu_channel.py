@@ -533,6 +533,16 @@ class TestFeishuWebSocketMode:
         with pytest.raises(ChannelError, match="app_id"):
             _run(channel.start())
 
+    def test_invalid_subscription_mode_raises(self):
+        config = FeishuConfig(
+            app_id="test-id",
+            app_secret="test-secret",
+            subscription_mode="websockeet",
+        )
+        channel = FeishuChannel(config)
+        with pytest.raises(ChannelError, match="Invalid feishu_subscription_mode"):
+            _run(channel.start())
+
     def test_on_lark_sdk_message_bridges_to_on_message(self):
         """Test that _on_lark_sdk_message enqueues event dict via queue."""
         import queue as queue_mod
