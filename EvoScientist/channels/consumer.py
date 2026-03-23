@@ -438,6 +438,30 @@ class InboundConsumer:
             del self._pending_interrupts[session_key]
 
         async with self._chat_locks[session_key]:
+            from ..commands.channel_dispatch import execute_supported_channel_command
+
+            command_response = await execute_supported_channel_command(
+                msg.content,
+                agent=self.agent,
+                thread_id=thread_id,
+            )
+            if command_response is not None:
+                outbound = OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=command_response,
+                    reply_to=msg.message_id or None,
+                    metadata=msg.metadata,
+                )
+                await self.bus.publish_outbound(outbound)
+                self._metrics.total_successes += 1
+                if self._on_message_sent:
+                    try:
+                        self._on_message_sent(outbound)
+                    except Exception:
+                        pass
+                return
+
             await self._stream_with_hitl(msg, channel, thread_id, session_key)
 
     async def _stream_with_hitl(

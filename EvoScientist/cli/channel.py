@@ -521,6 +521,7 @@ async def _bus_inbound_consumer(bus, manager) -> None:
 async def _handle_bus_message(bus, manager, msg) -> None:
     """Handle a single inbound bus message (runs as an independent task)."""
     from ..channels.bus.events import OutboundMessage
+    from ..commands.channel_dispatch import execute_supported_channel_command
 
     _channel_logger.info(
         f"[bus] Received from {msg.channel}:{msg.sender_id}: {msg.content[:60]}..."
@@ -530,6 +531,30 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     channel = manager.get_channel(msg.channel)
     if channel:
         await channel.start_typing(msg.chat_id)
+
+    command_response = await execute_supported_channel_command(
+        msg.content,
+        agent=_cli_agent,
+        thread_id=_cli_thread_id or "",
+    )
+    if command_response is not None:
+        try:
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=command_response,
+                    reply_to=msg.message_id or None,
+                    metadata=msg.metadata,
+                )
+            )
+            manager.record_message(msg.channel, "sent")
+        except Exception as e:
+            _channel_logger.error(f"[bus] Outbound error: {e}")
+        finally:
+            if channel:
+                await channel.stop_typing(msg.chat_id)
+        return
 
     # Enqueue for main CLI thread to process with its own event loop
     cm = ChannelMessage(

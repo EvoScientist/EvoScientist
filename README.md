@@ -414,6 +414,13 @@ channel_enabled: "telegram,slack,feishu,qq"
 
 The channel can also be started interactively with `/channel` in the CLI session.
 
+All bus-based messaging channels also support a built-in `/gpu` command. When a
+user sends the exact message `/gpu`, EvoScientist bypasses the normal agent
+pipeline, runs `nvidia-smi` on the host machine, and returns the raw GPU status
+directly. This is useful for quick cluster checks from Telegram, Slack,
+DingTalk, Feishu, WeChat, Discord, QQ, Signal, Email, or iMessage.
+`nvidia-smi` must be available on the host for this command to work.
+
 > [!TIP]
 > For per-channel setup guides, capability matrix, architecture details, and troubleshooting, see the **[Channel Integration Guide](https://github.com/EvoScientist/EvoScientist/tree/main/EvoScientist/channels#channels)**.
 

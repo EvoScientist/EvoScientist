@@ -320,6 +320,20 @@ EvoSci serve                # Start agent + all enabled channels
 EvoSci channel start        # Standalone channel mode (message loop only)
 ```
 
+### Built-in slash command: `/gpu`
+
+All channels that run through the shared `MessageBus` support a built-in
+`/gpu` command. If a user sends the exact message `/gpu`, the message is
+handled before the normal agent pipeline:
+
+- EvoScientist runs `nvidia-smi` on the host machine
+- the raw command output is returned directly to the originating channel
+- the normal agent / HITL / ask_user flow is skipped for that message
+
+This works across the standard channel integrations, including Telegram,
+Discord, Slack, Feishu, WeChat, DingTalk, QQ, Signal, Email, and iMessage.
+The host must have `nvidia-smi` available.
+
 ### 4. Health check
 
 ```bash
@@ -800,6 +814,7 @@ All enabled channels run concurrently via the internal `MessageBus`. Each channe
 - Has its own connection lifecycle (connect, reconnect, health check)
 - Shares the same `InboundConsumer` worker pool and agent instance
 - Routes outbound replies back to the originating channel automatically
+- Shares the same built-in commands such as `/gpu`
 
 ### Multi-Channel Architecture
 

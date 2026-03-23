@@ -423,6 +423,13 @@ channel_enabled: "telegram,slack,feishu,qq"
 
 也可以在 CLI 会话中通过 `/channel` 交互式启动渠道。
 
+所有基于共享 `MessageBus` 的消息渠道也都支持内置的 `/gpu` 指令。当
+用户发送精确的 `/gpu` 时，EvoScientist 会跳过正常的 agent 流程，直
+接在宿主机上执行 `nvidia-smi`，并将原始 GPU 状态结果返回到对应渠
+道。这适合用来从 Telegram、Slack、钉钉、飞书、微信、Discord、QQ、
+Signal、Email 或 iMessage 快速查看机器的 GPU 使用情况。宿主机需要
+可用的 `nvidia-smi`。
+
 > [!TIP]
 > 关于各渠道设置指南、功能矩阵、架构详情和故障排查，请参阅 **[渠道集成指南](https://github.com/EvoScientist/EvoScientist/tree/main/EvoScientist/channels#channels)**。
 
