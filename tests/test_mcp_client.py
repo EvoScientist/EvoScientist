@@ -791,7 +791,9 @@ class TestUvToolCompat:
         import EvoScientist.mcp.registry as reg
 
         monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
-        monkeypatch.setattr(reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None)
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
         assert reg.pip_install_hint() == "uv pip install"
 
     def test_pip_install_hint_plain_pip(self, monkeypatch):
@@ -815,7 +817,9 @@ class TestUvToolCompat:
             ns = type("R", (), {"returncode": 0})()
             return ns
 
-        monkeypatch.setattr(reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None)
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         result = reg.install_pip_package("some-package")
         assert result is True
@@ -893,7 +897,9 @@ class TestUvToolCompat:
         result = reg._resolve_command_path("my-mcp-server")
         assert result == str(fake_exe)
 
-    def test_resolve_command_path_returns_bare_when_not_found(self, monkeypatch, tmp_path):
+    def test_resolve_command_path_returns_bare_when_not_found(
+        self, monkeypatch, tmp_path
+    ):
         import sys
 
         import EvoScientist.mcp.registry as reg
