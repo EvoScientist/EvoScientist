@@ -52,6 +52,7 @@ from .channel import (
     _message_queue,
     _set_channel_response,
 )
+from .file_mentions import complete_file_mention, resolve_file_mentions
 from .mcp_ui import _cmd_mcp
 from .skills_cmd import (
     _cmd_install_skill,
@@ -171,10 +172,28 @@ _PICKER_STYLE = PtStyle.from_dict(
 
 
 class SlashCommandCompleter(Completer):
-    """Autocomplete for slash commands — triggers when input starts with '/'."""
+    """Autocomplete for slash commands and ``@file`` mentions."""
+
+    def __init__(self, workspace_dir: str | None = None) -> None:
+        self._workspace_dir = workspace_dir
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+
+        # @file mention completion
+        if "@" in text:
+            candidates = complete_file_mention(text, self._workspace_dir)
+            if candidates:
+                # Replace from the last '@' token
+                import re as _re
+
+                m = _re.search(r"@[^\s]*$", text)
+                start = -len(m.group(0)) if m else 0
+                for path, type_hint in candidates:
+                    yield Completion(path, start_position=start, display_meta=type_hint)
+                return
+
+        # Slash command completion
         if not text.startswith("/"):
             return
         for cmd, desc in _SLASH_COMMANDS:
@@ -270,7 +289,7 @@ def cmd_interactive(
     session = PromptSession(
         history=FileHistory(history_file),
         auto_suggest=AutoSuggestFromHistory(),
-        completer=SlashCommandCompleter(),
+        completer=SlashCommandCompleter(workspace_dir=workspace_dir),
         complete_style=CompleteStyle.COLUMN,
         complete_while_typing=True,
         style=_COMPLETION_STYLE,
@@ -902,13 +921,18 @@ def cmd_interactive(
                             console.print(render_compact_result(result))
                             continue
 
+                        # Resolve @file mentions — inject file contents inline
+                        _, message_to_send = resolve_file_mentions(
+                            user_input, state["workspace_dir"]
+                        )
+
                         # Stream agent response with metadata for persistence
                         console.print()
                         meta = build_metadata(state["workspace_dir"], model)
                         run_streaming(
                             ui_backend=state["ui_backend"],
                             agent=state["agent"],
-                            message=user_input,
+                            message=message_to_send,
                             thread_id=state["thread_id"],
                             show_thinking=show_thinking,
                             interactive=True,
