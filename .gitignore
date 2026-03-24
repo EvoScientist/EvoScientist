@@ -37,6 +37,7 @@ workspace/
 skills/
 memory/
 media/
+conversation_history/
 .deno_cache/
 *.ipynb
 *CLAUDE.md

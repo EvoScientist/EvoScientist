@@ -23,6 +23,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from langchain.agents.middleware import AgentMiddleware
+
 from . import paths as _paths_mod
 from .config import apply_config_to_env, get_effective_config
 from .paths import set_active_workspace, set_workspace_root
@@ -136,10 +138,12 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
     ToolNode handler which produces terse messages without tracebacks or
     retry guidance — reducing the subagent's ability to self-recover.
     """
-    from .middleware import ToolErrorHandlerMiddleware
+    from .middleware import ContextOverflowMapperMiddleware, ToolErrorHandlerMiddleware
 
     for sa in subs:
-        sa.setdefault("middleware", []).append(ToolErrorHandlerMiddleware())
+        sa.setdefault("middleware", []).append(
+            ToolErrorHandlerMiddleware(), ContextOverflowMapperMiddleware()
+        )
 
 
 def _build_prompt_refs() -> dict:
@@ -270,14 +274,20 @@ def _get_default_backend():
 
 def _get_default_middleware():
     """Build the default middleware list."""
-    from .middleware import ToolErrorHandlerMiddleware, create_memory_middleware
+    from .middleware import (
+        ContextOverflowMapperMiddleware,
+        ToolErrorHandlerMiddleware,
+        create_memory_middleware,
+    )
 
     cfg = _ensure_config()
     memory_dir = str(_paths_mod.MEMORY_DIR)
     mw = [
+        ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         create_memory_middleware(memory_dir, extraction_model=_ensure_chat_model()),
     ]
+
     if cfg.enable_ask_user and not cfg.auto_approve:
         from .middleware.ask_user import AskUserMiddleware
 
@@ -341,14 +351,16 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
 
     from . import paths as _paths
     from .backends import CustomSandboxBackend, MergedReadOnlyBackend
-    from .middleware import ToolErrorHandlerMiddleware, create_memory_middleware
+    from .middleware import (
+        ContextOverflowMapperMiddleware,
+        ToolErrorHandlerMiddleware,
+        create_memory_middleware,
+    )
 
     cfg = _ensure_config(config)
 
     if checkpointer is None:
-        from langgraph.checkpoint.memory import (
-            InMemorySaver,  # type: ignore[import-untyped]
-        )
+        from langgraph.checkpoint.memory import InMemorySaver
 
         checkpointer = InMemorySaver()
 
@@ -392,7 +404,8 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         },
     )
 
-    mw = [
+    mw: list[AgentMiddleware] = [
+        ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         create_memory_middleware(_mem_dir, extraction_model=_ensure_chat_model()),
     ]

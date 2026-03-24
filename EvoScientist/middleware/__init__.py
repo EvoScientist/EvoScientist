@@ -11,6 +11,7 @@ from .ask_user import (
     Choice,
     Question,
 )
+from .context_overflow import ContextOverflowMapperMiddleware
 from .memory import (
     EvoMemoryMiddleware,
     EvoMemoryState,
@@ -24,6 +25,7 @@ __all__ = [
     "AskUserRequest",
     "AskUserWidgetResult",
     "Choice",
+    "ContextOverflowMapperMiddleware",
     "EvoMemoryMiddleware",
     "EvoMemoryState",
     "ExtractedMemory",
