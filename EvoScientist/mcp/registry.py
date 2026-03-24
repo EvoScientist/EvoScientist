@@ -62,8 +62,23 @@ class MCPServerEntry:
 # =============================================================================
 
 
+def _is_uv_tool_env() -> bool:
+    """Return True when running inside a ``uv tool install`` isolated environment.
+
+    Detection: ``VIRTUAL_ENV`` is set and its path contains the uv tools
+    directory segment (``/uv/tools/`` on Unix, ``\\uv\\tools\\`` on Windows).
+    """
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    if not virtual_env:
+        return False
+    normalized = virtual_env.replace("\\", "/")
+    return "/uv/tools/" in normalized
+
+
 def pip_install_hint() -> str:
     """Human-readable install command for error messages."""
+    if _is_uv_tool_env():
+        return "uv tool install --reinstall evoscientist --with"
     if shutil.which("uv"):
         return "uv pip install"
     return "pip install"
@@ -72,13 +87,18 @@ def pip_install_hint() -> str:
 def install_pip_package(package: str) -> bool:
     """Silently install a pip package.
 
-    Tries ``uv pip install`` first, then ``python -m pip install``.
+    When ``uv`` is available, uses ``uv pip install --python sys.executable``
+    to target the current interpreter directly — this works for uv tool envs,
+    standard venvs, conda envs, and system Python without needing ``--system``.
+    Falls back to ``python -m pip install`` when uv is not available.
 
     Returns True if installation succeeded.
     """
     commands: list[list[str]] = []
     if shutil.which("uv"):
-        commands.append(["uv", "pip", "install", "-q", package])
+        commands.append(
+            ["uv", "pip", "install", "--python", sys.executable, "-q", package]
+        )
     commands.append([sys.executable, "-m", "pip", "install", "-q", package])
 
     for cmd in commands:
@@ -92,6 +112,30 @@ def install_pip_package(package: str) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
     return False
+
+
+def _resolve_command_path(command: str) -> str:
+    """Resolve a command to its full path after pip installation.
+
+    Checks PATH first (standard case), then the bin directory of the current
+    Python interpreter — handles uv tool envs where a newly installed binary
+    is not on PATH but lives alongside the tool's Python executable.
+
+    Returns the full absolute path if found, otherwise the original string.
+    """
+    if os.path.isabs(command):
+        return command
+    found = shutil.which(command)
+    if found:
+        return found
+    candidate = Path(sys.executable).parent / command
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    if os.name == "nt":
+        candidate_exe = candidate.with_suffix(".exe")
+        if candidate_exe.is_file():
+            return str(candidate_exe)
+    return command
 
 
 # =============================================================================
@@ -257,10 +301,13 @@ def install_mcp_server(
                 headers=entry.headers,
             )
         else:
+            resolved_cmd = (
+                _resolve_command_path(entry.command) if entry.command else entry.command
+            )
             add_mcp_server(
                 entry.name,
                 entry.transport,
-                command=entry.command,
+                command=resolved_cmd,
                 args=entry.args,
                 env=entry.env,
             )
