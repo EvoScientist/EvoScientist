@@ -3,6 +3,15 @@
 Keyboard-driven widget mounted directly into the chat container (like
 ApprovalWidget).  Posts ``ThreadPickerWidget.Picked`` when user selects
 a thread, or ``ThreadPickerWidget.Cancelled`` on Esc.
+
+Threads are grouped into a two-level hierarchy:
+
+  L1 header  — common ancestor path shared by 2+ workspaces, or the
+               workspace path itself for standalone workspaces.
+  L2 subheader — relative sub-path shown only when a group contains
+                 multiple workspaces.  Run-mode dirs are marked with 🔁.
+  thread row — indented under their sub-path (or directly under L1 for
+               standalone groups).
 """
 
 from __future__ import annotations
@@ -22,8 +31,141 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Path helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalize_path(path: str) -> str:
+    """Strip trailing slash and replace home directory with ~."""
+    import os
+
+    if not path:
+        return ""
+    path = path.rstrip("/")
+    home = os.path.expanduser("~")
+    if path.startswith(home):
+        path = "~" + path[len(home) :]
+    return path
+
+
+def _common_prefix_depth(p1: str, p2: str) -> int:
+    """Return the number of leading path components shared by *p1* and *p2*."""
+    depth = 0
+    for a, b in zip(p1.split("/"), p2.split("/"), strict=False):
+        if a == b:
+            depth += 1
+        else:
+            break
+    return depth
+
+
+def _is_run_path(rel: str) -> bool:
+    """Return True if *rel* (relative to group ancestor) is a run-mode dir."""
+    return "runs" in rel.split("/")
+
+
+def _group_by_ancestor(norm_paths: list[str]) -> dict[str, list[str]]:
+    """Group normalized paths by their deepest common ancestor.
+
+    Two paths are placed in the same group when they share a common prefix
+    of at least 2 components (e.g. ``~/Projects``).  Paths with no such
+    shared prefix become standalone single-item groups keyed by their own
+    full path.
+
+    The returned dict is ordered by first appearance in *norm_paths*.
+    """
+    path_to_ancestor: dict[str, str] = {}
+    for i, p in enumerate(norm_paths):
+        best = 1  # at minimum depth 1 (~)
+        for j, other in enumerate(norm_paths):
+            if i != j:
+                best = max(best, _common_prefix_depth(p, other))
+        # Only group if they truly share a meaningful ancestor (>= 2 levels)
+        if best >= 2:
+            ancestor = "/".join(p.split("/")[:best])
+        else:
+            ancestor = p  # standalone
+        path_to_ancestor[p] = ancestor
+
+    groups: dict[str, list[str]] = {}
+    for p in norm_paths:
+        anc = path_to_ancestor[p]
+        if anc not in groups:
+            groups[anc] = []
+        groups[anc].append(p)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Item builders
+# ---------------------------------------------------------------------------
+
+
+def _build_items(threads: list[dict]) -> list[dict]:
+    """Build the flat item list rendered by ThreadPickerWidget.
+
+    Returns a list whose elements are one of::
+
+        {"type": "header",    "label": str}
+        {"type": "subheader", "label": str}
+        {"type": "thread",    "thread": dict, "indented": bool}
+
+    *indented* is True for thread rows that sit under a L2 subheader.
+    """
+    if not threads:
+        return []
+
+    # Map normalized path -> list[thread dicts], preserving first-seen order
+    raw_to_threads: dict[str, list[dict]] = {}
+    seen_order: list[str] = []
+    for t in threads:
+        raw = t.get("workspace_dir", "") or ""
+        norm = _normalize_path(raw) or raw
+        if norm not in raw_to_threads:
+            raw_to_threads[norm] = []
+            seen_order.append(norm)
+        raw_to_threads[norm].append(t)
+
+    groups = _group_by_ancestor(seen_order)
+
+    items: list[dict] = []
+    for ancestor, norm_paths in groups.items():
+        multi = len(norm_paths) > 1
+
+        # L1 header — the common ancestor (or the sole workspace path)
+        items.append({"type": "header", "label": ancestor or "(no workspace)"})
+
+        for norm_path in norm_paths:
+            if multi:
+                # L2 subheader — relative path from ancestor
+                rel = norm_path[len(ancestor) :].lstrip("/")
+                if not rel:
+                    # norm_path IS the ancestor (standalone group of 1 that shares
+                    # an ancestor with others); show just the last path component
+                    rel = norm_path.split("/")[-1] or norm_path
+                icon = "🔁" if _is_run_path(rel) else "📁"
+                items.append({"type": "subheader", "label": f"{icon} {rel}"})
+
+            for t in raw_to_threads[norm_path]:
+                items.append({"type": "thread", "thread": t, "indented": multi})
+
+    return items
+
+
+def build_header_text(label: str) -> Text:
+    """L1 header: ``── 📂 <label>``."""
+    t = Text()
+    t.append("\u2500\u2500 \U0001f4c2 ", style="bold cyan")
+    t.append(label, style="bold cyan")
+    return t
+
+
+def build_subheader_text(label: str) -> Text:
+    """L2 subheader: ``  <icon> <rel-path>`` (indented, dim)."""
+    t = Text()
+    t.append("  ", style="")
+    t.append(label, style="dim")
+    return t
 
 
 def build_row_text(
@@ -31,11 +173,9 @@ def build_row_text(
     *,
     selected: bool = False,
     current: bool = False,
+    indented: bool = False,
 ) -> Text:
-    """Build a Rich Text object for a single thread row.
-
-    Pure function — no Textual app context required, safe for unit tests.
-    """
+    """Thread row.  *indented* adds extra leading space for L2-grouped rows."""
     from ...sessions import _format_relative_time
 
     tid = thread["thread_id"]
@@ -45,16 +185,19 @@ def build_row_text(
     when = _format_relative_time(thread.get("updated_at"))
 
     line = Text()
+    # Extra indent when nested under a subheader
+    if indented:
+        line.append("  ", style="")
     cursor = "\u25b8 " if selected else "  "
     line.append(cursor, style="bold cyan" if selected else "dim")
-    line.append(f"{tid}", style="bold" if selected else "")
+    line.append(tid, style="bold" if selected else "")
     if current:
         line.append(" *", style="bold green")
     line.append("  ")
     if preview:
         display_preview = preview[:40] + "\u2026" if len(preview) > 40 else preview
-        line.append(display_preview, style="")
-        line.append("  ", style="")
+        line.append(display_preview)
+        line.append("  ")
     line.append(f"({msgs} msgs)", style="dim")
     if model:
         line.append(f"  {model}", style="dim italic")
@@ -72,7 +215,7 @@ class ThreadPickerWidget(Widget):
     """Inline thread picker — mounts in chat, keyboard-driven.
 
     Posts ``Picked(thread_id)`` on Enter, ``Cancelled()`` on Esc.
-    Follows the same pattern as ``ApprovalWidget``.
+    Threads are displayed in a two-level workspace hierarchy.
     """
 
     can_focus = True
@@ -81,7 +224,7 @@ class ThreadPickerWidget(Widget):
     DEFAULT_CSS = """
     ThreadPickerWidget {
         height: auto;
-        max-height: 22;
+        max-height: 26;
         margin: 1 0;
         padding: 0 1;
         background: $surface;
@@ -94,8 +237,17 @@ class ThreadPickerWidget(Widget):
     }
     ThreadPickerWidget .picker-rows {
         height: auto;
-        max-height: 16;
+        max-height: 20;
         overflow-y: auto;
+    }
+    ThreadPickerWidget .picker-header {
+        height: 1;
+        padding: 0 1;
+        margin-top: 1;
+    }
+    ThreadPickerWidget .picker-subheader {
+        height: 1;
+        padding: 0 1;
     }
     ThreadPickerWidget .picker-row {
         height: 1;
@@ -122,8 +274,6 @@ class ThreadPickerWidget(Widget):
     ]
 
     class Picked(Message):
-        """Posted when user picks a thread."""
-
         def __init__(self, thread_id: str) -> None:
             super().__init__()
             self.thread_id = thread_id
@@ -143,14 +293,38 @@ class ThreadPickerWidget(Widget):
         self._threads = threads
         self._current_thread = current_thread
         self._title = title
-        self._selected = 0
+        self._items = _build_items(threads)
+        self._selected = self._first_thread_index()
         self._row_widgets: list[Static] = []
+
+    def _first_thread_index(self) -> int:
+        for i, item in enumerate(self._items):
+            if item["type"] == "thread":
+                return i
+        return 0
+
+    def _move(self, direction: int) -> None:
+        if not self._items:
+            return
+        i = (self._selected + direction) % len(self._items)
+        steps = 0
+        while self._items[i]["type"] != "thread" and steps < len(self._items):
+            i = (i + direction) % len(self._items)
+            steps += 1
+        if self._items[i]["type"] == "thread":
+            self._selected = i
+            self._update_rows()
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="picker-title")
         with Container(classes="picker-rows"):
-            for _ in self._threads:
-                widget = Static("", classes="picker-row")
+            for item in self._items:
+                css = {
+                    "header": "picker-header",
+                    "subheader": "picker-subheader",
+                    "thread": "picker-row",
+                }.get(item["type"], "picker-row")
+                widget = Static("", classes=css)
                 self._row_widgets.append(widget)
                 yield widget
         yield Static(
@@ -163,40 +337,46 @@ class ThreadPickerWidget(Widget):
         self.call_later(self.focus)
 
     def _update_rows(self) -> None:
-        for i, (thread, widget) in enumerate(
-            zip(self._threads, self._row_widgets, strict=False)
+        for i, (item, widget) in enumerate(
+            zip(self._items, self._row_widgets, strict=False)
         ):
-            is_current = thread["thread_id"] == self._current_thread
-            text = build_row_text(
-                thread, selected=(i == self._selected), current=is_current
-            )
-            widget.update(text)
             widget.remove_class("picker-row-selected")
-            if i == self._selected:
-                widget.add_class("picker-row-selected")
-                widget.scroll_visible()
+            if item["type"] == "header":
+                widget.update(build_header_text(item["label"]))
+            elif item["type"] == "subheader":
+                widget.update(build_subheader_text(item["label"]))
+            else:
+                thread = item["thread"]
+                is_selected = i == self._selected
+                text = build_row_text(
+                    thread,
+                    selected=is_selected,
+                    current=thread["thread_id"] == self._current_thread,
+                    indented=item.get("indented", False),
+                )
+                widget.update(text)
+                if is_selected:
+                    widget.add_class("picker-row-selected")
+                    widget.scroll_visible()
 
     def action_move_up(self) -> None:
-        if not self._threads:
-            return
-        self._selected = (self._selected - 1) % len(self._threads)
-        self._update_rows()
+        self._move(-1)
 
     def action_move_down(self) -> None:
-        if not self._threads:
-            return
-        self._selected = (self._selected + 1) % len(self._threads)
-        self._update_rows()
+        self._move(1)
 
     def action_select(self) -> None:
-        if not self._threads:
+        if not self._items or self._selected >= len(self._items):
             self.post_message(self.Cancelled())
             return
-        self.post_message(self.Picked(self._threads[self._selected]["thread_id"]))
+        item = self._items[self._selected]
+        if item["type"] == "thread":
+            self.post_message(self.Picked(item["thread"]["thread_id"]))
+        else:
+            self.post_message(self.Cancelled())
 
     def action_cancel(self) -> None:
         self.post_message(self.Cancelled())
 
     def on_blur(self, event: events.Blur) -> None:
-        """Re-focus to keep focus trapped until decision is made."""
         self.call_after_refresh(self.focus)

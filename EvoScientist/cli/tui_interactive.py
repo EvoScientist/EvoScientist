@@ -1874,42 +1874,81 @@ def run_textual_interactive(
             self._append_system(f"Unknown command: {command}", style="yellow")
 
         async def _render_history(self, thread_id_value: str) -> None:
-            """Render conversation history from a saved thread."""
+            """Render conversation history from a saved thread.
+
+            Restores human messages and AI responses (with Markdown and
+            thinking panels). Tool calls and other intermediate steps are
+            skipped — they are difficult to faithfully reproduce from
+            checkpoint data.
+            """
             messages = await get_thread_messages(thread_id_value)
             if not messages:
                 return
 
+            HISTORY_WINDOW = 50
             container = self.query_one("#chat", VerticalScroll)
-            await container.mount(
-                SystemMessage("── Conversation history ──", msg_style="dim")
-            )
-            for message in messages:
+
+            # Only human and ai messages; skip tool/system/other
+            display = [
+                m for m in messages if getattr(m, "type", None) in ("human", "ai")
+            ]
+
+            if len(display) > HISTORY_WINDOW:
+                skipped = len(display) - HISTORY_WINDOW
+                display = display[-HISTORY_WINDOW:]
+                await container.mount(
+                    SystemMessage(
+                        f"── ... {skipped} earlier messages ──", msg_style="dim"
+                    )
+                )
+            else:
+                await container.mount(
+                    SystemMessage("── Conversation history ──", msg_style="dim")
+                )
+
+            for message in display:
                 msg_type = getattr(message, "type", None)
                 content = getattr(message, "content", "") or ""
-                if isinstance(content, list):
-                    parts = [
-                        block.get("text", "")
-                        for block in content
-                        if isinstance(block, dict) and block.get("type") == "text"
-                    ]
-                    content = " ".join(parts) if parts else ""
-                content = content.strip()
-                if len(content) > 220:
-                    content = content[:220] + "..."
 
                 if msg_type == "human":
-                    await container.mount(UserMessage(content))
-                elif msg_type == "ai":
-                    tool_calls = getattr(message, "tool_calls", None) or []
+                    if isinstance(content, list):
+                        parts = [
+                            block.get("text", "")
+                            for block in content
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        ]
+                        content = " ".join(parts) if parts else ""
+                    content = content.strip()
                     if content:
-                        await container.mount(Static(Text(content, style="dim")))
-                    if tool_calls:
-                        names = [tc.get("name", "?") for tc in tool_calls]
-                        await container.mount(
-                            Static(
-                                Text(f"  \u25b6 {', '.join(names)}", style="dim italic")
-                            )
-                        )
+                        await container.mount(UserMessage(content))
+
+                elif msg_type == "ai":
+                    # Extract thinking and text blocks from content list
+                    thinking_text = ""
+                    text_content = ""
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict):
+                                continue
+                            if block.get("type") == "thinking":
+                                thinking_text += block.get("thinking", "")
+                            elif block.get("type") == "text":
+                                text_content += block.get("text", "")
+                    else:
+                        text_content = content or ""
+                    text_content = text_content.strip()
+
+                    # Render thinking as collapsed panel (click to expand)
+                    if thinking_text.strip() and show_thinking:
+                        w = ThinkingWidget(show_thinking=True)
+                        await container.mount(w)
+                        w.append_text(thinking_text)
+                        w.finalize()
+
+                    # Render AI response with full Markdown
+                    if text_content:
+                        await container.mount(AssistantMessage(text_content))
+
             await container.mount(
                 SystemMessage("── End of history ──", msg_style="dim")
             )

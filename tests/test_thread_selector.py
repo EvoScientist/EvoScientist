@@ -22,6 +22,7 @@ _THREADS = [
         "message_count": 12,
         "model": "claude-sonnet-4-6",
         "updated_at": "2026-03-09T10:00:00+00:00",
+        "workspace_dir": "/workspace",
     },
     {
         "thread_id": "def67890",
@@ -29,6 +30,7 @@ _THREADS = [
         "message_count": 5,
         "model": "gpt-4o",
         "updated_at": "2026-03-08T08:00:00+00:00",
+        "workspace_dir": "/workspace",
     },
     {
         "thread_id": "ghi11111",
@@ -36,6 +38,7 @@ _THREADS = [
         "message_count": 0,
         "model": "",
         "updated_at": None,
+        "workspace_dir": "/workspace",
     },
 ]
 
@@ -114,7 +117,8 @@ class TestThreadPickerWidget:
         picker = ThreadPickerWidget(_THREADS, current_thread="abc12345")
         assert picker._threads == _THREADS
         assert picker._current_thread == "abc12345"
-        assert picker._selected == 0
+        # items = [header, thread0, thread1, thread2] — first thread is at index 1
+        assert picker._selected == 1
 
     def test_init_empty_threads(self):
         picker = ThreadPickerWidget([])
@@ -131,19 +135,23 @@ class TestThreadPickerWidget:
     def test_action_move_down_wraps(self):
         picker = ThreadPickerWidget(_THREADS)
         picker._row_widgets = [mock.MagicMock() for _ in _THREADS]
-        picker._selected = len(_THREADS) - 1
+        # items = [header@0, t0@1, t1@2, t2@3]; last thread is at index 3
+        picker._selected = len(picker._items) - 1
         # Mock _update_rows to avoid Textual update calls
         picker._update_rows = mock.MagicMock()
         picker.action_move_down()
-        assert picker._selected == 0
+        # wraps past header back to first thread at index 1
+        assert picker._selected == 1
 
     def test_action_move_up_wraps(self):
         picker = ThreadPickerWidget(_THREADS)
         picker._row_widgets = [mock.MagicMock() for _ in _THREADS]
-        picker._selected = 0
+        # items = [header@0, t0@1, t1@2, t2@3]; start at first thread
+        picker._selected = 1
         picker._update_rows = mock.MagicMock()
         picker.action_move_up()
-        assert picker._selected == len(_THREADS) - 1
+        # wraps past header back to last thread at index 3
+        assert picker._selected == len(picker._items) - 1
 
     def test_action_move_down_increments(self):
         picker = ThreadPickerWidget(_THREADS)
@@ -170,7 +178,8 @@ class TestThreadPickerWidget:
 
     def test_action_select_posts_picked(self):
         picker = ThreadPickerWidget(_THREADS)
-        picker._selected = 1
+        # items = [header@0, t0@1, t1@2, t2@3]; select t1 (def67890) at index 2
+        picker._selected = 2
         picker.post_message = mock.MagicMock()
         picker.action_select()
         msg = picker.post_message.call_args[0][0]
