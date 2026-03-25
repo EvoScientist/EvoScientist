@@ -1393,9 +1393,11 @@ def run_textual_interactive(
             self._render_status()
             cancelled = False
 
-            # Resolve @file mentions — inject file contents before sending to agent
+            # Resolve @file mentions — inject file contents before sending to agent.
+            # Use self._workspace_dir (current session) not the startup-captured
+            # workspace_dir closure, which becomes stale after /new or /resume.
             _, message_to_send, file_warnings = await asyncio.to_thread(
-                resolve_file_mentions, user_text, workspace_dir
+                resolve_file_mentions, user_text, self._workspace_dir
             )
 
             try:

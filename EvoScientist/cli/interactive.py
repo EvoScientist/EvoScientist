@@ -930,7 +930,7 @@ def cmd_interactive(
                         # Warnings printed here so they appear just before the
                         # model response, not before the user input echo.
                         for w in file_warnings:
-                            console.print(f"[yellow]⚠ {w}[/yellow]")
+                            console.print(f"[yellow]⚠ {escape(w)}[/yellow]")
                         console.print()
                         meta = build_metadata(state["workspace_dir"], model)
                         run_streaming(

@@ -224,8 +224,14 @@ def parse_file_mentions(
             if not resolved.exists() or not resolved.is_file():
                 warnings.append(f"@file not found: {raw}")
                 continue
+            # Deduplicate: skip paths already seen in this message.
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(resolved)
             # Warn when the file lives outside the workspace root — it may
             # contain sensitive content (e.g. @~/.ssh/id_rsa).
+            # Checked after dedup so a repeated mention only warns once.
             try:
                 resolved.relative_to(workspace_root)
             except ValueError:
@@ -233,11 +239,6 @@ def parse_file_mentions(
                     f"@{raw} is outside the workspace "
                     f"({workspace_root}) — embedding may expose sensitive files"
                 )
-            # Deduplicate: skip paths already seen in this message.
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            files.append(resolved)
         except (OSError, RuntimeError) as exc:
             warnings.append(f"invalid @file path {raw!r}: {exc}")
 
