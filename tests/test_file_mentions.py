@@ -20,47 +20,74 @@ class TestParseFileMentions:
     def test_single_mention(self, tmp_path: Path) -> None:
         f = tmp_path / "paper.tex"
         f.write_text("hello")
-        result = parse_file_mentions(f"read @{f}", cwd=tmp_path)
-        assert result == [f.resolve()]
+        files, _ = parse_file_mentions(f"read @{f}", cwd=tmp_path)
+        assert files == [f.resolve()]
 
     def test_relative_mention(self, tmp_path: Path) -> None:
         f = tmp_path / "notes.md"
         f.write_text("world")
-        result = parse_file_mentions("check @notes.md", cwd=tmp_path)
-        assert result == [f.resolve()]
+        files, _ = parse_file_mentions("check @notes.md", cwd=tmp_path)
+        assert files == [f.resolve()]
 
     def test_multiple_mentions(self, tmp_path: Path) -> None:
         a = tmp_path / "a.py"
         b = tmp_path / "b.py"
         a.write_text("a")
         b.write_text("b")
-        result = parse_file_mentions(f"diff @{a} @{b}", cwd=tmp_path)
-        assert set(result) == {a.resolve(), b.resolve()}
+        files, _ = parse_file_mentions(f"diff @{a} @{b}", cwd=tmp_path)
+        assert set(files) == {a.resolve(), b.resolve()}
 
     def test_missing_file_skipped(self, tmp_path: Path) -> None:
-        result = parse_file_mentions("@nonexistent.txt", cwd=tmp_path)
-        assert result == []
+        files, warnings = parse_file_mentions("@nonexistent.txt", cwd=tmp_path)
+        assert files == []
+        assert any("not found" in w for w in warnings)
 
     def test_email_address_ignored(self, tmp_path: Path) -> None:
-        result = parse_file_mentions("send to user@example.com", cwd=tmp_path)
-        assert result == []
+        files, warnings = parse_file_mentions("send to user@example.com", cwd=tmp_path)
+        assert files == []
+        assert warnings == []
 
     def test_directory_excluded(self, tmp_path: Path) -> None:
         d = tmp_path / "subdir"
         d.mkdir()
-        result = parse_file_mentions(f"@{d}", cwd=tmp_path)
-        assert result == []
+        files, _ = parse_file_mentions(f"@{d}", cwd=tmp_path)
+        assert files == []
 
     def test_bare_at_sign_ignored(self, tmp_path: Path) -> None:
-        result = parse_file_mentions("hello @ world", cwd=tmp_path)
-        assert result == []
+        files, warnings = parse_file_mentions("hello @ world", cwd=tmp_path)
+        assert files == []
+        assert warnings == []
 
     def test_tilde_expansion(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
         f = tmp_path / "file.txt"
         f.write_text("x")
-        result = parse_file_mentions("@~/file.txt", cwd=tmp_path)
-        assert result == [f.resolve()]
+        files, _ = parse_file_mentions("@~/file.txt", cwd=tmp_path)
+        assert files == [f.resolve()]
+
+    def test_duplicate_mention_deduplicated(self, tmp_path: Path) -> None:
+        """Mentioning the same file twice returns it only once."""
+        f = tmp_path / "file.txt"
+        f.write_text("hello")
+        files, _ = parse_file_mentions(f"@{f} and again @{f}", cwd=tmp_path)
+        assert files == [f.resolve()]
+
+    def test_outside_workspace_warns(self, tmp_path: Path) -> None:
+        """Files outside the workspace root trigger a warning but are still returned."""
+        outside = tmp_path.parent / "secret.txt"
+        outside.write_text("secret")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        files, warnings = parse_file_mentions(f"@{outside}", cwd=workspace)
+        assert files == [outside.resolve()]
+        assert any("outside the workspace" in w for w in warnings)
+
+    def test_inside_workspace_no_warning(self, tmp_path: Path) -> None:
+        """Files inside the workspace do NOT produce an outside-workspace warning."""
+        f = tmp_path / "safe.txt"
+        f.write_text("data")
+        _, warnings = parse_file_mentions(f"@{f}", cwd=tmp_path)
+        assert not any("outside the workspace" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -71,15 +98,16 @@ class TestParseFileMentions:
 class TestResolveFileMentions:
     def test_no_mentions_returns_original(self, tmp_path: Path) -> None:
         text = "just a normal message"
-        original, final = resolve_file_mentions(text, str(tmp_path))
+        original, final, warnings = resolve_file_mentions(text, str(tmp_path))
         assert original == text
         assert final == text
+        assert warnings == []
 
     def test_mention_appends_content(self, tmp_path: Path) -> None:
         f = tmp_path / "README.md"
         f.write_text("# Hello")
         text = f"summarise @{f}"
-        original, final = resolve_file_mentions(text, str(tmp_path))
+        original, final, _ = resolve_file_mentions(text, str(tmp_path))
         assert original == text
         assert "## Referenced Files" in final
         assert "README.md" in final
@@ -90,7 +118,7 @@ class TestResolveFileMentions:
         # Write more than 256 KB
         f.write_bytes(b"x" * (260 * 1024))
         text = f"read @{f}"
-        _, final = resolve_file_mentions(text, str(tmp_path))
+        _, final, _ = resolve_file_mentions(text, str(tmp_path))
         assert "too large to embed" in final
         assert "read_file" in final
 
@@ -99,7 +127,7 @@ class TestResolveFileMentions:
         b = tmp_path / "b.txt"
         a.write_text("AAA")
         b.write_text("BBB")
-        _, final = resolve_file_mentions(f"@{a} and @{b}", str(tmp_path))
+        _, final, _ = resolve_file_mentions(f"@{a} and @{b}", str(tmp_path))
         assert "AAA" in final
         assert "BBB" in final
 
@@ -107,15 +135,24 @@ class TestResolveFileMentions:
         f = tmp_path / "f.txt"
         f.write_text("content")
         text = f"look at @{f} please"
-        _, final = resolve_file_mentions(text, str(tmp_path))
+        _, final, _ = resolve_file_mentions(text, str(tmp_path))
         assert final.startswith(text)
 
     def test_none_workspace_uses_cwd(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         f = tmp_path / "local.txt"
         f.write_text("local")
-        _, final = resolve_file_mentions("@local.txt", None)
+        _, final, _ = resolve_file_mentions("@local.txt", None)
         assert "local" in final
+
+    def test_warnings_returned_not_printed(self, tmp_path: Path) -> None:
+        """Warnings are returned in the third element, not printed to stdout."""
+        outside = tmp_path.parent / "outside.txt"
+        outside.write_text("sensitive")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _, _, warnings = resolve_file_mentions(f"@{outside}", str(workspace))
+        assert any("outside the workspace" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------

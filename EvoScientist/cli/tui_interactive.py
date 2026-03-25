@@ -700,6 +700,7 @@ def run_textual_interactive(
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
             skip_user_message: bool = False,
+            file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
             channel_ask_user_fn: Callable[[dict], dict] | None = None,
         ) -> str:
@@ -723,6 +724,10 @@ def run_textual_interactive(
             # 1. Mount user message + loading spinner
             if not skip_user_message:
                 await container.mount(UserMessage(user_text))
+            # Mount file warnings after user message so they appear in the
+            # correct position (between user input and model response).
+            for w in file_warnings or []:
+                self._append_system(f"⚠ {w}", style="yellow")
             loading = LoadingWidget()
             await container.mount(loading)
             container.scroll_end(animate=False)
@@ -1389,12 +1394,14 @@ def run_textual_interactive(
             cancelled = False
 
             # Resolve @file mentions — inject file contents before sending to agent
-            _, message_to_send = await asyncio.to_thread(
+            _, message_to_send, file_warnings = await asyncio.to_thread(
                 resolve_file_mentions, user_text, workspace_dir
             )
 
             try:
-                await self._stream_with_widgets(message_to_send)
+                await self._stream_with_widgets(
+                    message_to_send, file_warnings=file_warnings
+                )
             except asyncio.CancelledError:
                 cancelled = True
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")

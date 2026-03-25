@@ -182,7 +182,10 @@ def _read_file(path: Path) -> str:
     return f"\n### {path.name}\nPath: `{path}`\n```\n{content}\n```"
 
 
-def parse_file_mentions(text: str, cwd: Path | None = None) -> list[Path]:
+def parse_file_mentions(
+    text: str,
+    cwd: Path | None = None,
+) -> tuple[list[Path], list[str]]:
     """Extract resolved ``@file`` paths from *text*.
 
     Args:
@@ -191,13 +194,19 @@ def parse_file_mentions(text: str, cwd: Path | None = None) -> list[Path]:
               process working directory.
 
     Returns:
-        List of resolved, existing ``Path`` objects (directories excluded).
-        Unresolvable or missing paths are skipped with a printed warning.
+        ``(files, warnings)`` — deduplicated list of resolved, existing
+        ``Path`` objects (directories excluded) in order of first appearance,
+        and a list of human-readable warning strings to be displayed by the
+        caller.  Callers must display the warnings themselves using the
+        appropriate UI mechanism (Rich console, Textual widget, etc.).
     """
     if cwd is None:
         cwd = Path.cwd()
 
+    workspace_root = cwd.resolve()
     files: list[Path] = []
+    warnings: list[str] = []
+    seen: set[Path] = set()
     for match in FILE_MENTION_PATTERN.finditer(text):
         # Skip email addresses — character immediately before @ is alphanumeric
         before = text[: match.start()]
@@ -212,21 +221,34 @@ def parse_file_mentions(text: str, cwd: Path | None = None) -> list[Path]:
             if not p.is_absolute():
                 p = cwd / p
             resolved = p.resolve()
-            if resolved.exists() and resolved.is_file():
-                files.append(resolved)
-            else:
-                print(f"[warning] @file not found: {raw}")
+            if not resolved.exists() or not resolved.is_file():
+                warnings.append(f"@file not found: {raw}")
+                continue
+            # Warn when the file lives outside the workspace root — it may
+            # contain sensitive content (e.g. @~/.ssh/id_rsa).
+            try:
+                resolved.relative_to(workspace_root)
+            except ValueError:
+                warnings.append(
+                    f"@{raw} is outside the workspace "
+                    f"({workspace_root}) — embedding may expose sensitive files"
+                )
+            # Deduplicate: skip paths already seen in this message.
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(resolved)
         except (OSError, RuntimeError) as exc:
-            print(f"[warning] invalid @file path {raw!r}: {exc}")
+            warnings.append(f"invalid @file path {raw!r}: {exc}")
 
-    return files
+    return files, warnings
 
 
 def resolve_file_mentions(
     text: str,
     workspace_dir: str | None = None,
-) -> tuple[str, str]:
-    """Parse ``@file`` mentions and return *(original_text, final_prompt)*.
+) -> tuple[str, str, list[str]]:
+    """Parse ``@file`` mentions and return *(original_text, final_prompt, warnings)*.
 
     *final_prompt* equals *original_text* when no valid mentions are found,
     otherwise it appends a ``## Referenced Files`` section with the file
@@ -237,14 +259,15 @@ def resolve_file_mentions(
         workspace_dir: Workspace root used for resolving relative paths.
 
     Returns:
-        ``(original_text, final_prompt)`` — the first element is always the
-        unchanged input; the second is the prompt to send to the agent.
+        ``(original_text, final_prompt, warnings)`` — the first element is
+        always the unchanged input; the second is the prompt to send to the
+        agent; the third is a list of warning strings to display to the user.
     """
     cwd = Path(workspace_dir) if workspace_dir else None
-    files = parse_file_mentions(text, cwd=cwd)
+    files, warnings = parse_file_mentions(text, cwd=cwd)
 
     if not files:
-        return text, text
+        return text, text, warnings
 
     parts = [text, "\n\n## Referenced Files\n"]
     for path in files:
@@ -253,7 +276,7 @@ def resolve_file_mentions(
         except (OSError, UnicodeDecodeError) as exc:
             parts.append(f"\n### {path.name}\n[Error reading file: {exc}]")
 
-    return text, "\n".join(parts)
+    return text, "\n".join(parts), warnings
 
 
 # ---------------------------------------------------------------------------

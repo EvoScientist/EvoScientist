@@ -922,11 +922,15 @@ def cmd_interactive(
                             continue
 
                         # Resolve @file mentions — inject file contents inline
-                        _, message_to_send = resolve_file_mentions(
+                        _, message_to_send, file_warnings = resolve_file_mentions(
                             user_input, state["workspace_dir"]
                         )
 
                         # Stream agent response with metadata for persistence
+                        # Warnings printed here so they appear just before the
+                        # model response, not before the user input echo.
+                        for w in file_warnings:
+                            console.print(f"[yellow]⚠ {w}[/yellow]")
                         console.print()
                         meta = build_metadata(state["workspace_dir"], model)
                         run_streaming(
