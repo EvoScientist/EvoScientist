@@ -141,8 +141,8 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
     from .middleware import ContextOverflowMapperMiddleware, ToolErrorHandlerMiddleware
 
     for sa in subs:
-        sa.setdefault("middleware", []).append(
-            ToolErrorHandlerMiddleware(), ContextOverflowMapperMiddleware()
+        sa.setdefault("middleware", []).extend(
+            [ToolErrorHandlerMiddleware(), ContextOverflowMapperMiddleware()]
         )
 
 
