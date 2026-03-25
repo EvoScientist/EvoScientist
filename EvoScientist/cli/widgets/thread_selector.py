@@ -73,19 +73,28 @@ def _group_by_ancestor(norm_paths: list[str]) -> dict[str, list[str]]:
     full path.
 
     The returned dict is ordered by first appearance in *norm_paths*.
+
+    Complexity: O(n log n) — paths are sorted lexicographically so the
+    maximum common prefix depth for each path is found by comparing only
+    its immediate neighbours in sorted order (not all pairs).
     """
-    path_to_ancestor: dict[str, str] = {}
-    for i, p in enumerate(norm_paths):
+    sorted_paths = sorted(norm_paths)
+    n = len(sorted_paths)
+
+    # Single pass over sorted list: max common prefix is always with a neighbour.
+    sorted_best: dict[str, int] = {}
+    for i, p in enumerate(sorted_paths):
         best = 1  # at minimum depth 1 (~)
-        for j, other in enumerate(norm_paths):
-            if i != j:
-                best = max(best, _common_prefix_depth(p, other))
-        # Only group if they truly share a meaningful ancestor (>= 2 levels)
-        if best >= 2:
-            ancestor = "/".join(p.split("/")[:best])
-        else:
-            ancestor = p  # standalone
-        path_to_ancestor[p] = ancestor
+        if i > 0:
+            best = max(best, _common_prefix_depth(p, sorted_paths[i - 1]))
+        if i < n - 1:
+            best = max(best, _common_prefix_depth(p, sorted_paths[i + 1]))
+        sorted_best[p] = best
+
+    path_to_ancestor: dict[str, str] = {
+        p: ("/".join(p.split("/")[:best]) if best >= 2 else p)
+        for p, best in sorted_best.items()
+    }
 
     groups: dict[str, list[str]] = {}
     for p in norm_paths:
