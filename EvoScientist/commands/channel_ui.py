@@ -126,6 +126,9 @@ class ChannelCommandUI(CommandUI):
     def request_quit(self) -> None:
         self.append_system("Quit command ignored in channel.")
 
+    def force_quit(self) -> None:
+        self.request_quit()
+
     def start_new_session(self) -> None:
         if self.start_new_session_callback:
             self.start_new_session_callback()

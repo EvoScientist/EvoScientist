@@ -2007,6 +2007,10 @@ def run_textual_interactive(
                 lambda: setattr(self, "_quit_pending", False),
             )
 
+        def force_quit(self) -> None:
+            """Exit immediately without double-press confirmation (used by /exit command)."""
+            self._do_exit()
+
         def _do_exit(self) -> None:
             """Clean up channels and exit."""
             if self._channel_timer is not None:

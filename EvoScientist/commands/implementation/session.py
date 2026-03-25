@@ -261,7 +261,7 @@ class ExitCommand(Command):
     description = "Quit EvoScientist"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        ctx.ui.request_quit()
+        ctx.ui.force_quit()
 
 
 # Register session commands
