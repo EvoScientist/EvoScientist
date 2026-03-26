@@ -40,8 +40,19 @@ AGENT_NAME = "EvoScientist"
 
 
 def get_db_path() -> Path:
-    """Return ``~/.config/evoscientist/sessions.db``, creating parents."""
-    db_dir = Path.home() / ".config" / "evoscientist"
+    """Return ``~/.config/evoscientist/sessions.db``, creating parents.
+
+    Supports XDG_CONFIG_HOME environment variable to override default location.
+    This is useful on Windows systems with non-ASCII usernames where SQLite
+    may have issues with Unicode paths.
+    """
+    import os
+
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        db_dir = Path(xdg_config) / "evoscientist"
+    else:
+        db_dir = Path.home() / ".config" / "evoscientist"
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / "sessions.db"
 
