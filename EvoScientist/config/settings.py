@@ -8,7 +8,7 @@ with the following priority (highest to lowest):
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal
 
@@ -206,6 +206,9 @@ class EvoScientistConfig:
     stt_model: str = ""  # override model id; empty = auto-select by language
     stt_device: str = "cpu"  # "cpu" | "cuda"
     stt_compute_type: str = "int8"  # "int8" | "float16" | "float32"
+
+    # error handling
+    fallback_models: list[str] = field(default_factory=list)
 
 
 # =============================================================================

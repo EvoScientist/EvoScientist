@@ -23,7 +23,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, ModelFallbackMiddleware
 
 from . import paths as _paths_mod
 from .config import apply_config_to_env, get_effective_config
@@ -46,6 +46,7 @@ SKILLS_DIR = str(Path(__file__).parent / "skills")
 
 _config = None
 _chat_model = None
+_needs_update = False
 
 # Cache MCP tools by the effective config signature to avoid reconnecting
 # to MCP servers on every `/new` when config is unchanged.
@@ -65,13 +66,13 @@ _EvoScientist_agent = None
 
 def _ensure_config(config=None):
     """Return cached config.  If *config* is passed, cache and use it."""
-    global _config
-    if config is not None:
-        _config = config
-        apply_config_to_env(_config)
-    if _config is None:
+    global _config, _needs_update
+    if _needs_update:
         _config = get_effective_config()
-        apply_config_to_env(_config)
+        _needs_update = False
+    else:
+        _config = config or get_effective_config()
+    apply_config_to_env(_config)
     return _config
 
 
@@ -323,9 +324,65 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-# =============================================================================
-# CLI agent factory
-# =============================================================================
+class InfoModelFallbackMiddleware(ModelFallbackMiddleware):
+    def _print_msg(self, msg: str, style: str = "dim"):
+        try:
+            from textual._context import active_app
+
+            app = active_app.get()
+            app.append_system(msg, style=style)
+        except Exception:
+            print(msg)
+
+    def wrap_model_call(self, request, handler):
+        try:
+            return handler(request)
+        except Exception as e:
+            self._print_msg(f"Model failed: {type(e).__name__}: {e}", style="red")
+            last_exception = e
+
+        for fallback_model in self.models:
+            name = getattr(
+                fallback_model,
+                "model",
+                getattr(fallback_model, "model_name", str(fallback_model)),
+            )
+            self._print_msg(f"Switching to fallback model: {name}", style="yellow")
+            try:
+                return handler(request.override(model=fallback_model))
+            except Exception as e:
+                self._print_msg(
+                    f"Fallback model failed: {type(e).__name__}: {e}", style="red"
+                )
+                last_exception = e
+                continue
+
+        raise last_exception
+
+    async def awrap_model_call(self, request, handler):
+        try:
+            return await handler(request)
+        except Exception as e:
+            self._print_msg(f"Model failed: {type(e).__name__}: {e}", style="red")
+            last_exception = e
+
+        for fallback_model in self.models:
+            name = getattr(
+                fallback_model,
+                "model",
+                getattr(fallback_model, "model_name", str(fallback_model)),
+            )
+            self._print_msg(f"Switching to fallback model: {name}", style="yellow")
+            try:
+                return await handler(request.override(model=fallback_model))
+            except Exception as e:
+                self._print_msg(
+                    f"Fallback model failed: {type(e).__name__}: {e}", style="red"
+                )
+                last_exception = e
+                continue
+
+        raise last_exception
 
 
 def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config=None):
@@ -413,6 +470,20 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
+
+    if cfg.fallback_models:
+        from .llm import get_chat_model
+
+        fallback_instances = []
+        for fm in cfg.fallback_models:
+            if ":" in fm:
+                provider, model_name = fm.split(":", 1)
+                fallback_instances.append(
+                    get_chat_model(model=model_name, provider=provider)
+                )
+            else:
+                fallback_instances.append(get_chat_model(model=fm))
+        mw.append(InfoModelFallbackMiddleware(*fallback_instances))
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(be, mw)
