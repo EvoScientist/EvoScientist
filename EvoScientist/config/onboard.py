@@ -337,7 +337,7 @@ def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
 
 
 def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
-    """Validate an OpenRouter API key by making a test request.
+    """Validate an OpenRouter API key via the authenticated /auth/key endpoint.
 
     Returns:
         Tuple of (is_valid, message).
@@ -346,20 +346,17 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         return True, "Skipped (no key provided)"
 
     try:
-        import openai
+        import httpx
 
-        client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        client.models.list()
-        return True, "Valid"
+        resp = httpx.get(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, "Valid"
+        return False, "Invalid API key"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
         return False, f"Error: {e}"
 
 
