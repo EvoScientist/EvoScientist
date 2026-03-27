@@ -495,6 +495,18 @@ def get_chat_model(
 
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
 
+    # User-level override for the OpenAI Responses API vs Chat Completions.
+    # When "false", force Chat Completions and drop reasoning (which triggers
+    # the Responses API path in langchain-openai).
+    _responses_api_setting = (
+        os.environ.get("EVOSCIENTIST_USE_RESPONSES_API", "").strip().lower()
+    )
+    if _responses_api_setting == "false":
+        kwargs["use_responses_api"] = False
+        kwargs.pop("reasoning", None)
+    elif _responses_api_setting == "true":
+        kwargs["use_responses_api"] = True
+
     chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
     # Flatten list content to strings for OpenAI-compatible providers
