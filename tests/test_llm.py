@@ -790,3 +790,42 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["include_thoughts"] is True
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_false(self, mock_init, monkeypatch):
+        """use_responses_api=false forces Chat Completions and drops reasoning."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "false")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is False
+        assert "reasoning" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_true(self, mock_init, monkeypatch):
+        """use_responses_api=true explicitly enables the Responses API."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "true")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is True
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_default_unchanged(self, mock_init, monkeypatch):
+        """Empty use_responses_api preserves default behavior (no kwarg set)."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "use_responses_api" not in call_kwargs
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}

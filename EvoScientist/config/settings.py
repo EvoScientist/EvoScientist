@@ -197,6 +197,9 @@ class EvoScientistConfig:
     # DM access control policy
     dm_policy: str = "allowlist"
 
+    # OpenAI API mode - "" = auto, "true" = force Responses, "false" = force Completions
+    use_responses_api: str = ""
+
     # ccproxy
     ccproxy_port: int = 8000
 
@@ -372,6 +375,7 @@ _ENV_MAPPINGS = {
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
+    "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
 }
 
 
