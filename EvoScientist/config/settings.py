@@ -472,3 +472,7 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["OLLAMA_BASE_URL"] = config.ollama_base_url
     if config.tavily_api_key and not os.environ.get("TAVILY_API_KEY"):
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
+    if config.use_responses_api and not os.environ.get(
+        "EVOSCIENTIST_USE_RESPONSES_API"
+    ):
+        os.environ["EVOSCIENTIST_USE_RESPONSES_API"] = config.use_responses_api

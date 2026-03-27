@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from EvoScientist.llm import (
     DEFAULT_MODEL,
     MODELS,
@@ -829,3 +831,34 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert "use_responses_api" not in call_kwargs
         assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    @pytest.mark.parametrize("env_value", ["FALSE", " false ", "False"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_false_normalization(
+        self, mock_init, monkeypatch, env_value
+    ):
+        """Case/whitespace variants of 'false' are normalized correctly."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", env_value)
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is False
+        assert "reasoning" not in call_kwargs
+
+    @pytest.mark.parametrize("env_value", ["TRUE", " true ", "True"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_true_normalization(
+        self, mock_init, monkeypatch, env_value
+    ):
+        """Case/whitespace variants of 'true' are normalized correctly."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", env_value)
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is True
