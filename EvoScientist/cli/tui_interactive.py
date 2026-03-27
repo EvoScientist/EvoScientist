@@ -1805,12 +1805,8 @@ def run_textual_interactive(
                 return
 
             prompt = self.query_one("#prompt", ChatTextArea)
-            # Insert at cursor position
-            pos = prompt.cursor_position
-            current = prompt.value
-            new_value = current[:pos] + text + current[pos:]
-            prompt.value = new_value
-            prompt.cursor_position = pos + len(text)
+            prompt.insert(text)
+            prompt.focus()
 
         def action_tab_complete(self) -> None:
             """Handle TAB: cycle completions when visible, otherwise no-op.
@@ -1873,8 +1869,6 @@ def run_textual_interactive(
                 prompt.value = new_val
             else:
                 prompt.value = selected + " "
-
-            prompt.cursor_position = len(prompt.value)
 
         def _hide_completions(self) -> None:
             self._comp_items = []
