@@ -46,33 +46,38 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 <table>
   <tr>
-    <td align="center" valign="top" width="25%">
-      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_data.png" height="180" alt="AstaBench Data Analysis #1"/>
-      <br />
-      <sub><b>#1 on AstaBench Data Analysis</b></sub>
-    </td>
-    <td align="center" valign="top" width="25%">
-      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_code.png" height="180" alt="AstaBench Code & Execution #1"/>
-      <br />
-      <sub><b>#1 on AstaBench Code & Execution</b></sub>
-    </td>
-    <td align="center" valign="top" width="25%">
-      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/deepresearch_bench_2.JPG" height="180" alt="DeepResearch Bench II #1"/>
-      <br />
-      <sub><b>#1 on DeepResearch Bench II</b></sub>
-    </td>
-    <td align="center" valign="top" width="25%">
+      <td align="center" valign="top" width="33%">
       <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_awards.JPG" height="180" alt="ICAIS 2025 Awards"/>
       <br />
       <sub><b>Best Paper & Appraisal Award</b></sub>
     </td>
-  </tr>
-  <tr>
-    <td align="center" valign="top" width="25%">
+    <td align="center" valign="top" width="33%">
       <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_best_paper.png" height="180" alt="Best Paper"/>
       <br />
       <sub><b>AI-Generated Best Paper</b></sub>
     </td>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/deepresearch_bench_2.JPG" height="180" alt="DeepResearch Bench II #1"/>
+      <br />
+      <sub><b>#1 on DeepResearch Bench II</b></sub>
+    </td>
+  </tr>
+</table>
+
+<br />
+
+<table>
+  <tr>
+          </td>
+    <td align="center" valign="top" width="50%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_code.png" height="180" alt="AstaBench Code & Execution #1"/>
+      <br />
+      <sub><b>#1 on AstaBench Code & Execution</b></sub>
+    </td>
+    <td align="center" valign="top" width="50%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_data.png" height="180" alt="AstaBench Data Analysis #1"/>
+      <br />
+      <sub><b>#1 on AstaBench Data Analysis</b></sub>
   </tr>
 </table>
 
