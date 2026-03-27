@@ -1714,9 +1714,14 @@ def _step_tinytex() -> None:
     when none is found.  The agent can auto-install missing LaTeX packages at
     runtime via ``tlmgr``, so only the base TinyTeX is needed here.
     """
-    prepare = questionary.confirm(
-        "Prepare LaTeX environment? (needed to compile .tex → .pdf)",
-        default=True,
+    latex_choices = [
+        Choice(title="No need (skip LaTeX setup)", value=False),
+        Choice(title="Install now (TinyTeX compiler)", value=True),
+    ]
+    prepare = questionary.select(
+        "LaTeX environment (needed to compile .tex → .pdf):",
+        choices=latex_choices,
+        default=False,
         style=WIZARD_STYLE,
         qmark=QMARK,
     ).ask()

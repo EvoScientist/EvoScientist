@@ -1248,7 +1248,7 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_step_skipped") as mock_ps,
             patch("EvoScientist.config.onboard.console"),
         ):
-            mock_q.confirm.return_value.ask.return_value = False
+            mock_q.select.return_value.ask.return_value = False
             _step_tinytex()
             mock_ps.assert_called_once_with("LaTeX", "skipped")
 
@@ -1269,7 +1269,7 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_latex_status") as mock_status,
             patch("EvoScientist.config.onboard.console"),
         ):
-            mock_q.confirm.return_value.ask.return_value = True
+            mock_q.select.return_value.ask.return_value = True
             _step_tinytex()
             mock_status.assert_called_once()
 
@@ -1291,7 +1291,7 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._auto_install_latexmk") as mock_auto,
             patch("EvoScientist.config.onboard.console"),
         ):
-            mock_q.confirm.return_value.ask.return_value = True
+            mock_q.select.return_value.ask.return_value = True
             _step_tinytex()
             mock_auto.assert_called_once()
 
@@ -1319,6 +1319,7 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_latex_status"),
             patch("EvoScientist.config.onboard.console"),
         ):
+            mock_q.select.return_value.ask.return_value = True
             mock_q.confirm.return_value.ask.return_value = True
             _step_tinytex()
             mock_pr.assert_called_once_with("LaTeX", "TinyTeX installed")
@@ -1341,8 +1342,8 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_step_skipped") as mock_ps,
             patch("EvoScientist.config.onboard.console"),
         ):
-            # First confirm (prepare) = True, second confirm (install) = False
-            mock_q.confirm.return_value.ask.side_effect = [True, False]
+            mock_q.select.return_value.ask.return_value = True
+            mock_q.confirm.return_value.ask.return_value = False
             _step_tinytex()
             mock_ps.assert_called_once_with("LaTeX", "skipped")
 
@@ -1368,6 +1369,7 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_step_result") as mock_pr,
             patch("EvoScientist.config.onboard.console"),
         ):
+            mock_q.select.return_value.ask.return_value = True
             mock_q.confirm.return_value.ask.return_value = True
             _step_tinytex()
             mock_pr.assert_called_once_with(
@@ -1396,6 +1398,7 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_step_result") as mock_pr,
             patch("EvoScientist.config.onboard.console") as mock_con,
         ):
+            mock_q.select.return_value.ask.return_value = True
             mock_q.confirm.return_value.ask.return_value = True
             _step_tinytex()
             path_warning_printed = any(
@@ -1424,7 +1427,6 @@ class TestStepTinytex:
             patch("EvoScientist.config.onboard._print_step_skipped") as mock_ps,
             patch("EvoScientist.config.onboard.console"),
         ):
-            # Only one confirm call (prepare=True), no second confirm for manual
-            mock_q.confirm.return_value.ask.return_value = True
+            mock_q.select.return_value.ask.return_value = True
             _step_tinytex()
             mock_ps.assert_called_once_with("LaTeX", "manual install needed")
