@@ -108,6 +108,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **🌐 Multi-Provider** — Anthropic, OpenAI, Google, MiniMax, NVIDIA — one config to switch.
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
+- **🔄 Code Generation Modes** — Choose Lite (single-pass) or More Effort (iterative plan → code → evaluate → refine) per conversation via `experiment-iterative-coder` skill.
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
 
 > [!TIP]

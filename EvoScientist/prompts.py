@@ -60,6 +60,30 @@ Read the appropriate skill's `SKILL.md` for workflow guidance at each phase.
   - `/success_criteria.md` for success signals
 
 ## Step 3: Execute & Debug
+
+### Code Generation Dispatch (based on user's mode choice)
+When delegating code tasks to code-agent, apply the mode selected by the user:
+
+- **Lite** (or no mode selected): Delegate to code-agent normally using the `task` tool.
+  Standard single-pass code generation, no special workflow.
+
+- **More Effort**: BEFORE delegating, verify the skill exists:
+  1. Read `/skills/experiment-iterative-coder/SKILL.md`
+  2. If the file is NOT found → STOP. Do NOT delegate to code-agent. Do NOT fall back to Lite.
+     Tell the user immediately:
+     "The experiment-iterative-coder skill is not installed. Install it with:
+     `/install-skill EvoScientist/EvoSkills@skills/experiment-iterative-coder`
+     Then retry, or choose Lite mode."
+     Then re-ask the mode selection.
+  3. If the file exists → delegate to code-agent with this instruction prefix:
+     "MODE: MORE_EFFORT — Read /skills/experiment-iterative-coder/SKILL.md and follow
+     the iterative refinement workflow described there. Run plan→code→evaluate→refine
+     cycles until the quality target is met or iteration budget is exhausted."
+     code-agent will read the skill and execute the iterative loop autonomously.
+
+- **Skip**: Do not delegate any code generation task. Proceed with analysis/writing steps only.
+
+### Task Delegation
 - Delegate tasks to sub-agents using the `task` tool:
   - Planning/structuring → planner-agent
   - Methods/baselines/datasets → research-agent

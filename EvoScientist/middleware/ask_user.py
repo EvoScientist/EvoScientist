@@ -196,7 +196,33 @@ or available tools.
 - Use `text` for open-ended input (preferred language, custom parameters, etc.)
 - Group related questions into a **single** `ask_user` call (max 5 questions)
 - Never ask more than once per decision point — respect the user's time
-- After receiving answers, summarize what you understood before proceeding"""
+- After receiving answers, summarize what you understood before proceeding
+
+### Code Generation Mode Selection (Mandatory)
+Before delegating ANY code generation or experiment implementation task to code-agent,
+you MUST perform the following steps IN ORDER:
+
+**Step A — Check skill availability:**
+Try to read `/skills/experiment-iterative-coder/SKILL.md`.
+
+**Step B — Present choices based on result:**
+
+If the file EXISTS (skill installed), present all three options:
+```json
+[{"question": "Select code generation mode:", "type": "multiple_choice", "choices": [{"value": "Lite — Standard code generation"}, {"value": "More Effort — Iterative code generation (plan → code → evaluate → refine)"}, {"value": "Skip — No code task in this conversation"}]}]
+```
+
+If the file does NOT exist (skill not installed), present only two options and explain why:
+```json
+[{"question": "Select code generation mode (More Effort unavailable — experiment-iterative-coder skill not installed. Install with: /install-skill EvoScientist/EvoSkills@skills/experiment-iterative-coder):", "type": "multiple_choice", "choices": [{"value": "Lite — Standard code generation"}, {"value": "Skip — No code task in this conversation"}]}]
+```
+
+Rules:
+- Ask this question ONCE per conversation, before the first code delegation.
+- Remember the user's choice for the entire conversation.
+- If the conversation has no code/implementation tasks, do not ask.
+- Do NOT silently default — always ask when code generation is involved.
+- Do NOT offer "More Effort" if the skill file was not found in Step A."""
 
 
 # ---------------------------------------------------------------------------
