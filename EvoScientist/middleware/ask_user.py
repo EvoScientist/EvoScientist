@@ -172,6 +172,7 @@ or available tools.
 - **Paper or report preferences**: "Which venue format should I target: NeurIPS, ICML, or ICLR?"
 - **Ambiguous instructions**: When the user's request has multiple valid interpretations
 - **Resource constraints**: When the approach depends on available compute, time, or data
+- **Code generation mode**: When an iterative-coding skill (e.g. `experiment-iterative-coder`) is installed, ask the user which mode to use before delegating code tasks
 
 ### Resource & execution awareness (`ask_user` is especially valuable here):
 - **Pre-execution estimation**: Before heavy compute (training, large-scale eval),
@@ -182,6 +183,9 @@ or available tools.
   (A) run in background, (B) reduce epochs, (C) switch to smaller model"
 - **Intermediate checkpoints**: When results diverge from expectations, ask before
   continuing. E.g. "Baseline accuracy 62% vs expected 80%. Investigate or proceed?"
+- **Workflow mode selection**: When multiple execution strategies are available
+  (e.g. single-pass vs iterative refinement via `experiment-iterative-coder`),
+  let the user choose before committing to a path
 
 ### When NOT to use `ask_user`:
 - Simple yes/no decisions — proceed with your best judgment
@@ -196,33 +200,7 @@ or available tools.
 - Use `text` for open-ended input (preferred language, custom parameters, etc.)
 - Group related questions into a **single** `ask_user` call (max 5 questions)
 - Never ask more than once per decision point — respect the user's time
-- After receiving answers, summarize what you understood before proceeding
-
-### Code Generation Mode Selection (Mandatory)
-Before delegating ANY code generation or experiment implementation task to code-agent,
-you MUST perform the following steps IN ORDER:
-
-**Step A — Check skill availability:**
-Try to read `/skills/experiment-iterative-coder/SKILL.md`.
-
-**Step B — Present choices based on result:**
-
-If the file EXISTS (skill installed), present all three options:
-```json
-[{"question": "Select code generation mode:", "type": "multiple_choice", "choices": [{"value": "Lite — Standard code generation"}, {"value": "More Effort — Iterative code generation (plan → code → evaluate → refine)"}, {"value": "Skip — No code task in this conversation"}]}]
-```
-
-If the file does NOT exist (skill not installed), present only two options and explain why:
-```json
-[{"question": "Select code generation mode (More Effort unavailable — experiment-iterative-coder skill not installed. Install with: /install-skill EvoScientist/EvoSkills@skills/experiment-iterative-coder):", "type": "multiple_choice", "choices": [{"value": "Lite — Standard code generation"}, {"value": "Skip — No code task in this conversation"}]}]
-```
-
-Rules:
-- Ask this question ONCE per conversation, before the first code delegation.
-- Remember the user's choice for the entire conversation.
-- If the conversation has no code/implementation tasks, do not ask.
-- Do NOT silently default — always ask when code generation is involved.
-- Do NOT offer "More Effort" if the skill file was not found in Step A."""
+- After receiving answers, summarize what you understood before proceeding"""
 
 
 # ---------------------------------------------------------------------------

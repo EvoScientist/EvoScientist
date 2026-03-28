@@ -60,28 +60,18 @@ Read the appropriate skill's `SKILL.md` for workflow guidance at each phase.
   - `/success_criteria.md` for success signals
 
 ## Step 3: Execute & Debug
+Before any code delegation, you MUST complete the Code Generation Mode Selection below.
 
-### Code Generation Dispatch (based on user's mode choice)
-When delegating code tasks to code-agent, apply the mode selected by the user:
+### Code Generation Mode Selection
+Before delegating code tasks to code-agent, ask the user which code generation
+mode they prefer. Do not skip this step or assume a default silently.
 
-- **Lite** (or no mode selected): Delegate to code-agent normally using the `task` tool.
-  Standard single-pass code generation, no special workflow.
+- **Lite** (default): Delegate to code-agent normally via the `task` tool.
 
-- **More Effort**: BEFORE delegating, verify the skill exists:
-  1. Read `/skills/experiment-iterative-coder/SKILL.md`
-  2. If the file is NOT found → STOP. Do NOT delegate to code-agent. Do NOT fall back to Lite.
-     Tell the user immediately:
-     "The experiment-iterative-coder skill is not installed. Install it with:
-     `/install-skill EvoScientist/EvoSkills@skills/experiment-iterative-coder`
-     Then retry, or choose Lite mode."
-     Then re-ask the mode selection.
-  3. If the file exists → delegate to code-agent with this instruction prefix:
-     "MODE: MORE_EFFORT — Read /skills/experiment-iterative-coder/SKILL.md and follow
-     the iterative refinement workflow described there. Run plan→code→evaluate→refine
-     cycles until the quality target is met or iteration budget is exhausted."
-     code-agent will read the skill and execute the iterative loop autonomously.
-
-- **Skip**: Do not delegate any code generation task. Proceed with analysis/writing steps only.
+- **More Effort**: Check whether the `experiment-iterative-coder` skill is installed.
+  - If NOT installed → STOP. Do NOT fall back to Lite silently. Inform the user
+    and suggest installing it, or choosing Lite mode. Then re-select.
+  - If installed → delegate to code-agent with the `experiment-iterative-coder` skill.
 
 ### Task Delegation
 - Delegate tasks to sub-agents using the `task` tool:
