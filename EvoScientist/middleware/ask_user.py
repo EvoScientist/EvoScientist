@@ -172,6 +172,7 @@ or available tools.
 - **Paper or report preferences**: "Which venue format should I target: NeurIPS, ICML, or ICLR?"
 - **Ambiguous instructions**: When the user's request has multiple valid interpretations
 - **Resource constraints**: When the approach depends on available compute, time, or data
+- **Code generation mode**: When an iterative-coding skill (e.g. `experiment-iterative-coder`) is installed, ask the user which mode to use before delegating code tasks
 
 ### Resource & execution awareness (`ask_user` is especially valuable here):
 - **Pre-execution estimation**: Before heavy compute (training, large-scale eval),
@@ -182,6 +183,9 @@ or available tools.
   (A) run in background, (B) reduce epochs, (C) switch to smaller model"
 - **Intermediate checkpoints**: When results diverge from expectations, ask before
   continuing. E.g. "Baseline accuracy 62% vs expected 80%. Investigate or proceed?"
+- **Workflow mode selection**: When multiple execution strategies are available
+  (e.g. single-pass vs iterative refinement via `experiment-iterative-coder`),
+  let the user choose before committing to a path
 
 ### When NOT to use `ask_user`:
 - Simple yes/no decisions — proceed with your best judgment
