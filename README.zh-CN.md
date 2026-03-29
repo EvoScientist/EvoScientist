@@ -165,6 +165,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv tool install EvoScientist
 ```
 
+> [!NOTE]
+> 更新已安装的版本到最新，请使用 `uv tool upgrade`：
+> ```bash
+> uv tool upgrade EvoScientist
+> ```
+
 或安装到当前环境：
 
 ```bash
