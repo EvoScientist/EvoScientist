@@ -114,12 +114,20 @@ class TestResolveFileMentions:
         assert "# Hello" in final
 
     def test_large_file_reference_only(self, tmp_path: Path) -> None:
-        f = tmp_path / "big.bin"
-        # Write more than 256 KB
+        f = tmp_path / "big.txt"
+        # Write more than 256 KB — use .txt so it's not caught by binary check
         f.write_bytes(b"x" * (260 * 1024))
         text = f"read @{f}"
         _, final, _ = resolve_file_mentions(text, str(tmp_path))
         assert "too large to embed" in final
+        assert "read_file" in final
+
+    def test_binary_file_reference_only(self, tmp_path: Path) -> None:
+        f = tmp_path / "image.png"
+        f.write_bytes(b"\x89PNG\r\n" + b"\x00" * 100)
+        text = f"look at @{f}"
+        _, final, _ = resolve_file_mentions(text, str(tmp_path))
+        assert "binary file" in final
         assert "read_file" in final
 
     def test_multiple_files_all_embedded(self, tmp_path: Path) -> None:

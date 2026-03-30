@@ -32,6 +32,9 @@ _EMAIL_PREFIX = re.compile(r"[a-zA-Z0-9._%+-]$")
 # Files larger than this are referenced by path only (not embedded inline).
 _MAX_EMBED_BYTES = 256 * 1024  # 256 KB
 
+# Bytes to sample for binary detection (null byte check).
+_BINARY_PROBE_BYTES = 8192
+
 # Fuzzy search thresholds (ported from DeepAgents FuzzyFileController)
 _MIN_FUZZY_SCORE = 15
 _MIN_FUZZY_RATIO = 0.4
@@ -170,6 +173,14 @@ def _read_file(path: Path) -> str:
     hint to use the ``read_file`` tool instead.
     """
     size = path.stat().st_size
+    # Binary detection: sample first bytes for null byte (covers all formats).
+    with open(path, "rb") as fh:
+        if b"\x00" in fh.read(_BINARY_PROBE_BYTES):
+            return (
+                f"\n### {path.name}\n"
+                f"Path: `{path}`\n"
+                "(binary file — use the read_file tool to view it)"
+            )
     if size > _MAX_EMBED_BYTES:
         size_kb = size // 1024
         return (
