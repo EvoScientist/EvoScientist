@@ -55,6 +55,30 @@ def _patch_anthropic_proxy_compat() -> None:
 
 _patch_anthropic_proxy_compat()
 
+
+# ---------------------------------------------------------------------------
+# Patch: langchain-openrouter v0.2.1 — _convert_message_to_dict() serializes
+# reasoning_details back to the API, but streaming chunks use wrong field
+# names per type (thinking→content, reasoning.summary→summary,
+# reasoning.encrypted→data), causing Pydantic errors on multi-turn.
+# Fix: wrap the function to drop reasoning_details from output.
+# ---------------------------------------------------------------------------
+def _patch_openrouter_reasoning_details() -> None:
+    try:
+        import langchain_openrouter.chat_models as _mod
+
+        _orig = _mod._convert_message_to_dict
+
+        def _patched(message: Any) -> Any:
+            result = _orig(message)
+            result.pop("reasoning_details", None)
+            return result
+
+        _mod._convert_message_to_dict = _patched
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Patch: ccproxy Codex embeds thinking as <thinking>...</thinking> tags
 # inside the content string. Strip these so they don't appear in output.
@@ -465,10 +489,9 @@ def get_chat_model(
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
         provider = "openai"
 
-    # OpenRouter → native ChatOpenRouter via init_chat_model with first-class
-    # reasoning support. Requires patch_langchain_openrouter.py for streaming
-    # reasoning_details merge bug (see scripts/patch_langchain_openrouter.py).
+    # OpenRouter → native ChatOpenRouter via init_chat_model.
     elif provider == "openrouter":
+        _patch_openrouter_reasoning_details()
         _is_third_party = True
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if api_key:
