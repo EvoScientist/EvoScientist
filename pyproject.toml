@@ -23,6 +23,7 @@ dependencies = [
     "langchain-nvidia-ai-endpoints>=0.3",
     "langchain-google-genai>=4.2.1",
     "langchain-ollama>=1.0",
+    "langchain-openrouter>=0.2.1",
     "tavily-python>=0.7",
     "pyyaml>=6.0",
     "rich>=14.0",
