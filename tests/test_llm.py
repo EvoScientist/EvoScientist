@@ -634,18 +634,18 @@ class TestFlattenMessageContent:
     """Tests for the content-flattening utility used by OpenAI-compatible providers."""
 
     def test_string_passthrough(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content("hello") == "hello"
 
     def test_non_list_passthrough(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content(42) == 42
         assert _flatten_message_content(None) is None
 
     def test_text_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "text", "text": "Hello"},
@@ -654,7 +654,7 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "Hello\n\nWorld"
 
     def test_skips_thinking_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "thinking", "text": "Let me think..."},
@@ -665,13 +665,13 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "The answer is 42"
 
     def test_string_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = ["hello", "world"]
         assert _flatten_message_content(content) == "hello\n\nworld"
 
     def test_mixed_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "thinking", "text": "skip me"},
@@ -681,12 +681,12 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "plain string\n\ndict text"
 
     def test_empty_list(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content([]) == ""
 
     def test_only_thinking_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [{"type": "thinking", "text": "thought"}]
         assert _flatten_message_content(content) == ""
