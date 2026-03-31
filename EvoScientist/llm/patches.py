@@ -66,7 +66,14 @@ _patch_anthropic_proxy_compat()
 # reasoning.encrypted→data), causing Pydantic errors on multi-turn.
 # Fix: wrap the function to drop reasoning_details from output.
 # ---------------------------------------------------------------------------
+_openrouter_patched = False
+
+
 def _patch_openrouter_reasoning_details() -> None:
+    global _openrouter_patched
+    if _openrouter_patched:
+        return
+    _openrouter_patched = True
     try:
         import langchain_openrouter.chat_models as _mod
 
