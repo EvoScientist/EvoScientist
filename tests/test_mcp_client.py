@@ -817,7 +817,31 @@ class TestUvToolCompat:
         )
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         result = reg._uv_tool_existing_requirements()
-        assert result == ["arxiv-mcp-server", "rich"]
+        assert result == {"arxiv-mcp-server": "arxiv-mcp-server", "rich": "rich"}
+
+    def test_existing_requirements_preserves_specifiers_and_extras(
+        self, monkeypatch, tmp_path
+    ):
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        receipt = venv / "uv-receipt.toml"
+        receipt.write_text(
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist" },\n'
+            '  { name = "rich", specifier = ">=13.0" },\n'
+            '  { name = "requests", extras = ["socks"] },\n'
+            '  { name = "lark-oapi", specifier = ">=1.4.0", extras = ["oauth"] },\n'
+            "]\n"
+        )
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        result = reg._uv_tool_existing_requirements()
+        assert result == {
+            "rich": "rich>=13.0",
+            "requests": "requests[socks]",
+            "lark-oapi": "lark-oapi[oauth]>=1.4.0",
+        }
 
     def test_existing_requirements_excludes_tool_name(self, monkeypatch, tmp_path):
         import EvoScientist.mcp.registry as reg
@@ -829,7 +853,7 @@ class TestUvToolCompat:
             '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
         )
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-        assert reg._uv_tool_existing_requirements() == []
+        assert reg._uv_tool_existing_requirements() == {}
 
     def test_existing_requirements_no_receipt(self, monkeypatch, tmp_path):
         import EvoScientist.mcp.registry as reg
@@ -837,7 +861,7 @@ class TestUvToolCompat:
         venv = tmp_path / "uv" / "tools" / "evoscientist"
         venv.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-        assert reg._uv_tool_existing_requirements() == []
+        assert reg._uv_tool_existing_requirements() == {}
 
     # -- pip_install_hint --
 
@@ -937,6 +961,76 @@ class TestUvToolCompat:
         cmd = captured[0]
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert with_args.count("arxiv-mcp-server") == 1
+
+    def test_install_pip_package_uv_tool_preserves_specifiers(
+        self, monkeypatch, tmp_path
+    ):
+        """Existing --with specs with extras/versions must be preserved."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        receipt = venv / "uv-receipt.toml"
+        receipt.write_text(
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist" },\n'
+            '  { name = "rich", specifier = ">=13.0" },\n'
+            '  { name = "requests", extras = ["socks"] },\n'
+            "]\n"
+        )
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            return type("R", (), {"returncode": 0})()
+
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        reg.install_pip_package("new-pkg")
+        cmd = captured[0]
+        with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
+        assert "rich>=13.0" in with_args
+        assert "requests[socks]" in with_args
+        assert "new-pkg" in with_args
+
+    def test_install_pip_package_uv_tool_dedup_with_version_spec(
+        self, monkeypatch, tmp_path
+    ):
+        """Dedup must match bare name even if package arg has version spec."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        receipt = venv / "uv-receipt.toml"
+        receipt.write_text(
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist" },\n'
+            '  { name = "rich", specifier = ">=13.0" },\n'
+            "]\n"
+        )
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            return type("R", (), {"returncode": 0})()
+
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        # package arg has version constraint — should still dedup against "rich"
+        reg.install_pip_package("rich>=14.0")
+        cmd = captured[0]
+        with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
+        # Should keep the existing spec, not add a duplicate
+        assert with_args.count("rich>=13.0") == 1
+        assert "rich>=14.0" not in with_args
 
     def test_install_pip_package_uv_tool_falls_back_on_failure(
         self, monkeypatch, tmp_path

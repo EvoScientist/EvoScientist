@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,36 +89,62 @@ def _uv_tool_name() -> str | None:
     return Path(virtual_env).name or None
 
 
-def _uv_tool_existing_requirements() -> list[str]:
+def _bare_package_name(package: str) -> str:
+    """Extract the bare package name from a PEP 508 requirement string.
+
+    Strips extras (``[...]``), version specifiers (``>=``, ``==``, etc.),
+    and environment markers (``; ...``).
+    """
+    return re.split(r"[\[><=!~;]", package, maxsplit=1)[0].strip()
+
+
+def _receipt_entry_to_spec(entry: dict[str, object]) -> str:
+    """Convert a ``uv-receipt.toml`` requirement entry to a PEP 508 string.
+
+    Handles ``name``, ``extras`` (list), and ``specifier`` (version constraint)
+    fields that uv records in the receipt.
+    """
+    spec = str(entry.get("name", ""))
+    extras = entry.get("extras")
+    if extras and isinstance(extras, list):
+        spec += "[" + ",".join(str(e) for e in extras) + "]"
+    specifier = entry.get("specifier")
+    if specifier:
+        spec += str(specifier)
+    return spec
+
+
+def _uv_tool_existing_requirements() -> dict[str, str]:
     """Read existing ``--with`` requirements from the uv tool receipt.
 
-    Returns package names (excluding the tool itself) so that
-    ``uv tool install --with`` calls can preserve them.
+    Returns a mapping of ``{bare_name: full_spec}`` (excluding the tool
+    itself) so that ``uv tool install --with`` calls can preserve them
+    with their original extras and version constraints.
     """
     virtual_env = os.environ.get("VIRTUAL_ENV", "")
     if not virtual_env:
-        return []
+        return {}
     receipt = Path(virtual_env) / "uv-receipt.toml"
     if not receipt.is_file():
-        return []
+        return {}
     try:
         import tomllib
     except ModuleNotFoundError:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ModuleNotFoundError:
-            return []
+            return {}
     try:
         data = tomllib.loads(receipt.read_text())
     except Exception:
-        return []
+        return {}
     tool_name = _uv_tool_name() or ""
     reqs = data.get("tool", {}).get("requirements", [])
-    return [
-        r["name"]
+    return {
+        r["name"]: _receipt_entry_to_spec(r)
         for r in reqs
         if isinstance(r, dict) and r.get("name") and r["name"] != tool_name
-    ]
+    }
 
 
 def pip_install_hint() -> str:
@@ -148,9 +175,9 @@ def install_pip_package(package: str) -> bool:
         if tool_name:
             existing = _uv_tool_existing_requirements()
             cmd = ["uv", "tool", "install", tool_name, "-q"]
-            for req in existing:
-                cmd += ["--with", req]
-            if package not in existing:
+            for spec in existing.values():
+                cmd += ["--with", spec]
+            if _bare_package_name(package) not in existing:
                 cmd += ["--with", package]
             try:
                 result = subprocess.run(
