@@ -152,7 +152,7 @@ def _patch_openai_compat_content(model: Any) -> None:
 
 _MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -165,7 +165,6 @@ _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "deepseek": (_DEEPSEEK_BASE_URL, "DEEPSEEK_API_KEY"),
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
-    "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
     "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
     "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
@@ -464,13 +463,18 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
-        # OpenRouter: enable reasoning via extra_body (not top-level kwarg)
-        # to avoid multi-turn 400 errors from reasoning blocks in history.
-        if provider == "openrouter":
-            kwargs.setdefault("extra_body", {}).setdefault(
-                "reasoning", {"effort": "high", "summary": "auto"}
-            )
         provider = "openai"
+
+    # OpenRouter → native ChatOpenRouter via init_chat_model with first-class
+    # reasoning support. Requires patch_langchain_openrouter.py for streaming
+    # reasoning_details merge bug (see scripts/patch_langchain_openrouter.py).
+    elif provider == "openrouter":
+        _is_third_party = True
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if api_key:
+            kwargs["api_key"] = api_key
+        # Enable reasoning; disable summary to avoid multi-turn schema errors.
+        kwargs.setdefault("reasoning", {"effort": "high", "summary": "disabled"})
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:
