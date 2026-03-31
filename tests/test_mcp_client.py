@@ -809,7 +809,7 @@ class TestUvToolCompat:
         venv.mkdir(parents=True)
         receipt = venv / "uv-receipt.toml"
         receipt.write_text(
-            '[tool]\nrequirements = [\n'
+            "[tool]\nrequirements = [\n"
             '  { name = "evoscientist" },\n'
             '  { name = "arxiv-mcp-server" },\n'
             '  { name = "rich" },\n'
@@ -826,9 +826,7 @@ class TestUvToolCompat:
         venv.mkdir(parents=True)
         receipt = venv / "uv-receipt.toml"
         receipt.write_text(
-            '[tool]\nrequirements = [\n'
-            '  { name = "evoscientist" },\n'
-            "]\n"
+            '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
         )
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         assert reg._uv_tool_existing_requirements() == []
@@ -879,7 +877,7 @@ class TestUvToolCompat:
         venv.mkdir(parents=True)
         receipt = venv / "uv-receipt.toml"
         receipt.write_text(
-            '[tool]\nrequirements = [\n'
+            "[tool]\nrequirements = [\n"
             '  { name = "evoscientist" },\n'
             '  { name = "existing-pkg" },\n'
             "]\n"
@@ -918,7 +916,7 @@ class TestUvToolCompat:
         venv.mkdir(parents=True)
         receipt = venv / "uv-receipt.toml"
         receipt.write_text(
-            '[tool]\nrequirements = [\n'
+            "[tool]\nrequirements = [\n"
             '  { name = "evoscientist" },\n'
             '  { name = "arxiv-mcp-server" },\n'
             "]\n"
@@ -950,9 +948,7 @@ class TestUvToolCompat:
         venv.mkdir(parents=True)
         receipt = venv / "uv-receipt.toml"
         receipt.write_text(
-            '[tool]\nrequirements = [\n'
-            '  { name = "evoscientist" },\n'
-            "]\n"
+            '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
         )
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
 

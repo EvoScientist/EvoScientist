@@ -114,7 +114,8 @@ def _uv_tool_existing_requirements() -> list[str]:
     tool_name = _uv_tool_name() or ""
     reqs = data.get("tool", {}).get("requirements", [])
     return [
-        r["name"] for r in reqs
+        r["name"]
+        for r in reqs
         if isinstance(r, dict) and r.get("name") and r["name"] != tool_name
     ]
 
