@@ -464,6 +464,12 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
+        # OpenRouter: enable reasoning via extra_body (not top-level kwarg)
+        # to avoid multi-turn 400 errors from reasoning blocks in history.
+        if provider == "openrouter":
+            kwargs.setdefault("extra_body", {}).setdefault(
+                "reasoning", {"effort": "high", "summary": "auto"}
+            )
         provider = "openai"
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
