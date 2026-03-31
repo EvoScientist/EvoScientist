@@ -75,6 +75,50 @@ def _is_uv_tool_env() -> bool:
     return "/uv/tools/" in normalized
 
 
+def _uv_tool_name() -> str | None:
+    """Extract the uv tool name from ``VIRTUAL_ENV``.
+
+    Returns ``None`` when not in a uv tool environment.
+    The tool name is the last path component of ``VIRTUAL_ENV``
+    (e.g. ``/home/user/.local/share/uv/tools/evoscientist`` → ``evoscientist``).
+    """
+    if not _is_uv_tool_env():
+        return None
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    return Path(virtual_env).name or None
+
+
+def _uv_tool_existing_requirements() -> list[str]:
+    """Read existing ``--with`` requirements from the uv tool receipt.
+
+    Returns package names (excluding the tool itself) so that
+    ``uv tool install --with`` calls can preserve them.
+    """
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    if not virtual_env:
+        return []
+    receipt = Path(virtual_env) / "uv-receipt.toml"
+    if not receipt.is_file():
+        return []
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            return []
+    try:
+        data = tomllib.loads(receipt.read_text())
+    except Exception:
+        return []
+    tool_name = _uv_tool_name() or ""
+    reqs = data.get("tool", {}).get("requirements", [])
+    return [
+        r["name"] for r in reqs
+        if isinstance(r, dict) and r.get("name") and r["name"] != tool_name
+    ]
+
+
 def pip_install_hint() -> str:
     """Human-readable install command for error messages."""
     if _is_uv_tool_env():
@@ -87,13 +131,40 @@ def pip_install_hint() -> str:
 def install_pip_package(package: str) -> bool:
     """Silently install a pip package.
 
-    When ``uv`` is available, uses ``uv pip install --python sys.executable``
-    to target the current interpreter directly — this works for uv tool envs,
-    standard venvs, conda envs, and system Python without needing ``--system``.
+    In a **uv tool environment**, uses ``uv tool install <tool> --with``
+    which records the dependency in uv's receipt so it survives
+    ``uv tool upgrade``.  Existing ``--with`` packages are preserved.
+
+    Otherwise, when ``uv`` is available, uses
+    ``uv pip install --python sys.executable``.
     Falls back to ``python -m pip install`` when uv is not available.
 
     Returns True if installation succeeded.
     """
+    # ---- uv tool env: durable install via `uv tool install --with` ----
+    if _is_uv_tool_env() and shutil.which("uv"):
+        tool_name = _uv_tool_name()
+        if tool_name:
+            existing = _uv_tool_existing_requirements()
+            cmd = ["uv", "tool", "install", tool_name, "-q"]
+            for req in existing:
+                cmd += ["--with", req]
+            if package not in existing:
+                cmd += ["--with", package]
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=180
+                )
+                if result.returncode == 0:
+                    import importlib
+
+                    importlib.invalidate_caches()
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            # Fall through to legacy methods if uv tool install failed.
+
+    # ---- Standard venv / conda / system Python ----
     commands: list[list[str]] = []
     if shutil.which("uv"):
         commands.append(
