@@ -1310,7 +1310,7 @@ def _step_reasoning_effort(config: EvoScientistConfig) -> str:
         Choice(title="high   — ~80% of max_tokens (recommended)", value="high"),
         Choice(title="medium — ~50% of max_tokens", value="medium"),
         Choice(title="low    — ~20% of max_tokens", value="low"),
-        Choice(title="minimal— ~10% of max_tokens", value="minimal"),
+        Choice(title="minimal — ~10% of max_tokens", value="minimal"),
         Choice(title="none   — disable reasoning entirely", value="none"),
     ]
 
