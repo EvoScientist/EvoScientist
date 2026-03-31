@@ -416,6 +416,18 @@ class TestThirdPartyRouting:
         assert call_kwargs["reasoning"] == {"effort": "low"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_reasoning_effort_from_env(self, mock_init, monkeypatch):
+        """Reasoning effort should be configurable via env var."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
+
+        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "disabled"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_routes_through_openai(self, mock_init, monkeypatch):
         """Custom provider should route through OpenAI with env-configured base_url."""
         mock_init.return_value = "mock_model"

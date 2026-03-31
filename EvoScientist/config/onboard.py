@@ -1293,6 +1293,43 @@ def _step_model(
     return model
 
 
+def _step_reasoning_effort(config: EvoScientistConfig) -> str:
+    """Step 3.5: Configure OpenRouter reasoning effort level.
+
+    Only shown when the selected provider is OpenRouter. See:
+    https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+
+    Args:
+        config: Current configuration.
+
+    Returns:
+        Selected reasoning effort level, or empty string to use default.
+    """
+    effort_choices = [
+        Choice(title="xhigh  — ~95% of max_tokens for reasoning", value="xhigh"),
+        Choice(title="high   — ~80% of max_tokens (recommended)", value="high"),
+        Choice(title="medium — ~50% of max_tokens", value="medium"),
+        Choice(title="low    — ~20% of max_tokens", value="low"),
+        Choice(title="minimal— ~10% of max_tokens", value="minimal"),
+        Choice(title="none   — disable reasoning entirely", value="none"),
+    ]
+
+    current = config.reasoning_effort or "high"
+    effort = questionary.select(
+        "Select reasoning effort level:",
+        choices=effort_choices,
+        default=current,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
+    ).ask()
+
+    if effort is None:
+        raise KeyboardInterrupt()
+
+    return effort
+
+
 def _step_tavily_key(
     config: EvoScientistConfig,
     skip_validation: bool = False,
@@ -2773,6 +2810,11 @@ def run_onboard(skip_validation: bool = False) -> bool:
             config, provider, ollama_detected_models=ollama_detected_models
         )
         config.model = model
+
+        # Step 3.5: Reasoning Effort (OpenRouter only)
+        if provider == "openrouter":
+            effort = _step_reasoning_effort(config)
+            config.reasoning_effort = effort
 
         # Step 4: Tavily Key
         new_tavily_key = _step_tavily_key(config, skip_validation)

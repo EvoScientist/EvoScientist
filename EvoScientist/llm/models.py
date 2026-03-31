@@ -474,7 +474,8 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
         # Enable reasoning; disable summary to avoid multi-turn schema errors.
-        kwargs.setdefault("reasoning", {"effort": "high", "summary": "disabled"})
+        effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or "high"
+        kwargs.setdefault("reasoning", {"effort": effort, "summary": "disabled"})
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:
