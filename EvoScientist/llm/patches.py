@@ -73,7 +73,6 @@ def _patch_openrouter_reasoning_details() -> None:
     global _openrouter_patched
     if _openrouter_patched:
         return
-    _openrouter_patched = True
     try:
         import langchain_openrouter.chat_models as _mod
 
@@ -85,6 +84,7 @@ def _patch_openrouter_reasoning_details() -> None:
             return result
 
         _mod._convert_message_to_dict = _patched
+        _openrouter_patched = True
     except Exception:
         pass
 
