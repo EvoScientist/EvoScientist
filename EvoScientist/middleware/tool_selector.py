@@ -69,13 +69,26 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         _selector_active = True
         _total_tools_count = len(request.tools or [])
 
+        # Track whether handler was called — if so, any exception is from
+        # the downstream model, not the selector, and must propagate.
+        _handler_called = False
+
         def _handler_after_selection(req: ModelRequest) -> ModelResponse:
+            nonlocal _handler_called
             global _selector_active
+            _handler_called = True
             _selector_active = False
             return handler(req)
 
         try:
             return self._selector.wrap_model_call(request, _handler_after_selection)
+        except Exception:
+            if _handler_called:
+                raise  # Error from downstream model — don't retry
+            # Selector itself failed (e.g., structured output not supported).
+            logger.warning("Tool selector failed, using all tools", exc_info=True)
+            _selector_active = False
+            return handler(request)
         finally:
             _selector_active = False
 
@@ -91,8 +104,12 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         _selector_active = True
         _total_tools_count = len(request.tools or [])
 
+        _handler_called = False
+
         async def _handler_after_selection(req: ModelRequest) -> ModelResponse:
+            nonlocal _handler_called
             global _selector_active
+            _handler_called = True
             _selector_active = False
             return await handler(req)
 
@@ -100,6 +117,12 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await self._selector.awrap_model_call(
                 request, _handler_after_selection
             )
+        except Exception:
+            if _handler_called:
+                raise
+            logger.warning("Tool selector failed, using all tools", exc_info=True)
+            _selector_active = False
+            return await handler(request)
         finally:
             _selector_active = False
 

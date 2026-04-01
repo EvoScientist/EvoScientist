@@ -486,13 +486,32 @@ async def stream_agent_events(
                     else ""
                 )
 
-                # Detect start of selector JSON: '{"' at the beginning
-                if not _tool_selection_suppressing and _text.lstrip().startswith('{"'):
-                    _tool_selection_suppressing = True
-                    continue
-                # Keep suppressing until JSON closes with ']}'
+                # Suppress Anthropic's structured output tool calls.
+                # Anthropic implements with_structured_output via tool calls
+                # named "ToolSelectionResponse" (exact LangChain convention).
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    _tc_names = [tc.get("name", "") for tc in msg.tool_calls]
+                    if any(n == "ToolSelectionResponse" for n in _tc_names):
+                        _tool_selection_was_active = True
+                        continue
+
+                # Detect selector JSON across providers:
+                # - Streamed (OpenRouter/NVIDIA): short first chunk '{' or '{"'
+                # - Non-streamed (OpenAI/Codex): full JSON '{"tools":[...]}'
+                # - Spaced (NVIDIA): '{ "tools": [...]}'
+                _stripped = _text.lstrip()
+                if not _tool_selection_suppressing:
+                    if '"tools"' in _stripped and _stripped.startswith("{"):
+                        # Full or partial JSON with "tools" key — suppress entire chunk
+                        _tool_selection_was_active = True
+                        continue
+                    if _stripped.startswith("{") and len(_stripped) <= 10:
+                        # Short first chunk from streamed providers
+                        _tool_selection_suppressing = True
+                        continue
+                # Keep suppressing streamed chunks until JSON closes
                 if _tool_selection_suppressing:
-                    if "]}" in _text:
+                    if "}" in _text:
                         _tool_selection_suppressing = False
                         _tool_selection_was_active = True
                     continue
