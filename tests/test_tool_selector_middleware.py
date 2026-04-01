@@ -154,7 +154,7 @@ def test_tracker_captures_tools():
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_default_middleware_includes_tool_selector(mock_config, mock_model, _):
+def test_default_middleware_includes_tool_selector(mock_config, mock_model, mock_ts):
     mock_model.return_value = _mock_model()
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -188,7 +188,7 @@ def test_subagent_no_tool_selector(mock_model):
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_tool_selector_ordering(mock_config, mock_model, _):
+def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     """ToolSelector should come after ToolErrorHandler and before Memory."""
     mock_model.return_value = _mock_model()
     cfg = MagicMock()

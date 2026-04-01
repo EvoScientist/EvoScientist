@@ -2,11 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from langchain.agents.middleware import ContextEditingMiddleware
 
 from EvoScientist.middleware.context_editing import compute_context_editing_trigger
-
 
 # ---------------------------------------------------------------------------
 # compute_context_editing_trigger tests
@@ -97,7 +95,7 @@ def test_create_middleware_model_none_fallback(mock_model):
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_default_middleware_includes_context_editing(mock_config, mock_model, _):
+def test_default_middleware_includes_context_editing(mock_config, mock_model, mock_ts):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -129,14 +127,13 @@ def test_inject_subagent_includes_context_editing(mock_model):
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_context_editing_before_overflow_mapper(mock_config, mock_model, _):
+def test_context_editing_before_overflow_mapper(mock_config, mock_model, mock_ts):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
     cfg.enable_ask_user = False
     cfg.auto_approve = False
     mock_config.return_value = cfg
 
-    from EvoScientist.middleware import ContextOverflowMapperMiddleware
     from EvoScientist.EvoScientist import _get_default_middleware
 
     mw = _get_default_middleware()
