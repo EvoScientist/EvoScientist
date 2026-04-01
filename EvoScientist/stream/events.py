@@ -350,6 +350,8 @@ async def stream_agent_events(
         astream_input = message
 
     _summarization_in_progress = False
+    _tool_selection_suppressing = False  # True while buffering selector JSON
+    _tool_selection_was_active = False  # True after suppression, triggers Panel
 
     try:
         async for chunk in agent.astream(
@@ -464,6 +466,59 @@ async def stream_agent_events(
                 if chunk_text:
                     yield emitter.summarization(chunk_text).data
                 continue
+
+            # Suppress LLMToolSelectorMiddleware streaming output.
+            # The selector streams JSON like '{"tools":[...]}' via ainvoke
+            # which gets captured by astream.  We detect it by content since
+            # the _selector_active flag is not visible in the streaming loop.
+            # Uses _tool_selection_suppressing to track suppression state
+            # and emits a tool_selection event from the tracker ContextVar.
+            if isinstance(msg, (AIMessageChunk, AIMessage)):
+                _raw = msg.content
+                _text = (
+                    _raw
+                    if isinstance(_raw, str)
+                    else "".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in _raw
+                    )
+                    if isinstance(_raw, list)
+                    else ""
+                )
+
+                # Detect start of selector JSON: '{"' at the beginning
+                if not _tool_selection_suppressing and _text.lstrip().startswith('{"'):
+                    _tool_selection_suppressing = True
+                    continue
+                # Keep suppressing until JSON closes with ']}'
+                if _tool_selection_suppressing:
+                    if "]}" in _text:
+                        _tool_selection_suppressing = False
+                        _tool_selection_was_active = True
+                    continue
+
+                # Emit tool_selection event on first non-empty chunk after
+                # suppression.  Empty chunks arrive before the tracker has
+                # captured the selected tools, so we skip them.
+                if _tool_selection_was_active:
+                    import EvoScientist.middleware.tool_selector as _ts_mod
+
+                    if _ts_mod._current_selected_tools:
+                        _tool_selection_was_active = False
+                        selected = _ts_mod._current_selected_tools
+                        # Only show Panel when:
+                        # 1. Tools were actually filtered (not all selected)
+                        # 2. Selection changed from last time
+                        if len(selected) < _ts_mod._total_tools_count and sorted(
+                            selected
+                        ) != sorted(_ts_mod._last_emitted_tools):
+                            yield emitter.tool_selection(list(selected)).data
+                            _ts_mod._last_emitted_tools = list(selected)
+                        _ts_mod._current_selected_tools = []
+                    elif _text or (hasattr(msg, "tool_calls") and msg.tool_calls):
+                        # Non-empty content arrived but no selected tools —
+                        # tracker didn't run (shouldn't happen). Give up.
+                        _tool_selection_was_active = False
 
             subagent = _get_subagent_name(namespace, metadata)
             subagent_tracker = None

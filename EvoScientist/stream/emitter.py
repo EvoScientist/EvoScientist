@@ -170,6 +170,11 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def tool_selection(tools: list[str]) -> StreamEvent:
+        """Tool selection event from LLMToolSelectorMiddleware."""
+        return StreamEvent("tool_selection", {"type": "tool_selection", "tools": tools})
+
+    @staticmethod
     def summarization(content: str) -> StreamEvent:
         """Context summarization event."""
         return StreamEvent(

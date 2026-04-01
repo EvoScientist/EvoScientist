@@ -60,7 +60,9 @@ def test_compute_trigger_custom_fallback():
 
 
 def test_create_middleware_configuration():
-    from EvoScientist.middleware.context_editing import create_context_editing_middleware
+    from EvoScientist.middleware.context_editing import (
+        create_context_editing_middleware,
+    )
 
     model = MagicMock()
     model.profile = {"max_input_tokens": 200_000}
@@ -73,7 +75,9 @@ def test_create_middleware_configuration():
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 def test_create_middleware_model_none_fallback(mock_model):
-    from EvoScientist.middleware.context_editing import create_context_editing_middleware
+    from EvoScientist.middleware.context_editing import (
+        create_context_editing_middleware,
+    )
 
     mock_model.return_value = MagicMock(profile=None)
     mw = create_context_editing_middleware(None)
@@ -87,9 +91,13 @@ def test_create_middleware_model_none_fallback(mock_model):
 # ---------------------------------------------------------------------------
 
 
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock(), MagicMock()],
+)
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_default_middleware_includes_context_editing(mock_config, mock_model):
+def test_default_middleware_includes_context_editing(mock_config, mock_model, _):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -115,9 +123,13 @@ def test_inject_subagent_includes_context_editing(mock_model):
     assert ContextEditingMiddleware in middleware_types
 
 
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock(), MagicMock()],
+)
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_context_editing_before_overflow_mapper(mock_config, mock_model):
+def test_context_editing_before_overflow_mapper(mock_config, mock_model, _):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -132,4 +144,6 @@ def test_context_editing_before_overflow_mapper(mock_config, mock_model):
 
     ce_idx = type_names.index("ContextEditingMiddleware")
     co_idx = type_names.index("ContextOverflowMapperMiddleware")
-    assert ce_idx < co_idx, "ContextEditingMiddleware should come before ContextOverflowMapperMiddleware"
+    assert ce_idx < co_idx, (
+        "ContextEditingMiddleware should come before ContextOverflowMapperMiddleware"
+    )

@@ -23,6 +23,8 @@ from .memory import (
     create_memory_middleware,
 )
 from .tool_error_handler import ToolErrorHandlerMiddleware
+from .tool_selector import create_tool_selector_middleware
+from .utils import disable_thinking
 
 __all__ = [
     "AskUserMiddleware",
@@ -38,4 +40,6 @@ __all__ = [
     "compute_context_editing_trigger",
     "create_context_editing_middleware",
     "create_memory_middleware",
+    "create_tool_selector_middleware",
+    "disable_thinking",
 ]

@@ -289,6 +289,7 @@ def _get_default_middleware():
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_middleware,
+        create_tool_selector_middleware,
     )
 
     cfg = _ensure_config()
@@ -298,6 +299,7 @@ def _get_default_middleware():
         create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
+        *create_tool_selector_middleware(),
         create_memory_middleware(memory_dir, extraction_model=model),
     ]
 
@@ -369,6 +371,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_middleware,
+        create_tool_selector_middleware,
     )
 
     cfg = _ensure_config(config)
@@ -423,6 +426,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
+        *create_tool_selector_middleware(),
         create_memory_middleware(_mem_dir, extraction_model=model),
     ]
     if cfg.enable_ask_user and not cfg.auto_approve:
