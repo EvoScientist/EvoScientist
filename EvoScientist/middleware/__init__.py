@@ -11,6 +11,10 @@ from .ask_user import (
     Choice,
     Question,
 )
+from .context_editing import (
+    compute_context_editing_trigger,
+    create_context_editing_middleware,
+)
 from .context_overflow import ContextOverflowMapperMiddleware
 from .memory import (
     EvoMemoryMiddleware,
@@ -31,5 +35,7 @@ __all__ = [
     "ExtractedMemory",
     "Question",
     "ToolErrorHandlerMiddleware",
+    "compute_context_editing_trigger",
+    "create_context_editing_middleware",
     "create_memory_middleware",
 ]
