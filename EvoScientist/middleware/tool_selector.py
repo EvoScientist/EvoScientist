@@ -16,7 +16,6 @@ Usage::
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware.types import (
@@ -27,9 +26,8 @@ from langchain.agents.middleware.types import (
 
 logger = logging.getLogger(__name__)
 
-# Thread-safe storage for tool selection state.
+# Module-level storage for tool selection state.
 # Updated by _ToolSelectionTrackerMiddleware; read by stream/events.py.
-_lock = threading.Lock()
 _current_selected_tools: list[str] = []
 _last_emitted_tools: list[str] = []  # last selection shown to user
 _total_tools_count: int = 0  # total tools before selection

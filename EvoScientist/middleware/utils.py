@@ -40,4 +40,5 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         return model.model_copy(update=updates)
     except Exception:
         # Fallback for non-Pydantic or unusual model classes
-        return model.bind(**{k: v for k, v in updates.items() if v is not None})
+        # Note: bind() may not effectively override first-class Pydantic fields
+        return model.bind(**updates)
