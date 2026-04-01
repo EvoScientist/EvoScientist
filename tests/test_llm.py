@@ -57,6 +57,8 @@ class TestModelsRegistry:
             "custom-openai",
             "custom-anthropic",
             "deepseek",
+            "moonshot",
+            "kimi-coding",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"

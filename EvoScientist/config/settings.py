@@ -73,6 +73,8 @@ class EvoScientistConfig:
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
     dashscope_api_key: str = ""
+    moonshot_api_key: str = ""
+    kimi_api_key: str = ""
     custom_openai_api_key: str = ""
     custom_openai_base_url: str = ""
     custom_anthropic_api_key: str = ""
@@ -365,6 +367,8 @@ _ENV_MAPPINGS = {
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
     "dashscope_api_key": "DASHSCOPE_API_KEY",
+    "moonshot_api_key": "MOONSHOT_API_KEY",
+    "kimi_api_key": "KIMI_API_KEY",
     "custom_openai_api_key": "CUSTOM_OPENAI_API_KEY",
     "custom_openai_base_url": "CUSTOM_OPENAI_BASE_URL",
     "custom_anthropic_api_key": "CUSTOM_ANTHROPIC_API_KEY",
@@ -456,6 +460,10 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["VOLCENGINE_API_KEY"] = config.volcengine_api_key
     if config.dashscope_api_key and not os.environ.get("DASHSCOPE_API_KEY"):
         os.environ["DASHSCOPE_API_KEY"] = config.dashscope_api_key
+    if config.moonshot_api_key and not os.environ.get("MOONSHOT_API_KEY"):
+        os.environ["MOONSHOT_API_KEY"] = config.moonshot_api_key
+    if config.kimi_api_key and not os.environ.get("KIMI_API_KEY"):
+        os.environ["KIMI_API_KEY"] = config.kimi_api_key
     if config.custom_openai_api_key and not os.environ.get("CUSTOM_OPENAI_API_KEY"):
         os.environ["CUSTOM_OPENAI_API_KEY"] = config.custom_openai_api_key
     if config.custom_openai_base_url and not os.environ.get("CUSTOM_OPENAI_BASE_URL"):

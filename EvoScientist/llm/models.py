@@ -159,11 +159,14 @@ _VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
+_KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
 _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "deepseek": (_DEEPSEEK_BASE_URL, "DEEPSEEK_API_KEY"),
+    "moonshot": (_MOONSHOT_BASE_URL, "MOONSHOT_API_KEY"),
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
     "openrouter": (_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
@@ -180,6 +183,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Maps provider name → (base_url or None, env var for API key).
 _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "minimax": (_MINIMAX_ANTHROPIC_BASE_URL, "MINIMAX_API_KEY"),
+    "kimi-coding": (_KIMI_CODING_BASE_URL, "KIMI_API_KEY"),
     "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
 }
 
@@ -282,6 +286,16 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # DeepSeek
     ("deepseek-r1", "deepseek-reasoner", "deepseek"),
     ("deepseek-v3", "deepseek-chat", "deepseek"),
+    # Moonshot (月之暗面 — OpenAI-compatible)
+    ("kimi-k2.5", "kimi-k2.5", "moonshot"),
+    ("kimi-k2-thinking", "kimi-k2-thinking", "moonshot"),
+    ("kimi-k2-thinking-turbo", "kimi-k2-thinking-turbo", "moonshot"),
+    ("moonshot-v1-auto", "moonshot-v1-auto", "moonshot"),
+    ("moonshot-v1-128k", "moonshot-v1-128k", "moonshot"),
+    ("moonshot-v1-32k", "moonshot-v1-32k", "moonshot"),
+    ("moonshot-v1-8k", "moonshot-v1-8k", "moonshot"),
+    # Kimi Coding Plan (Kimi 代码计划 — Anthropic-compatible)
+    ("kimi-for-coding", "kimi-for-coding", "kimi-coding"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).
@@ -464,6 +478,9 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
+        # Moonshot: same issue, but uses Anthropic-style thinking param.
+        if provider == "moonshot":
+            kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
         provider = "openai"
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
@@ -486,6 +503,9 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
         _original_provider = provider
+        # Kimi Coding Plan requires claude-code User-Agent header
+        if provider == "kimi-coding":
+            kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
         provider = "anthropic"
 
     elif provider == "ollama":
