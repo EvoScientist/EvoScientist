@@ -1174,6 +1174,20 @@ def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
 
+    from ..config import get_effective_config
+
+    def _resolve_log_level() -> int:
+        """Resolve the root log level from config/env with a safe fallback."""
+        try:
+            raw = (get_effective_config().log_level or "").strip().upper()
+        except Exception:
+            raw = ""
+        if raw == "WARN":
+            raw = "WARNING"
+        return getattr(logging, raw, logging.WARNING)
+
+    resolved_level = _resolve_log_level()
+
     class DimWarningHandler(RichHandler):
         """Custom handler that renders warnings in dim style."""
 
@@ -1191,7 +1205,7 @@ def _configure_logging():
     handler = DimWarningHandler(
         console=console, show_time=False, show_path=False, show_level=False
     )
-    handler.setLevel(logging.WARNING)
+    handler.setLevel(resolved_level)
 
     # Apply to root logger (catches all loggers including deepagents)
     root_logger = logging.getLogger()
@@ -1199,7 +1213,7 @@ def _configure_logging():
     for h in root_logger.handlers[:]:
         root_logger.removeHandler(h)
     root_logger.addHandler(handler)
-    root_logger.setLevel(logging.WARNING)
+    root_logger.setLevel(resolved_level)
 
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")

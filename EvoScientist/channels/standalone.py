@@ -21,8 +21,17 @@ from .base import Channel
 from .bus import MessageBus
 from .bus.events import OutboundMessage
 from .consumer import InboundConsumer
+from .debug import emit_debug_event
 
 logger = logging.getLogger(__name__)
+
+
+def _channel_trace_enabled(channel: Channel) -> bool:
+    """Check if debug tracing is enabled on the channel."""
+    try:
+        return channel.is_debug_trace_enabled()
+    except Exception:
+        return False
 
 
 async def standalone_outbound_dispatcher(
@@ -44,7 +53,23 @@ async def standalone_outbound_dispatcher(
         try:
             if msg.content:
                 await channel.send(msg)
+                emit_debug_event(
+                    logger,
+                    "standalone_dispatch_ok",
+                    channel=channel.name,
+                    enabled=_channel_trace_enabled(channel),
+                    recipient=msg.recipient,
+                    content_len=len(msg.content),
+                )
         except Exception as e:
+            emit_debug_event(
+                logger,
+                "standalone_dispatch_error",
+                channel=channel.name,
+                enabled=_channel_trace_enabled(channel),
+                recipient=msg.recipient,
+                error=str(e),
+            )
             logger.error(f"Error sending outbound: {e}")
 
 
@@ -60,6 +85,16 @@ async def _async_main(
     channel.set_bus(bus)
     if send_thinking:
         channel.send_thinking = True
+
+    trace = _channel_trace_enabled(channel)
+    emit_debug_event(
+        logger,
+        "standalone_start",
+        channel=channel.name,
+        enabled=trace,
+        use_agent=use_agent,
+        send_thinking=send_thinking,
+    )
 
     # Create a lightweight manager for the consumer to use
     manager = ChannelManager(bus)
@@ -112,9 +147,17 @@ async def _async_main(
                 pass
         if drained:
             logger.info(f"Outbound drain: {drained} sent")
+        stop_trace = _channel_trace_enabled(channel)
         channel._running = False
         await channel.stop()
         await manager.stop_health()
+        emit_debug_event(
+            logger,
+            "standalone_stop",
+            channel=channel.name,
+            enabled=stop_trace,
+            drained=drained,
+        )
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
