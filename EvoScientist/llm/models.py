@@ -531,10 +531,12 @@ def get_chat_model(
 
     chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
-    # Flatten list content to strings for OpenAI-compatible providers
+    # Flatten list content to strings for strict OpenAI-compatible providers
     # (DeepSeek, SiliconFlow, OpenRouter, custom-openai, etc.) and
     # native OpenAI through a proxy, to avoid "sequence expected string" errors.
-    if _is_third_party or _is_openai_proxy:
+    # Moonshot 和 Kimi Coding 支持标准 format，不需要 patch。
+    _no_patch_providers = {"moonshot", "kimi-coding"}
+    if (_is_third_party or _is_openai_proxy) and _original_provider not in _no_patch_providers:
         _patch_openai_compat_content(chat_model)
 
     return chat_model
