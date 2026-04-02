@@ -1096,9 +1096,7 @@ class Channel(ChannelPlugin, ABC):
                             compute_type=self._stt_compute_type,
                         )
                     except Exception as exc:
-                        self._trace_event(
-                            "stt_error", file_path=fp, error=str(exc)
-                        )
+                        self._trace_event("stt_error", file_path=fp, error=str(exc))
                         continue
                     if text:
                         transcripts.append(text)
