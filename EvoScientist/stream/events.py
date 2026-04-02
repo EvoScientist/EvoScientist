@@ -362,6 +362,7 @@ async def stream_agent_events(
 
     _summarization_in_progress = False
     _tool_selection_suppressing = False  # True while buffering selector JSON
+    _tool_selection_buffer = ""  # accumulates JSON chunks for parse attempt
     _tool_selection_was_active = False  # True after suppression, triggers Panel
 
     try:
@@ -500,31 +501,76 @@ async def stream_agent_events(
                 # Suppress Anthropic's structured output tool calls.
                 # Anthropic implements with_structured_output via tool calls
                 # named "ToolSelectionResponse" (exact LangChain convention).
+                # After the initial tool call, Anthropic streams input_json_delta
+                # chunks with the JSON arguments — suppress those too.
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     _tc_names = [tc.get("name", "") for tc in msg.tool_calls]
                     if any(n == "ToolSelectionResponse" for n in _tc_names):
                         _tool_selection_was_active = True
                         continue
+                if _tool_selection_was_active and isinstance(_raw, list):
+                    if any(
+                        isinstance(b, dict) and b.get("type") == "input_json_delta"
+                        for b in _raw
+                    ):
+                        continue  # still streaming selector tool call args
 
-                # Detect selector JSON across providers:
-                # - Streamed (OpenRouter/NVIDIA): short first chunk '{' or '{"'
-                # - Non-streamed (OpenAI/Codex): full JSON '{"tools":[...]}'
-                # - Spaced (NVIDIA): '{ "tools": [...]}'
-                _stripped = _text.lstrip()
-                if not _tool_selection_suppressing:
-                    if '"tools"' in _stripped and _stripped.startswith("{"):
-                        # Full or partial JSON with "tools" key — suppress entire chunk
-                        _tool_selection_was_active = True
-                        continue
-                    if _stripped.startswith("{") and len(_stripped) <= 10:
-                        # Short first chunk from streamed providers
-                        _tool_selection_suppressing = True
-                        continue
-                # Keep suppressing streamed chunks until JSON closes
+                # Universal selector JSON detection via buffering.
+                # Buffer chunks starting with '{', try JSON parse,
+                # suppress if contains "tools". If not selector JSON,
+                # stop buffering and let the chunk through (don't drop it).
                 if _tool_selection_suppressing:
-                    if "}" in _text:
+                    _tool_selection_buffer += _text
+                    try:
+                        import json as _json
+
+                        _parsed = _json.loads(_tool_selection_buffer.strip())
+                        if isinstance(_parsed, dict) and "tools" in _parsed:
+                            _tool_selection_was_active = True
+                            _tool_selection_suppressing = False
+                            _tool_selection_buffer = ""
+                            continue
+                        # Valid JSON but not selector — stop buffering,
+                        # fall through so this chunk is processed normally.
                         _tool_selection_suppressing = False
-                        _tool_selection_was_active = True
+                        _tool_selection_buffer = ""
+                    except (ValueError, TypeError):
+                        _buf = _tool_selection_buffer.strip()
+                        # Concatenated JSONs: {"tools":[...]}{"tools":[...]}
+                        if '"tools"' in _buf and _buf.endswith("}"):
+                            _tool_selection_was_active = True
+                            _tool_selection_suppressing = False
+                            _tool_selection_buffer = ""
+                            continue
+                        if len(_tool_selection_buffer) > 10000:
+                            _tool_selection_suppressing = False
+                            _tool_selection_buffer = ""
+                            # Fall through — don't drop content
+                        else:
+                            continue  # keep buffering
+                if (
+                    not _tool_selection_suppressing
+                    and _text.lstrip().startswith("{")
+                    and ('"tools"' in _text or len(_text.strip()) <= 10)
+                ):
+                    # Try immediate parse (ccproxy returns full JSON in one chunk)
+                    _stripped_text = _text.strip()
+                    try:
+                        import json as _json2
+
+                        _parsed2 = _json2.loads(_stripped_text)
+                        if isinstance(_parsed2, dict) and "tools" in _parsed2:
+                            _tool_selection_was_active = True
+                            continue
+                    except (ValueError, TypeError):
+                        # Could be concatenated JSONs: {"tools":[...]}{"tools":[...]}
+                        # or incomplete JSON from streamed provider.
+                        if '"tools"' in _stripped_text and _stripped_text.endswith("}"):
+                            _tool_selection_was_active = True
+                            continue
+                    # Incomplete JSON — start buffering for streamed providers
+                    _tool_selection_suppressing = True
+                    _tool_selection_buffer = _text
                     continue
 
                 # Emit tool_selection event on first non-empty chunk after
