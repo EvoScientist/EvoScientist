@@ -12,7 +12,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from ..debug import debug_trace_enabled, emit_debug_event
+from ..debug import TraceMixin, debug_trace_enabled
 from .events import InboundMessage, OutboundMessage
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 OutboundCallback = Callable[[OutboundMessage], Awaitable[None]]
 
 
-class MessageBus:
+class MessageBus(TraceMixin):
     """Async message bus that decouples chat channels from the agent core."""
 
     def __init__(self):
@@ -29,15 +29,8 @@ class MessageBus:
         self._outbound_subscribers: dict[str, list[OutboundCallback]] = {}
         self._running = False
         self._debug_trace = debug_trace_enabled()
-
-    def _trace_event(self, event: str, channel: str, **fields) -> None:
-        emit_debug_event(
-            logger,
-            event,
-            channel=channel,
-            enabled=self._debug_trace,
-            **fields,
-        )
+        self._trace_name = "bus"
+        self._trace_logger = logger
 
     # ── inbound (channel → agent) ──
 
@@ -46,7 +39,7 @@ class MessageBus:
         await self.inbound.put(msg)
         self._trace_event(
             "bus_publish_inbound",
-            msg.channel,
+            source_channel=msg.channel,
             sender_id=msg.sender_id,
             chat_id=msg.chat_id,
             message_id=msg.message_id or "-",
@@ -64,7 +57,7 @@ class MessageBus:
         await self.outbound.put(msg)
         self._trace_event(
             "bus_publish_outbound",
-            msg.channel,
+            target_channel=msg.channel,
             chat_id=msg.chat_id,
             reply_to=msg.reply_to,
             content_len=len(msg.content or ""),
@@ -89,7 +82,7 @@ class MessageBus:
         self._outbound_subscribers[channel].append(callback)
         self._trace_event(
             "bus_subscribe_outbound",
-            channel,
+            target_channel=channel,
             subscriber_count=len(self._outbound_subscribers[channel]),
         )
 
@@ -99,7 +92,7 @@ class MessageBus:
         Run as a background task — loops until :meth:`stop` is called.
         """
         self._running = True
-        self._trace_event("bus_dispatcher_start", "bus")
+        self._trace_event("bus_dispatcher_start")
         while self._running:
             try:
                 msg = await asyncio.wait_for(
@@ -112,7 +105,7 @@ class MessageBus:
             if not subscribers:
                 self._trace_event(
                     "bus_dispatch_drop",
-                    msg.channel,
+                    target_channel=msg.channel,
                     reason="no_subscriber",
                     chat_id=msg.chat_id,
                 )
@@ -123,14 +116,14 @@ class MessageBus:
                     await callback(msg)
                     self._trace_event(
                         "bus_dispatch_ok",
-                        msg.channel,
+                        target_channel=msg.channel,
                         chat_id=msg.chat_id,
                         subscriber_count=len(subscribers),
                     )
                 except Exception as e:
                     self._trace_event(
                         "bus_dispatch_error",
-                        msg.channel,
+                        target_channel=msg.channel,
                         chat_id=msg.chat_id,
                         error_type=type(e).__name__,
                     )
@@ -139,7 +132,7 @@ class MessageBus:
     def stop(self) -> None:
         """Stop the dispatcher loop."""
         self._running = False
-        self._trace_event("bus_dispatcher_stop", "bus")
+        self._trace_event("bus_dispatcher_stop")
 
     @property
     def inbound_size(self) -> int:

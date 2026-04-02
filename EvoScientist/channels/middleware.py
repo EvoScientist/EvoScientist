@@ -391,13 +391,7 @@ def _debug_trace_enabled(context: dict[str, Any]) -> bool:
     channel = context.get("channel")
     if channel is None:
         return False
-    checker = getattr(channel, "is_debug_trace_enabled", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-    return bool(getattr(getattr(channel, "config", None), "debug_trace", False))
+    return channel.is_debug_trace_enabled()
 
 
 def _ctx_channel_name(context: dict[str, Any]) -> str:

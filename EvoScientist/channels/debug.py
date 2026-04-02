@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping, Sequence
-from functools import lru_cache
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Generator
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _DATE_FORMAT = "%H:%M:%S"
@@ -63,7 +63,6 @@ def configure_standalone_logging(log_level: str | None = None) -> int:
     return resolved
 
 
-@lru_cache(maxsize=1)
 def _load_debug_flags() -> tuple[bool, bool]:
     """Load debug feature switches from config as a fallback to env vars."""
     try:
@@ -137,7 +136,7 @@ def _redact_mapping(payload: Mapping[str, Any]) -> dict[str, Any]:
         elif isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
         ):
-            redacted[key] = [str(_stringify(item)) for item in value[:10]]
+            redacted[key] = [_stringify(item) for item in value[:10]]
         else:
             redacted[key] = _stringify(value)
     return redacted
@@ -151,6 +150,9 @@ def _format_fields(fields: Mapping[str, Any]) -> str:
         safe_value = _REDACTED if _should_redact_key(key) else _stringify(value)
         parts.append(f"{key}={safe_value}")
     return " ".join(parts)
+
+
+_warned_debug_level_mismatch = False
 
 
 def emit_debug_event(
@@ -167,7 +169,17 @@ def emit_debug_event(
     ``event=inbound_raw channel=telegram message_id=123 chat_id=-1001``
     """
 
-    if not enabled or not logger.isEnabledFor(logging.DEBUG):
+    global _warned_debug_level_mismatch
+    if not enabled:
+        return
+    if not logger.isEnabledFor(logging.DEBUG):
+        if not _warned_debug_level_mismatch:
+            _warned_debug_level_mismatch = True
+            logger.warning(
+                "channel debug tracing is enabled but logger level is above DEBUG; "
+                "call configure_standalone_logging() or set log_level to DEBUG "
+                "to see trace events"
+            )
         return
     base_fields = {"event": event, "channel": channel}
     base_fields.update(fields)
@@ -226,3 +238,109 @@ def emit_debug_payload(
         payload_preview=preview,
         **fields,
     )
+
+
+# ── Trace span context manager ──────────────────────────────────────
+
+
+class TraceSpan:
+    """Accumulates extra fields during a traced operation."""
+
+    __slots__ = ("_fields",)
+
+    def __init__(self, **fields: Any) -> None:
+        self._fields: dict[str, Any] = dict(fields)
+
+    def set(self, **fields: Any) -> None:
+        """Add or update fields that will be included in the closing event."""
+        self._fields.update(fields)
+
+
+@contextmanager
+def trace_span(
+    logger: logging.Logger,
+    event: str,
+    *,
+    channel: str,
+    enabled: bool,
+    **fields: Any,
+) -> Generator[TraceSpan, None, None]:
+    """Context manager that emits start/ok/error events automatically.
+
+    Usage::
+
+        with trace_span(logger, "outbound_send", channel="tg", enabled=True,
+                         chat_id=123) as span:
+            chunks = prepare(...)
+            span.set(chunk_count=len(chunks))
+            # ... business logic ...
+        # emits outbound_send_start on entry, outbound_send_ok on normal exit,
+        # or outbound_send_error on exception (then re-raises).
+    """
+    span = TraceSpan(**fields)
+    emit_debug_event(
+        logger, f"{event}_start", channel=channel, enabled=enabled, **fields
+    )
+    try:
+        yield span
+    except Exception as exc:
+        emit_debug_event(
+            logger,
+            f"{event}_error",
+            channel=channel,
+            enabled=enabled,
+            error_type=type(exc).__name__,
+            **span._fields,
+        )
+        raise
+    else:
+        emit_debug_event(
+            logger,
+            f"{event}_ok",
+            channel=channel,
+            enabled=enabled,
+            **span._fields,
+        )
+
+
+# ── TraceMixin ──────────────────────────────────────────────────────
+
+
+class TraceMixin:
+    """Mixin providing unified structured trace helpers.
+
+    Classes using this mixin must set ``_debug_trace`` (bool) and
+    ``_trace_name`` (str) attributes, and define a ``_trace_logger``
+    property or attribute returning a :class:`logging.Logger`.
+    """
+
+    _debug_trace: bool
+    _trace_name: str
+    _trace_logger: logging.Logger
+
+    def _trace_event(self, event: str, **fields: Any) -> None:
+        """Emit a structured debug event when tracing is enabled."""
+        emit_debug_event(
+            self._trace_logger,
+            event,
+            channel=self._trace_name,
+            enabled=self._debug_trace,
+            **fields,
+        )
+
+    def _trace_debug(self, message: str, *args: Any) -> None:
+        """Emit a debug log only when tracing is explicitly enabled."""
+        if self._debug_trace:
+            self._trace_logger.debug(message, *args)
+
+    @contextmanager
+    def _trace_span(self, event: str, **fields: Any) -> Generator[TraceSpan, None, None]:
+        """Channel-level convenience wrapper around :func:`trace_span`."""
+        with trace_span(
+            self._trace_logger,
+            event,
+            channel=self._trace_name,
+            enabled=self._debug_trace,
+            **fields,
+        ) as span:
+            yield span

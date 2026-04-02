@@ -4,6 +4,8 @@ import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.channels.debug import (
+    TraceMixin,
+    TraceSpan,
     configure_standalone_logging,
     debug_payloads_enabled,
     debug_trace_enabled,
@@ -11,6 +13,7 @@ from EvoScientist.channels.debug import (
     emit_debug_event_if,
     emit_debug_payload,
     resolve_log_level,
+    trace_span,
 )
 
 from .conftest import run_async
@@ -326,3 +329,124 @@ def test_format_fallback_emits_event(caplog):
         run_async(_run())
     assert "outbound_format_fallback" in caplog.text
     assert call_count == 2
+
+
+# ── trace_span tests ──────────────────────────────────────────────────
+
+
+def test_trace_span_emits_start_and_ok(caplog):
+    logger = logging.getLogger("tests.trace_span.ok")
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        with trace_span(
+            logger, "my_op", channel="test", enabled=True, chat_id="c1"
+        ) as span:
+            span.set(extra="data")
+    assert "event=my_op_start" in caplog.text
+    assert "event=my_op_ok" in caplog.text
+    assert "extra=data" in caplog.text
+
+
+def test_trace_span_emits_start_and_error_on_exception(caplog):
+    logger = logging.getLogger("tests.trace_span.err")
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        try:
+            with trace_span(
+                logger, "fail_op", channel="test", enabled=True
+            ):
+                raise ValueError("boom")
+        except ValueError:
+            pass
+    assert "event=fail_op_start" in caplog.text
+    assert "event=fail_op_error" in caplog.text
+    assert "error_type=ValueError" in caplog.text
+
+
+def test_trace_span_disabled_emits_nothing(caplog):
+    logger = logging.getLogger("tests.trace_span.disabled")
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        with trace_span(
+            logger, "noop", channel="test", enabled=False
+        ) as span:
+            span.set(x=1)
+    assert "noop" not in caplog.text
+
+
+# ── TraceMixin tests ─────────────────────────────────────────────────
+
+
+def test_trace_mixin_trace_event(caplog):
+
+    class _Stub(TraceMixin):
+        def __init__(self):
+            self._debug_trace = True
+            self._trace_name = "stub"
+            self._trace_logger = logging.getLogger("tests.mixin")
+
+    stub = _Stub()
+    with caplog.at_level(logging.DEBUG, logger="tests.mixin"):
+        stub._trace_event("some_event", key="val")
+    assert "event=some_event" in caplog.text
+    assert "channel=stub" in caplog.text
+    assert "key=val" in caplog.text
+
+
+def test_trace_mixin_trace_span(caplog):
+
+    class _Stub(TraceMixin):
+        def __init__(self):
+            self._debug_trace = True
+            self._trace_name = "stub"
+            self._trace_logger = logging.getLogger("tests.mixin_span")
+
+    stub = _Stub()
+    with caplog.at_level(logging.DEBUG, logger="tests.mixin_span"):
+        with stub._trace_span("op", x=1) as span:
+            span.set(y=2)
+    assert "event=op_start" in caplog.text
+    assert "event=op_ok" in caplog.text
+    assert "y=2" in caplog.text
+
+
+def test_trace_mixin_trace_debug(caplog):
+
+    class _Stub(TraceMixin):
+        def __init__(self):
+            self._debug_trace = True
+            self._trace_name = "stub"
+            self._trace_logger = logging.getLogger("tests.mixin_debug")
+
+    stub = _Stub()
+    with caplog.at_level(logging.DEBUG, logger="tests.mixin_debug"):
+        stub._trace_debug("hello %s", "world")
+    assert "hello world" in caplog.text
+
+
+# ── One-time warning test ────────────────────────────────────────────
+
+
+def test_emit_debug_event_warns_on_level_mismatch(caplog):
+    import EvoScientist.channels.debug as dbg
+
+    # Reset the global warning flag
+    dbg._warned_debug_level_mismatch = False
+    logger = logging.getLogger("tests.level_mismatch")
+    # Logger at WARNING — higher than DEBUG
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        emit_debug_event(
+            logger, "should_warn", channel="test", enabled=True, x=1
+        )
+        emit_debug_event(
+            logger, "should_not_warn_again", channel="test", enabled=True
+        )
+
+    # Should see the one-time mismatch warning
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    mismatch_warnings = [
+        r for r in warnings if "debug tracing is enabled" in r.message
+    ]
+    assert len(mismatch_warnings) == 1
+    # Should NOT see the actual debug events
+    assert "should_warn" not in caplog.text or "event=should_warn" not in caplog.text
+
+    # Reset for other tests
+    dbg._warned_debug_level_mismatch = False

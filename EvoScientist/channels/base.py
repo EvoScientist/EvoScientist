@@ -19,7 +19,7 @@ from typing import Any
 from ..paths import MEDIA_DIR
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
-from .debug import debug_trace_enabled, emit_debug_event
+from .debug import TraceMixin, debug_trace_enabled
 from .formatter import UnifiedFormatter
 from .plugin import ChannelMeta, ChannelPlugin
 
@@ -253,7 +253,7 @@ class RawIncoming:
     was_mentioned: bool = True  # default True so DMs always pass
 
 
-class Channel(ChannelPlugin, ABC):
+class Channel(TraceMixin, ChannelPlugin, ABC):
     """Abstract base class for messaging channels.
 
     Subclasses must implement:
@@ -304,6 +304,8 @@ class Channel(ChannelPlugin, ABC):
         self._debug_trace: bool = bool(getattr(config, "debug_trace", False)) or (
             debug_trace_enabled()
         )
+        self._trace_name: str = self.name
+        self._trace_logger = _logger
 
         # Typing indicator — delegated to TypingManager
         from .middleware import TypingManager
@@ -421,21 +423,6 @@ class Channel(ChannelPlugin, ABC):
         """Return whether extra per-message diagnostics should be emitted."""
         return self._debug_trace
 
-    def _trace_debug(self, message: str, *args: Any) -> None:
-        """Emit a debug log only when channel tracing is explicitly enabled."""
-        if self._debug_trace:
-            _logger.debug(message, *args)
-
-    def _trace_event(self, event: str, **fields: Any) -> None:
-        """Emit a structured debug event when channel tracing is enabled."""
-        emit_debug_event(
-            _logger,
-            event,
-            channel=self.name,
-            enabled=self._debug_trace,
-            **fields,
-        )
-
     @abstractmethod
     async def start(self) -> None:
         """Initialize and start the channel.
@@ -548,53 +535,40 @@ class Channel(ChannelPlugin, ABC):
         try:
             chat_id = self._resolve_chat_id(message)
             limit = self._get_chunk_limit()
-            self._trace_event(
-                "outbound_send_start",
+            with self._trace_span(
+                "outbound_send",
                 chat_id=chat_id,
                 reply_to=message.reply_to,
                 content_len=len(message.content or ""),
                 media_count=len(message.media or []),
                 chunk_limit=limit,
-            )
-            async with self._acquire_send_lock(chat_id):
-                pairs = self._prepare_chunks(message.content, limit)
-                self._trace_event(
-                    "outbound_send_chunks_prepared",
-                    chat_id=chat_id,
-                    chunk_count=len(pairs),
-                )
-                had_error = False
-                for i, (formatted, raw) in enumerate(pairs):
-                    reply_to = self._resolve_reply_to(message.reply_to, i)
-                    try:
-                        await self._send_with_retry(
-                            lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
-                                self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
+            ) as span:
+                async with self._acquire_send_lock(chat_id):
+                    pairs = self._prepare_chunks(message.content, limit)
+                    span.set(chunk_count=len(pairs))
+                    had_error = False
+                    for i, (formatted, raw) in enumerate(pairs):
+                        reply_to = self._resolve_reply_to(message.reply_to, i)
+                        try:
+                            await self._send_with_retry(
+                                lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
+                                    self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
+                                )
                             )
-                        )
-                    except Exception as chunk_err:
-                        self._trace_event(
-                            "outbound_send_error",
-                            chat_id=chat_id,
-                            reply_to=reply_to,
-                            chunk_index=i,
-                            error_type=type(chunk_err).__name__,
-                        )
-                        _logger.error(f"{self.name} chunk {i} send error: {chunk_err}")
-                        had_error = True
-            self._trace_event(
-                "outbound_send_ok" if not had_error else "outbound_send_partial",
-                chat_id=chat_id,
-                chunk_count=len(pairs),
-            )
+                        except Exception as chunk_err:
+                            self._trace_event(
+                                "outbound_send_chunk_error",
+                                chat_id=chat_id,
+                                reply_to=reply_to,
+                                chunk_index=i,
+                                error_type=type(chunk_err).__name__,
+                            )
+                            _logger.error(f"{self.name} chunk {i} send error: {chunk_err}")
+                            had_error = True
+                if had_error:
+                    span.set(result="partial")
             return not had_error
         except Exception as e:
-            self._trace_event(
-                "outbound_send_error",
-                chat_id=message.chat_id,
-                reply_to=message.reply_to,
-                error_type=type(e).__name__,
-            )
             _logger.error(f"{self.name} send error: {e}")
             return False
 
@@ -731,38 +705,27 @@ class Channel(ChannelPlugin, ABC):
         Returns:
             True if sent successfully, False otherwise.
         """
+        chat_id = self._resolve_media_chat_id(recipient, metadata)
         if not self._is_ready():
             self._trace_event(
                 "outbound_media_skip",
                 reason="channel_not_ready",
-                chat_id=self._resolve_media_chat_id(recipient, metadata),
+                chat_id=chat_id,
                 file_path=file_path,
             )
             return False
         try:
-            chat_id = self._resolve_media_chat_id(recipient, metadata)
-            self._trace_event(
-                "outbound_media_start",
+            with self._trace_span(
+                "outbound_media",
                 chat_id=chat_id,
                 file_path=file_path,
                 caption_len=len(caption or ""),
-            )
-            result = await self._send_media_impl(
-                recipient, file_path, caption, metadata
-            )
-            self._trace_event(
-                "outbound_media_ok" if result else "outbound_media_partial",
-                chat_id=chat_id,
-                file_path=file_path,
-            )
+            ):
+                result = await self._send_media_impl(
+                    recipient, file_path, caption, metadata
+                )
             return result
         except Exception as e:
-            self._trace_event(
-                "outbound_media_error",
-                chat_id=self._resolve_media_chat_id(recipient, metadata),
-                file_path=file_path,
-                error_type=type(e).__name__,
-            )
             _logger.error(f"{self.name} send_media error: {e}")
             return False
 
@@ -896,24 +859,25 @@ class Channel(ChannelPlugin, ABC):
         """
         from .retry import retry_async
 
+        def _on_retry(info):
+            self._trace_event(
+                "outbound_send_retry",
+                attempt=info.attempt,
+                max_attempts=info.max_attempts,
+                backoff_s=round(info.delay_s, 2),
+                error_type=type(info.error).__name__,
+            )
+            _logger.warning(
+                f"{self.name} send retry {info.attempt}/{info.max_attempts} "
+                f"in {info.delay_s:.2f}s: {info.error}"
+            )
+
         return await retry_async(
             coro_factory,
             config=self._retry_config,
             should_retry=lambda exc, _: self._extract_retry_after(exc) is not None,
             retry_after_s=self._extract_retry_after,
-            on_retry=lambda info: (
-                self._trace_event(
-                    "outbound_send_retry",
-                    attempt=info.attempt,
-                    max_attempts=info.max_attempts,
-                    backoff_s=round(info.delay_s, 2),
-                    error_type=type(info.error).__name__,
-                ),
-                _logger.warning(
-                    f"{self.name} send retry {info.attempt}/{info.max_attempts} "
-                    f"in {info.delay_s:.2f}s: {info.error}"
-                ),
-            )[-1],
+            on_retry=_on_retry,
             label=f"{self.name}.send",
         )
 
@@ -1126,25 +1090,15 @@ class Channel(ChannelPlugin, ABC):
         if msg is None:
             return
         if raw.message_id:
-            self._trace_event(
-                "ack_reaction_attempt",
-                chat_id=raw.chat_id,
-                message_id=raw.message_id,
-            )
             try:
-                await self._send_ack_reaction(raw.chat_id, raw.message_id)
-                self._trace_event(
-                    "ack_reaction_ok",
+                with self._trace_span(
+                    "ack_reaction",
                     chat_id=raw.chat_id,
                     message_id=raw.message_id,
-                )
-            except Exception as exc:
-                self._trace_event(
-                    "ack_reaction_error",
-                    chat_id=raw.chat_id,
-                    message_id=raw.message_id,
-                    error=str(exc),
-                )
+                ):
+                    await self._send_ack_reaction(raw.chat_id, raw.message_id)
+            except Exception:
+                pass  # trace_span already emits ack_reaction_error
         self._trace_debug(
             "%s inbound queued: sender=%s chat=%s message_id=%s media=%d content_len=%d",
             self.name,
