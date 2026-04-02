@@ -8,6 +8,7 @@ import asyncio
 import base64
 import mimetypes
 import os
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -19,6 +20,16 @@ from langchain_core.messages import (  # type: ignore[import-untyped]
 from .emitter import StreamEventEmitter
 from .tracker import ToolCallTracker
 from .utils import DisplayLimits, is_success
+
+# Safety net: older ccproxy versions may embed thinking as XML tags in content
+# strings.  Strip them so they never leak to users or channels.
+_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
+
+
+def _strip_legacy_thinking_tags(content: str) -> str:
+    """Remove ``<thinking>...</thinking>`` tags from content strings."""
+    return _THINKING_TAG_RE.sub("", content)
+
 
 # Image media types returned by DeepAgents read_file
 _IMAGE_MEDIA_TYPES = {
@@ -602,7 +613,9 @@ def _process_chunk_content(
 
     if isinstance(content, str):
         if content:
-            yield emitter.text(content)
+            cleaned = _strip_legacy_thinking_tags(content)
+            if cleaned:
+                yield emitter.text(cleaned)
             return
 
     blocks = None
@@ -640,7 +653,9 @@ def _process_chunk_content(
         elif block_type == "text":
             text = block.get("text") or block.get("content") or ""
             if text:
-                yield emitter.text(text)
+                text = _strip_legacy_thinking_tags(text)
+                if text:
+                    yield emitter.text(text)
 
         elif block_type in ("tool_use", "tool_call"):
             tool_id = block.get("id", "")

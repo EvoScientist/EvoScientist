@@ -124,14 +124,25 @@ class TestProcessChunkContentStrings:
         assert events[0].type == "text"
         assert events[0].data["content"] == "Hello world"
 
-    def test_thinking_tags_pass_through_verbatim(self):
-        """<thinking> tags are NOT stripped (ccproxy >=0.2.7 regression baseline)."""
+    def test_thinking_tags_stripped(self):
+        """Legacy <thinking> tags from older ccproxy are stripped."""
         raw = "<thinking>some reasoning</thinking>The answer is 42."
         events = self._emit(raw)
         assert len(events) == 1
-        # Tags pass through unchanged — no stripping
-        assert "<thinking>" in events[0].data["content"]
-        assert "The answer is 42." in events[0].data["content"]
+        assert "<thinking>" not in events[0].data["content"]
+        assert events[0].data["content"] == "The answer is 42."
+
+    def test_thinking_tags_only_yields_nothing(self):
+        """Content that is only a thinking block yields no events."""
+        events = self._emit("<thinking>just reasoning</thinking>")
+        assert events == []
+
+    def test_thinking_tags_preserve_surrounding_whitespace(self):
+        """Stripping tags does not swallow adjacent spaces."""
+        raw = "before <thinking>x</thinking> after"
+        events = self._emit(raw)
+        assert len(events) == 1
+        assert events[0].data["content"] == "before  after"
 
     def test_empty_string_no_events(self):
         events = self._emit("")

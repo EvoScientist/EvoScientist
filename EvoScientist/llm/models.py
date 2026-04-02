@@ -55,6 +55,22 @@ def _patch_anthropic_proxy_compat() -> None:
 _patch_anthropic_proxy_compat()
 
 
+def _is_ccproxy_codex() -> bool:
+    """Return True if the OpenAI endpoint is ccproxy's Codex adapter.
+
+    Checks for the ccproxy-specific markers set by ``setup_codex_env()``
+    in ``ccproxy_manager.py``: the sentinel API key and the ``/codex/v1``
+    path.  Plain localhost endpoints (vLLM, Ollama, etc.) are not affected.
+    """
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    return (
+        ("127.0.0.1" in base_url or "localhost" in base_url)
+        and api_key == "ccproxy-oauth"
+        and "/codex/" in base_url
+    )
+
+
 _SKIP_CONTENT_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
 
 
@@ -326,9 +342,7 @@ def _apply_auto_config(
 
     # OpenAI (native, not third-party routed): reasoning
     if provider == "openai" and not is_third_party and "reasoning" not in kwargs:
-        base_url = os.environ.get("OPENAI_BASE_URL", "")
-        _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
-        if _is_openai_proxy:
+        if _is_ccproxy_codex():
             # ccproxy uses Chat Completions which doesn't support reasoning.
             pass
         else:
@@ -416,9 +430,9 @@ def get_chat_model(
         base_url = os.environ.get("OPENAI_BASE_URL", "")
         if base_url:
             kwargs["base_url"] = base_url
-            _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
+            _is_openai_proxy = _is_ccproxy_codex()
             if _is_openai_proxy:
-                # Default to Chat Completions for proxy: ccproxy's Chat
+                # Default to Chat Completions for ccproxy: its Chat
                 # Completions → Responses API converter handles system messages
                 # correctly; its native Responses API endpoint does not.
                 # (User can override via EVOSCIENTIST_USE_RESPONSES_API=true.)

@@ -774,6 +774,50 @@ class TestAutoConfig:
         assert call_kwargs["streaming"] is False
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_localhost_non_ccproxy_not_downgraded(self, mock_init, monkeypatch):
+        """Local OpenAI-compatible endpoints (vLLM, etc.) are not affected by ccproxy workarounds."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-local-key")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "http://127.0.0.1:8080/v1"
+        # NOT ccproxy: reasoning should be applied, no forced Chat Completions
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert "use_responses_api" not in call_kwargs
+        assert "streaming" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_codex_path_but_wrong_key_not_ccproxy(self, mock_init, monkeypatch):
+        """ccproxy detection requires both /codex/ path AND ccproxy-oauth key."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert "use_responses_api" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_key_but_wrong_path_not_ccproxy(
+        self, mock_init, monkeypatch
+    ):
+        """ccproxy detection requires both /codex/ path AND ccproxy-oauth key."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert "use_responses_api" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_no_base_url_when_unset(self, mock_init, monkeypatch):
         """OpenAI provider should not set base_url when env var is empty."""
         mock_init.return_value = "mock_model"
