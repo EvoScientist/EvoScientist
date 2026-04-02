@@ -349,9 +349,7 @@ def test_trace_span_emits_start_and_error_on_exception(caplog):
     logger = logging.getLogger("tests.trace_span.err")
     with caplog.at_level(logging.DEBUG, logger=logger.name):
         try:
-            with trace_span(
-                logger, "fail_op", channel="test", enabled=True
-            ):
+            with trace_span(logger, "fail_op", channel="test", enabled=True):
                 raise ValueError("boom")
         except ValueError:
             pass
@@ -363,9 +361,7 @@ def test_trace_span_emits_start_and_error_on_exception(caplog):
 def test_trace_span_disabled_emits_nothing(caplog):
     logger = logging.getLogger("tests.trace_span.disabled")
     with caplog.at_level(logging.DEBUG, logger=logger.name):
-        with trace_span(
-            logger, "noop", channel="test", enabled=False
-        ) as span:
+        with trace_span(logger, "noop", channel="test", enabled=False) as span:
             span.set(x=1)
     assert "noop" not in caplog.text
 
@@ -423,18 +419,12 @@ def test_emit_debug_event_warns_on_level_mismatch(caplog):
     logger = logging.getLogger("tests.level_mismatch")
     # Logger at WARNING — higher than DEBUG
     with caplog.at_level(logging.WARNING, logger=logger.name):
-        emit_debug_event(
-            logger, "should_warn", channel="test", enabled=True, x=1
-        )
-        emit_debug_event(
-            logger, "should_not_warn_again", channel="test", enabled=True
-        )
+        emit_debug_event(logger, "should_warn", channel="test", enabled=True, x=1)
+        emit_debug_event(logger, "should_not_warn_again", channel="test", enabled=True)
 
     # Should see the one-time mismatch warning
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    mismatch_warnings = [
-        r for r in warnings if "debug tracing is enabled" in r.message
-    ]
+    mismatch_warnings = [r for r in warnings if "debug tracing is enabled" in r.message]
     assert len(mismatch_warnings) == 1
     # Should NOT see the actual debug events
     assert "should_warn" not in caplog.text or "event=should_warn" not in caplog.text

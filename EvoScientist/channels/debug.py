@@ -350,7 +350,9 @@ class TraceMixin:
             self._trace_logger.debug(message, *args)
 
     @contextmanager
-    def _trace_span(self, event: str, **fields: Any) -> Generator[TraceSpan, None, None]:
+    def _trace_span(
+        self, event: str, **fields: Any
+    ) -> Generator[TraceSpan, None, None]:
         """Channel-level convenience wrapper around :func:`trace_span`."""
         with trace_span(
             self._trace_logger,

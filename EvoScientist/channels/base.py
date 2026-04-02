@@ -562,7 +562,9 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                                 chunk_index=i,
                                 error_type=type(chunk_err).__name__,
                             )
-                            _logger.error(f"{self.name} chunk {i} send error: {chunk_err}")
+                            _logger.error(
+                                f"{self.name} chunk {i} send error: {chunk_err}"
+                            )
                             had_error = True
                 if had_error:
                     span.set(result="partial")
