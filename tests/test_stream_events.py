@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessageChunk
 
-from EvoScientist.stream.events import _extract_tool_content, stream_agent_events
+from EvoScientist.stream.events import (
+    _extract_tool_content,
+    _process_chunk_content,
+    stream_agent_events,
+)
 
 
 class TestExtractToolContent:
@@ -89,6 +93,60 @@ class TestExtractToolContent:
         content, is_image = _extract_tool_content(msg)
         assert is_image is False
         assert content == "some result"
+
+
+# =============================================================================
+# _process_chunk_content — string content passthrough
+# =============================================================================
+
+
+class TestProcessChunkContentStrings:
+    """Verify _process_chunk_content handles string content correctly.
+
+    After removing strip_thinking_tags (ccproxy >=0.2.7 no longer embeds
+    <thinking> tags), string content is emitted verbatim.  These tests
+    serve as a regression baseline: if a future ccproxy version re-introduces
+    tags, the raw tags will be visible and these tests will document that.
+    """
+
+    def _emit(self, content: str) -> list:
+        from EvoScientist.stream.emitter import StreamEventEmitter
+        from EvoScientist.stream.tracker import ToolCallTracker
+
+        emitter = StreamEventEmitter()
+        tracker = ToolCallTracker()
+        chunk = AIMessageChunk(content=content)
+        return list(_process_chunk_content(chunk, emitter, tracker))
+
+    def test_plain_text_passthrough(self):
+        events = self._emit("Hello world")
+        assert len(events) == 1
+        assert events[0].type == "text"
+        assert events[0].data["content"] == "Hello world"
+
+    def test_thinking_tags_stripped(self):
+        """Legacy <thinking> tags from older ccproxy are stripped."""
+        raw = "<thinking>some reasoning</thinking>The answer is 42."
+        events = self._emit(raw)
+        assert len(events) == 1
+        assert "<thinking>" not in events[0].data["content"]
+        assert events[0].data["content"] == "The answer is 42."
+
+    def test_thinking_tags_only_yields_nothing(self):
+        """Content that is only a thinking block yields no events."""
+        events = self._emit("<thinking>just reasoning</thinking>")
+        assert events == []
+
+    def test_thinking_tags_preserve_surrounding_whitespace(self):
+        """Stripping tags does not swallow adjacent spaces."""
+        raw = "before <thinking>x</thinking> after"
+        events = self._emit(raw)
+        assert len(events) == 1
+        assert events[0].data["content"] == "before  after"
+
+    def test_empty_string_no_events(self):
+        events = self._emit("")
+        assert events == []
 
 
 # =============================================================================

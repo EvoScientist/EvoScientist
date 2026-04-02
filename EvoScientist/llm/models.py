@@ -10,7 +10,6 @@ convenient short names for common models.
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 from langchain.chat_models import init_chat_model
@@ -55,16 +54,21 @@ def _patch_anthropic_proxy_compat() -> None:
 
 _patch_anthropic_proxy_compat()
 
-# ---------------------------------------------------------------------------
-# Patch: ccproxy Codex embeds thinking as <thinking>...</thinking> tags
-# inside the content string. Strip these so they don't appear in output.
-# ---------------------------------------------------------------------------
-_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>\s*", re.DOTALL)
 
+def _is_ccproxy_codex() -> bool:
+    """Return True if the OpenAI endpoint is ccproxy's Codex adapter.
 
-def strip_thinking_tags(content: str) -> str:
-    """Remove ``<thinking>...</thinking>`` tags from ccproxy response content."""
-    return _THINKING_TAG_RE.sub("", content)
+    Checks for the ccproxy-specific markers set by ``setup_codex_env()``
+    in ``ccproxy_manager.py``: the sentinel API key and the ``/codex/v1``
+    path.  Plain localhost endpoints (vLLM, Ollama, etc.) are not affected.
+    """
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    return (
+        ("127.0.0.1" in base_url or "localhost" in base_url)
+        and api_key == "ccproxy-oauth"
+        and "/codex/" in base_url
+    )
 
 
 _SKIP_CONTENT_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
@@ -320,16 +324,15 @@ def _apply_auto_config(
     # Anthropic: extended thinking
     if provider == "anthropic" and "thinking" not in kwargs:
         _supports_thinking = original_provider in _THINKING_CAPABLE_PROVIDERS
-        # Only check ANTHROPIC_BASE_URL for proxy detection on native Anthropic
-        # (routed providers have their own base_url set in kwargs already).
+        # Detect local proxy (e.g. ccproxy): thinking blocks in conversation
+        # history cause 422 errors because the proxy doesn't accept 'thinking'
+        # as a valid content block type on round-trip.
         if not is_third_party:
             base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
             _is_proxy = "127.0.0.1" in base_url or "localhost" in base_url
         else:
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
-            # ccproxy / generic third-party: skip thinking to avoid
-            # 422 errors with thinking content blocks in history
             pass
         elif model_id.endswith("4-6"):
             kwargs["thinking"] = {"type": "adaptive"}
@@ -339,10 +342,8 @@ def _apply_auto_config(
 
     # OpenAI (native, not third-party routed): reasoning
     if provider == "openai" and not is_third_party and "reasoning" not in kwargs:
-        base_url = os.environ.get("OPENAI_BASE_URL", "")
-        _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
-        if _is_openai_proxy:
-            # Skip reasoning kwarg for ccproxy — not needed and may cause issues.
+        if _is_ccproxy_codex():
+            # ccproxy uses Chat Completions which doesn't support reasoning.
             pass
         else:
             kwargs["reasoning"] = {"effort": "high", "summary": "auto"}
@@ -429,14 +430,16 @@ def get_chat_model(
         base_url = os.environ.get("OPENAI_BASE_URL", "")
         if base_url:
             kwargs["base_url"] = base_url
-            _is_openai_proxy = "127.0.0.1" in base_url or "localhost" in base_url
+            _is_openai_proxy = _is_ccproxy_codex()
             if _is_openai_proxy:
-                kwargs.setdefault(
-                    "streaming", False
-                )  # ccproxy streaming format incompatible with langchain-openai
-                kwargs.setdefault(
-                    "use_responses_api", True
-                )  # ccproxy Chat Completions does not support tool calling; Responses API does
+                # Default to Chat Completions for ccproxy: its Chat
+                # Completions → Responses API converter handles system messages
+                # correctly; its native Responses API endpoint does not.
+                # (User can override via EVOSCIENTIST_USE_RESPONSES_API=true.)
+                kwargs.setdefault("use_responses_api", False)
+                # Default streaming off: ccproxy duplicates tool call names
+                # in streaming Chat Completions chunks.
+                kwargs.setdefault("streaming", False)
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key
