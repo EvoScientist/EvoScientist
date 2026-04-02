@@ -698,6 +698,7 @@ def run_textual_interactive(
             self,
             user_text: str,
             *,
+            display_text: str | None = None,
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
@@ -712,6 +713,11 @@ def run_textual_interactive(
             ``_process_channel_message`` (channel).
 
             Args:
+                display_text: Text to show in UserMessage widget. When
+                    ``None`` (default), falls back to *user_text*.  This
+                    allows callers to show the original user input while
+                    sending the resolved (e.g. @file-expanded) text to
+                    the agent.
                 skip_user_message: If True, don't mount UserMessage (caller
                     already mounted it — e.g. channel messages with labels).
                 channel_hitl_fn: Optional channel-based HITL approval function.
@@ -725,7 +731,7 @@ def run_textual_interactive(
 
             # 1. Mount user message + loading spinner
             if not skip_user_message:
-                await container.mount(UserMessage(user_text))
+                await container.mount(UserMessage(display_text or user_text))
             # Mount file warnings after user message so they appear in the
             # correct position (between user input and model response).
             for w in file_warnings or []:
@@ -1404,7 +1410,9 @@ def run_textual_interactive(
 
             try:
                 await self._stream_with_widgets(
-                    message_to_send, file_warnings=file_warnings
+                    message_to_send,
+                    display_text=user_text,
+                    file_warnings=file_warnings,
                 )
             except asyncio.CancelledError:
                 cancelled = True
