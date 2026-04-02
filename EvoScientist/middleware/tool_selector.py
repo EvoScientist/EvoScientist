@@ -23,6 +23,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,11 @@ class _ToolSelectionTrackerMiddleware(AgentMiddleware):
         return await handler(request)
 
 
-def create_tool_selector_middleware(threshold: int = DEFAULT_TOOL_THRESHOLD):
+def create_tool_selector_middleware(
+    threshold: int = DEFAULT_TOOL_THRESHOLD,
+    *,
+    model: BaseChatModel | None = None,
+):
     """Build LLMToolSelectorMiddleware + tracker with EvoScientist defaults.
 
     Returns a list of two middleware:
@@ -171,6 +176,8 @@ def create_tool_selector_middleware(threshold: int = DEFAULT_TOOL_THRESHOLD):
     2. ``_ToolSelectionTrackerMiddleware`` — captures selected tool names
 
     Args:
+        model: Chat model for tool selection.  If *None*, the default
+            model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
             Default 20.  Set to 0 to always run selection.
 
@@ -182,12 +189,12 @@ def create_tool_selector_middleware(threshold: int = DEFAULT_TOOL_THRESHOLD):
     """
     from langchain.agents.middleware import LLMToolSelectorMiddleware
 
-    # Resolve model and strip thinking/reasoning for structured output compat.
-    from EvoScientist.EvoScientist import _ensure_chat_model
-
     from .utils import disable_thinking
 
-    model = _ensure_chat_model()
+    if model is None:
+        from EvoScientist.EvoScientist import _ensure_chat_model
+
+        model = _ensure_chat_model()
     safe_model = disable_thinking(model)
 
     selector = LLMToolSelectorMiddleware(
