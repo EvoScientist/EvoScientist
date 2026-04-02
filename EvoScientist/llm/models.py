@@ -478,7 +478,9 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
-        # Moonshot: same issue, but uses Anthropic-style thinking param.
+        # Moonshot: 禁用所有模型的 thinking 以避免 LangChain 丢弃 reasoning_content
+        # 导致多轮对话错误 (error 20015)。即使是 kimi-k2-thinking 等原生 thinking 模型
+        # 也会以非-thinking模式工作。
         if provider == "moonshot":
             kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
         provider = "openai"

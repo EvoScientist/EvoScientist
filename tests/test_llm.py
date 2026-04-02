@@ -39,6 +39,8 @@ class TestModelsRegistry:
         assert "volcengine" in providers
         assert "dashscope" in providers
         assert "deepseek" in providers
+        assert "moonshot" in providers
+        assert "kimi-coding" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
