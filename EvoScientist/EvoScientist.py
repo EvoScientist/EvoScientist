@@ -132,17 +132,27 @@ def _load_mcp_tools_cached() -> dict[str, list]:
 
 
 def _inject_subagent_middleware(subs: list[dict]) -> None:
-    """Ensure every subagent gets ToolErrorHandlerMiddleware.
+    """Ensure every subagent gets error handling and context management middleware.
 
     Without this, subagent tool errors are caught by LangGraph's default
     ToolNode handler which produces terse messages without tracebacks or
     retry guidance — reducing the subagent's ability to self-recover.
     """
-    from .middleware import ContextOverflowMapperMiddleware, ToolErrorHandlerMiddleware
+    from .middleware import (
+        ContextOverflowMapperMiddleware,
+        ToolErrorHandlerMiddleware,
+        create_context_editing_middleware,
+    )
 
     for sa in subs:
         sa.setdefault("middleware", []).extend(
-            [ToolErrorHandlerMiddleware(), ContextOverflowMapperMiddleware()]
+            [
+                # Uses main agent's model for trigger — subagents currently
+                # share the same model, so context window matches.
+                create_context_editing_middleware(),
+                ToolErrorHandlerMiddleware(),
+                ContextOverflowMapperMiddleware(),
+            ]
         )
 
 
@@ -277,15 +287,20 @@ def _get_default_middleware():
     from .middleware import (
         ContextOverflowMapperMiddleware,
         ToolErrorHandlerMiddleware,
+        create_context_editing_middleware,
         create_memory_middleware,
+        create_tool_selector_middleware,
     )
 
     cfg = _ensure_config()
+    model = _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORY_DIR)
     mw = [
+        create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        create_memory_middleware(memory_dir, extraction_model=_ensure_chat_model()),
+        *create_tool_selector_middleware(),
+        create_memory_middleware(memory_dir, extraction_model=model),
     ]
 
     if cfg.enable_ask_user and not cfg.auto_approve:
@@ -354,7 +369,9 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
     from .middleware import (
         ContextOverflowMapperMiddleware,
         ToolErrorHandlerMiddleware,
+        create_context_editing_middleware,
         create_memory_middleware,
+        create_tool_selector_middleware,
     )
 
     cfg = _ensure_config(config)
@@ -404,10 +421,13 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         },
     )
 
+    model = _ensure_chat_model()
     mw: list[AgentMiddleware] = [
+        create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        create_memory_middleware(_mem_dir, extraction_model=_ensure_chat_model()),
+        *create_tool_selector_middleware(),
+        create_memory_middleware(_mem_dir, extraction_model=model),
     ]
     if cfg.enable_ask_user and not cfg.auto_approve:
         from .middleware.ask_user import AskUserMiddleware
