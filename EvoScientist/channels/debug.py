@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _DATE_FORMAT = "%H:%M:%S"

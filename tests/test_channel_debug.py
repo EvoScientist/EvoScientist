@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.channels.debug import (
     TraceMixin,
-    TraceSpan,
     configure_standalone_logging,
     debug_payloads_enabled,
     debug_trace_enabled,
