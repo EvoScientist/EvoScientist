@@ -442,11 +442,21 @@ def _start_channels_bus_mode(
                 except asyncio.CancelledError:
                     pass
 
+        async def _run_as_task():
+            # Wrap in a Task so that asyncio.timeout / asyncio.wait_for work
+            # correctly on Python 3.11+ (they require a running Task context).
+            task = loop.create_task(_run())
+            try:
+                await task
+            except Exception as e:
+                _channel_logger.error(
+                    "Bus thread terminated with error: %s", e, exc_info=True
+                )
+
         try:
-            loop.run_until_complete(_run())
-        except Exception as e:
-            _channel_logger.error(f"Bus thread error: {e}")
+            loop.run_until_complete(_run_as_task())
         finally:
+            _channel_logger.debug("Bus thread event loop closed")
             loop.close()
 
     thread = threading.Thread(target=_bus_thread_entry, daemon=True)

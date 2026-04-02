@@ -757,7 +757,16 @@ class ChannelManager:
         """Start the HTTP health-check endpoint (if configured)."""
         if self._health_port and self._health_server is None:
             self._health_server = _HealthServer(self, self._health_port)
-            await self._health_server.start()
+            try:
+                await self._health_server.start()
+            except OSError as e:
+                logger.warning(
+                    "Health server failed to bind on port %s: %s — "
+                    "health endpoint disabled, channel will still start normally.",
+                    self._health_port,
+                    e,
+                )
+                self._health_server = None
 
     async def stop_health(self) -> None:
         """Stop the HTTP health-check endpoint."""
