@@ -1,10 +1,7 @@
 """Tests for shared channel debug logging helpers."""
 
-import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from EvoScientist.channels.debug import (
     configure_standalone_logging,
@@ -112,7 +109,7 @@ def _make_raw(**overrides):
     """Create a minimal RawIncoming for testing."""
     from EvoScientist.channels.base import RawIncoming
 
-    defaults = dict(sender_id="user1", chat_id="chat1", text="hello")
+    defaults = {"sender_id": "user1", "chat_id": "chat1", "text": "hello"}
     defaults.update(overrides)
     return RawIncoming(**defaults)
 
