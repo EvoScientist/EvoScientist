@@ -394,6 +394,7 @@ def create_streaming_display(
     total_input_tokens: int = 0,
     total_output_tokens: int = 0,
     summarization_text: str = "",
+    selected_tools: list | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -436,6 +437,18 @@ def create_streaming_display(
                 Text(display_thinking, style="dim"),
                 title=thinking_title,
                 border_style="blue",
+                padding=(0, 1),
+            )
+        )
+
+    # Selected tools panel (from LLMToolSelectorMiddleware)
+    if selected_tools:
+        tools_str = ", ".join(selected_tools)
+        elements.append(
+            Panel(
+                Text(tools_str, style="cyan"),
+                title=f"Adaptive Selected Tools ({len(selected_tools)})",
+                border_style="#2d7d46",
                 padding=(0, 1),
             )
         )

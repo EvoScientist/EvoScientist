@@ -950,6 +950,16 @@ def run_textual_interactive(
                                     await container.mount(summarization_w)
                                 summarization_w.append_text(content)
 
+                        elif event_type == "tool_selection":
+                            tools = event.get("tools", [])
+                            if tools:
+                                from .widgets.tool_selection_widget import (
+                                    ToolSelectionWidget,
+                                )
+
+                                await container.mount(ToolSelectionWidget(tools))
+                                _schedule_scroll()
+
                         elif event_type == "text":
                             # Finalize summarization widget when regular text resumes
                             if (

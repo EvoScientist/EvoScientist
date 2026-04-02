@@ -169,7 +169,7 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.86.0"
+version = "0.87.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -181,9 +181,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/37/7a/8b390dc47945d3169875d342847431e5f7d5fa716b2e37494d57cfc1db10/anthropic-0.86.0.tar.gz", hash = "sha256:60023a7e879aa4fbb1fed99d487fe407b2ebf6569603e5047cfe304cebdaa0e5", size = 583820, upload-time = "2026-03-18T18:43:08.017Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/8f/3281edf7c35cbac169810e5388eb9b38678c7ea9867c2d331237bd5dff08/anthropic-0.87.0.tar.gz", hash = "sha256:098fef3753cdd3c0daa86f95efb9c8d03a798d45c5170329525bb4653f6702d0", size = 588982, upload-time = "2026-03-31T17:52:41.697Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/5f/67db29c6e5d16c8c9c4652d3efb934d89cb750cad201539141781d8eae14/anthropic-0.86.0-py3-none-any.whl", hash = "sha256:9d2bbd339446acce98858c5627d33056efe01f70435b22b63546fe7edae0cd57", size = 469400, upload-time = "2026-03-18T18:43:06.526Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/02/99bf351933bdea0545a2b6e2d812ed878899e9a95f618351dfa3d0de0e69/anthropic-0.87.0-py3-none-any.whl", hash = "sha256:e2669b86d42c739d3df163f873c51719552e263a3d85179297180fb4fa00a236", size = 472126, upload-time = "2026-03-31T17:52:40.174Z" },
 ]
 
 [[package]]
@@ -350,7 +350,7 @@ wheels = [
 
 [[package]]
 name = "ccproxy-api"
-version = "0.2.6"
+version = "0.2.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -368,9 +368,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/29/ea/3b277688847ed229f24ff32875597cf215176f52a9fcea7a0dafde380ce9/ccproxy_api-0.2.6.tar.gz", hash = "sha256:9fea2c59c632db653b7254ee3c3833e716665598d1f9b1f7d1af3c8c79728648", size = 680952, upload-time = "2026-03-22T20:44:21.05Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/f2/89247f1d4fa31ddccf271db6d300ae9bffb66c7f7e804539a7099995a255/ccproxy_api-0.2.7.tar.gz", hash = "sha256:35af27665fadab4a49396604531ff81acb7c648c3f8657aa96086e92eebdbf08", size = 681504, upload-time = "2026-03-31T08:20:01.629Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/de/d3/ff6613b59db9ae1587905d3d631555e5eee116b0cca8ad8cff5058397541/ccproxy_api-0.2.6-py3-none-any.whl", hash = "sha256:4333ae6f2c5b39b8ca15c20624725e34295651ee810d476233b73bf6fba7e49e", size = 877705, upload-time = "2026-03-22T20:44:18.942Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/f9/854c5f8e178e8eb953e5ab737c7f148fc175ba946bf9618a1b5181d435f8/ccproxy_api-0.2.7-py3-none-any.whl", hash = "sha256:961f972131aa2b30a45a37fcf8459ce7857e73728cf22a7967a9ae6fb60eb82d", size = 878222, upload-time = "2026-03-31T08:20:00.011Z" },
 ]
 
 [[package]]
@@ -957,7 +957,7 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'all-channels'", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.4" },
+    { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.7" },
     { name = "deepagents", specifier = ">=0.4.11" },
     { name = "discord-py", marker = "extra == 'all-channels'", specifier = ">=2.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3" },
