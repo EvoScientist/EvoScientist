@@ -102,6 +102,73 @@ def _flatten_message_content(content: Any) -> str | Any:
     return "\n\n".join(parts) if parts else ""
 
 
+def _patch_system_messages_for_proxy(model: Any) -> None:
+    """Convert system messages to human messages for proxies that reject system role.
+
+    Some OpenAI-compatible proxies (e.g. ccproxy's Codex endpoint) return HTTP
+    400 "System messages are not allowed" when the request includes a system-role
+    message.  This patch intercepts _generate / _agenerate and prepends system
+    message content to the first non-system message so the proxy never sees it.
+    """
+    import copy
+    import functools
+
+    from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+
+    def _convert(messages: list[BaseMessage]) -> list[BaseMessage]:
+        system_parts: list[str] = []
+        rest: list[BaseMessage] = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                text = (
+                    msg.content
+                    if isinstance(msg.content, str)
+                    else _flatten_message_content(msg.content)
+                )
+                if text:
+                    system_parts.append(text)
+            else:
+                rest.append(msg)
+        if not system_parts:
+            return messages
+        prefix = "\n\n".join(system_parts)
+        if rest:
+            first = copy.copy(rest[0])
+            existing = (
+                first.content
+                if isinstance(first.content, str)
+                else _flatten_message_content(first.content)
+            )
+            first.content = f"{prefix}\n\n{existing}" if existing else prefix
+            rest[0] = first
+        else:
+            rest = [HumanMessage(content=prefix)]
+        return rest
+
+    orig_generate = getattr(model, "_generate", None)
+    if orig_generate is None:
+        return
+
+    @functools.wraps(orig_generate)
+    def _patched_generate(
+        messages: list[BaseMessage], *args: Any, **kwargs: Any
+    ) -> Any:
+        return orig_generate(_convert(messages), *args, **kwargs)
+
+    model._generate = _patched_generate
+
+    orig_agenerate = getattr(model, "_agenerate", None)
+    if orig_agenerate is not None:
+
+        @functools.wraps(orig_agenerate)
+        async def _patched_agenerate(
+            messages: list[BaseMessage], *args: Any, **kwargs: Any
+        ) -> Any:
+            return await orig_agenerate(_convert(messages), *args, **kwargs)
+
+        model._agenerate = _patched_agenerate
+
+
 def _patch_openai_compat_content(model: Any) -> None:
     """Flatten list content to strings before OpenAI-compatible API calls.
 
@@ -514,6 +581,11 @@ def get_chat_model(
     # native OpenAI through a proxy, to avoid "sequence expected string" errors.
     if _is_third_party or _is_openai_proxy:
         _patch_openai_compat_content(chat_model)
+
+    # Convert system messages to human messages for proxies that reject system role
+    # (e.g. ccproxy's Codex endpoint returns 400 "System messages are not allowed").
+    if _is_openai_proxy:
+        _patch_system_messages_for_proxy(chat_model)
 
     return chat_model
 

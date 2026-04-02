@@ -305,9 +305,18 @@ def _patch_ccproxy_oauth_header() -> None:
         if not ccproxy_bin:
             return
 
-        # Find the Python interpreter used by the ccproxy binary via shebang
-        shebang = pathlib.Path(ccproxy_bin).read_text().splitlines()[0]
-        python_exe = shebang.lstrip("#!").strip()
+        # Find the Python interpreter used by the ccproxy binary via shebang.
+        # On Windows ccproxy is a compiled EXE with no shebang — fall back to
+        # sys.executable (both tools are typically in the same conda/venv env).
+        import sys as _sys
+
+        binary_data = pathlib.Path(ccproxy_bin).read_bytes()
+        if binary_data.startswith(b"#!"):
+            shebang = binary_data.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+            python_exe = shebang.lstrip("#!").strip()
+        else:
+            # Binary executable (e.g. Windows .exe) — use current interpreter.
+            python_exe = _sys.executable
 
         # Ask that Python where ccproxy's adapter lives
         result = subprocess.run(
