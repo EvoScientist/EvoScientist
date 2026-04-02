@@ -427,7 +427,7 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "http://localhost:8000/api/v1"
         assert call_kwargs["api_key"] == "sk-dummy"
-        # Proxy mode: thinking skipped for 4-6 models (ccproxy manages it)
+        # Proxy mode: thinking skipped (history round-trip causes 422)
         assert "thinking" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -696,7 +696,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_proxy_no_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-6 models via proxy skip thinking (ccproxy manages it)."""
+        """Anthropic 4-6 models via proxy skip thinking (history round-trip 422)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
@@ -709,7 +709,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_5_proxy_no_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-5 models via proxy also skip thinking."""
+        """Anthropic 4-5 models via proxy also skip thinking (history round-trip 422)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
@@ -767,8 +767,11 @@ class TestAutoConfig:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "http://127.0.0.1:8000/codex/v1"
         assert call_kwargs["api_key"] == "ccproxy-oauth"
-        # Proxy mode: reasoning skipped (triggers Responses API → rs_ 404)
+        # Proxy mode: reasoning skipped (Chat Completions doesn't support it)
         assert "reasoning" not in call_kwargs
+        # Proxy mode: Chat Completions + no streaming (ccproxy workarounds)
+        assert call_kwargs["use_responses_api"] is False
+        assert call_kwargs["streaming"] is False
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_no_base_url_when_unset(self, mock_init, monkeypatch):

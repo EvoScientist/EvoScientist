@@ -602,12 +602,7 @@ def _process_chunk_content(
 
     if isinstance(content, str):
         if content:
-            # Strip ccproxy <thinking>...</thinking> tags from content
-            from ..llm.models import strip_thinking_tags
-
-            cleaned = strip_thinking_tags(content)
-            if cleaned:
-                yield emitter.text(cleaned)
+            yield emitter.text(content)
             return
 
     blocks = None
