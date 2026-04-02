@@ -457,6 +457,7 @@ def get_chat_model(
 
     # OpenAI-routed providers → route through OpenAI provider with base_url
     elif provider in _OPENAI_ROUTED_PROVIDERS:
+        _original_provider = provider
         base_url_default, api_key_env = _OPENAI_ROUTED_PROVIDERS[provider]
         if provider == "custom-openai":
             base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "")
@@ -487,6 +488,7 @@ def get_chat_model(
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:
+        _original_provider = provider
         base_url_default, api_key_env = _ANTHROPIC_ROUTED_PROVIDERS[provider]
         if provider == "custom-anthropic":
             base_url = os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", "")
@@ -504,7 +506,6 @@ def get_chat_model(
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
-        _original_provider = provider
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
