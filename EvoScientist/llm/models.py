@@ -346,7 +346,7 @@ def _apply_auto_config(
             # ccproxy uses Chat Completions which doesn't support reasoning.
             pass
         else:
-            kwargs["reasoning"] = {"effort": "high", "summary": "auto"}
+            kwargs["reasoning"] = {"effort": "xhigh", "summary": "auto"}
 
     # Google GenAI: surface thinking traces
     if provider == "google-genai":

@@ -752,7 +752,7 @@ class TestAutoConfig:
         get_chat_model("gpt-5-nano")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {"effort": "xhigh", "summary": "auto"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_base_url_override(self, mock_init, monkeypatch):
@@ -785,7 +785,7 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["base_url"] == "http://127.0.0.1:8080/v1"
         # NOT ccproxy: reasoning should be applied, no forced Chat Completions
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {"effort": "xhigh", "summary": "auto"}
         assert "use_responses_api" not in call_kwargs
         assert "streaming" not in call_kwargs
 
@@ -799,7 +799,7 @@ class TestAutoConfig:
         get_chat_model("gpt-5-nano", provider="openai")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {"effort": "xhigh", "summary": "auto"}
         assert "use_responses_api" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -814,7 +814,7 @@ class TestAutoConfig:
         get_chat_model("gpt-5-nano", provider="openai")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {"effort": "xhigh", "summary": "auto"}
         assert "use_responses_api" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -864,7 +864,7 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["use_responses_api"] is True
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {"effort": "xhigh", "summary": "auto"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_use_responses_api_default_unchanged(self, mock_init, monkeypatch):
@@ -877,7 +877,7 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert "use_responses_api" not in call_kwargs
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {"effort": "xhigh", "summary": "auto"}
 
     @pytest.mark.parametrize("env_value", ["FALSE", " false ", "False"])
     @patch("EvoScientist.llm.models.init_chat_model")
