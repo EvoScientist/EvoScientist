@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,77 @@ def _is_uv_tool_env() -> bool:
     return "/uv/tools/" in normalized
 
 
+def _uv_tool_name() -> str | None:
+    """Extract the uv tool name from ``VIRTUAL_ENV``.
+
+    Returns ``None`` when not in a uv tool environment.
+    The tool name is the last path component of ``VIRTUAL_ENV``
+    (e.g. ``/home/user/.local/share/uv/tools/evoscientist`` → ``evoscientist``).
+    """
+    if not _is_uv_tool_env():
+        return None
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    return Path(virtual_env).name or None
+
+
+def _bare_package_name(package: str) -> str:
+    """Extract the bare package name from a PEP 508 requirement string.
+
+    Strips extras (``[...]``), version specifiers (``>=``, ``==``, etc.),
+    and environment markers (``; ...``).
+    """
+    return re.split(r"[\[><=!~;]", package, maxsplit=1)[0].strip()
+
+
+def _receipt_entry_to_spec(entry: dict[str, object]) -> str:
+    """Convert a ``uv-receipt.toml`` requirement entry to a PEP 508 string.
+
+    Handles ``name``, ``extras`` (list), and ``specifier`` (version constraint)
+    fields that uv records in the receipt.
+    """
+    spec = str(entry.get("name", ""))
+    extras = entry.get("extras")
+    if extras and isinstance(extras, list):
+        spec += "[" + ",".join(str(e) for e in extras) + "]"
+    specifier = entry.get("specifier")
+    if specifier:
+        spec += str(specifier)
+    return spec
+
+
+def _uv_tool_existing_requirements() -> dict[str, str]:
+    """Read existing ``--with`` requirements from the uv tool receipt.
+
+    Returns a mapping of ``{bare_name: full_spec}`` (excluding the tool
+    itself) so that ``uv tool install --with`` calls can preserve them
+    with their original extras and version constraints.
+    """
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    if not virtual_env:
+        return {}
+    receipt = Path(virtual_env) / "uv-receipt.toml"
+    if not receipt.is_file():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            return {}
+    try:
+        data = tomllib.loads(receipt.read_text())
+    except Exception:
+        return {}
+    tool_name = _uv_tool_name() or ""
+    reqs = data.get("tool", {}).get("requirements", [])
+    return {
+        r["name"]: _receipt_entry_to_spec(r)
+        for r in reqs
+        if isinstance(r, dict) and r.get("name") and r["name"] != tool_name
+    }
+
+
 def pip_install_hint() -> str:
     """Human-readable install command for error messages."""
     if _is_uv_tool_env():
@@ -87,13 +159,40 @@ def pip_install_hint() -> str:
 def install_pip_package(package: str) -> bool:
     """Silently install a pip package.
 
-    When ``uv`` is available, uses ``uv pip install --python sys.executable``
-    to target the current interpreter directly — this works for uv tool envs,
-    standard venvs, conda envs, and system Python without needing ``--system``.
+    In a **uv tool environment**, uses ``uv tool install <tool> --with``
+    which records the dependency in uv's receipt so it survives
+    ``uv tool upgrade``.  Existing ``--with`` packages are preserved.
+
+    Otherwise, when ``uv`` is available, uses
+    ``uv pip install --python sys.executable``.
     Falls back to ``python -m pip install`` when uv is not available.
 
     Returns True if installation succeeded.
     """
+    # ---- uv tool env: durable install via `uv tool install --with` ----
+    if _is_uv_tool_env() and shutil.which("uv"):
+        tool_name = _uv_tool_name()
+        if tool_name:
+            existing = _uv_tool_existing_requirements()
+            cmd = ["uv", "tool", "install", tool_name, "-q"]
+            for spec in existing.values():
+                cmd += ["--with", spec]
+            if _bare_package_name(package) not in existing:
+                cmd += ["--with", package]
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=180
+                )
+                if result.returncode == 0:
+                    import importlib
+
+                    importlib.invalidate_caches()
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            # Fall through to legacy methods if uv tool install failed.
+
+    # ---- Standard venv / conda / system Python ----
     commands: list[list[str]] = []
     if shutil.which("uv"):
         commands.append(
