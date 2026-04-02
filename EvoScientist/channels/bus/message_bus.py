@@ -23,13 +23,14 @@ OutboundCallback = Callable[[OutboundMessage], Awaitable[None]]
 class MessageBus(TraceMixin):
     """Async message bus that decouples chat channels from the agent core."""
 
+    name = "bus"
+
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=5000)
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=5000)
         self._outbound_subscribers: dict[str, list[OutboundCallback]] = {}
         self._running = False
         self._debug_trace = debug_trace_enabled()
-        self._trace_name = "bus"
         self._trace_logger = logger
 
     # ── inbound (channel → agent) ──

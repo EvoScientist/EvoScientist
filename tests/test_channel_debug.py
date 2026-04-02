@@ -374,15 +374,21 @@ def test_trace_span_disabled_emits_nothing(caplog):
 # ── TraceMixin tests ─────────────────────────────────────────────────
 
 
-def test_trace_mixin_trace_event(caplog):
+def _make_trace_stub(logger_name: str = "tests.mixin") -> TraceMixin:
+    """Create a minimal TraceMixin instance for testing."""
 
     class _Stub(TraceMixin):
+        name = "stub"
+
         def __init__(self):
             self._debug_trace = True
-            self._trace_name = "stub"
-            self._trace_logger = logging.getLogger("tests.mixin")
+            self._trace_logger = logging.getLogger(logger_name)
 
-    stub = _Stub()
+    return _Stub()
+
+
+def test_trace_mixin_trace_event(caplog):
+    stub = _make_trace_stub("tests.mixin")
     with caplog.at_level(logging.DEBUG, logger="tests.mixin"):
         stub._trace_event("some_event", key="val")
     assert "event=some_event" in caplog.text
@@ -391,14 +397,7 @@ def test_trace_mixin_trace_event(caplog):
 
 
 def test_trace_mixin_trace_span(caplog):
-
-    class _Stub(TraceMixin):
-        def __init__(self):
-            self._debug_trace = True
-            self._trace_name = "stub"
-            self._trace_logger = logging.getLogger("tests.mixin_span")
-
-    stub = _Stub()
+    stub = _make_trace_stub("tests.mixin_span")
     with caplog.at_level(logging.DEBUG, logger="tests.mixin_span"):
         with stub._trace_span("op", x=1) as span:
             span.set(y=2)
@@ -408,14 +407,7 @@ def test_trace_mixin_trace_span(caplog):
 
 
 def test_trace_mixin_trace_debug(caplog):
-
-    class _Stub(TraceMixin):
-        def __init__(self):
-            self._debug_trace = True
-            self._trace_name = "stub"
-            self._trace_logger = logging.getLogger("tests.mixin_debug")
-
-    stub = _Stub()
+    stub = _make_trace_stub("tests.mixin_debug")
     with caplog.at_level(logging.DEBUG, logger="tests.mixin_debug"):
         stub._trace_debug("hello %s", "world")
     assert "hello world" in caplog.text

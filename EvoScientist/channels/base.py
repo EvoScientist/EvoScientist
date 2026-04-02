@@ -304,7 +304,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         self._debug_trace: bool = bool(getattr(config, "debug_trace", False)) or (
             debug_trace_enabled()
         )
-        self._trace_name: str = self.name
         self._trace_logger = _logger
 
         # Typing indicator — delegated to TypingManager
@@ -1098,7 +1097,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 ):
                     await self._send_ack_reaction(raw.chat_id, raw.message_id)
             except Exception:
-                pass  # trace_span already emits ack_reaction_error
+                pass
         self._trace_debug(
             "%s inbound queued: sender=%s chat=%s message_id=%s media=%d content_len=%d",
             self.name,

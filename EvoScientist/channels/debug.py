@@ -255,6 +255,14 @@ class TraceSpan:
         """Add or update fields that will be included in the closing event."""
         self._fields.update(fields)
 
+    @property
+    def fields(self) -> dict[str, Any]:
+        """Return accumulated fields for emission."""
+        return self._fields
+
+
+_NOOP_SPAN = TraceSpan()
+
 
 @contextmanager
 def trace_span(
@@ -277,6 +285,9 @@ def trace_span(
         # emits outbound_send_start on entry, outbound_send_ok on normal exit,
         # or outbound_send_error on exception (then re-raises).
     """
+    if not enabled:
+        yield _NOOP_SPAN
+        return
     span = TraceSpan(**fields)
     emit_debug_event(
         logger, f"{event}_start", channel=channel, enabled=enabled, **fields
@@ -290,7 +301,7 @@ def trace_span(
             channel=channel,
             enabled=enabled,
             error_type=type(exc).__name__,
-            **span._fields,
+            **span.fields,
         )
         raise
     else:
@@ -299,7 +310,7 @@ def trace_span(
             f"{event}_ok",
             channel=channel,
             enabled=enabled,
-            **span._fields,
+            **span.fields,
         )
 
 
@@ -310,13 +321,18 @@ class TraceMixin:
     """Mixin providing unified structured trace helpers.
 
     Classes using this mixin must set ``_debug_trace`` (bool) and
-    ``_trace_name`` (str) attributes, and define a ``_trace_logger``
-    property or attribute returning a :class:`logging.Logger`.
+    ``_trace_logger`` attribute returning a :class:`logging.Logger`.
+
+    The trace name defaults to ``self.name`` if present, otherwise
+    ``"unknown"``.  Override ``_trace_name`` to customise.
     """
 
     _debug_trace: bool
-    _trace_name: str
     _trace_logger: logging.Logger
+
+    @property
+    def _trace_name(self) -> str:
+        return getattr(self, "name", "unknown")
 
     def _trace_event(self, event: str, **fields: Any) -> None:
         """Emit a structured debug event when tracing is enabled."""
