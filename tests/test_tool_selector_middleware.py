@@ -47,7 +47,8 @@ def _factory_patches():
 
 
 def test_create_tool_selector_returns_list():
-    with _factory_patches()[0], _factory_patches()[1], _factory_patches()[2]:
+    p1, p2, p3 = _factory_patches()
+    with p1, p2, p3:
         result = create_tool_selector_middleware()
         assert isinstance(result, list)
         assert len(result) == 2
@@ -64,7 +65,8 @@ def test_create_tool_selector_always_include():
 
 
 def test_custom_threshold():
-    with _factory_patches()[0], _factory_patches()[1], _factory_patches()[2]:
+    p1, p2, p3 = _factory_patches()
+    with p1, p2, p3:
         result = create_tool_selector_middleware(threshold=5)
         assert result[0]._threshold == 5
 
