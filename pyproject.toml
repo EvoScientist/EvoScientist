@@ -66,7 +66,7 @@ wechat = ["pycryptodome>=3.20"]
 feishu = ["lark-oapi>=1.4.0"]
 qq = ["qq-botpy>=1.0"]
 stt = ["faster-whisper>=1.0"]
-oauth = ["ccproxy-api>=0.2.4"]
+oauth = ["ccproxy-api>=0.2.7"]
 all-channels = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",

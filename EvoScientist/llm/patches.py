@@ -9,13 +9,13 @@ Patches:
     - _patch_openai_compat_content: list content→string for strict APIs
 
 Utilities:
-    - strip_thinking_tags: remove ccproxy <thinking> tags from content
+    - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
     - _flatten_message_content: convert content blocks to plain string
 """
 
 from __future__ import annotations
 
-import re
+import os
 from typing import Any
 
 
@@ -90,15 +90,22 @@ def _patch_openrouter_reasoning_details() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Utility: ccproxy Codex embeds thinking as <thinking>...</thinking> tags
-# inside the content string. Strip these so they don't appear in output.
+# Utility: detect ccproxy's Codex adapter (as opposed to generic localhost).
 # ---------------------------------------------------------------------------
-_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>\s*", re.DOTALL)
+def _is_ccproxy_codex() -> bool:
+    """Return True if the OpenAI endpoint is ccproxy's Codex adapter.
 
-
-def strip_thinking_tags(content: str) -> str:
-    """Remove ``<thinking>...</thinking>`` tags from ccproxy response content."""
-    return _THINKING_TAG_RE.sub("", content)
+    Checks for the ccproxy-specific markers set by ``setup_codex_env()``
+    in ``ccproxy_manager.py``: the sentinel API key and the ``/codex/v1``
+    path.  Plain localhost endpoints (vLLM, Ollama, etc.) are not affected.
+    """
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    return (
+        ("127.0.0.1" in base_url or "localhost" in base_url)
+        and api_key == "ccproxy-oauth"
+        and "/codex/" in base_url
+    )
 
 
 # ---------------------------------------------------------------------------
