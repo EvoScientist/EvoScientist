@@ -1036,11 +1036,19 @@ def run_textual_interactive(
                                     await container.mount(w)
                                     if tool_id:
                                         tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos
+                            # Update todo widget on write_todos.
+                            # Insert before tool call widget so Task List
+                            # panel appears above the tool call.
                             if tool_name == "write_todos" and state.todo_items:
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tool_id and tool_id in tool_widgets:
+                                        await container.mount(
+                                            todo_w,
+                                            before=tool_widgets[tool_id],
+                                        )
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
 
