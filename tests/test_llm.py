@@ -388,17 +388,44 @@ class TestThirdPartyRouting:
         assert call_kwargs["extra_body"]["enable_thinking"] is False
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openrouter_routes_through_openai(self, mock_init, monkeypatch):
-        """OpenRouter provider should route through OpenAI with correct base_url."""
+    def test_openrouter_uses_native_provider(self, mock_init, monkeypatch):
+        """OpenRouter should use native 'openrouter' provider via init_chat_model."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key-456")
 
         get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model_provider"] == "openai"
-        assert call_kwargs["base_url"] == "https://openrouter.ai/api/v1"
+        assert call_kwargs["model_provider"] == "openrouter"
         assert call_kwargs["api_key"] == "or-key-456"
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "disabled"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_reasoning_user_override(self, mock_init, monkeypatch):
+        """User-supplied reasoning config should not be overridden."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        get_chat_model(
+            "x-ai/grok-4.1-fast",
+            provider="openrouter",
+            reasoning={"effort": "low"},
+        )
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "low"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_reasoning_effort_from_env(self, mock_init, monkeypatch):
+        """Reasoning effort should be configurable via env var."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
+
+        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "disabled"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_routes_through_openai(self, mock_init, monkeypatch):
@@ -447,9 +474,9 @@ class TestThirdPartyRouting:
     def test_third_party_no_reasoning(self, mock_init, monkeypatch):
         """Third-party providers routed through OpenAI should NOT get auto-reasoning."""
         mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key")
 
-        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+        get_chat_model("deepseek-v3", provider="siliconflow")
 
         call_kwargs = mock_init.call_args[1]
         assert "reasoning" not in call_kwargs
@@ -607,18 +634,18 @@ class TestFlattenMessageContent:
     """Tests for the content-flattening utility used by OpenAI-compatible providers."""
 
     def test_string_passthrough(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content("hello") == "hello"
 
     def test_non_list_passthrough(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content(42) == 42
         assert _flatten_message_content(None) is None
 
     def test_text_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "text", "text": "Hello"},
@@ -627,7 +654,7 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "Hello\n\nWorld"
 
     def test_skips_thinking_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "thinking", "text": "Let me think..."},
@@ -638,13 +665,13 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "The answer is 42"
 
     def test_string_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = ["hello", "world"]
         assert _flatten_message_content(content) == "hello\n\nworld"
 
     def test_mixed_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "thinking", "text": "skip me"},
@@ -654,12 +681,12 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "plain string\n\ndict text"
 
     def test_empty_list(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content([]) == ""
 
     def test_only_thinking_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [{"type": "thinking", "text": "thought"}]
         assert _flatten_message_content(content) == ""
