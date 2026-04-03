@@ -35,8 +35,8 @@ _total_tools_count: int = 0  # total tools before selection
 _selector_active: bool = False
 
 # Default threshold: only run tool selection when tools exceed this count.
-# Base tools are ~14; selector activates when MCP tools push count above 20.
-DEFAULT_TOOL_THRESHOLD = 20
+# Base tools are ~14; selector activates when MCP tools push count above 26.
+DEFAULT_TOOL_THRESHOLD = 26
 
 
 class _ConditionalToolSelectorMiddleware(AgentMiddleware):
@@ -87,7 +87,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             if _handler_called:
                 raise  # Error from downstream model — don't retry
             # Selector itself failed (e.g., structured output not supported).
-            logger.warning("Tool selector failed, using all tools", exc_info=True)
+            logger.debug("Tool selector failed, using all tools", exc_info=True)
             _selector_active = False
             return handler(request)
         finally:
@@ -121,7 +121,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         except Exception:
             if _handler_called:
                 raise
-            logger.warning("Tool selector failed, using all tools", exc_info=True)
+            logger.debug("Tool selector failed, using all tools", exc_info=True)
             _selector_active = False
             return await handler(request)
         finally:

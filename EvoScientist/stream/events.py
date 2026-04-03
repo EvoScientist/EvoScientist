@@ -508,6 +508,10 @@ async def stream_agent_events(
                     if any(n == "ToolSelectionResponse" for n in _tc_names):
                         _tool_selection_was_active = True
                         continue
+                    # Skip follow-up tool call chunks with empty names
+                    # (streaming fragments of the ToolSelectionResponse)
+                    if _tool_selection_was_active and all(n == "" for n in _tc_names):
+                        continue
                 if _tool_selection_was_active and isinstance(_raw, list):
                     if any(
                         isinstance(b, dict) and b.get("type") == "input_json_delta"

@@ -85,6 +85,7 @@ class EvoScientistConfig:
     # LLM Settings
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5"
+    reasoning_effort: str = ""  # OpenRouter reasoning effort: "xhigh"|"high"|"medium"|"low"|"minimal"|"none"|"" (default=high)
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -484,3 +485,5 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):
         os.environ["EVOSCIENTIST_USE_RESPONSES_API"] = config.use_responses_api
+    if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
+        os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort

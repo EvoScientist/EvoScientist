@@ -445,8 +445,11 @@ def _start_channels_bus_mode(
         try:
             loop.run_until_complete(_run())
         except Exception as e:
-            _channel_logger.error(f"Bus thread error: {e}")
+            _channel_logger.error(
+                "Bus thread terminated with error: %s", e, exc_info=True
+            )
         finally:
+            _channel_logger.debug("Bus thread event loop closed")
             loop.close()
 
     thread = threading.Thread(target=_bus_thread_entry, daemon=True)

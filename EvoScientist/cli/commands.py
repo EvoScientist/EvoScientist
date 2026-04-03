@@ -504,10 +504,6 @@ def serve(
     Starts all configured channels and processes messages via the agent.
     Press Ctrl+C to shut down.
     """
-    import nest_asyncio  # type: ignore[import-untyped]
-
-    nest_asyncio.apply()
-
     from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides = {}
