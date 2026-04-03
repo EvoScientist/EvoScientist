@@ -131,11 +131,13 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5.1", "glm-5.1", "zhipu-code"),
     ("glm-5", "glm-5", "zhipu-code"),
     ("glm-5-turbo", "glm-5-turbo", "zhipu-code"),
+    ("glm-5v-turbo", "glm-5v-turbo", "zhipu-code"),
     ("glm-4.7", "glm-4.7", "zhipu-code"),
     # Zhipu (智谱 — general endpoint, default for simple lookups)
     ("glm-5.1", "glm-5.1", "zhipu"),
     ("glm-5", "glm-5", "zhipu"),
     ("glm-5-turbo", "glm-5-turbo", "zhipu"),
+    ("glm-5v-turbo", "glm-5v-turbo", "zhipu"),
     ("glm-4.7", "glm-4.7", "zhipu"),
     # Volcengine (火山引擎 — Doubao models)
     ("doubao-seed-2.0-pro", "doubao-seed-2-0-pro-260215", "volcengine"),
