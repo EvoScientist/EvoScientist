@@ -263,10 +263,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
     ("glm-5-turbo", "z-ai/glm-5-turbo", "openrouter"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
+    ("glm-5.1", "glm-5.1", "zhipu-code"),
     ("glm-5", "glm-5", "zhipu-code"),
     ("glm-5-turbo", "glm-5-turbo", "zhipu-code"),
     ("glm-4.7", "glm-4.7", "zhipu-code"),
     # Zhipu (智谱 — general endpoint, default for simple lookups)
+    ("glm-5.1", "glm-5.1", "zhipu"),
     ("glm-5", "glm-5", "zhipu"),
     ("glm-5-turbo", "glm-5-turbo", "zhipu"),
     ("glm-4.7", "glm-4.7", "zhipu"),
