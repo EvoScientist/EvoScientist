@@ -1176,7 +1176,9 @@ def _run_streaming(
             running_loop = None
 
         if running_loop is not None:
-            # Already inside a running loop (TUI) — must use nest_asyncio
+            # Already inside a running loop (TUI) — must use nest_asyncio.
+            # NOTE: nest_asyncio.apply() is global and irreversible within
+            # the process; avoid mixing TUI and serve modes in one process.
             import nest_asyncio  # type: ignore[import-untyped]
 
             nest_asyncio.apply()
