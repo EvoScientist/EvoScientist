@@ -40,4 +40,5 @@ class TimestampClickMixin:
 
     def on_click(self, event) -> None:
         """Show timestamp toast on click."""
-        show_timestamp_toast(self)
+        # TODO: re-enable after UX review
+        # show_timestamp_toast(self)
