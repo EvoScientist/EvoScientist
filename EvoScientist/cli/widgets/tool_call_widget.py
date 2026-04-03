@@ -238,7 +238,8 @@ class ToolCallWidget(Vertical):
     def on_click(self, event: Click) -> None:
         """Toggle collapsed output on click, or show timestamp."""
         if self._status == "running" or not self._result_content.strip():
-            show_timestamp_toast(self)
+            # TODO: re-enable after UX review
+            # show_timestamp_toast(self)
             return
         output_w = self.query_one(".tool-output", Static)
 
@@ -256,7 +257,8 @@ class ToolCallWidget(Vertical):
             return
 
         if not self._should_collapse():
-            show_timestamp_toast(self)
+            # TODO: re-enable after UX review
+            # show_timestamp_toast(self)
             return  # Short output is always visible, nothing to toggle
         if self._collapsed:
             # Expand
