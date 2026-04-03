@@ -109,6 +109,8 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
 - **🔄 Code Generation Modes** — More Effort (iterative refinement), continuously improving code quality.
+- **⚡ Adaptive Tools** — Per-turn tool selection keeps only relevant tools visible, reducing noise.
+- **✂️ Context Editing** — Dynamic system prompt rewriting based on conversation state.
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
 
 > [!TIP]
