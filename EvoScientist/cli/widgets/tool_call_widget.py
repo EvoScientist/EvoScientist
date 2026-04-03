@@ -256,7 +256,8 @@ class ToolCallWidget(Vertical):
             return
 
         if not self._should_collapse():
-            show_timestamp_toast(self)
+            # TODO: re-enable after UX review
+            # show_timestamp_toast(self)
             return  # Short output is always visible, nothing to toggle
         if self._collapsed:
             # Expand
