@@ -15,7 +15,7 @@ def test_doctor_reports_missing_provider_api_key(tmp_path, monkeypatch):
     result = run_doctor(config_path=config_path)
 
     assert result["ok"] is False
-    assert any(item["name"] == "provider_api_key" for item in result["checks"])
+    assert any(item["name"] == "provider_credentials" for item in result["checks"])
 
 
 def test_doctor_accepts_custom_openai_env_key(tmp_path, monkeypatch):
@@ -27,7 +27,7 @@ def test_doctor_accepts_custom_openai_env_key(tmp_path, monkeypatch):
 
     assert result["ok"] is True
     assert any(
-        item["name"] == "provider_api_key" and item["ok"] is True
+        item["name"] == "provider_credentials" and item["ok"] is True
         for item in result["checks"]
     )
 
@@ -41,9 +41,36 @@ def test_doctor_accepts_custom_anthropic_env_key(tmp_path, monkeypatch):
 
     assert result["ok"] is True
     assert any(
-        item["name"] == "provider_api_key" and item["ok"] is True
+        item["name"] == "provider_credentials" and item["ok"] is True
         for item in result["checks"]
     )
+
+
+def test_doctor_accepts_runtime_supported_provider_env_keys(tmp_path, monkeypatch):
+    cases = [
+        ("deepseek", "DEEPSEEK_API_KEY", "deepseek-v3"),
+        ("siliconflow", "SILICONFLOW_API_KEY", "glm-5"),
+        ("openrouter", "OPENROUTER_API_KEY", "gpt-5.4"),
+        ("zhipu", "ZHIPU_API_KEY", "glm-5"),
+        ("zhipu-code", "ZHIPU_API_KEY", "glm-5"),
+        ("volcengine", "VOLCENGINE_API_KEY", "doubao-seed-2.0-pro"),
+        ("dashscope", "DASHSCOPE_API_KEY", "qwen-max"),
+        ("ollama", "OLLAMA_BASE_URL", "llama3.1"),
+    ]
+
+    for provider, env_name, model in cases:
+        config_path = tmp_path / f"{provider}.yaml"
+        config_path.write_text(f"provider: {provider}\nmodel: {model}\n")
+        monkeypatch.setenv(env_name, "test-value")
+
+        result = run_doctor(config_path=config_path)
+
+        assert result["ok"] is True, provider
+        assert any(
+            item["name"] == "provider_credentials" and item["ok"] is True
+            for item in result["checks"]
+        ), provider
+        monkeypatch.delenv(env_name, raising=False)
 
 
 def test_doctor_passes_with_explicit_workdir_and_api_key(tmp_path, monkeypatch):
