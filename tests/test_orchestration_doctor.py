@@ -18,6 +18,34 @@ def test_doctor_reports_missing_provider_api_key(tmp_path, monkeypatch):
     assert any(item["name"] == "provider_api_key" for item in result["checks"])
 
 
+def test_doctor_accepts_custom_openai_env_key(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("provider: custom-openai\nmodel: gpt-5.4\n")
+    monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "test-key")
+
+    result = run_doctor(config_path=config_path)
+
+    assert result["ok"] is True
+    assert any(
+        item["name"] == "provider_api_key" and item["ok"] is True
+        for item in result["checks"]
+    )
+
+
+def test_doctor_accepts_custom_anthropic_env_key(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("provider: custom-anthropic\nmodel: claude-sonnet-4-5\n")
+    monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+
+    result = run_doctor(config_path=config_path)
+
+    assert result["ok"] is True
+    assert any(
+        item["name"] == "provider_api_key" and item["ok"] is True
+        for item in result["checks"]
+    )
+
+
 def test_doctor_passes_with_explicit_workdir_and_api_key(tmp_path, monkeypatch):
     workdir = tmp_path / "workspace"
     workdir.mkdir()

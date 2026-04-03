@@ -9,7 +9,9 @@ from ..config import get_config_path
 
 _PROVIDER_ENV_MAP = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "custom-anthropic": "CUSTOM_ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "custom-openai": "CUSTOM_OPENAI_API_KEY",
     "google-genai": "GOOGLE_API_KEY",
     "google": "GOOGLE_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
