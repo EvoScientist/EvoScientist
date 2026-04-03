@@ -625,33 +625,12 @@ class EvoMemoryMiddleware(AgentMiddleware):
     def _disable_thinking(model: BaseChatModel) -> BaseChatModel:
         """Return a copy of the model with thinking/reasoning disabled.
 
-        Anthropic's API does not allow extended thinking when tool_choice
-        forces tool use (as with_structured_output does).  Similarly,
-        OpenAI reasoning can conflict.  Strip these settings so extraction
-        works reliably.
-
-        Uses model_copy() to produce a real new instance — bind() only
-        wraps the model in a RunnableBinding whose kwargs do NOT override
-        first-class Pydantic fields like ``thinking`` on ChatAnthropic.
+        Delegates to the shared :func:`~.utils.disable_thinking` utility.
+        Kept as a static method for backward compatibility.
         """
-        updates: dict[str, Any] = {}
-        model_kwargs = getattr(model, "model_kwargs", {}) or {}
+        from .utils import disable_thinking
 
-        if getattr(model, "thinking", None) or "thinking" in model_kwargs:
-            updates["thinking"] = None
-        if getattr(model, "reasoning", None) or "reasoning" in model_kwargs:
-            updates["reasoning"] = None
-
-        if not updates:
-            return model
-
-        # Prefer Pydantic model_copy (creates a true new instance with the
-        # field cleared) over bind() which only adds invocation kwargs.
-        try:
-            return model.model_copy(update=updates)
-        except Exception:
-            # Fallback for non-Pydantic or unusual model classes
-            return model.bind(**{k: v for k, v in updates.items() if v is not None})
+        return disable_thinking(model)
 
     def _extract(
         self, model: BaseChatModel, memory: str, messages: list[AnyMessage]

@@ -96,6 +96,8 @@ class StreamState:
         # Token usage tracking
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        # Tool selection tracking (LLMToolSelectorMiddleware)
+        self.selected_tools: list[str] = []
         # HITL interrupt tracking
         self.pending_interrupt: dict | None = None
         # ask_user interrupt tracking
@@ -270,6 +272,9 @@ class StreamState:
         elif event_type == "ask_user":
             self.pending_ask_user = event
 
+        elif event_type == "tool_selection":
+            self.selected_tools = event.get("tools", [])
+
         elif event_type == "summarization":
             self.summarization_text += event.get("content", "")
 
@@ -307,6 +312,7 @@ class StreamState:
             "todo_items": self.todo_items,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
+            "selected_tools": self.selected_tools,
         }
 
 

@@ -361,6 +361,9 @@ async def stream_agent_events(
         astream_input = message
 
     _summarization_in_progress = False
+    _tool_selection_suppressing = False  # True while buffering selector JSON
+    _tool_selection_buffer = ""  # accumulates JSON chunks for parse attempt
+    _tool_selection_was_active = False  # True after suppression, triggers Panel
 
     try:
         async for chunk in agent.astream(
@@ -475,6 +478,127 @@ async def stream_agent_events(
                 if chunk_text:
                     yield emitter.summarization(chunk_text).data
                 continue
+
+            # Suppress LLMToolSelectorMiddleware streaming output.
+            # The selector streams JSON like '{"tools":[...]}' via ainvoke
+            # which gets captured by astream.  We detect it by content since
+            # the _selector_active flag is not visible in the streaming loop.
+            # Uses _tool_selection_suppressing to track suppression state
+            # and emits a tool_selection event from the tracker ContextVar.
+            if isinstance(msg, (AIMessageChunk, AIMessage)):
+                _raw = msg.content
+                _text = (
+                    _raw
+                    if isinstance(_raw, str)
+                    else "".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in _raw
+                    )
+                    if isinstance(_raw, list)
+                    else ""
+                )
+
+                # Suppress Anthropic's structured output tool calls.
+                # Anthropic implements with_structured_output via tool calls
+                # named "ToolSelectionResponse" (exact LangChain convention).
+                # After the initial tool call, Anthropic streams input_json_delta
+                # chunks with the JSON arguments — suppress those too.
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    _tc_names = [tc.get("name", "") for tc in msg.tool_calls]
+                    if any(n == "ToolSelectionResponse" for n in _tc_names):
+                        _tool_selection_was_active = True
+                        continue
+                    # Skip follow-up tool call chunks with empty names
+                    # (streaming fragments of the ToolSelectionResponse)
+                    if _tool_selection_was_active and all(n == "" for n in _tc_names):
+                        continue
+                if _tool_selection_was_active and isinstance(_raw, list):
+                    if any(
+                        isinstance(b, dict) and b.get("type") == "input_json_delta"
+                        for b in _raw
+                    ):
+                        continue  # still streaming selector tool call args
+
+                # Universal selector JSON detection via buffering.
+                # Buffer chunks starting with '{', try JSON parse,
+                # suppress if contains "tools". If not selector JSON,
+                # stop buffering and let the chunk through (don't drop it).
+                if _tool_selection_suppressing:
+                    _tool_selection_buffer += _text
+                    try:
+                        import json as _json
+
+                        _parsed = _json.loads(_tool_selection_buffer.strip())
+                        if isinstance(_parsed, dict) and "tools" in _parsed:
+                            _tool_selection_was_active = True
+                            _tool_selection_suppressing = False
+                            _tool_selection_buffer = ""
+                            continue
+                        # Valid JSON but not selector — stop buffering,
+                        # fall through so this chunk is processed normally.
+                        _tool_selection_suppressing = False
+                        _tool_selection_buffer = ""
+                    except (ValueError, TypeError):
+                        _buf = _tool_selection_buffer.strip()
+                        # Concatenated JSONs: {"tools":[...]}{"tools":[...]}
+                        if '"tools"' in _buf and _buf.endswith("}"):
+                            _tool_selection_was_active = True
+                            _tool_selection_suppressing = False
+                            _tool_selection_buffer = ""
+                            continue
+                        if len(_tool_selection_buffer) > 10000:
+                            _tool_selection_suppressing = False
+                            _tool_selection_buffer = ""
+                            # Fall through — don't drop content
+                        else:
+                            continue  # keep buffering
+                if (
+                    not _tool_selection_suppressing
+                    and _text.lstrip().startswith("{")
+                    and ('"tools"' in _text or len(_text.strip()) <= 10)
+                ):
+                    # Try immediate parse (ccproxy returns full JSON in one chunk)
+                    _stripped_text = _text.strip()
+                    try:
+                        import json as _json2
+
+                        _parsed2 = _json2.loads(_stripped_text)
+                        if isinstance(_parsed2, dict) and "tools" in _parsed2:
+                            _tool_selection_was_active = True
+                            continue
+                    except (ValueError, TypeError):
+                        # Could be concatenated JSONs: {"tools":[...]}{"tools":[...]}
+                        # or incomplete JSON from streamed provider.
+                        if '"tools"' in _stripped_text and _stripped_text.endswith("}"):
+                            _tool_selection_was_active = True
+                            continue
+                    # Incomplete JSON — start buffering for streamed providers
+                    _tool_selection_suppressing = True
+                    _tool_selection_buffer = _text
+                    continue
+
+                # Emit tool_selection event on first non-empty chunk after
+                # suppression.  Empty chunks arrive before the tracker has
+                # captured the selected tools, so we skip them.
+                if _tool_selection_was_active:
+                    import EvoScientist.middleware.tool_selector as _ts_mod
+
+                    if _ts_mod._current_selected_tools:
+                        _tool_selection_was_active = False
+                        selected = _ts_mod._current_selected_tools
+                        # Only show Panel when:
+                        # 1. Tools were actually filtered (not all selected)
+                        # 2. Selection changed from last time
+                        if len(selected) < _ts_mod._total_tools_count and sorted(
+                            selected
+                        ) != sorted(_ts_mod._last_emitted_tools):
+                            yield emitter.tool_selection(list(selected)).data
+                            _ts_mod._last_emitted_tools = list(selected)
+                        _ts_mod._current_selected_tools = []
+                    elif _text or (hasattr(msg, "tool_calls") and msg.tool_calls):
+                        # Non-empty content arrived but no selected tools —
+                        # tracker didn't run (shouldn't happen). Give up.
+                        _tool_selection_was_active = False
 
             subagent = _get_subagent_name(namespace, metadata)
             subagent_tracker = None
