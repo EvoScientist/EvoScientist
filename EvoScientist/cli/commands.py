@@ -1,9 +1,11 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import json
 import logging
 import os
 import queue
 import re
+import secrets
 from datetime import datetime
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -61,6 +63,194 @@ def onboard(
     from ..config import run_onboard
 
     run_onboard(skip_validation=skip_validation)
+
+
+@app.command()
+def doctor(
+    json_output: bool = typer.Option(False, "--json", help="Output JSON diagnostics")
+):
+    """Run orchestration-focused environment diagnostics."""
+    from ..orchestration.doctor import run_doctor
+
+    result = run_doctor()
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+    else:
+        for check in result["checks"]:
+            status = "OK" if check["ok"] else "FAIL"
+            console.print(f"[{status}] {check['name']}: {check['message']}")
+
+    if not result["ok"]:
+        raise typer.Exit(1)
+
+
+@app.command()
+def validate(
+    json_output: bool = typer.Option(False, "--json", help="Output JSON validation result")
+):
+    """Validate orchestrator-facing config basics."""
+    from ..config import get_config_path
+
+    config_path = get_config_path()
+    checks: list[dict[str, object]] = []
+
+    if not config_path.exists():
+        checks.append(
+            {
+                "name": "config_file",
+                "ok": False,
+                "message": f"Config file not found: {config_path}",
+            }
+        )
+        result = {"ok": False, "errors": ["missing config file"], "warnings": [], "checks": checks}
+    else:
+        import yaml
+
+        try:
+            data = yaml.safe_load(config_path.read_text()) or {}
+            provider = data.get("provider", "")
+            model = data.get("model", "")
+            checks.append(
+                {
+                    "name": "config_file",
+                    "ok": True,
+                    "message": f"Config file found: {config_path}",
+                }
+            )
+            checks.append(
+                {
+                    "name": "provider",
+                    "ok": bool(provider),
+                    "message": "Provider configured" if provider else "Provider missing",
+                }
+            )
+            checks.append(
+                {
+                    "name": "model",
+                    "ok": bool(model),
+                    "message": "Model configured" if model else "Model missing",
+                }
+            )
+            ok = all(bool(item["ok"]) for item in checks)
+            errors = [str(item["message"]) for item in checks if not item["ok"]]
+            result = {"ok": ok, "errors": errors, "warnings": [], "checks": checks}
+        except Exception as exc:
+            checks.append(
+                {
+                    "name": "config_parse",
+                    "ok": False,
+                    "message": f"Failed to parse config: {exc}",
+                }
+            )
+            result = {"ok": False, "errors": [str(checks[-1]["message"])], "warnings": [], "checks": checks}
+
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+    else:
+        for check in result["checks"]:
+            status = "OK" if check["ok"] else "FAIL"
+            console.print(f"[{status}] {check['name']}: {check['message']}")
+
+    if not result["ok"]:
+        raise typer.Exit(1)
+
+
+@app.command()
+def status(
+    run_id: str = typer.Argument(..., help="Run ID to inspect"),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON status snapshot"),
+    output: str = typer.Option("artifacts", "--output", help="Artifact root directory"),
+):
+    """Show orchestration status for a run."""
+    from ..orchestration.run_store import load_status_snapshot, resolve_run_dir
+
+    run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
+    snapshot = load_status_snapshot(run_dir)
+    if snapshot is None:
+        raise typer.Exit(1)
+    payload = {
+        "run_id": snapshot.run_id,
+        "status": snapshot.status.value,
+        "thread_id": snapshot.thread_id,
+        "workspace_dir": snapshot.workspace_dir,
+        "artifact_dir": snapshot.artifact_dir,
+        "current_stage": snapshot.current_stage,
+        "completed_stages": snapshot.completed_stages,
+        "last_error": snapshot.last_error,
+        "suggested_next_action": snapshot.suggested_next_action,
+        "updated_at": snapshot.updated_at,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        console.print(payload)
+
+
+@app.command()
+def artifacts(
+    run_id: str = typer.Argument(..., help="Run ID to inspect"),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON artifact index"),
+    output: str = typer.Option("artifacts", "--output", help="Artifact root directory"),
+):
+    """Show artifact paths for a run."""
+    from ..orchestration.run_store import artifact_index_for, resolve_run_dir
+
+    run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
+    if not run_dir.exists():
+        raise typer.Exit(1)
+    index = artifact_index_for(run_dir)
+    payload = {
+        "artifact_dir": index.artifact_dir,
+        "run_json": index.run_json,
+        "status_json": index.status_json,
+        "events_jsonl": index.events_jsonl,
+        "outputs_dir": index.outputs_dir,
+        "deliverables_dir": index.deliverables_dir,
+        "diagnostics_dir": index.diagnostics_dir,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        console.print(payload)
+
+
+@app.command()
+def report(
+    run_id: str = typer.Argument(..., help="Run ID to summarize"),
+    output: str = typer.Option("artifacts", "--output", help="Artifact root directory"),
+):
+    """Generate a human-readable summary for a run."""
+    from ..orchestration.report import build_run_report
+    from ..orchestration.run_store import resolve_run_dir
+
+    run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
+    if not run_dir.exists():
+        raise typer.Exit(1)
+    typer.echo(build_run_report(run_dir))
+
+
+@app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Run ID to resume"),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable resume payload"),
+    output: str = typer.Option("artifacts", "--output", help="Artifact root directory"),
+):
+    """Resume a run using explicit restart-from-saved-context semantics."""
+    from ..orchestration.resume import build_resume_payload
+    from ..orchestration.run_store import resolve_run_dir
+
+    run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
+    if not run_dir.exists():
+        raise typer.Exit(1)
+    payload = build_resume_payload(run_dir)
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        typer.echo(
+            f"Resume {payload['run_id']} using {payload['resume_semantics']}\n"
+            f"Workspace: {payload['workspace_dir']}\n"
+            f"Prompt: {payload['prompt']}"
+        )
 
 
 # =============================================================================
@@ -942,6 +1132,12 @@ def _main_callback(
     prompt: str | None = typer.Option(
         None, "-p", "--prompt", help="Query to execute (single-shot mode)"
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output machine-readable orchestration metadata"
+    ),
+    output: str | None = typer.Option(
+        None, "--output", help="Override artifact output root for orchestration runs"
+    ),
     thread_id: str | None = typer.Option(
         None, "--thread-id", help="Thread ID for conversation persistence"
     ),
@@ -1119,6 +1315,95 @@ def _main_callback(
 
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
+
+    if prompt and json_output:
+        import asyncio
+
+        import nest_asyncio  # type: ignore[import-untyped]
+
+        from ..orchestration.models import RunRecord, RunStatus, StatusSnapshot
+        from ..orchestration.run_store import (
+            append_run_event,
+            apply_event_and_update_status,
+            consume_event_stream,
+            create_run_artifact_tree,
+            write_run_record,
+            write_status_snapshot,
+        )
+        from ..sessions import generate_thread_id, get_checkpointer
+        from ..stream.events import stream_agent_events
+
+        artifact_root = Path(output).expanduser().resolve() if output else Path.cwd() / "artifacts"
+        run_id = f"{datetime.now().strftime('es-%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+        artifact_dir = create_run_artifact_tree(artifact_root, run_id)
+        tid = thread_id or generate_thread_id()
+        record = RunRecord(
+            run_id=run_id,
+            thread_id=tid,
+            workspace_dir=workspace_dir,
+            artifact_dir=str(artifact_dir),
+            status=RunStatus.CREATED,
+            metadata={"prompt": prompt, "model": config.model, "provider": config.provider},
+        )
+        snapshot = StatusSnapshot(
+            run_id=run_id,
+            status=RunStatus.CREATED,
+            thread_id=tid,
+            workspace_dir=workspace_dir,
+            artifact_dir=str(artifact_dir),
+            updated_at=record.updated_at,
+        )
+        write_run_record(artifact_dir, record)
+        write_status_snapshot(artifact_dir, snapshot)
+        append_run_event(
+            artifact_dir,
+            {
+                "type": "created",
+                "run_id": run_id,
+                "thread_id": tid,
+                "timestamp": record.updated_at,
+                "status": "created",
+            },
+        )
+
+        async def _run_json_orchestration() -> RunRecord:
+            try:
+                async with get_checkpointer() as checkpointer:
+                    agent = _load_agent(
+                        workspace_dir=workspace_dir,
+                        checkpointer=checkpointer,
+                        config=config,
+                    )
+                    event_stream = stream_agent_events(
+                        agent,
+                        prompt,
+                        tid,
+                        metadata=build_metadata(workspace_dir, config.model),
+                    )
+                    return await consume_event_stream(artifact_dir, record, event_stream)
+            except Exception as exc:
+                return apply_event_and_update_status(
+                    artifact_dir,
+                    record,
+                    {"type": "error", "message": str(exc)},
+                )
+
+        nest_asyncio.apply()
+        final_record = asyncio.get_event_loop().run_until_complete(_run_json_orchestration())
+        write_run_record(artifact_dir, final_record)
+        typer.echo(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "thread_id": tid,
+                    "artifact_dir": str(artifact_dir),
+                    "workspace_dir": workspace_dir,
+                    "status": final_record.status.value,
+                },
+                indent=2,
+            )
+        )
+        return
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
