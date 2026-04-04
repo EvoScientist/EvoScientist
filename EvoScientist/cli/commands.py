@@ -1100,7 +1100,100 @@ def mcp_install(
 # =============================================================================
 
 
-def _version_callback(value: bool):
+
+
+def _run_prompt_json_orchestration(
+    *,
+    prompt: str,
+    workspace_dir: str,
+    config: Any,
+    output: str | None = None,
+    thread_id: str | None = None,
+) -> dict[str, str]:
+    import asyncio
+
+    import nest_asyncio  # type: ignore[import-untyped]
+
+    from ..orchestration.models import RunRecord, RunStatus, StatusSnapshot
+    from ..orchestration.run_store import (
+        append_run_event,
+        apply_event_and_update_status,
+        consume_event_stream,
+        create_run_artifact_tree,
+        write_run_record,
+        write_status_snapshot,
+    )
+    from ..sessions import generate_thread_id, get_checkpointer
+    from ..stream.events import stream_agent_events
+
+    artifact_root = Path(output).expanduser().resolve() if output else Path.cwd() / "artifacts"
+    run_id = f"{datetime.now().strftime('es-%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    artifact_dir = create_run_artifact_tree(artifact_root, run_id)
+    tid = thread_id or generate_thread_id()
+    record = RunRecord(
+        run_id=run_id,
+        thread_id=tid,
+        workspace_dir=workspace_dir,
+        artifact_dir=str(artifact_dir),
+        status=RunStatus.CREATED,
+        metadata={"prompt": prompt, "model": config.model, "provider": config.provider},
+    )
+    snapshot = StatusSnapshot(
+        run_id=run_id,
+        status=RunStatus.CREATED,
+        thread_id=tid,
+        workspace_dir=workspace_dir,
+        artifact_dir=str(artifact_dir),
+        updated_at=record.updated_at,
+    )
+    write_run_record(artifact_dir, record)
+    write_status_snapshot(artifact_dir, snapshot)
+    append_run_event(
+        artifact_dir,
+        {
+            "type": "created",
+            "run_id": run_id,
+            "thread_id": tid,
+            "timestamp": record.updated_at,
+            "status": "created",
+        },
+    )
+
+    async def _run_json_orchestration() -> RunRecord:
+        try:
+            async with get_checkpointer() as checkpointer:
+                agent = _load_agent(
+                    workspace_dir=workspace_dir,
+                    checkpointer=checkpointer,
+                    config=config,
+                )
+                event_stream = stream_agent_events(
+                    agent,
+                    prompt,
+                    tid,
+                    metadata=build_metadata(workspace_dir, config.model),
+                )
+                return await consume_event_stream(artifact_dir, record, event_stream)
+        except Exception as exc:
+            return apply_event_and_update_status(
+                artifact_dir,
+                record,
+                {"type": "error", "message": str(exc)},
+            )
+
+    nest_asyncio.apply()
+    final_record = asyncio.get_event_loop().run_until_complete(_run_json_orchestration())
+    write_run_record(artifact_dir, final_record)
+    return {
+        "run_id": run_id,
+        "thread_id": tid,
+        "artifact_dir": str(artifact_dir),
+        "workspace_dir": workspace_dir,
+        "status": final_record.status.value,
+    }
+
+
+def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
         raise typer.Exit()
@@ -1317,89 +1410,15 @@ def _main_callback(
     ensure_dirs()
 
     if prompt and json_output:
-        import asyncio
-
-        import nest_asyncio  # type: ignore[import-untyped]
-
-        from ..orchestration.models import RunRecord, RunStatus, StatusSnapshot
-        from ..orchestration.run_store import (
-            append_run_event,
-            apply_event_and_update_status,
-            consume_event_stream,
-            create_run_artifact_tree,
-            write_run_record,
-            write_status_snapshot,
-        )
-        from ..sessions import generate_thread_id, get_checkpointer
-        from ..stream.events import stream_agent_events
-
-        artifact_root = Path(output).expanduser().resolve() if output else Path.cwd() / "artifacts"
-        run_id = f"{datetime.now().strftime('es-%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
-        artifact_dir = create_run_artifact_tree(artifact_root, run_id)
-        tid = thread_id or generate_thread_id()
-        record = RunRecord(
-            run_id=run_id,
-            thread_id=tid,
-            workspace_dir=workspace_dir,
-            artifact_dir=str(artifact_dir),
-            status=RunStatus.CREATED,
-            metadata={"prompt": prompt, "model": config.model, "provider": config.provider},
-        )
-        snapshot = StatusSnapshot(
-            run_id=run_id,
-            status=RunStatus.CREATED,
-            thread_id=tid,
-            workspace_dir=workspace_dir,
-            artifact_dir=str(artifact_dir),
-            updated_at=record.updated_at,
-        )
-        write_run_record(artifact_dir, record)
-        write_status_snapshot(artifact_dir, snapshot)
-        append_run_event(
-            artifact_dir,
-            {
-                "type": "created",
-                "run_id": run_id,
-                "thread_id": tid,
-                "timestamp": record.updated_at,
-                "status": "created",
-            },
-        )
-
-        async def _run_json_orchestration() -> RunRecord:
-            try:
-                async with get_checkpointer() as checkpointer:
-                    agent = _load_agent(
-                        workspace_dir=workspace_dir,
-                        checkpointer=checkpointer,
-                        config=config,
-                    )
-                    event_stream = stream_agent_events(
-                        agent,
-                        prompt,
-                        tid,
-                        metadata=build_metadata(workspace_dir, config.model),
-                    )
-                    return await consume_event_stream(artifact_dir, record, event_stream)
-            except Exception as exc:
-                return apply_event_and_update_status(
-                    artifact_dir,
-                    record,
-                    {"type": "error", "message": str(exc)},
-                )
-
-        nest_asyncio.apply()
-        final_record = asyncio.get_event_loop().run_until_complete(_run_json_orchestration())
-        write_run_record(artifact_dir, final_record)
         typer.echo(
             json.dumps(
-                {
-                    "run_id": run_id,
-                    "thread_id": tid,
-                    "artifact_dir": str(artifact_dir),
-                    "workspace_dir": workspace_dir,
-                    "status": final_record.status.value,
-                },
+                _run_prompt_json_orchestration(
+                    prompt=prompt,
+                    workspace_dir=workspace_dir,
+                    config=config,
+                    output=output,
+                    thread_id=thread_id,
+                ),
                 indent=2,
             )
         )

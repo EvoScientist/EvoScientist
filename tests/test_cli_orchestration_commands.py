@@ -7,6 +7,11 @@ from EvoScientist.cli._app import app
 runner = CliRunner()
 
 
+class _TestConfig:
+    provider = "anthropic"
+    model = "claude-sonnet-4-5"
+
+
 def _bootstrap_run(monkeypatch, tmp_path):
     import json
 
@@ -79,7 +84,22 @@ def test_validate_command_returns_json_for_valid_config(monkeypatch, tmp_path):
     assert '"ok": true' in result.stdout.lower()
 
 
+def test_run_prompt_json_orchestration_returns_structured_payload(monkeypatch, tmp_path):
+    from EvoScientist.cli import commands
 
+    _install_fake_stream(monkeypatch)
+
+    payload = commands._run_prompt_json_orchestration(
+        prompt="test prompt",
+        workspace_dir=str(tmp_path),
+        config=_TestConfig(),
+        output=str(tmp_path / "artifacts"),
+    )
+
+    assert payload["run_id"].startswith("es-")
+    assert payload["status"] == "completed"
+    assert payload["workspace_dir"] == str(tmp_path)
+    assert payload["artifact_dir"].startswith(str(tmp_path / "artifacts"))
 
 
 
@@ -147,6 +167,55 @@ def test_report_command_summarizes_run(monkeypatch, tmp_path):
     assert payload["run_id"] in result.stdout
     assert "artifact" in result.stdout.lower()
 
+
+
+def test_run_prompt_json_orchestration_marks_failed_when_startup_raises_before_first_event(
+    monkeypatch, tmp_path
+):
+    import json
+
+    from EvoScientist.cli import commands
+    from EvoScientist import sessions
+
+    class _DummyCheckpointer:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sessions, "get_checkpointer", lambda: _DummyCheckpointer())
+    monkeypatch.setattr(commands, "_load_agent", lambda **kwargs: object())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("startup boom")
+
+    monkeypatch.setattr(commands, "build_metadata", _boom)
+
+    payload = commands._run_prompt_json_orchestration(
+        prompt="test prompt",
+        workspace_dir=str(tmp_path),
+        config=_TestConfig(),
+        output=str(tmp_path / "artifacts"),
+    )
+
+    assert payload["status"] == "failed"
+
+    artifact_root = tmp_path / "artifacts"
+    run_dirs = [path for path in artifact_root.iterdir() if path.is_dir()]
+    assert len(run_dirs) == 1
+
+    status_payload = json.loads((run_dirs[0] / "status.json").read_text())
+    run_payload = json.loads((run_dirs[0] / "run.json").read_text())
+    failure_summary = json.loads(
+        (run_dirs[0] / "diagnostics" / "failure_summary.json").read_text()
+    )
+    assert status_payload["status"] == "failed"
+    assert status_payload["last_error"] == "startup boom"
+    assert run_payload["status"] == "failed"
+    assert run_payload["last_error"] == "startup boom"
+    assert failure_summary["status"] == "failed"
+    assert failure_summary["last_error"] == "startup boom"
 
 
 
