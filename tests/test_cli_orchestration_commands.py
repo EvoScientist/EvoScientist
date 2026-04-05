@@ -138,6 +138,26 @@ def test_status_command_returns_json_snapshot_for_run(monkeypatch, tmp_path):
     assert '"status": "completed"' in result.stdout
 
 
+import pytest
+
+
+@pytest.mark.parametrize("command", ["status", "artifacts", "resume"])
+def test_orchestration_commands_emit_json_error_payload_for_missing_run(tmp_path, command):
+    import json
+
+    result = runner.invoke(
+        app,
+        [command, "missing-run", "--json", "--output", str(tmp_path / "artifacts")],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "run not found"
+    assert payload["run_id"] == "missing-run"
+    assert payload["run_dir"].endswith("artifacts/missing-run")
+
+
+
 def test_artifacts_command_returns_expected_paths(monkeypatch, tmp_path):
     _install_fake_stream(monkeypatch)
     payload = _bootstrap_run(monkeypatch, tmp_path)

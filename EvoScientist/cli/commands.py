@@ -167,6 +167,17 @@ def status(
     run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
     snapshot = load_status_snapshot(run_dir)
     if snapshot is None:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "error": "run not found",
+                        "run_id": run_id,
+                        "run_dir": str(run_dir),
+                    },
+                    indent=2,
+                )
+            )
         raise typer.Exit(1)
     payload = {
         "run_id": snapshot.run_id,
@@ -197,6 +208,17 @@ def artifacts(
 
     run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
     if not run_dir.exists():
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "error": "run not found",
+                        "run_id": run_id,
+                        "run_dir": str(run_dir),
+                    },
+                    indent=2,
+                )
+            )
         raise typer.Exit(1)
     index = artifact_index_for(run_dir)
     payload = {
@@ -241,6 +263,17 @@ def resume(
 
     run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
     if not run_dir.exists():
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "error": "run not found",
+                        "run_id": run_id,
+                        "run_dir": str(run_dir),
+                    },
+                    indent=2,
+                )
+            )
         raise typer.Exit(1)
     payload = build_resume_payload(run_dir)
     if json_output:

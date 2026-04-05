@@ -92,3 +92,30 @@ def test_doctor_passes_with_explicit_workdir_and_api_key(tmp_path, monkeypatch):
 
     assert result["ok"] is True
     assert all(item["ok"] for item in result["checks"])
+
+
+@pytest.mark.parametrize(
+    ("config_text", "env_name", "env_value"),
+    [
+        ("provider: anthropic\nmodel: claude-sonnet-4-5\nauth_mode: oauth\n", None, None),
+        ("provider: anthropic\nmodel: claude-sonnet-4-5\n", "CC_PROXY_URL", "http://localhost:3456"),
+    ],
+)
+def test_doctor_accepts_oauth_or_ccproxy_without_api_key(
+    tmp_path, monkeypatch, config_text, env_name, env_value
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CC_PROXY_URL", raising=False)
+    monkeypatch.delenv("AUTH_MODE", raising=False)
+    if env_name is not None and env_value is not None:
+        monkeypatch.setenv(env_name, env_value)
+
+    result = run_doctor(config_path=config_path)
+
+    assert result["ok"] is True
+    assert any(
+        item["name"] == "provider_credentials" and item["ok"] is True
+        for item in result["checks"]
+    )
