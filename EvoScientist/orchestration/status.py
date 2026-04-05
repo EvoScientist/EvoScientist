@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 from .models import RunRecord, RunStatus
 

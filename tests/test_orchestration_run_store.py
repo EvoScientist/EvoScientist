@@ -15,8 +15,6 @@ from EvoScientist.orchestration.run_store import (
 )
 
 
-
-
 def test_create_run_artifact_tree_rejects_existing_run_dir(tmp_path):
     create_run_artifact_tree(tmp_path, "es-20260401-abc123")
 

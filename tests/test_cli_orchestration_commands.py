@@ -30,8 +30,8 @@ def _bootstrap_run(monkeypatch, tmp_path):
 
 
 def _install_fake_stream(monkeypatch):
-    from EvoScientist.cli import commands
     from EvoScientist import sessions
+    from EvoScientist.cli import commands
     from EvoScientist.stream import events
 
     class _DummyCheckpointer:
@@ -174,8 +174,8 @@ def test_run_prompt_json_orchestration_marks_failed_when_startup_raises_before_f
 ):
     import json
 
-    from EvoScientist.cli import commands
     from EvoScientist import sessions
+    from EvoScientist.cli import commands
 
     class _DummyCheckpointer:
         async def __aenter__(self):
@@ -222,8 +222,8 @@ def test_run_prompt_json_orchestration_marks_failed_when_startup_raises_before_f
 def test_run_command_marks_failed_when_startup_raises_before_first_event(monkeypatch, tmp_path):
     import json
 
-    from EvoScientist.cli import commands
     from EvoScientist import sessions
+    from EvoScientist.cli import commands
 
     class _DummyCheckpointer:
         async def __aenter__(self):
