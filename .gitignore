@@ -45,3 +45,11 @@ conversation_history/
 *meals/
 botpy.log
 large_tool_results/
+
+# Allow Claude orchestration integration files
+!.claude/
+!.claude/agents/
+!.claude/agents/EVOSCIENTIST_AGENTS.md
+!.claude/skills/
+!.claude/skills/evoscientist/
+!.claude/skills/evoscientist/SKILL.md
