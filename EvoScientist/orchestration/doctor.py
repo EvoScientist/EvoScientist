@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
@@ -41,20 +42,35 @@ def run_doctor(config_path: str | Path | None = None) -> dict[str, object]:
 
     checks.append(_check("config_file", True, f"Config file found: {path}"))
 
-    data = yaml.safe_load(path.read_text()) or {}
-    provider = data.get("provider", "anthropic")
-    config_key, env_name = _PROVIDER_KEY_SOURCES.get(provider, ("", ""))
-    config_value = data.get(config_key, "") if config_key else ""
-    env_value = os.environ.get(env_name, "") if env_name else ""
+    try:
+        raw_data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        checks.append(_check("config_parse", False, f"Failed to parse config: {exc}"))
+        return {"ok": False, "checks": checks}
 
-    has_key = bool(config_value or env_value)
-    checks.append(
-        _check(
-            "provider_credentials",
-            has_key,
-            f"Provider {provider} credentials {'available' if has_key else 'missing'}",
+    if raw_data is None:
+        data: Mapping[str, object] = {}
+    elif isinstance(raw_data, Mapping):
+        data = raw_data
+    else:
+        checks.append(_check("config_parse", False, "Config file must contain a mapping"))
+        return {"ok": False, "checks": checks}
+
+    provider = str(data.get("provider", "anthropic"))
+    if provider not in _PROVIDER_KEY_SOURCES:
+        checks.append(_check("provider_supported", False, f"Provider {provider} is unsupported"))
+    else:
+        config_key, env_name = _PROVIDER_KEY_SOURCES[provider]
+        config_value = data.get(config_key, "")
+        env_value = os.environ.get(env_name, "")
+        has_key = bool(config_value or env_value)
+        checks.append(
+            _check(
+                "provider_credentials",
+                has_key,
+                f"Provider {provider} credentials {'available' if has_key else 'missing'}",
+            )
         )
-    )
 
     default_workdir = data.get("default_workdir", "")
     if default_workdir:

@@ -25,3 +25,14 @@ def test_report_summarizes_run_state_and_outputs(tmp_path):
     assert "es-20260401-abc123" in report
     assert "created" in report.lower()
     assert str(artifact_dir) in report
+
+
+def test_report_tolerates_malformed_status_json(tmp_path):
+    artifact_dir = tmp_path / "artifacts" / "es-bad"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "status.json").write_text("{not json")
+
+    report = build_run_report(artifact_dir)
+
+    assert "Run es-bad" in report
+    assert "Status: unknown" in report

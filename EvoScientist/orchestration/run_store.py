@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -205,8 +206,16 @@ def load_status_snapshot(run_dir: str | Path) -> StatusSnapshot | None:
     raw = status_file.read_text().strip()
     if not raw or raw == "{}":
         return None
-    payload = json.loads(raw)
-    status = RunStatus(payload.get("status", "created"))
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return None
+        required = ("run_id", "thread_id", "workspace_dir", "artifact_dir", "updated_at")
+        if not all(isinstance(payload.get(key), str) and payload.get(key) for key in required):
+            return None
+        status = RunStatus(payload.get("status", "created"))
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
     return StatusSnapshot(
         run_id=payload["run_id"],
         status=status,
@@ -277,7 +286,9 @@ def replay_events_into_status(
 
 
 async def consume_event_stream(
-    run_dir: str | Path, record: RunRecord, event_stream
+    run_dir: str | Path,
+    record: RunRecord,
+    event_stream: AsyncIterator[dict[str, Any]],
 ) -> RunRecord:
     current = record
     try:

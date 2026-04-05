@@ -30,4 +30,7 @@ def test_resume_command_restarts_from_stored_run_metadata(tmp_path):
     assert payload["run_id"] == "es-20260401-abc123"
     assert payload["thread_id"] == "deadbeef"
     assert payload["workspace_dir"] == "/tmp/work"
+    assert payload["artifact_dir"] == str(artifact_dir)
     assert payload["prompt"] == "test prompt"
+    assert payload["model"] == "claude-sonnet-4-5"
+    assert payload["resume_semantics"] == "restart_from_saved_run_context"

@@ -1,4 +1,5 @@
 from EvoScientist.orchestration.models import RunRecord, RunStatus
+from EvoScientist.orchestration.run_store import load_status_snapshot
 from EvoScientist.orchestration.status import build_status_snapshot
 
 
@@ -42,3 +43,11 @@ def test_build_status_snapshot_recommends_next_action_for_failed_run():
     assert snapshot["status"] == "failed"
     assert snapshot["last_error"] == "provider auth missing"
     assert snapshot["suggested_next_action"] is not None
+
+
+def test_load_status_snapshot_returns_none_for_malformed_payload(tmp_path):
+    run_dir = tmp_path / "artifacts" / "es-bad"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.json").write_text('{"status": "not-a-real-status"}')
+
+    assert load_status_snapshot(run_dir) is None

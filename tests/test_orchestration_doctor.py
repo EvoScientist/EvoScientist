@@ -1,3 +1,5 @@
+import pytest
+
 from EvoScientist.orchestration.doctor import run_doctor
 
 
@@ -46,8 +48,9 @@ def test_doctor_accepts_custom_anthropic_env_key(tmp_path, monkeypatch):
     )
 
 
-def test_doctor_accepts_runtime_supported_provider_env_keys(tmp_path, monkeypatch):
-    cases = [
+@pytest.mark.parametrize(
+    ("provider", "env_name", "model"),
+    [
         ("deepseek", "DEEPSEEK_API_KEY", "deepseek-v3"),
         ("siliconflow", "SILICONFLOW_API_KEY", "glm-5"),
         ("openrouter", "OPENROUTER_API_KEY", "gpt-5.4"),
@@ -56,21 +59,22 @@ def test_doctor_accepts_runtime_supported_provider_env_keys(tmp_path, monkeypatc
         ("volcengine", "VOLCENGINE_API_KEY", "doubao-seed-2.0-pro"),
         ("dashscope", "DASHSCOPE_API_KEY", "qwen-max"),
         ("ollama", "OLLAMA_BASE_URL", "llama3.1"),
-    ]
+    ],
+)
+def test_doctor_accepts_runtime_supported_provider_env_keys(
+    tmp_path, monkeypatch, provider, env_name, model
+):
+    config_path = tmp_path / f"{provider}.yaml"
+    config_path.write_text(f"provider: {provider}\nmodel: {model}\n")
+    monkeypatch.setenv(env_name, "test-value")
 
-    for provider, env_name, model in cases:
-        config_path = tmp_path / f"{provider}.yaml"
-        config_path.write_text(f"provider: {provider}\nmodel: {model}\n")
-        monkeypatch.setenv(env_name, "test-value")
+    result = run_doctor(config_path=config_path)
 
-        result = run_doctor(config_path=config_path)
-
-        assert result["ok"] is True, provider
-        assert any(
-            item["name"] == "provider_credentials" and item["ok"] is True
-            for item in result["checks"]
-        ), provider
-        monkeypatch.delenv(env_name, raising=False)
+    assert result["ok"] is True
+    assert any(
+        item["name"] == "provider_credentials" and item["ok"] is True
+        for item in result["checks"]
+    )
 
 
 def test_doctor_passes_with_explicit_workdir_and_api_key(tmp_path, monkeypatch):

@@ -10,7 +10,13 @@ def build_run_report(run_dir: str | Path) -> str:
     if not status_file.exists():
         return f"Run report unavailable: missing status.json in {run_dir}"
 
-    payload = json.loads(status_file.read_text())
+    try:
+        payload = json.loads(status_file.read_text())
+    except json.JSONDecodeError:
+        payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
     run_id = payload.get("run_id", run_dir.name)
     status = payload.get("status", "unknown")
     workspace_dir = payload.get("workspace_dir", "")

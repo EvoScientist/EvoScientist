@@ -1181,8 +1181,14 @@ def _run_prompt_json_orchestration(
                 {"type": "error", "message": str(exc)},
             )
 
-    nest_asyncio.apply()
-    final_record = asyncio.get_event_loop().run_until_complete(_run_json_orchestration())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    nest_asyncio.apply(loop)
+    try:
+        final_record = loop.run_until_complete(_run_json_orchestration())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
     write_run_record(artifact_dir, final_record)
     return {
         "run_id": run_id,
@@ -1451,8 +1457,14 @@ def _main_callback(
 
         import nest_asyncio  # type: ignore[import-untyped]
 
-        nest_asyncio.apply()
-        asyncio.get_event_loop().run_until_complete(_single_shot())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        nest_asyncio.apply(loop)
+        try:
+            loop.run_until_complete(_single_shot())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
     else:
         # Interactive mode (default) — checkpointer managed inside cmd_interactive
         cmd_interactive(
