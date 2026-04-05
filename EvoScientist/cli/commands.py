@@ -249,6 +249,7 @@ def report(
 
     run_dir = resolve_run_dir(Path(output).expanduser().resolve(), run_id)
     if not run_dir.exists():
+        console.print(f"[red]Run not found: {run_id}[/red]")
         raise typer.Exit(1)
     typer.echo(build_run_report(run_dir))
 
@@ -277,7 +278,24 @@ def resume(
                 )
             )
         raise typer.Exit(1)
-    payload = build_resume_payload(run_dir)
+    try:
+        payload = build_resume_payload(run_dir)
+    except ValueError as exc:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "error": "resume unavailable",
+                        "run_id": run_id,
+                        "run_dir": str(run_dir),
+                        "detail": str(exc),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
     else:
