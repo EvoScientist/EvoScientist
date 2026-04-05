@@ -97,7 +97,11 @@ def test_doctor_passes_with_explicit_workdir_and_api_key(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("config_text", "env_name", "env_value"),
     [
-        ("provider: anthropic\nmodel: claude-sonnet-4-5\nauth_mode: oauth\n", None, None),
+        (
+            "provider: anthropic\nmodel: claude-sonnet-4-5\nanthropic_auth_mode: oauth\n",
+            None,
+            None,
+        ),
         ("provider: anthropic\nmodel: claude-sonnet-4-5\n", "CC_PROXY_URL", "http://localhost:3456"),
     ],
 )
@@ -108,7 +112,7 @@ def test_doctor_accepts_oauth_or_ccproxy_without_api_key(
     config_path.write_text(config_text)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CC_PROXY_URL", raising=False)
-    monkeypatch.delenv("AUTH_MODE", raising=False)
+    monkeypatch.delenv("EVOSCIENTIST_ANTHROPIC_AUTH_MODE", raising=False)
     if env_name is not None and env_value is not None:
         monkeypatch.setenv(env_name, env_value)
 

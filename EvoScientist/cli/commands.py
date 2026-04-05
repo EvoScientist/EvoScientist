@@ -108,6 +108,8 @@ def validate(
 
         try:
             data = yaml.safe_load(config_path.read_text()) or {}
+            if not isinstance(data, dict):
+                raise ValueError("Config file must contain a mapping")
             provider = data.get("provider", "")
             model = data.get("model", "")
             checks.append(

@@ -63,14 +63,24 @@ def run_doctor(config_path: str | Path | None = None) -> dict[str, object]:
         config_key, env_name = _PROVIDER_KEY_SOURCES[provider]
         config_value = data.get(config_key, "")
         env_value = os.environ.get(env_name, "")
-        auth_mode = str(data.get("auth_mode", "")).lower()
-        env_auth_mode = os.environ.get("AUTH_MODE", "").lower()
+        provider_auth_key = {
+            "anthropic": "anthropic_auth_mode",
+            "openai": "openai_auth_mode",
+        }.get(provider)
+        provider_auth_mode = (
+            str(data.get(provider_auth_key, "")).lower() if provider_auth_key else ""
+        )
+        provider_auth_env = (
+            os.environ.get(f"EVOSCIENTIST_{provider_auth_key.upper()}", "").lower()
+            if provider_auth_key
+            else ""
+        )
         has_proxy = bool(os.environ.get("CC_PROXY_URL"))
         has_key = bool(
             config_value
             or env_value
-            or auth_mode == "oauth"
-            or env_auth_mode == "oauth"
+            or provider_auth_mode == "oauth"
+            or provider_auth_env == "oauth"
             or has_proxy
         )
         checks.append(

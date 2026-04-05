@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from EvoScientist.cli._app import app
@@ -136,9 +137,6 @@ def test_status_command_returns_json_snapshot_for_run(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert '"run_id":' in result.stdout
     assert '"status": "completed"' in result.stdout
-
-
-import pytest
 
 
 @pytest.mark.parametrize("command", ["status", "artifacts", "resume"])
