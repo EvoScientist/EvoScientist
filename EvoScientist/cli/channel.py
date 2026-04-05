@@ -55,6 +55,10 @@ _message_queue: queue.Queue[ChannelMessage] = queue.Queue()
 _pending_responses: dict[str, dict] = {}
 _response_lock = threading.Lock()
 
+_RESPONSE_TIMEOUT = 600.0
+_LATE_RESPONSE_TIMEOUT = 86400.0
+_LATE_RESPONSE_NOTICE = "Still working on it. I'll send the result when it's ready."
+
 
 def _enqueue_channel_message(msg: ChannelMessage) -> threading.Event:
     """Enqueue a channel message for the main thread and return a wait event."""
@@ -531,8 +535,10 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     manager.record_message(msg.channel, "received")
 
     channel = manager.get_channel(msg.channel)
+    typing_active = False
     if channel:
         await channel.start_typing(msg.chat_id)
+        typing_active = True
 
     # Enqueue for main CLI thread to process with its own event loop
     cm = ChannelMessage(
@@ -548,17 +554,42 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     )
     event = _enqueue_channel_message(cm)
 
-    # Wait (non-blocking for asyncio) until main thread sets response
-    _RESPONSE_TIMEOUT = 600  # 10 minutes max per message
-    replied = await asyncio.to_thread(event.wait, _RESPONSE_TIMEOUT)
-    if not replied:
-        _channel_logger.warning(
-            f"[bus] Response timeout ({_RESPONSE_TIMEOUT}s) for {cm.msg_id}"
-        )
-    response = _pop_channel_response(cm.msg_id) or "No response"
-
-    # Publish the response back through the bus → channel
     try:
+        # Two-stage wait: first stage with timeout, then extended wait for late reply
+        replied = await asyncio.to_thread(event.wait, _RESPONSE_TIMEOUT)
+        if not replied:
+            _channel_logger.warning(
+                f"[bus] Response timeout ({_RESPONSE_TIMEOUT}s) for {cm.msg_id}; "
+                "keeping late-reply delivery active"
+            )
+            try:
+                await bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=_LATE_RESPONSE_NOTICE,
+                        reply_to=msg.message_id or None,
+                        metadata=msg.metadata,
+                    )
+                )
+                manager.record_message(msg.channel, "sent")
+            except Exception as e:
+                _channel_logger.error(f"[bus] Late notice send error: {e}")
+            if channel and typing_active:
+                await channel.stop_typing(msg.chat_id)
+                typing_active = False
+
+            # Keep waiting for the actual response
+            replied = await asyncio.to_thread(event.wait, _LATE_RESPONSE_TIMEOUT)
+            if not replied:
+                _channel_logger.warning(
+                    f"[bus] Late response timeout ({_LATE_RESPONSE_TIMEOUT}s) "
+                    f"for {cm.msg_id}"
+                )
+                _pop_channel_response(cm.msg_id)  # cleanup
+                return
+
+        response = _pop_channel_response(cm.msg_id) or "No response"
         await bus.publish_outbound(
             OutboundMessage(
                 channel=msg.channel,
@@ -569,10 +600,13 @@ async def _handle_bus_message(bus, manager, msg) -> None:
             )
         )
         manager.record_message(msg.channel, "sent")
+    except asyncio.CancelledError:
+        _pop_channel_response(cm.msg_id)  # cleanup
+        raise
     except Exception as e:
         _channel_logger.error(f"[bus] Outbound error: {e}")
     finally:
-        if channel:
+        if channel and typing_active:
             await channel.stop_typing(msg.chat_id)
 
 
