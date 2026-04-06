@@ -24,7 +24,7 @@ from .tui_runtime import (  # noqa: F401
 )
 
 
-def main():
+def main(debug: bool = False):
     """CLI entry point."""
     import warnings
 
@@ -33,6 +33,12 @@ def main():
         "ignore", message=".*type is unknown and inference may fail.*"
     )
     from .commands import _configure_logging
+
+    # Set env var before configuring logging when debug mode is requested
+    if debug:
+        import os
+
+        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
 
     _configure_logging()
     app()
