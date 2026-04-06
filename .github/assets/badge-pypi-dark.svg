@@ -5,5 +5,5 @@
   <rect x="54" y="5" width="62" height="24" rx="6" fill="#1565c0"/>
   <text x="85" y="22" text-anchor="middle"
         font-family="Inter, -apple-system, system-ui, sans-serif"
-        font-size="13" font-weight="700" fill="#ffffff">v0.0.5</text>
+        font-size="13" font-weight="700" fill="#ffffff">v0.0.6</text>
 </svg>
