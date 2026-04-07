@@ -524,50 +524,34 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         controls which chunks carry a ``reply_to`` reference.
         """
         if not self._is_ready():
-            self._trace_event(
-                "outbound_send_skip",
-                reason="channel_not_ready",
-                chat_id=message.chat_id,
-                reply_to=message.reply_to,
-            )
             return False
         try:
             chat_id = self._resolve_chat_id(message)
             limit = self._get_chunk_limit()
-            with self._trace_span(
-                "outbound_send",
-                chat_id=chat_id,
-                reply_to=message.reply_to,
-                content_len=len(message.content or ""),
-                media_count=len(message.media or []),
-                chunk_limit=limit,
-            ) as span:
-                async with self._acquire_send_lock(chat_id):
-                    pairs = self._prepare_chunks(message.content, limit)
-                    span.set(chunk_count=len(pairs))
-                    had_error = False
-                    for i, (formatted, raw) in enumerate(pairs):
-                        reply_to = self._resolve_reply_to(message.reply_to, i)
-                        try:
-                            await self._send_with_retry(
-                                lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
-                                    self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
-                                )
+            async with self._acquire_send_lock(chat_id):
+                had_error = False
+                for i, (formatted, raw) in enumerate(
+                    self._prepare_chunks(message.content, limit)
+                ):
+                    reply_to = self._resolve_reply_to(message.reply_to, i)
+                    try:
+                        await self._send_with_retry(
+                            lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: self._send_chunk(
+                                _cid, _fmt, _raw, _reply, _meta
                             )
-                        except Exception as chunk_err:
-                            self._trace_event(
-                                "outbound_send_chunk_error",
-                                chat_id=chat_id,
-                                reply_to=reply_to,
-                                chunk_index=i,
-                                error_type=type(chunk_err).__name__,
-                            )
-                            _logger.error(
-                                f"{self.name} chunk {i} send error: {chunk_err}"
-                            )
-                            had_error = True
-                if had_error:
-                    span.set(result="partial")
+                        )
+                    except Exception as chunk_err:
+                        self._trace_event(
+                            "outbound_send_chunk_error",
+                            chat_id=chat_id,
+                            reply_to=reply_to,
+                            chunk_index=i,
+                            error_type=type(chunk_err).__name__,
+                        )
+                        _logger.error(
+                            f"{self.name} chunk {i} send error: {chunk_err}"
+                        )
+                        had_error = True
             return not had_error
         except Exception as e:
             _logger.error(f"{self.name} send error: {e}")
@@ -702,29 +686,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """
         chat_id = self._resolve_media_chat_id(recipient, metadata)
         if not self._is_ready():
-            self._trace_event(
-                "outbound_media_skip",
-                reason="channel_not_ready",
-                chat_id=chat_id,
-                file_path=file_path,
-            )
             return False
         try:
-            result = await self._send_media_impl(recipient, file_path, caption, metadata)
-            if not result:
-                self._trace_event(
-                    "outbound_media_fail",
-                    chat_id=chat_id,
-                    file_path=file_path,
-                )
-            return result
+            return await self._send_media_impl(recipient, file_path, caption, metadata)
         except Exception as e:
-            self._trace_event(
-                "outbound_media_error",
-                chat_id=chat_id,
-                file_path=file_path,
-                error_type=type(e).__name__,
-            )
             _logger.error(f"{self.name} send_media error: {e}")
             return False
 
@@ -955,13 +920,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 return None
             result = await mw.process_inbound(current, context)
             if result is None:
-                self._trace_event(
-                    "inbound_middleware_drop",
-                    middleware=type(mw).__name__,
-                    sender_id=current.sender_id,
-                    chat_id=current.chat_id,
-                    message_id=current.message_id or "-",
-                )
                 return None
             current = result
         if current is None:
