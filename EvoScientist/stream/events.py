@@ -735,10 +735,21 @@ def _process_chunk_content(
     """Process content blocks from an AI message chunk."""
     content = chunk.content
 
+    # OpenRouter (langchain-openrouter) stores reasoning in
+    # additional_kwargs["reasoning_content"] instead of content blocks.
+    _additional = getattr(chunk, "additional_kwargs", None) or {}
+    _rc = _additional.get("reasoning_content")
+    _emitted_thinking = False
+    if _rc and isinstance(_rc, str):
+        yield emitter.thinking(_rc)
+        _emitted_thinking = True
+
     if isinstance(content, str):
         if content:
             cleaned = _strip_legacy_thinking_tags(content)
-            if cleaned:
+            # Skip whitespace-only text (OpenRouter may send '\n\n' before
+            # reasoning chunks, which would prematurely trigger is_responding).
+            if cleaned and not cleaned.isspace():
                 yield emitter.text(cleaned)
             return
 
@@ -771,7 +782,8 @@ def _process_chunk_content(
 
         if block_type in ("thinking", "reasoning"):
             thinking_text = block.get("thinking") or block.get("reasoning") or ""
-            if thinking_text:
+            # Skip if already emitted from additional_kwargs (avoid duplicates)
+            if thinking_text and not _emitted_thinking:
                 yield emitter.thinking(thinking_text)
 
         elif block_type == "text":

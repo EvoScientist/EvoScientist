@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.0.5" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.0.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -109,6 +109,8 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
 - **🔄 Code Generation Modes** — More Effort (iterative refinement), continuously improving code quality.
+- **⚡ Adaptive Tools** — Per-turn tool selection keeps only relevant tools visible, reducing noise.
+- **✂️ Context Editing** — Dynamic system prompt rewriting based on conversation state.
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
 
 > [!TIP]
