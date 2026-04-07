@@ -81,11 +81,6 @@ class MessageBus(TraceMixin):
         if channel not in self._outbound_subscribers:
             self._outbound_subscribers[channel] = []
         self._outbound_subscribers[channel].append(callback)
-        self._trace_event(
-            "bus_subscribe_outbound",
-            target_channel=channel,
-            subscriber_count=len(self._outbound_subscribers[channel]),
-        )
 
     async def dispatch_outbound(self) -> None:
         """Route outbound messages to subscribed channels.
@@ -93,7 +88,6 @@ class MessageBus(TraceMixin):
         Run as a background task — loops until :meth:`stop` is called.
         """
         self._running = True
-        self._trace_event("bus_dispatcher_start")
         while self._running:
             try:
                 msg = await asyncio.wait_for(
@@ -115,12 +109,6 @@ class MessageBus(TraceMixin):
             for callback in subscribers:
                 try:
                     await callback(msg)
-                    self._trace_event(
-                        "bus_dispatch_ok",
-                        target_channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        subscriber_count=len(subscribers),
-                    )
                 except Exception as e:
                     self._trace_event(
                         "bus_dispatch_error",
@@ -133,7 +121,6 @@ class MessageBus(TraceMixin):
     def stop(self) -> None:
         """Stop the dispatcher loop."""
         self._running = False
-        self._trace_event("bus_dispatcher_stop")
 
     @property
     def inbound_size(self) -> int:

@@ -52,15 +52,9 @@ async def standalone_outbound_dispatcher(
 
         try:
             if msg.content:
-                await channel.send(msg)
-                emit_debug_event(
-                    logger,
-                    "standalone_dispatch_ok",
-                    channel=channel.name,
-                    enabled=_channel_trace_enabled(channel),
-                    recipient=msg.recipient,
-                    content_len=len(msg.content),
-                )
+                sent = await channel.send(msg)
+                if not sent:
+                    raise RuntimeError("send() returned False")
         except Exception as e:
             emit_debug_event(
                 logger,
@@ -141,8 +135,9 @@ async def _async_main(
                 break
             try:
                 if msg.content:
-                    await asyncio.wait_for(channel.send(msg), timeout=5.0)
-                    drained += 1
+                    sent = await asyncio.wait_for(channel.send(msg), timeout=5.0)
+                    if sent:
+                        drained += 1
             except Exception:
                 pass
         if drained:

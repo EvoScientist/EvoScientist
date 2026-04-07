@@ -636,13 +636,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         Uses the formatter auto-configured from ``capabilities.format_type``.
         Subclasses rarely need to override this — set ``capabilities`` instead.
         """
-        result = self._formatter.format(text)
-        self._trace_event(
-            "outbound_format_applied",
-            input_len=len(text),
-            output_len=len(result),
-        )
-        return result
+        return self._formatter.format(text)
 
     @abstractmethod
     async def _send_chunk(
@@ -716,17 +710,21 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             )
             return False
         try:
-            with self._trace_span(
-                "outbound_media",
-                chat_id=chat_id,
-                file_path=file_path,
-                caption_len=len(caption or ""),
-            ):
-                result = await self._send_media_impl(
-                    recipient, file_path, caption, metadata
+            result = await self._send_media_impl(recipient, file_path, caption, metadata)
+            if not result:
+                self._trace_event(
+                    "outbound_media_fail",
+                    chat_id=chat_id,
+                    file_path=file_path,
                 )
             return result
         except Exception as e:
+            self._trace_event(
+                "outbound_media_error",
+                chat_id=chat_id,
+                file_path=file_path,
+                error_type=type(e).__name__,
+            )
             _logger.error(f"{self.name} send_media error: {e}")
             return False
 
@@ -1051,7 +1049,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             transcribed_files: set[str] = set()
             for fp in raw.media_files:
                 if is_audio_file(fp):
-                    self._trace_event("stt_start", file_path=fp)
                     try:
                         text = await transcribe_file(
                             fp,
@@ -1066,11 +1063,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                     if text:
                         transcripts.append(text)
                         transcribed_files.add(fp)
-                        self._trace_event(
-                            "stt_transcribed",
-                            file_path=fp,
-                            text_len=len(text),
-                        )
                 # Non-audio files are silently skipped — no trace event
                 # to avoid log noise when messages contain many images.
             if transcripts:
@@ -1092,23 +1084,9 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             return
         if raw.message_id:
             try:
-                with self._trace_span(
-                    "ack_reaction",
-                    chat_id=raw.chat_id,
-                    message_id=raw.message_id,
-                ):
-                    await self._send_ack_reaction(raw.chat_id, raw.message_id)
+                await self._send_ack_reaction(raw.chat_id, raw.message_id)
             except Exception:
                 pass
-        self._trace_debug(
-            "%s inbound queued: sender=%s chat=%s message_id=%s media=%d content_len=%d",
-            self.name,
-            msg.sender_id,
-            msg.chat_id,
-            msg.message_id or "-",
-            len(msg.media),
-            len(msg.content),
-        )
         await self._queue.put(msg)
 
     # ── Bus integration ──────────────────────────────────────────────
@@ -1147,15 +1125,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             self.initial_debounce + (msg_count - 1) * self.debounce_step,
             self.max_debounce,
         )
-        self._trace_event(
-            "inbound_debounce_scheduled",
-            sender_id=sender,
-            chat_id=msg.chat_id,
-            message_id=msg.message_id or "-",
-            message_count=msg_count,
-            wait_s=round(wait, 2),
-            media_count=len(msg.media),
-        )
         _logger.debug(f"Debounce for {sender}: {wait:.1f}s (message #{msg_count})")
 
         async def debounce_callback(_s=sender, _w=wait):
@@ -1183,17 +1152,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             return
 
         merged_content = "\n".join(messages)
-        self._trace_event(
-            "inbound_debounce_flush",
-            sender_id=sender,
-            chat_id=(metadata or {}).get("chat_id", sender),
-            message_id=message_id or "-",
-            message_count=len(messages),
-            merged_content_len=len(merged_content),
-            media_count=len(media),
-            is_group=is_group,
-            was_mentioned=was_mentioned,
-        )
         _logger.info(f"Processing {len(messages)} merged message(s) from {sender}")
 
         if self._bus:
@@ -1208,13 +1166,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 message_id=message_id,
                 is_group=is_group,
                 was_mentioned=was_mentioned,
-            )
-            self._trace_event(
-                "inbound_bus_publish",
-                sender_id=sender,
-                chat_id=inbound.chat_id,
-                message_id=message_id or "-",
-                media_count=len(media),
             )
             await self._bus.publish_inbound(inbound)
 
@@ -1262,26 +1213,13 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         backoff = 1.0
         max_backoff = 60.0
         self._running = True
-        self._trace_event("channel_run_start")
         while self._running:
             try:
                 await self.start()
-                self._trace_event("channel_start_ok")
                 backoff = 1.0
                 async for msg in self.receive():
-                    self._trace_event(
-                        "channel_receive",
-                        sender_id=msg.sender_id,
-                        chat_id=msg.chat_id,
-                        message_id=msg.message_id or "-",
-                        content_len=len(msg.content),
-                        media_count=len(msg.media),
-                        is_group=msg.is_group,
-                        was_mentioned=msg.was_mentioned,
-                    )
                     await self.queue_message(msg)
             except asyncio.CancelledError:
-                self._trace_event("channel_run_cancelled")
                 break
             except ChannelError as e:
                 self._trace_event(
@@ -1307,10 +1245,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 self._running = should_reconnect
 
             if self._running:
-                self._trace_event(
-                    "channel_reconnect_scheduled",
-                    backoff_s=round(backoff, 2),
-                )
                 _logger.info(f"Reconnecting {self.name} in {backoff:.1f}s...")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)

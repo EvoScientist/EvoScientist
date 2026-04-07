@@ -1,5 +1,6 @@
 """Tests for shared channel debug logging helpers."""
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -185,7 +186,7 @@ def test_typing_manager_emits_trace_events(caplog):
     from EvoScientist.channels.middleware import TypingManager
 
     async def _run():
-        send_action = AsyncMock()
+        send_action = AsyncMock(side_effect=RuntimeError("typing api down"))
         mgr = TypingManager(
             send_action,
             interval=100.0,
@@ -193,21 +194,21 @@ def test_typing_manager_emits_trace_events(caplog):
             channel_name="test",
         )
         await mgr.start("chat1")
+        await asyncio.sleep(0)
         await mgr.stop("chat1")
 
     with caplog.at_level(logging.DEBUG):
         run_async(_run())
-    assert "typing_start" in caplog.text
-    assert "typing_stop" in caplog.text
+    assert "typing_error" in caplog.text
     assert "chat_id=chat1" in caplog.text
 
 
-def test_ack_reaction_emits_trace_events(caplog):
+def test_ack_reaction_emits_error_traces(caplog):
     from EvoScientist.channels.middleware import AckReactionMiddleware
 
     async def _run():
         send_fn = AsyncMock()
-        remove_fn = AsyncMock()
+        remove_fn = AsyncMock(side_effect=RuntimeError("remove failed"))
         ack = AckReactionMiddleware(
             scope="all",
             send_fn=send_fn,
@@ -221,7 +222,7 @@ def test_ack_reaction_emits_trace_events(caplog):
         await ack.send_ack("chat1", "msg1")
         send_fn.assert_awaited_once()
 
-        # Successful remove
+        # Error on remove
         await ack.remove_ack("chat1")
         remove_fn.assert_awaited_once()
 
@@ -232,10 +233,10 @@ def test_ack_reaction_emits_trace_events(caplog):
 
     with caplog.at_level(logging.DEBUG):
         run_async(_run())
-    assert "ack_send_ok" in caplog.text
-    assert "ack_remove_ok" in caplog.text
     assert "ack_send_error" in caplog.text
+    assert "ack_remove_error" in caplog.text
     assert "api down" in caplog.text
+    assert "remove failed" in caplog.text
 
 
 def test_inbound_raw_event_emitted(caplog):
@@ -406,6 +407,35 @@ def test_trace_mixin_trace_debug(caplog):
     with caplog.at_level(logging.DEBUG, logger="tests.mixin_debug"):
         stub._trace_debug("hello %s", "world")
     assert "hello world" in caplog.text
+
+
+def test_standalone_dispatcher_treats_false_send_as_error(caplog):
+    from EvoScientist.channels.bus import MessageBus
+    from EvoScientist.channels.bus.events import OutboundMessage
+    from EvoScientist.channels.standalone import standalone_outbound_dispatcher
+
+    channel = MagicMock()
+    channel.name = "test"
+    channel.is_debug_trace_enabled.return_value = True
+    channel.send = AsyncMock(return_value=False)
+    bus = MessageBus()
+
+    async def _run():
+        task = asyncio.create_task(standalone_outbound_dispatcher(bus, channel))
+        await bus.publish_outbound(
+            OutboundMessage(channel="test", chat_id="c1", content="hi")
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    with caplog.at_level(logging.DEBUG):
+        run_async(_run())
+    assert "standalone_dispatch_error" in caplog.text
+    assert "send() returned False" in caplog.text
 
 
 # ── One-time warning test ────────────────────────────────────────────
