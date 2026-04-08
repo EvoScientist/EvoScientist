@@ -10,6 +10,7 @@ from typing import ClassVar
 from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import QQ as QQ_CAPS
 from ..config import BaseChannelConfig
+from ..formatter import UnifiedFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,10 @@ class QQChannel(Channel):
     _non_retryable_patterns = ()
     _mention_pattern = r"@\S+\s*"
     _mention_strip_count = 1
+    _markdown_fallback_exc_types: ClassVar[tuple[type[Exception], ...]] = (
+        TypeError,
+        ValueError,
+    )
 
     def __init__(self, config: QQConfig):
         super().__init__(config)
@@ -71,6 +76,7 @@ class QQChannel(Channel):
         self._msg_seq: dict[str, int] = {}  # msg_id -> next seq number
         self._msg_seq_order: deque = deque(maxlen=500)
         self._msg_seq_ids: set[str] = set()  # companion set for O(1) lookup
+        self._plain_formatter = UnifiedFormatter.for_channel("plain")
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -189,21 +195,106 @@ class QQChannel(Channel):
         msg_type = (metadata or {}).get("msg_type", "c2c")
         msg_id = (metadata or {}).get("event_id", "")
         seq = self._next_msg_seq(msg_id)
+        try:
+            await self._post_markdown_message(chat_id, raw_text, msg_type, msg_id, seq)
+            return
+        except Exception as exc:
+            if not self._should_fallback_to_plain_text(exc):
+                raise
+            self._record_markdown_fallback(chat_id, raw_text, exc)
+            logger.debug("QQ markdown send failed, falling back to plain text: %s", exc)
+
+        plain_text = self._plain_formatter.format(raw_text)
+        await self._post_plain_message(chat_id, plain_text, msg_type, msg_id, seq)
+
+    def _should_fallback_to_plain_text(self, exc: Exception) -> bool:
+        """Return True only for markdown compatibility/validation failures."""
+        if isinstance(exc, self._markdown_fallback_exc_types):
+            return True
+
+        msg = str(exc).lower()
+        compatibility_tokens = ("unsupported", "unexpected", "unknown", "invalid")
+        return (
+            "unexpected keyword argument" in msg
+            or (
+                "markdown" in msg
+                and any(token in msg for token in compatibility_tokens)
+            )
+            or (
+                "msg_type" in msg
+                and any(token in msg for token in compatibility_tokens)
+            )
+        )
+
+    def _record_markdown_fallback(
+        self,
+        chat_id: str,
+        raw_text: str,
+        exc: Exception,
+    ) -> None:
+        """Emit optional debug trace for markdown fallback without blocking send."""
+        trace_event = getattr(self, "_trace_event", None)
+        if not callable(trace_event):
+            return
+        try:
+            trace_event(
+                "outbound_format_fallback",
+                chat_id=chat_id,
+                error=str(exc),
+                formatted_len=len(raw_text),
+                raw_len=len(raw_text),
+            )
+        except Exception as trace_exc:
+            logger.debug("QQ fallback trace failed: %s", trace_exc)
+
+    async def _post_markdown_message(
+        self,
+        chat_id: str,
+        text: str,
+        msg_type: str,
+        msg_id: str,
+        seq: int,
+    ) -> None:
+        payload = {
+            "msg_type": 2,
+            "markdown": {"content": text},
+            "msg_id": msg_id,
+            "msg_seq": seq,
+        }
         if msg_type == "group":
             await self._client.api.post_group_message(
                 group_openid=chat_id,
-                msg_type=0,
-                content=raw_text,
-                msg_id=msg_id,
-                msg_seq=seq,
+                **payload,
             )
         else:
             await self._client.api.post_c2c_message(
                 openid=chat_id,
-                msg_type=0,
-                content=raw_text,
-                msg_id=msg_id,
-                msg_seq=seq,
+                **payload,
+            )
+
+    async def _post_plain_message(
+        self,
+        chat_id: str,
+        text: str,
+        msg_type: str,
+        msg_id: str,
+        seq: int,
+    ) -> None:
+        payload = {
+            "msg_type": 0,
+            "content": text,
+            "msg_id": msg_id,
+            "msg_seq": seq,
+        }
+        if msg_type == "group":
+            await self._client.api.post_group_message(
+                group_openid=chat_id,
+                **payload,
+            )
+        else:
+            await self._client.api.post_c2c_message(
+                openid=chat_id,
+                **payload,
             )
 
     # _send_typing_action: inherited no-op (QQ Bot API has no typing indicator)
