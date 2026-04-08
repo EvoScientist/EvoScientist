@@ -195,13 +195,6 @@ class QQChannel(Channel):
             await self._post_markdown_message(chat_id, raw_text, msg_type, msg_id, seq)
             return
         except Exception as exc:
-            self._trace_event(
-                "outbound_format_fallback",
-                chat_id=chat_id,
-                error=str(exc),
-                formatted_len=len(raw_text),
-                raw_len=len(raw_text),
-            )
             logger.debug(
                 "QQ markdown send failed, falling back to plain text: %s", exc
             )
