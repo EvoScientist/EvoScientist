@@ -190,3 +190,30 @@ def _patch_openai_compat_content(model: Any) -> None:
             return await orig_agenerate(_sanitize_messages(messages), *args, **kwargs)
 
         model._agenerate = _patched_agenerate
+
+    # Also patch streaming paths — CLI/agent uses _stream/_astream, so without
+    # these the content flattening is bypassed during normal streaming calls.
+    orig_stream = getattr(model, "_stream", None)
+    if orig_stream is not None:
+
+        @functools.wraps(orig_stream)
+        def _patched_stream(
+            messages: list[BaseMessage], *args: Any, **kwargs: Any
+        ) -> Any:
+            return orig_stream(_sanitize_messages(messages), *args, **kwargs)
+
+        model._stream = _patched_stream
+
+    orig_astream = getattr(model, "_astream", None)
+    if orig_astream is not None:
+
+        @functools.wraps(orig_astream)
+        async def _patched_astream(
+            messages: list[BaseMessage], *args: Any, **kwargs: Any
+        ) -> Any:
+            async for chunk in orig_astream(
+                _sanitize_messages(messages), *args, **kwargs
+            ):
+                yield chunk
+
+        model._astream = _patched_astream
