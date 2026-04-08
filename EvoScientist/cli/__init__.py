@@ -24,21 +24,20 @@ from .tui_runtime import (  # noqa: F401
 )
 
 
-def main(debug: bool = False):
+def main():
     """CLI entry point."""
+    import os
     import warnings
 
     warnings.filterwarnings("ignore", message=".*not known to support tools.*")
     warnings.filterwarnings(
         "ignore", message=".*type is unknown and inference may fail.*"
     )
+    from ..config import load_config
     from .commands import _configure_logging
 
-    # Set env var before configuring logging when debug mode is requested
-    if debug:
-        import os
-
-        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
-
-    _configure_logging()
+    # Priority: env var > config file > default (WARNING)
+    config = load_config()
+    _log_level = os.environ.get("EVOSCIENTIST_LOG_LEVEL", "") or config.log_level
+    _configure_logging(debug=_log_level.upper() == "DEBUG")
     app()
