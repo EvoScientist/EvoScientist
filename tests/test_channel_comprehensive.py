@@ -1273,6 +1273,37 @@ class TestChannelManagerDrain:
 
         _run(_test())
 
+    def test_stop_all_drains_media_and_counts_only_success(self, caplog):
+        async def _test():
+            bus = MessageBus()
+            mgr = ChannelManager(bus, drain_timeout=1.0)
+            ch = StubChannel()
+            sent = []
+            media_sent = []
+            ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or False)
+            ch.send_media = AsyncMock(
+                side_effect=lambda **kw: media_sent.append(kw) or True
+            )
+            mgr.register(ch)
+
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel="stub",
+                    chat_id="c1",
+                    content="drain me",
+                    media=["/tmp/file.png"],
+                )
+            )
+
+            await mgr.stop_all()
+
+            assert len(sent) == 1
+            assert len(media_sent) == 1
+
+        with caplog.at_level("INFO"):
+            _run(_test())
+        assert "Outbound drain:" not in caplog.text
+
 
 class TestChannelManagerTracking:
     def test_record_message(self):

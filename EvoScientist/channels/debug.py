@@ -86,6 +86,19 @@ def _format_fields(fields: Mapping[str, Any]) -> str:
 _warned_debug_level_mismatch = False
 
 
+def _warn_debug_level_mismatch(logger: logging.Logger) -> None:
+    """Emit a one-time warning when tracing is enabled but DEBUG logs are hidden."""
+    global _warned_debug_level_mismatch
+    if _warned_debug_level_mismatch:
+        return
+    _warned_debug_level_mismatch = True
+    logger.warning(
+        "channel debug tracing is enabled but logger level is above DEBUG; "
+        "set EVOSCIENTIST_LOG_LEVEL=DEBUG, configure log_level=debug, "
+        "or use 'serve --debug' to see trace events"
+    )
+
+
 def emit_debug_event(
     logger: logging.Logger,
     event: str,
@@ -100,17 +113,10 @@ def emit_debug_event(
     ``event=inbound_raw channel=telegram message_id=123 chat_id=-1001``
     """
 
-    global _warned_debug_level_mismatch
     if not enabled:
         return
     if not logger.isEnabledFor(logging.DEBUG):
-        if not _warned_debug_level_mismatch:
-            _warned_debug_level_mismatch = True
-            logger.warning(
-                "channel debug tracing is enabled but logger level is above DEBUG; "
-                "call configure_standalone_logging() or set log_level to DEBUG "
-                "to see trace events"
-            )
+        _warn_debug_level_mismatch(logger)
         return
     base_fields = {"event": event, "channel": channel}
     base_fields.update(fields)
@@ -130,7 +136,10 @@ def emit_debug_event_if(
     classes, managers, and standalone helpers.
     """
 
-    if not enabled or not logger.isEnabledFor(logging.DEBUG):
+    if not enabled:
+        return
+    if not logger.isEnabledFor(logging.DEBUG):
+        _warn_debug_level_mismatch(logger)
         return
     base_fields: dict[str, Any] = {"event": event}
     base_fields.update(fields)

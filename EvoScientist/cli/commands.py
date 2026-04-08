@@ -524,6 +524,9 @@ def serve(
         cli_overrides["log_level"] = "DEBUG"
         cli_overrides["channel_debug_tracing"] = True
     config = get_effective_config(cli_overrides)
+    if debug:
+        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
+        os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
     apply_config_to_env(config)
     if debug:
         _configure_logging()

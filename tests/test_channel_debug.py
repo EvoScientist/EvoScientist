@@ -333,6 +333,40 @@ def test_standalone_dispatcher_treats_false_send_as_error(caplog):
     assert "send() returned False" in caplog.text
 
 
+def test_standalone_dispatcher_sends_media():
+    from EvoScientist.channels.bus import MessageBus
+    from EvoScientist.channels.bus.events import OutboundMessage
+    from EvoScientist.channels.standalone import standalone_outbound_dispatcher
+
+    channel = MagicMock()
+    channel.name = "test"
+    channel.is_debug_trace_enabled.return_value = True
+    channel.send = AsyncMock(return_value=True)
+    channel.send_media = AsyncMock(return_value=True)
+    bus = MessageBus()
+
+    async def _run():
+        task = asyncio.create_task(standalone_outbound_dispatcher(bus, channel))
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="test", chat_id="c1", content="", media=["/tmp/a.png"]
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    run_async(_run())
+    channel.send_media.assert_awaited_once_with(
+        recipient="c1",
+        file_path="/tmp/a.png",
+        metadata={},
+    )
+
+
 # ── One-time warning test ────────────────────────────────────────────
 
 

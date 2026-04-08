@@ -712,15 +712,35 @@ class ChannelManager:
             except asyncio.QueueEmpty:
                 break
             channel = self._channels.get(msg.channel)
-            if channel and msg.content:
+            if not channel:
+                continue
+            delivery_failed = False
+            if msg.content:
                 try:
-                    await asyncio.wait_for(
+                    text_ok = await asyncio.wait_for(
                         channel.send(msg),
                         timeout=max(1.0, deadline - time.monotonic()),
                     )
-                    drained += 1
+                    if not text_ok:
+                        delivery_failed = True
                 except Exception:
-                    pass
+                    delivery_failed = True
+            for media_path in msg.media:
+                try:
+                    media_ok = await asyncio.wait_for(
+                        channel.send_media(
+                            recipient=msg.chat_id,
+                            file_path=media_path,
+                            metadata=msg.metadata,
+                        ),
+                        timeout=max(1.0, deadline - time.monotonic()),
+                    )
+                    if not media_ok:
+                        delivery_failed = True
+                except Exception:
+                    delivery_failed = True
+            if not delivery_failed and (msg.content or msg.media):
+                drained += 1
         dropped = self.bus.outbound.qsize()
         if drained or dropped:
             logger.info(f"Outbound drain: {drained} sent, {dropped} dropped")
