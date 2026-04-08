@@ -498,6 +498,11 @@ def serve(
         "--ask-user",
         help="Enable agent to ask clarifying questions about your research preferences",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug logging and channel trace output in serve mode",
+    ),
 ):
     """Run EvoScientist in headless mode -- channels only, no interactive prompt.
 
@@ -515,8 +520,13 @@ def serve(
         cli_overrides["auto_approve"] = True
     if ask_user:
         cli_overrides["enable_ask_user"] = True
+    if debug:
+        cli_overrides["log_level"] = "DEBUG"
+        cli_overrides["channel_debug_tracing"] = True
     config = get_effective_config(cli_overrides)
     apply_config_to_env(config)
+    if debug:
+        _configure_logging()
 
     # Auto-start ccproxy if any provider uses OAuth mode
     _ccproxy_proc_serve = None
@@ -1187,6 +1197,7 @@ def _configure_logging():
         return getattr(logging, raw, logging.WARNING)
 
     resolved_level = _resolve_log_level()
+    verbose_logging = resolved_level <= logging.DEBUG
 
     class DimWarningHandler(RichHandler):
         """Custom handler that renders warnings in dim style."""
@@ -1203,7 +1214,10 @@ def _configure_logging():
 
     # Configure root logger to use our handler for WARNING and above
     handler = DimWarningHandler(
-        console=console, show_time=False, show_path=False, show_level=False
+        console=console,
+        show_time=verbose_logging,
+        show_path=verbose_logging,
+        show_level=verbose_logging,
     )
     handler.setLevel(resolved_level)
 

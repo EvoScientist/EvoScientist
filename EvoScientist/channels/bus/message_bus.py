@@ -38,14 +38,6 @@ class MessageBus(TraceMixin):
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
         await self.inbound.put(msg)
-        self._trace_event(
-            "bus_publish_inbound",
-            source_channel=msg.channel,
-            sender_id=msg.sender_id,
-            chat_id=msg.chat_id,
-            message_id=msg.message_id or "-",
-            queue_size=self.inbound.qsize(),
-        )
 
     async def consume_inbound(self) -> InboundMessage:
         """Consume the next inbound message (blocks until available)."""
@@ -56,15 +48,6 @@ class MessageBus(TraceMixin):
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
         await self.outbound.put(msg)
-        self._trace_event(
-            "bus_publish_outbound",
-            target_channel=msg.channel,
-            chat_id=msg.chat_id,
-            reply_to=msg.reply_to,
-            content_len=len(msg.content or ""),
-            media_count=len(msg.media),
-            queue_size=self.outbound.qsize(),
-        )
 
     async def consume_outbound(self) -> OutboundMessage:
         """Consume the next outbound message (blocks until available)."""

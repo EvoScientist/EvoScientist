@@ -97,7 +97,6 @@ class EvoScientistConfig:
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
     channel_send_thinking: bool = True  # forward thinking to any channel
     channel_debug_tracing: bool = False  # emit extra inbound diagnostics at DEBUG
-    channel_debug_payloads: bool = False  # emit redacted payload previews at DEBUG
     require_mention: str = "group"  # "always" | "group" | "off"
     text_chunk_limit: int = 0  # 0 = use capability default
     allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
@@ -379,7 +378,6 @@ _ENV_MAPPINGS = {
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
-    "channel_debug_payloads": "EVOSCIENTIST_CHANNEL_DEBUG_PAYLOADS",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
 }

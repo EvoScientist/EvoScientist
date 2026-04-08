@@ -6,32 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.channels.debug import (
     TraceMixin,
-    configure_standalone_logging,
-    debug_payloads_enabled,
     debug_trace_enabled,
     emit_debug_event,
     emit_debug_event_if,
-    emit_debug_payload,
-    resolve_log_level,
-    trace_span,
 )
 
 from .conftest import run_async
 
 
-def test_resolve_log_level_accepts_warn_alias():
-    assert resolve_log_level("warn") == logging.WARNING
-    assert resolve_log_level("DEBUG") == logging.DEBUG
-
-
 def test_debug_trace_enabled_from_bool():
     assert debug_trace_enabled(True) is True
     assert debug_trace_enabled(False) is False
-
-
-def test_debug_payloads_enabled_from_bool():
-    assert debug_payloads_enabled(True) is True
-    assert debug_payloads_enabled(False) is False
 
 
 def test_emit_debug_event_structured(caplog):
@@ -51,27 +36,6 @@ def test_emit_debug_event_structured(caplog):
     assert "message_id=123" in caplog.text
     assert "has_text=true" in caplog.text
 
-
-def test_emit_debug_payload_redacts_secrets(caplog):
-    logger = logging.getLogger("tests.channel.payload")
-    with caplog.at_level(logging.DEBUG, logger=logger.name):
-        emit_debug_payload(
-            logger,
-            "payload_preview",
-            {"token": "secret-value", "chat_id": 1},
-            channel="telegram",
-            enabled=True,
-        )
-    assert "event=payload_preview" in caplog.text
-    assert "payload_preview={'token': '***'" in caplog.text
-    assert "secret-value" not in caplog.text
-
-
-def test_configure_standalone_logging_returns_level():
-    resolved = configure_standalone_logging("DEBUG")
-    assert resolved == logging.DEBUG
-
-
 # ── emit_debug_event_if tests ────────────────────────────────────────
 
 
@@ -86,24 +50,6 @@ def test_emit_debug_event_if_disabled_does_not_log(caplog):
             key="value",
         )
     assert "should_not_appear" not in caplog.text
-
-
-def test_emit_debug_payload_truncates_long_content(caplog):
-    logger = logging.getLogger("tests.channel.payload_trunc")
-    long_payload = {"data": "x" * 2000}
-    with caplog.at_level(logging.DEBUG, logger=logger.name):
-        emit_debug_payload(
-            logger,
-            "big_payload",
-            long_payload,
-            channel="test",
-            enabled=True,
-            preview_limit=100,
-        )
-    assert "event=big_payload" in caplog.text
-    # The preview should be truncated — indicated by trailing "..."
-    assert "..." in caplog.text
-
 
 # ── Middleware structured event tests ────────────────────────────────
 
@@ -330,43 +276,6 @@ def test_format_fallback_emits_event(caplog):
     assert "outbound_format_fallback" in caplog.text
     assert call_count == 2
 
-
-# ── trace_span tests ──────────────────────────────────────────────────
-
-
-def test_trace_span_emits_start_and_ok(caplog):
-    logger = logging.getLogger("tests.trace_span.ok")
-    with caplog.at_level(logging.DEBUG, logger=logger.name):
-        with trace_span(
-            logger, "my_op", channel="test", enabled=True, chat_id="c1"
-        ) as span:
-            span.set(extra="data")
-    assert "event=my_op_start" in caplog.text
-    assert "event=my_op_ok" in caplog.text
-    assert "extra=data" in caplog.text
-
-
-def test_trace_span_emits_start_and_error_on_exception(caplog):
-    logger = logging.getLogger("tests.trace_span.err")
-    with caplog.at_level(logging.DEBUG, logger=logger.name):
-        try:
-            with trace_span(logger, "fail_op", channel="test", enabled=True):
-                raise ValueError("boom")
-        except ValueError:
-            pass
-    assert "event=fail_op_start" in caplog.text
-    assert "event=fail_op_error" in caplog.text
-    assert "error_type=ValueError" in caplog.text
-
-
-def test_trace_span_disabled_emits_nothing(caplog):
-    logger = logging.getLogger("tests.trace_span.disabled")
-    with caplog.at_level(logging.DEBUG, logger=logger.name):
-        with trace_span(logger, "noop", channel="test", enabled=False) as span:
-            span.set(x=1)
-    assert "noop" not in caplog.text
-
-
 # ── TraceMixin tests ─────────────────────────────────────────────────
 
 
@@ -390,24 +299,6 @@ def test_trace_mixin_trace_event(caplog):
     assert "event=some_event" in caplog.text
     assert "channel=stub" in caplog.text
     assert "key=val" in caplog.text
-
-
-def test_trace_mixin_trace_span(caplog):
-    stub = _make_trace_stub("tests.mixin_span")
-    with caplog.at_level(logging.DEBUG, logger="tests.mixin_span"):
-        with stub._trace_span("op", x=1) as span:
-            span.set(y=2)
-    assert "event=op_start" in caplog.text
-    assert "event=op_ok" in caplog.text
-    assert "y=2" in caplog.text
-
-
-def test_trace_mixin_trace_debug(caplog):
-    stub = _make_trace_stub("tests.mixin_debug")
-    with caplog.at_level(logging.DEBUG, logger="tests.mixin_debug"):
-        stub._trace_debug("hello %s", "world")
-    assert "hello world" in caplog.text
-
 
 def test_standalone_dispatcher_treats_false_send_as_error(caplog):
     from EvoScientist.channels.bus import MessageBus

@@ -684,7 +684,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         Returns:
             True if sent successfully, False otherwise.
         """
-        chat_id = self._resolve_media_chat_id(recipient, metadata)
         if not self._is_ready():
             return False
         try:

@@ -80,16 +80,6 @@ async def _async_main(
     if send_thinking:
         channel.send_thinking = True
 
-    trace = _channel_trace_enabled(channel)
-    emit_debug_event(
-        logger,
-        "standalone_start",
-        channel=channel.name,
-        enabled=trace,
-        use_agent=use_agent,
-        send_thinking=send_thinking,
-    )
-
     # Create a lightweight manager for the consumer to use
     manager = ChannelManager(bus)
     manager._channels[channel.name] = channel
@@ -142,17 +132,9 @@ async def _async_main(
                 pass
         if drained:
             logger.info(f"Outbound drain: {drained} sent")
-        stop_trace = _channel_trace_enabled(channel)
         channel._running = False
         await channel.stop()
         await manager.stop_health()
-        emit_debug_event(
-            logger,
-            "standalone_stop",
-            channel=channel.name,
-            enabled=stop_trace,
-            drained=drained,
-        )
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
