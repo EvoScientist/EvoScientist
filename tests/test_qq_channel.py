@@ -44,6 +44,7 @@ class TestQQChannelSend:
 
     def test_send_falls_back_to_plain_text_when_markdown_send_fails(self):
         channel = self._make_ready_channel()
+        channel._trace_event = MagicMock(side_effect=RuntimeError("trace failed"))
         channel._client.api.post_c2c_message = AsyncMock(
             side_effect=[TypeError("unexpected keyword argument 'markdown'"), None]
         )
@@ -71,3 +72,30 @@ class TestQQChannelSend:
         assert second["content"] == "Title\n\n• item"
         assert second["msg_id"] == "evt_2"
         assert second["msg_seq"] == 1
+
+    def test_send_does_not_fallback_on_transport_error(self):
+        channel = self._make_ready_channel()
+
+        async def _send_once(coro_factory, max_retries=3):
+            return await coro_factory()
+
+        channel._send_with_retry = _send_once
+        channel._client.api.post_c2c_message = AsyncMock(
+            side_effect=RuntimeError("upstream service unavailable")
+        )
+        msg = OutboundMessage(
+            channel="qq",
+            chat_id="openid",
+            content="## Title\n\n- item",
+            metadata={
+                "chat_id": "openid",
+                "event_id": "evt_3",
+                "msg_type": "c2c",
+            },
+        )
+
+        assert _run(channel.send(msg)) is False
+        channel._client.api.post_c2c_message.assert_awaited_once()
+        sent = channel._client.api.post_c2c_message.await_args.kwargs
+        assert sent["msg_type"] == 2
+        assert "content" not in sent
