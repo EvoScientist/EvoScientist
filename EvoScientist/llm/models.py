@@ -427,7 +427,9 @@ def get_chat_model(
     # native OpenAI through a proxy, to avoid "sequence expected string" errors.
     # Moonshot and Kimi Coding support standard format, no patch needed.
     _no_patch_providers = {"moonshot", "kimi-coding"}
-    if (_is_third_party or _is_openai_proxy) and _original_provider not in _no_patch_providers:
+    if (
+        _is_third_party or _is_openai_proxy
+    ) and _original_provider not in _no_patch_providers:
         _patch_openai_compat_content(chat_model)
 
     return chat_model
