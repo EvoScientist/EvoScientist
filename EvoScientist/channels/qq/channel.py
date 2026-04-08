@@ -202,9 +202,7 @@ class QQChannel(Channel):
             if not self._should_fallback_to_plain_text(exc):
                 raise
             self._record_markdown_fallback(chat_id, raw_text, exc)
-            logger.debug(
-                "QQ markdown send failed, falling back to plain text: %s", exc
-            )
+            logger.debug("QQ markdown send failed, falling back to plain text: %s", exc)
 
         plain_text = self._plain_formatter.format(raw_text)
         await self._post_plain_message(chat_id, plain_text, msg_type, msg_id, seq)
@@ -218,8 +216,14 @@ class QQChannel(Channel):
         compatibility_tokens = ("unsupported", "unexpected", "unknown", "invalid")
         return (
             "unexpected keyword argument" in msg
-            or ("markdown" in msg and any(token in msg for token in compatibility_tokens))
-            or ("msg_type" in msg and any(token in msg for token in compatibility_tokens))
+            or (
+                "markdown" in msg
+                and any(token in msg for token in compatibility_tokens)
+            )
+            or (
+                "msg_type" in msg
+                and any(token in msg for token in compatibility_tokens)
+            )
         )
 
     def _record_markdown_fallback(
