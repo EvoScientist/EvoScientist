@@ -164,7 +164,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # DeepSeek
     ("deepseek-r1", "deepseek-reasoner", "deepseek"),
     ("deepseek-v3", "deepseek-chat", "deepseek"),
-    # Moonshot (月之暗面 — OpenAI-compatible)
+    # Moonshot (OpenAI-compatible)
     ("kimi-k2.5", "kimi-k2.5", "moonshot"),
     ("kimi-k2-thinking", "kimi-k2-thinking", "moonshot"),
     ("kimi-k2-thinking-turbo", "kimi-k2-thinking-turbo", "moonshot"),
@@ -172,7 +172,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("moonshot-v1-128k", "moonshot-v1-128k", "moonshot"),
     ("moonshot-v1-32k", "moonshot-v1-32k", "moonshot"),
     ("moonshot-v1-8k", "moonshot-v1-8k", "moonshot"),
-    # Kimi Coding Plan (Kimi 代码计划 — Anthropic-compatible)
+    # Kimi Coding Plan (Anthropic-compatible)
     ("kimi-for-coding", "kimi-for-coding", "kimi-coding"),
 ]
 
