@@ -536,8 +536,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                     reply_to = self._resolve_reply_to(message.reply_to, i)
                     try:
                         await self._send_with_retry(
-                            lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: self._send_chunk(
-                                _cid, _fmt, _raw, _reply, _meta
+                            lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
+                                self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
                             )
                         )
                     except Exception as chunk_err:
@@ -548,9 +548,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                             chunk_index=i,
                             error_type=type(chunk_err).__name__,
                         )
-                        _logger.error(
-                            f"{self.name} chunk {i} send error: {chunk_err}"
-                        )
+                        _logger.error(f"{self.name} chunk {i} send error: {chunk_err}")
                         had_error = True
             return not had_error
         except Exception as e:

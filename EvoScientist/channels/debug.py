@@ -26,6 +26,7 @@ _SECRET_TOKENS = (
     "signature",
 )
 
+
 def _load_debug_trace_flag() -> bool:
     """Load the trace feature switch from config as a fallback to env vars."""
     try:
@@ -70,6 +71,7 @@ def _stringify(value: Any) -> str:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return f"<seq:{len(value)}>"
     return str(value).replace("\n", "\\n")
+
 
 def _format_fields(fields: Mapping[str, Any]) -> str:
     parts: list[str] = []
@@ -133,6 +135,7 @@ def emit_debug_event_if(
     base_fields: dict[str, Any] = {"event": event}
     base_fields.update(fields)
     logger.debug(_format_fields(base_fields))
+
 
 class TraceMixin:
     """Mixin providing unified structured trace helpers.

@@ -36,6 +36,7 @@ def test_emit_debug_event_structured(caplog):
     assert "message_id=123" in caplog.text
     assert "has_text=true" in caplog.text
 
+
 # ── emit_debug_event_if tests ────────────────────────────────────────
 
 
@@ -50,6 +51,7 @@ def test_emit_debug_event_if_disabled_does_not_log(caplog):
             key="value",
         )
     assert "should_not_appear" not in caplog.text
+
 
 # ── Middleware structured event tests ────────────────────────────────
 
@@ -276,6 +278,7 @@ def test_format_fallback_emits_event(caplog):
     assert "outbound_format_fallback" in caplog.text
     assert call_count == 2
 
+
 # ── TraceMixin tests ─────────────────────────────────────────────────
 
 
@@ -299,6 +302,7 @@ def test_trace_mixin_trace_event(caplog):
     assert "event=some_event" in caplog.text
     assert "channel=stub" in caplog.text
     assert "key=val" in caplog.text
+
 
 def test_standalone_dispatcher_treats_false_send_as_error(caplog):
     from EvoScientist.channels.bus import MessageBus
