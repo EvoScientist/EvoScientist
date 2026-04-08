@@ -10,6 +10,7 @@ from typing import ClassVar
 from ..base import Channel, ChannelError, RawIncoming
 from ..capabilities import QQ as QQ_CAPS
 from ..config import BaseChannelConfig
+from ..formatter import UnifiedFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class QQChannel(Channel):
         self._msg_seq: dict[str, int] = {}  # msg_id -> next seq number
         self._msg_seq_order: deque = deque(maxlen=500)
         self._msg_seq_ids: set[str] = set()  # companion set for O(1) lookup
+        self._plain_formatter = UnifiedFormatter.for_channel("plain")
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -189,21 +191,72 @@ class QQChannel(Channel):
         msg_type = (metadata or {}).get("msg_type", "c2c")
         msg_id = (metadata or {}).get("event_id", "")
         seq = self._next_msg_seq(msg_id)
+        try:
+            await self._post_markdown_message(chat_id, raw_text, msg_type, msg_id, seq)
+            return
+        except Exception as exc:
+            self._trace_event(
+                "outbound_format_fallback",
+                chat_id=chat_id,
+                error=str(exc),
+                formatted_len=len(raw_text),
+                raw_len=len(raw_text),
+            )
+            logger.debug(
+                "QQ markdown send failed, falling back to plain text: %s", exc
+            )
+
+        plain_text = self._plain_formatter.format(raw_text)
+        await self._post_plain_message(chat_id, plain_text, msg_type, msg_id, seq)
+
+    async def _post_markdown_message(
+        self,
+        chat_id: str,
+        text: str,
+        msg_type: str,
+        msg_id: str,
+        seq: int,
+    ) -> None:
+        payload = {
+            "msg_type": 2,
+            "markdown": {"content": text},
+            "msg_id": msg_id,
+            "msg_seq": seq,
+        }
         if msg_type == "group":
             await self._client.api.post_group_message(
                 group_openid=chat_id,
-                msg_type=0,
-                content=raw_text,
-                msg_id=msg_id,
-                msg_seq=seq,
+                **payload,
             )
         else:
             await self._client.api.post_c2c_message(
                 openid=chat_id,
-                msg_type=0,
-                content=raw_text,
-                msg_id=msg_id,
-                msg_seq=seq,
+                **payload,
+            )
+
+    async def _post_plain_message(
+        self,
+        chat_id: str,
+        text: str,
+        msg_type: str,
+        msg_id: str,
+        seq: int,
+    ) -> None:
+        payload = {
+            "msg_type": 0,
+            "content": text,
+            "msg_id": msg_id,
+            "msg_seq": seq,
+        }
+        if msg_type == "group":
+            await self._client.api.post_group_message(
+                group_openid=chat_id,
+                **payload,
+            )
+        else:
+            await self._client.api.post_c2c_message(
+                openid=chat_id,
+                **payload,
             )
 
     # _send_typing_action: inherited no-op (QQ Bot API has no typing indicator)
