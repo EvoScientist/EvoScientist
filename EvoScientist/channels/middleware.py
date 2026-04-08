@@ -22,6 +22,7 @@ from typing import Any
 
 from .base import RawIncoming
 from .bus.events import InboundMessage, OutboundMessage
+from .debug import emit_debug_event_if
 
 _logger = logging.getLogger(__name__)
 
@@ -194,10 +195,14 @@ class TypingManager:
         self,
         send_action: Callable[[str], Awaitable[None]],
         interval: float = 5.0,
+        debug_trace: bool = False,
+        channel_name: str = "unknown",
     ) -> None:
         self._send_action = send_action
         self._interval = interval
         self._tasks: dict[str, asyncio.Task] = {}
+        self._debug_trace = debug_trace
+        self._channel_name = channel_name
 
     async def start(self, chat_id: str) -> None:
         """Start a background typing-indicator loop for *chat_id*."""
@@ -207,8 +212,14 @@ class TypingManager:
             while True:
                 try:
                     await self._send_action(chat_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _trace_named_event(
+                        "typing_error",
+                        enabled=self._debug_trace,
+                        channel_name=self._channel_name,
+                        chat_id=chat_id,
+                        error=str(exc),
+                    )
                 await asyncio.sleep(self._interval)
 
         self._tasks[chat_id] = asyncio.create_task(_loop())
@@ -360,6 +371,52 @@ class OutboundMiddlewareBase:
         return message
 
 
+def _debug_trace_enabled(context: dict[str, Any]) -> bool:
+    """Check whether channel-level debug tracing is enabled for this message."""
+    channel = context.get("channel")
+    if channel is None:
+        return False
+    return channel.is_debug_trace_enabled()
+
+
+def _ctx_channel_name(context: dict[str, Any]) -> str:
+    """Extract the channel name from middleware context."""
+    ch = context.get("channel")
+    return getattr(ch, "name", "unknown") if ch else "unknown"
+
+
+def _trace_context_event(
+    context: dict[str, Any],
+    event: str,
+    **fields: Any,
+) -> None:
+    """Emit a middleware trace event using the shared channel context."""
+    emit_debug_event_if(
+        _logger,
+        event,
+        _debug_trace_enabled(context),
+        channel=_ctx_channel_name(context),
+        **fields,
+    )
+
+
+def _trace_named_event(
+    event: str,
+    *,
+    enabled: bool,
+    channel_name: str,
+    **fields: Any,
+) -> None:
+    """Emit a trace event for helpers that already carry trace state."""
+    emit_debug_event_if(
+        _logger,
+        event,
+        enabled,
+        channel=channel_name,
+        **fields,
+    )
+
+
 # ── Dedup ────────────────────────────────────────────────────────────
 
 
@@ -384,7 +441,12 @@ class DedupMiddleware(InboundMiddleware):
         context: dict[str, Any],
     ) -> RawIncoming | None:
         if raw.message_id and self._cache.is_duplicate(raw.message_id):
-            _logger.debug(f"Dedup: skipping duplicate message {raw.message_id}")
+            _trace_context_event(
+                context,
+                "middleware_dedup_drop",
+                message_id=raw.message_id,
+                sender_id=raw.sender_id,
+            )
             return None
         return raw
 
@@ -612,8 +674,15 @@ class TypingMiddleware:
         self,
         send_typing_fn: Callable[[str], Any],
         interval: float = 5.0,
+        debug_trace: bool = False,
+        channel_name: str = "unknown",
     ) -> None:
-        self._manager = TypingManager(send_typing_fn, interval=interval)
+        self._manager = TypingManager(
+            send_typing_fn,
+            interval=interval,
+            debug_trace=debug_trace,
+            channel_name=channel_name,
+        )
 
     async def start(self, chat_id: str) -> None:
         await self._manager.start(chat_id)
@@ -647,6 +716,8 @@ class AckReactionMiddleware:
         remove_after_reply: bool = False,
         send_fn: Callable[[str, str, str], Any] | None = None,
         remove_fn: Callable[[str, str, str], Any] | None = None,
+        debug_trace: bool = False,
+        channel_name: str = "unknown",
     ) -> None:
         self.scope = scope
         self.emoji = emoji
@@ -654,6 +725,8 @@ class AckReactionMiddleware:
         self._send_fn = send_fn
         self._remove_fn = remove_fn
         self._pending: dict[str, str] = {}  # chat_id -> message_id
+        self._debug_trace = debug_trace
+        self._channel_name = channel_name
 
     def should_react(self, *, is_group: bool, was_mentioned: bool) -> bool:
         if self.scope == "off":
@@ -674,16 +747,30 @@ class AckReactionMiddleware:
                 await self._send_fn(chat_id, message_id, self.emoji)
                 if self.remove_after_reply:
                     self._pending[chat_id] = message_id
-            except Exception:
-                pass
+            except Exception as exc:
+                _trace_named_event(
+                    "ack_send_error",
+                    enabled=self._debug_trace,
+                    channel_name=self._channel_name,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    error=str(exc),
+                )
 
     async def remove_ack(self, chat_id: str) -> None:
         message_id = self._pending.pop(chat_id, None)
         if message_id and self._remove_fn:
             try:
                 await self._remove_fn(chat_id, message_id, self.emoji)
-            except Exception:
-                pass
+            except Exception as exc:
+                _trace_named_event(
+                    "ack_remove_error",
+                    enabled=self._debug_trace,
+                    channel_name=self._channel_name,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    error=str(exc),
+                )
 
 
 # ── Mention Gating ───────────────────────────────────────────────────
@@ -712,6 +799,12 @@ class MentionGatingMiddleware(InboundMiddleware):
         context: dict[str, Any],
     ) -> RawIncoming | None:
         if not self._should_process(raw):
+            _trace_context_event(
+                context,
+                "middleware_mention_drop",
+                chat_id=raw.chat_id,
+                policy=self.require_mention,
+            )
             return None
         # Strip mentions from group messages
         if raw.is_group and self._strip_fn:
@@ -752,7 +845,13 @@ class AllowListMiddleware(InboundMiddleware):
     ) -> RawIncoming | None:
         # Channel allow-list
         if self.allowed_channels and str(raw.chat_id) not in self.allowed_channels:
-            _logger.debug(f"Ignoring message from non-allowed channel {raw.chat_id}")
+            _trace_context_event(
+                context,
+                "middleware_allowlist_drop",
+                sender_id=raw.sender_id,
+                chat_id=raw.chat_id,
+                reason="chat_not_allowed",
+            )
             return None
 
         # Sender allow-list
@@ -760,7 +859,13 @@ class AllowListMiddleware(InboundMiddleware):
             return raw  # open DMs bypass sender checks
 
         if not self._is_sender_allowed(raw.sender_id):
-            _logger.debug(f"Ignoring message from non-allowed sender {raw.sender_id}")
+            _trace_context_event(
+                context,
+                "middleware_allowlist_drop",
+                sender_id=raw.sender_id,
+                chat_id=raw.chat_id,
+                reason="sender_not_allowed",
+            )
             return None
 
         return raw
@@ -875,5 +980,10 @@ class PairingMiddleware(InboundMiddleware):
             # Track the task to prevent GC and handle exceptions
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+        _trace_context_event(
+            context,
+            "middleware_pairing_required",
+            sender_id=raw.sender_id,
+        )
         _logger.info(f"Pairing required for {raw.sender_id}, code sent")
         return None

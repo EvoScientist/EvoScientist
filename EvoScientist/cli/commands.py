@@ -501,7 +501,7 @@ def serve(
     debug: bool = typer.Option(
         False,
         "--debug",
-        help="Enable debug logging (shows all log levels including DEBUG)",
+        help="Enable debug logging and channel trace output in serve mode",
     ),
 ):
     """Run EvoScientist in headless mode -- channels only, no interactive prompt.
@@ -509,6 +509,10 @@ def serve(
     Starts all configured channels and processes messages via the agent.
     Press Ctrl+C to shut down.
     """
+    import nest_asyncio  # type: ignore[import-untyped]
+
+    nest_asyncio.apply()
+
     from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides = {}
@@ -516,12 +520,16 @@ def serve(
         cli_overrides["auto_approve"] = True
     if ask_user:
         cli_overrides["enable_ask_user"] = True
-    config = get_effective_config(cli_overrides)
-    apply_config_to_env(config)
-
-    # Enable verbose logging when debug flag is set
     if debug:
-        _configure_logging(debug=True)
+        cli_overrides["log_level"] = "DEBUG"
+        cli_overrides["channel_debug_tracing"] = True
+    config = get_effective_config(cli_overrides)
+    if debug:
+        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
+        os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
+    apply_config_to_env(config)
+    if debug:
+        _configure_logging()
 
     # Auto-start ccproxy if any provider uses OAuth mode
     _ccproxy_proc_serve = None
@@ -1175,11 +1183,24 @@ def _main_callback(
         )
 
 
-def _configure_logging(debug: bool = False):
+def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
 
-    log_level = logging.DEBUG if debug else logging.WARNING
+    from ..config import get_effective_config
+
+    def _resolve_log_level() -> int:
+        """Resolve the root log level from config/env with a safe fallback."""
+        try:
+            raw = (get_effective_config().log_level or "").strip().upper()
+        except Exception:
+            raw = ""
+        if raw == "WARN":
+            raw = "WARNING"
+        return getattr(logging, raw, logging.WARNING)
+
+    resolved_level = _resolve_log_level()
+    verbose_logging = resolved_level <= logging.DEBUG
 
     class DimWarningHandler(RichHandler):
         """Custom handler that renders warnings in dim style."""
@@ -1196,9 +1217,12 @@ def _configure_logging(debug: bool = False):
 
     # Configure root logger to use our handler for WARNING and above
     handler = DimWarningHandler(
-        console=console, show_time=debug, show_path=debug, show_level=debug
+        console=console,
+        show_time=verbose_logging,
+        show_path=verbose_logging,
+        show_level=verbose_logging,
     )
-    handler.setLevel(log_level)
+    handler.setLevel(resolved_level)
 
     # Apply to root logger (catches all loggers including deepagents)
     root_logger = logging.getLogger()
@@ -1206,7 +1230,7 @@ def _configure_logging(debug: bool = False):
     for h in root_logger.handlers[:]:
         root_logger.removeHandler(h)
     root_logger.addHandler(handler)
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(resolved_level)
 
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")

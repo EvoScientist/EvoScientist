@@ -12,6 +12,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from ..debug import TraceMixin, debug_trace_enabled
 from .events import InboundMessage, OutboundMessage
 
 logger = logging.getLogger(__name__)
@@ -19,14 +20,18 @@ logger = logging.getLogger(__name__)
 OutboundCallback = Callable[[OutboundMessage], Awaitable[None]]
 
 
-class MessageBus:
+class MessageBus(TraceMixin):
     """Async message bus that decouples chat channels from the agent core."""
+
+    name = "bus"
 
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=5000)
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=5000)
         self._outbound_subscribers: dict[str, list[OutboundCallback]] = {}
         self._running = False
+        self._debug_trace = debug_trace_enabled()
+        self._trace_logger = logger
 
     # ── inbound (channel → agent) ──
 
@@ -76,12 +81,24 @@ class MessageBus:
                 continue
             subscribers = self._outbound_subscribers.get(msg.channel, [])
             if not subscribers:
+                self._trace_event(
+                    "bus_dispatch_drop",
+                    target_channel=msg.channel,
+                    reason="no_subscriber",
+                    chat_id=msg.chat_id,
+                )
                 logger.warning(f"No subscriber for channel: {msg.channel}")
                 continue
             for callback in subscribers:
                 try:
                     await callback(msg)
                 except Exception as e:
+                    self._trace_event(
+                        "bus_dispatch_error",
+                        target_channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        error_type=type(e).__name__,
+                    )
                     logger.error(f"Error dispatching to {msg.channel}: {e}")
 
     def stop(self) -> None:
