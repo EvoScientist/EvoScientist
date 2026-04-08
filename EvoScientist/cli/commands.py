@@ -498,6 +498,11 @@ def serve(
         "--ask-user",
         help="Enable agent to ask clarifying questions about your research preferences",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug logging (shows all log levels including DEBUG)",
+    ),
 ):
     """Run EvoScientist in headless mode -- channels only, no interactive prompt.
 
@@ -513,6 +518,10 @@ def serve(
         cli_overrides["enable_ask_user"] = True
     config = get_effective_config(cli_overrides)
     apply_config_to_env(config)
+
+    # Enable verbose logging when debug flag is set
+    if debug:
+        _configure_logging(debug=True)
 
     # Auto-start ccproxy if any provider uses OAuth mode
     _ccproxy_proc_serve = None
@@ -1166,9 +1175,11 @@ def _main_callback(
         )
 
 
-def _configure_logging():
+def _configure_logging(debug: bool = False):
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
+
+    log_level = logging.DEBUG if debug else logging.WARNING
 
     class DimWarningHandler(RichHandler):
         """Custom handler that renders warnings in dim style."""
@@ -1185,9 +1196,9 @@ def _configure_logging():
 
     # Configure root logger to use our handler for WARNING and above
     handler = DimWarningHandler(
-        console=console, show_time=False, show_path=False, show_level=False
+        console=console, show_time=debug, show_path=debug, show_level=debug
     )
-    handler.setLevel(logging.WARNING)
+    handler.setLevel(log_level)
 
     # Apply to root logger (catches all loggers including deepagents)
     root_logger = logging.getLogger()
@@ -1195,7 +1206,7 @@ def _configure_logging():
     for h in root_logger.handlers[:]:
         root_logger.removeHandler(h)
     root_logger.addHandler(handler)
-    root_logger.setLevel(logging.WARNING)
+    root_logger.setLevel(log_level)
 
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")

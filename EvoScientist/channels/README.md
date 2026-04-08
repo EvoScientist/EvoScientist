@@ -204,7 +204,7 @@ Mention detection is platform-specific:
 | Feishu      | Post | 4096 | S/R | R | R | | | | emoji | | G | @ | ws mode | 2h | yes | yes |
 | WeChat | MD | 4096 | S/R | R | | R | R | recall | | | G | @ | no | 2h | yes | yes |
 | DingTalk | MD | 4096 | S/R | R | | | R | | | | G | @ | yes | 2h | yes | yes |
-| QQ | Plain | 4096 | S/R | | | | | | | | G | @ | yes | | | yes |
+| QQ | MD/plain | 4096 | S/R | | | | | | | | G | @ | yes | | | yes |
 | Signal | Plain | 4096 | S/R | R | | | | api | emoji | | G | UUID | yes | | | yes |
 | iMessage | Plain | - | S/R | R | | | | | | | G | | yes | | | yes |
 | Email | HTML | - | S/R | | | | | | | | | | yes | | | yes |
@@ -647,7 +647,7 @@ qq_allowed_senders: ""
 
 **Env vars:** `EVOSCIENTIST_QQ_APP_ID`, `EVOSCIENTIST_QQ_APP_SECRET`
 
-**Technical details:** Uses `qq-botpy` SDK via WebSocket to connect to QQ Bot Gateway. Supports C2C (direct) and group messages. Message deduplication (1000-entry LRU cache). Group @mention filtering (strips first `@bot`). Intents: `public_messages=True`, `direct_message=True`. Text chunk limit: 2048 chars.
+**Technical details:** Uses `qq-botpy` SDK via WebSocket to connect to QQ Bot Gateway. Supports C2C (direct) and group messages. Outbound replies prefer native QQ markdown messages (`msg_type=2`) so headings/lists/code fences keep their structure; when the SDK/API rejects markdown, EvoScientist falls back to plain text with Markdown stripped but line structure preserved. Message deduplication (1000-entry LRU cache). Group @mention filtering (strips first `@bot`). Intents: `public_messages=True`, `direct_message=True`. Text chunk limit: 4096 chars.
 
 ---
 

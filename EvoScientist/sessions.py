@@ -39,11 +39,40 @@ AGENT_NAME = "EvoScientist"
 # ---------------------------------------------------------------------------
 
 
+def _to_short_path(path: str) -> str:
+    """Try to convert a Windows path to its 8.3 short form.
+
+    On Windows, sqlite3 may fail to open databases at paths containing
+    non-ASCII characters (e.g., Chinese usernames).  Short paths are
+    ASCII-safe when available, but conversion is best-effort: it fails
+    when 8.3 name generation is disabled, on non-NTFS volumes, or for
+    nonexistent targets.  Returns the original path on non-Windows or
+    on failure.
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return path
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(32767)
+    if ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf)):
+        return buf.value
+    return path
+
+
 def get_db_path() -> Path:
-    """Return ``~/.config/evoscientist/sessions.db``, creating parents."""
-    db_dir = Path.home() / ".config" / "evoscientist"
+    """Return the sessions database path, creating parents.
+
+    Reuses ``get_config_dir()`` for XDG_CONFIG_HOME support, then applies
+    a best-effort Windows 8.3 short-path conversion on the *directory*
+    (which exists after ``mkdir``) so sqlite3 can handle non-ASCII paths.
+    """
+    from .config.settings import get_config_dir
+
+    db_dir = get_config_dir()
     db_dir.mkdir(parents=True, exist_ok=True)
-    return db_dir / "sessions.db"
+    return Path(_to_short_path(str(db_dir))) / "sessions.db"
 
 
 def generate_thread_id() -> str:
