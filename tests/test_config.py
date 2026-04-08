@@ -30,6 +30,11 @@ def temp_config_dir(tmp_path, monkeypatch):
     """Use a temporary directory for config during tests."""
     config_dir = tmp_path / "evoscientist"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # Prevent load_dotenv from loading the project's real .env file
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.find_dotenv",
+        lambda *a, **k: str(tmp_path / ".env"),
+    )
     # Also clear any API keys from environment
     for key in [
         "ANTHROPIC_API_KEY",

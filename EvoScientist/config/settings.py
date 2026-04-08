@@ -92,6 +92,9 @@ class EvoScientistConfig:
     # UI Settings
     show_thinking: bool = True
     ui_backend: Literal["cli", "tui"] = "tui"
+    log_level: str = (
+        ""  # "DEBUG" | "WARNING" | "" (empty = check env var EVOSCIENTIST_LOG_LEVEL)
+    )
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)

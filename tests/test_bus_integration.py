@@ -7,6 +7,8 @@ thread to set a response via ``_set_channel_response()``.
 
 import asyncio
 
+import pytest
+
 from EvoScientist.channels.base import Channel, OutgoingMessage
 from EvoScientist.channels.bus.events import InboundMessage
 from EvoScientist.channels.bus.message_bus import MessageBus
@@ -21,6 +23,21 @@ def _drain_queue(q):
             q.get_nowait()
         except Exception:
             break
+
+
+@pytest.fixture(autouse=True)
+def clean_channel_state():
+    """Reset shared channel bridge state before and after each test."""
+    from EvoScientist.cli import channel as channel_mod
+    from EvoScientist.cli.channel import _message_queue
+
+    _drain_queue(_message_queue)
+    with channel_mod._response_lock:
+        channel_mod._pending_responses.clear()
+    yield
+    _drain_queue(_message_queue)
+    with channel_mod._response_lock:
+        channel_mod._pending_responses.clear()
 
 
 class _FakeConfig:
@@ -168,6 +185,150 @@ class TestBusInboundConsumer:
                 await consumer
             except asyncio.CancelledError:
                 pass
+
+        _run(_test())
+
+    def test_late_response_after_timeout_still_publishes(self, monkeypatch):
+        """A response that arrives after the bridge timeout is still forwarded."""
+        from EvoScientist.cli import channel as channel_mod
+        from EvoScientist.cli.channel import (
+            _bus_inbound_consumer,
+            _message_queue,
+            _set_channel_response,
+        )
+
+        monkeypatch.setattr(channel_mod, "_RESPONSE_TIMEOUT", 0.05)
+        monkeypatch.setattr(channel_mod, "_LATE_RESPONSE_TIMEOUT", 1.0)
+
+        _drain_queue(_message_queue)
+
+        async def _test():
+            bus = MessageBus()
+            manager = ChannelManager(bus)
+            ch = FakeChannel()
+            manager.register(ch)
+
+            consumer = asyncio.create_task(_bus_inbound_consumer(bus, manager))
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel="fake",
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="slow request",
+                    message_id="msg-123",
+                )
+            )
+
+            for _ in range(20):
+                if not _message_queue.empty():
+                    break
+                await asyncio.sleep(0.05)
+
+            msg = _message_queue.get_nowait()
+
+            notice = await asyncio.wait_for(
+                bus.consume_outbound(),
+                timeout=1.0,
+            )
+            assert "Still working on it" in notice.content
+            assert notice.reply_to == "msg-123"
+
+            _set_channel_response(msg.msg_id, "final answer")
+
+            outbound = await asyncio.wait_for(
+                bus.consume_outbound(),
+                timeout=1.0,
+            )
+            assert outbound.content == "final answer"
+            assert outbound.reply_to == "msg-123"
+
+            consumer.cancel()
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                pass
+
+        _run(_test())
+
+    def test_cancelled_wait_cleans_pending_response(self):
+        """Cancelling a pending bus message should not leak its response slot."""
+        from EvoScientist.cli import channel as channel_mod
+        from EvoScientist.cli.channel import _handle_bus_message, _message_queue
+
+        async def _test():
+            bus = MessageBus()
+            manager = ChannelManager(bus)
+            ch = FakeChannel()
+            manager.register(ch)
+
+            task = asyncio.create_task(
+                _handle_bus_message(
+                    bus,
+                    manager,
+                    InboundMessage(
+                        channel="fake",
+                        sender_id="user1",
+                        chat_id="chat1",
+                        content="cancel me",
+                    ),
+                )
+            )
+
+            for _ in range(20):
+                if not _message_queue.empty():
+                    break
+                await asyncio.sleep(0.05)
+
+            queued = _message_queue.get_nowait()
+            with channel_mod._response_lock:
+                assert queued.msg_id in channel_mod._pending_responses
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            with channel_mod._response_lock:
+                assert queued.msg_id not in channel_mod._pending_responses
+
+        _run(_test())
+
+    def test_consumer_shutdown_cleans_pending_response(self):
+        """Stopping the consumer should cancel late waits and clear state."""
+        from EvoScientist.cli import channel as channel_mod
+        from EvoScientist.cli.channel import _bus_inbound_consumer, _message_queue
+
+        async def _test():
+            bus = MessageBus()
+            manager = ChannelManager(bus)
+            ch = FakeChannel()
+            manager.register(ch)
+
+            consumer = asyncio.create_task(_bus_inbound_consumer(bus, manager))
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel="fake",
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="slow shutdown",
+                )
+            )
+
+            for _ in range(20):
+                if not _message_queue.empty():
+                    break
+                await asyncio.sleep(0.05)
+
+            queued = _message_queue.get_nowait()
+            with channel_mod._response_lock:
+                assert queued.msg_id in channel_mod._pending_responses
+
+            consumer.cancel()
+            await consumer
+
+            with channel_mod._response_lock:
+                assert queued.msg_id not in channel_mod._pending_responses
 
         _run(_test())
 
