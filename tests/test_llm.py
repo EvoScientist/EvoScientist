@@ -730,8 +730,9 @@ class TestPatchOpenAICompatContent:
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == "hello"
 
-    @pytest.mark.asyncio
-    async def test_agenerate_flattened(self):
+    def test_agenerate_flattened(self):
+        import asyncio
+
         from langchain_core.messages import HumanMessage
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
@@ -741,7 +742,7 @@ class TestPatchOpenAICompatContent:
         _patch_openai_compat_content(model)
 
         msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
-        await model._agenerate([msg])
+        asyncio.run(model._agenerate([msg]))
 
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == "hello"
@@ -761,8 +762,9 @@ class TestPatchOpenAICompatContent:
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == "hello"
 
-    @pytest.mark.asyncio
-    async def test_astream_flattened(self):
+    def test_astream_flattened(self):
+        import asyncio
+
         from langchain_core.messages import HumanMessage
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
@@ -778,11 +780,14 @@ class TestPatchOpenAICompatContent:
         model._astream = _fake_astream
         _patch_openai_compat_content(model)
 
-        msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
-        chunks = []
-        async for c in model._astream([msg]):
-            chunks.append(c)
+        async def _run():
+            msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
+            chunks = []
+            async for c in model._astream([msg]):
+                chunks.append(c)
+            return chunks
 
+        chunks = asyncio.run(_run())
         assert chunks == ["c1", "c2"]
         assert received_msgs[0].content == "hello"
 
