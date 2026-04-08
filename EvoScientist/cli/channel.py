@@ -51,18 +51,28 @@ class ChannelMessage:
 # Thread-safe queue: bus → main
 _message_queue: queue.Queue[ChannelMessage] = queue.Queue()
 
-# Pending responses: main → bus (msg_id → {"event": Event, "response": str|None})
+# Pending responses:
+# main → bus (msg_id → {"future": Future[str], "loop": loop, "response": str|None})
 _pending_responses: dict[str, dict] = {}
 _response_lock = threading.Lock()
 
+_RESPONSE_TIMEOUT = 600.0
+_LATE_RESPONSE_TIMEOUT = 86400.0
+_LATE_RESPONSE_NOTICE = "Still working on it. I'll send the result when it's ready."
 
-def _enqueue_channel_message(msg: ChannelMessage) -> threading.Event:
-    """Enqueue a channel message for the main thread and return a wait event."""
-    event = threading.Event()
+
+def _enqueue_channel_message(msg: ChannelMessage) -> asyncio.Future[str]:
+    """Enqueue a channel message for the main thread and return a wait future."""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
     with _response_lock:
-        _pending_responses[msg.msg_id] = {"event": event, "response": None}
+        _pending_responses[msg.msg_id] = {
+            "future": future,
+            "loop": loop,
+            "response": None,
+        }
     _message_queue.put(msg)
-    return event
+    return future
 
 
 def _set_channel_response(msg_id: str, response: str) -> None:
@@ -71,14 +81,29 @@ def _set_channel_response(msg_id: str, response: str) -> None:
         slot = _pending_responses.get(msg_id)
         if slot:
             slot["response"] = response
-            slot["event"].set()
+            future = slot["future"]
+            loop = slot["loop"]
+        else:
+            return
+
+    def _resolve_future() -> None:
+        if not future.done():
+            future.set_result(response)
+
+    loop.call_soon_threadsafe(_resolve_future)
 
 
-def _pop_channel_response(msg_id: str) -> str | None:
+def _pop_channel_response(msg_id: str, *, cancel_pending: bool = False) -> str | None:
     """Retrieve and remove the response for a channel message."""
     with _response_lock:
         slot = _pending_responses.pop(msg_id, None)
-    return slot["response"] if slot else None
+    if not slot:
+        return None
+
+    future = slot["future"]
+    if cancel_pending and not future.done():
+        future.cancel()
+    return slot["response"]
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +470,11 @@ def _start_channels_bus_mode(
         try:
             loop.run_until_complete(_run())
         except Exception as e:
-            _channel_logger.error(f"Bus thread error: {e}")
+            _channel_logger.error(
+                "Bus thread terminated with error: %s", e, exc_info=True
+            )
         finally:
+            _channel_logger.debug("Bus thread event loop closed")
             loop.close()
 
     thread = threading.Thread(target=_bus_thread_entry, daemon=True)
@@ -496,26 +524,32 @@ async def _bus_inbound_consumer(bus, manager) -> None:
     so the consumer loop stays responsive for HITL approval replies.
     """
     _tasks: set[asyncio.Task] = set()
-    while True:
-        try:
-            msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-        except TimeoutError:
-            continue
-        except asyncio.CancelledError:
-            break
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+            except TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
 
-        # Check if this message is a HITL approval reply
-        if _try_set_hitl_reply(msg.channel, msg.chat_id, msg.content):
-            _channel_logger.info(
-                f"[bus] HITL reply from {msg.channel}:{msg.sender_id}: "
-                f"{msg.content[:60]}"
-            )
-            continue
+            # Check if this message is a HITL approval reply
+            if _try_set_hitl_reply(msg.channel, msg.chat_id, msg.content):
+                _channel_logger.info(
+                    f"[bus] HITL reply from {msg.channel}:{msg.sender_id}: "
+                    f"{msg.content[:60]}"
+                )
+                continue
 
-        # Regular message — handle in a separate task
-        _task = asyncio.create_task(_handle_bus_message(bus, manager, msg))
-        _tasks.add(_task)
-        _task.add_done_callback(_tasks.discard)
+            # Regular message — handle in a separate task
+            _task = asyncio.create_task(_handle_bus_message(bus, manager, msg))
+            _tasks.add(_task)
+            _task.add_done_callback(_tasks.discard)
+    finally:
+        for task in list(_tasks):
+            task.cancel()
+        if _tasks:
+            await asyncio.gather(*_tasks, return_exceptions=True)
 
 
 async def _handle_bus_message(bus, manager, msg) -> None:
@@ -528,8 +562,10 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     manager.record_message(msg.channel, "received")
 
     channel = manager.get_channel(msg.channel)
+    typing_active = False
     if channel:
         await channel.start_typing(msg.chat_id)
+        typing_active = True
 
     # Enqueue for main CLI thread to process with its own event loop
     cm = ChannelMessage(
@@ -543,19 +579,60 @@ async def _handle_bus_message(bus, manager, msg) -> None:
         chat_id=msg.chat_id,
         message_id=msg.message_id,
     )
-    event = _enqueue_channel_message(cm)
+    response_waiter = _enqueue_channel_message(cm)
 
-    # Wait (non-blocking for asyncio) until main thread sets response
-    _RESPONSE_TIMEOUT = 600  # 10 minutes max per message
-    replied = await asyncio.to_thread(event.wait, _RESPONSE_TIMEOUT)
-    if not replied:
-        _channel_logger.warning(
-            f"[bus] Response timeout ({_RESPONSE_TIMEOUT}s) for {cm.msg_id}"
-        )
-    response = _pop_channel_response(cm.msg_id) or "No response"
-
-    # Publish the response back through the bus → channel
     try:
+        # Two-stage wait: first stage with timeout, then extended wait for late reply
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(response_waiter),
+                timeout=_RESPONSE_TIMEOUT,
+            )
+            replied = True
+        except TimeoutError:
+            replied = False
+
+        if not replied:
+            _channel_logger.warning(
+                f"[bus] Response timeout ({_RESPONSE_TIMEOUT}s) for {cm.msg_id}; "
+                "keeping late-reply delivery active"
+            )
+            try:
+                await bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=_LATE_RESPONSE_NOTICE,
+                        reply_to=msg.message_id or None,
+                        metadata=msg.metadata,
+                    )
+                )
+                manager.record_message(msg.channel, "sent")
+            except Exception as e:
+                _channel_logger.error(f"[bus] Late notice send error: {e}")
+            if channel and typing_active:
+                await channel.stop_typing(msg.chat_id)
+                typing_active = False
+
+            # Keep waiting for the actual response
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(response_waiter),
+                    timeout=_LATE_RESPONSE_TIMEOUT,
+                )
+                replied = True
+            except TimeoutError:
+                replied = False
+
+            if not replied:
+                _channel_logger.warning(
+                    f"[bus] Late response timeout ({_LATE_RESPONSE_TIMEOUT}s) "
+                    f"for {cm.msg_id}"
+                )
+                _pop_channel_response(cm.msg_id, cancel_pending=True)
+                return
+
+        response = _pop_channel_response(cm.msg_id) or "No response"
         await bus.publish_outbound(
             OutboundMessage(
                 channel=msg.channel,
@@ -566,10 +643,13 @@ async def _handle_bus_message(bus, manager, msg) -> None:
             )
         )
         manager.record_message(msg.channel, "sent")
+    except asyncio.CancelledError:
+        _pop_channel_response(cm.msg_id, cancel_pending=True)
+        raise
     except Exception as e:
         _channel_logger.error(f"[bus] Outbound error: {e}")
     finally:
-        if channel:
+        if channel and typing_active:
             await channel.stop_typing(msg.chat_id)
 
 

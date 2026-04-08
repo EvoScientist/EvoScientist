@@ -394,6 +394,7 @@ def create_streaming_display(
     total_input_tokens: int = 0,
     total_output_tokens: int = 0,
     summarization_text: str = "",
+    selected_tools: list | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -436,6 +437,18 @@ def create_streaming_display(
                 Text(display_thinking, style="dim"),
                 title=thinking_title,
                 border_style="blue",
+                padding=(0, 1),
+            )
+        )
+
+    # Selected tools panel (from LLMToolSelectorMiddleware)
+    if selected_tools:
+        tools_str = ", ".join(selected_tools)
+        elements.append(
+            Panel(
+                Text(tools_str, style="cyan"),
+                title=f"Adaptive Selected Tools ({len(selected_tools)})",
+                border_style="#2d7d46",
                 padding=(0, 1),
             )
         )
@@ -1055,10 +1068,6 @@ def _run_streaming(
     Returns:
         The final response text.
     """
-    import nest_asyncio
-
-    nest_asyncio.apply()
-
     state = _state if _state is not None else StreamState()
     _thinking_sent = False
     _todo_sent = False
@@ -1167,11 +1176,32 @@ def _run_streaming(
         vertical_overflow="visible",
     ) as live:
         live.update(create_streaming_display(is_waiting=True))
+        # Determine how to run the async streaming coroutine.
+        # - In TUI mode (Textual), there's already a running event loop;
+        #   nest_asyncio is needed to allow run_until_complete inside it.
+        # - In serve/CLI mode, the main thread has no running loop;
+        #   use a fresh event loop directly (no nest_asyncio needed or wanted,
+        #   since nest_asyncio.apply() patches globally and breaks the bus
+        #   thread's event loop Task-context detection).
         try:
-            loop = _get_event_loop()
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No current event loop
-            loop = _create_event_loop()
+            running_loop = None
+
+        if running_loop is not None:
+            # Already inside a running loop (TUI) — must use nest_asyncio.
+            # NOTE: nest_asyncio.apply() is global and irreversible within
+            # the process; avoid mixing TUI and serve modes in one process.
+            import nest_asyncio  # type: ignore[import-untyped]
+
+            nest_asyncio.apply()
+            loop = running_loop
+        else:
+            # No running loop (serve/CLI) — create a fresh one
+            try:
+                loop = _get_event_loop()
+            except RuntimeError:
+                loop = _create_event_loop()
 
         async def _run_with_refresh() -> None:
             async def _periodic_refresh() -> None:

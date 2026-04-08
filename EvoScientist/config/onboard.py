@@ -337,7 +337,7 @@ def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
 
 
 def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
-    """Validate an OpenRouter API key by making a test request.
+    """Validate an OpenRouter API key via the authenticated /auth/key endpoint.
 
     Returns:
         Tuple of (is_valid, message).
@@ -346,20 +346,17 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         return True, "Skipped (no key provided)"
 
     try:
-        import openai
+        import httpx
 
-        client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        client.models.list()
-        return True, "Valid"
+        resp = httpx.get(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, "Valid"
+        return False, "Invalid API key"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
         return False, f"Error: {e}"
 
 
@@ -1296,6 +1293,43 @@ def _step_model(
     return model
 
 
+def _step_reasoning_effort(config: EvoScientistConfig) -> str:
+    """Step 3.5: Configure OpenRouter reasoning effort level.
+
+    Only shown when the selected provider is OpenRouter. See:
+    https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+
+    Args:
+        config: Current configuration.
+
+    Returns:
+        Selected reasoning effort level, or empty string to use default.
+    """
+    effort_choices = [
+        Choice(title="xhigh  — ~95% of max_tokens for reasoning", value="xhigh"),
+        Choice(title="high   — ~80% of max_tokens (recommended)", value="high"),
+        Choice(title="medium — ~50% of max_tokens", value="medium"),
+        Choice(title="low    — ~20% of max_tokens", value="low"),
+        Choice(title="minimal — ~10% of max_tokens", value="minimal"),
+        Choice(title="none   — disable reasoning entirely", value="none"),
+    ]
+
+    current = config.reasoning_effort or "high"
+    effort = questionary.select(
+        "Select reasoning effort level:",
+        choices=effort_choices,
+        default=current,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
+    ).ask()
+
+    if effort is None:
+        raise KeyboardInterrupt()
+
+    return effort
+
+
 def _step_tavily_key(
     config: EvoScientistConfig,
     skip_validation: bool = False,
@@ -1717,9 +1751,14 @@ def _step_tinytex() -> None:
     when none is found.  The agent can auto-install missing LaTeX packages at
     runtime via ``tlmgr``, so only the base TinyTeX is needed here.
     """
-    prepare = questionary.confirm(
-        "Prepare LaTeX environment? (needed to compile .tex → .pdf)",
-        default=True,
+    latex_choices = [
+        Choice(title="No need (skip LaTeX setup)", value=False),
+        Choice(title="Install now (TinyTeX compiler)", value=True),
+    ]
+    prepare = questionary.select(
+        "LaTeX environment (needed to compile .tex → .pdf):",
+        choices=latex_choices,
+        default=False,
         style=WIZARD_STYLE,
         qmark=QMARK,
     ).ask()
@@ -2771,6 +2810,11 @@ def run_onboard(skip_validation: bool = False) -> bool:
             config, provider, ollama_detected_models=ollama_detected_models
         )
         config.model = model
+
+        # Step 3.5: Reasoning Effort (OpenRouter only)
+        if provider == "openrouter":
+            effort = _step_reasoning_effort(config)
+            config.reasoning_effort = effort
 
         # Step 4: Tavily Key
         new_tavily_key = _step_tavily_key(config, skip_validation)

@@ -115,6 +115,8 @@ def _build_welcome_banner(
     info.append(" \u2022 Type ", style="#ffe082")
     info.append("/", style="#ffe082 bold")
     info.append(" for commands", style="#ffe082")
+    info.append(" \u2022 ", style="#ffe082")
+    info.append("@ files", style="#ffe082 bold")
     info.append(" \u2022 Ctrl+C ", style="#ffe082")
     info.append("interrupt", style="#ffe082 bold")
     banner.append_text(info)
@@ -696,6 +698,7 @@ def run_textual_interactive(
             self,
             user_text: str,
             *,
+            display_text: str | None = None,
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
@@ -710,6 +713,11 @@ def run_textual_interactive(
             ``_process_channel_message`` (channel).
 
             Args:
+                display_text: Text to show in UserMessage widget. When
+                    ``None`` (default), falls back to *user_text*.  This
+                    allows callers to show the original user input while
+                    sending the resolved (e.g. @file-expanded) text to
+                    the agent.
                 skip_user_message: If True, don't mount UserMessage (caller
                     already mounted it — e.g. channel messages with labels).
                 channel_hitl_fn: Optional channel-based HITL approval function.
@@ -723,7 +731,7 @@ def run_textual_interactive(
 
             # 1. Mount user message + loading spinner
             if not skip_user_message:
-                await container.mount(UserMessage(user_text))
+                await container.mount(UserMessage(display_text or user_text))
             # Mount file warnings after user message so they appear in the
             # correct position (between user input and model response).
             for w in file_warnings or []:
@@ -942,6 +950,16 @@ def run_textual_interactive(
                                     await container.mount(summarization_w)
                                 summarization_w.append_text(content)
 
+                        elif event_type == "tool_selection":
+                            tools = event.get("tools", [])
+                            if tools:
+                                from .widgets.tool_selection_widget import (
+                                    ToolSelectionWidget,
+                                )
+
+                                await container.mount(ToolSelectionWidget(tools))
+                                _schedule_scroll()
+
                         elif event_type == "text":
                             # Finalize summarization widget when regular text resumes
                             if (
@@ -1018,11 +1036,19 @@ def run_textual_interactive(
                                     await container.mount(w)
                                     if tool_id:
                                         tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos
+                            # Update todo widget on write_todos.
+                            # Insert before tool call widget so Task List
+                            # panel appears above the tool call.
                             if tool_name == "write_todos" and state.todo_items:
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tool_id and tool_id in tool_widgets:
+                                        await container.mount(
+                                            todo_w,
+                                            before=tool_widgets[tool_id],
+                                        )
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
 
@@ -1402,7 +1428,9 @@ def run_textual_interactive(
 
             try:
                 await self._stream_with_widgets(
-                    message_to_send, file_warnings=file_warnings
+                    message_to_send,
+                    display_text=user_text,
+                    file_warnings=file_warnings,
                 )
             except asyncio.CancelledError:
                 cancelled = True
@@ -1805,12 +1833,8 @@ def run_textual_interactive(
                 return
 
             prompt = self.query_one("#prompt", ChatTextArea)
-            # Insert at cursor position
-            pos = prompt.cursor_position
-            current = prompt.value
-            new_value = current[:pos] + text + current[pos:]
-            prompt.value = new_value
-            prompt.cursor_position = pos + len(text)
+            prompt.insert(text)
+            prompt.focus()
 
         def action_tab_complete(self) -> None:
             """Handle TAB: cycle completions when visible, otherwise no-op.
@@ -1873,8 +1897,6 @@ def run_textual_interactive(
                 prompt.value = new_val
             else:
                 prompt.value = selected + " "
-
-            prompt.cursor_position = len(prompt.value)
 
         def _hide_completions(self) -> None:
             self._comp_items = []

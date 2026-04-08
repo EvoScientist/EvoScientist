@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from EvoScientist.llm import (
     DEFAULT_MODEL,
     MODELS,
@@ -386,17 +388,44 @@ class TestThirdPartyRouting:
         assert call_kwargs["extra_body"]["enable_thinking"] is False
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openrouter_routes_through_openai(self, mock_init, monkeypatch):
-        """OpenRouter provider should route through OpenAI with correct base_url."""
+    def test_openrouter_uses_native_provider(self, mock_init, monkeypatch):
+        """OpenRouter should use native 'openrouter' provider via init_chat_model."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key-456")
 
         get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model_provider"] == "openai"
-        assert call_kwargs["base_url"] == "https://openrouter.ai/api/v1"
+        assert call_kwargs["model_provider"] == "openrouter"
         assert call_kwargs["api_key"] == "or-key-456"
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "disabled"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_reasoning_user_override(self, mock_init, monkeypatch):
+        """User-supplied reasoning config should not be overridden."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        get_chat_model(
+            "x-ai/grok-4.1-fast",
+            provider="openrouter",
+            reasoning={"effort": "low"},
+        )
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "low"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_reasoning_effort_from_env(self, mock_init, monkeypatch):
+        """Reasoning effort should be configurable via env var."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
+
+        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "disabled"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_routes_through_openai(self, mock_init, monkeypatch):
@@ -425,7 +454,7 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "http://localhost:8000/api/v1"
         assert call_kwargs["api_key"] == "sk-dummy"
-        # Proxy mode: thinking skipped for 4-6 models (ccproxy manages it)
+        # Proxy mode: thinking skipped (history round-trip causes 422)
         assert "thinking" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -445,9 +474,9 @@ class TestThirdPartyRouting:
     def test_third_party_no_reasoning(self, mock_init, monkeypatch):
         """Third-party providers routed through OpenAI should NOT get auto-reasoning."""
         mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key")
 
-        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+        get_chat_model("deepseek-v3", provider="siliconflow")
 
         call_kwargs = mock_init.call_args[1]
         assert "reasoning" not in call_kwargs
@@ -605,18 +634,18 @@ class TestFlattenMessageContent:
     """Tests for the content-flattening utility used by OpenAI-compatible providers."""
 
     def test_string_passthrough(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content("hello") == "hello"
 
     def test_non_list_passthrough(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content(42) == 42
         assert _flatten_message_content(None) is None
 
     def test_text_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "text", "text": "Hello"},
@@ -625,7 +654,7 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "Hello\n\nWorld"
 
     def test_skips_thinking_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "thinking", "text": "Let me think..."},
@@ -636,13 +665,13 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "The answer is 42"
 
     def test_string_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = ["hello", "world"]
         assert _flatten_message_content(content) == "hello\n\nworld"
 
     def test_mixed_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "thinking", "text": "skip me"},
@@ -652,12 +681,12 @@ class TestFlattenMessageContent:
         assert _flatten_message_content(content) == "plain string\n\ndict text"
 
     def test_empty_list(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         assert _flatten_message_content([]) == ""
 
     def test_only_thinking_blocks(self):
-        from EvoScientist.llm.models import _flatten_message_content
+        from EvoScientist.llm.patches import _flatten_message_content
 
         content = [{"type": "thinking", "text": "thought"}]
         assert _flatten_message_content(content) == ""
@@ -694,7 +723,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_proxy_no_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-6 models via proxy skip thinking (ccproxy manages it)."""
+        """Anthropic 4-6 models via proxy skip thinking (history round-trip 422)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
@@ -707,7 +736,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_5_proxy_no_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-5 models via proxy also skip thinking."""
+        """Anthropic 4-5 models via proxy also skip thinking (history round-trip 422)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
@@ -742,15 +771,40 @@ class TestAutoConfig:
         assert call_kwargs["thinking"] == custom_thinking
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_reasoning(self, mock_init, monkeypatch):
-        """Native OpenAI models get auto-reasoning."""
+    def test_openai_reasoning_xhigh(self, mock_init, monkeypatch):
+        """gpt-5.4+ and codex models get xhigh reasoning."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+        get_chat_model("gpt-5.4", provider="openai")
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "xhigh",
+            "summary": "auto",
+        }
+
+        get_chat_model("gpt-5.3-codex", provider="openai")
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "xhigh",
+            "summary": "auto",
+        }
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_reasoning_high_fallback(self, mock_init, monkeypatch):
+        """Other OpenAI models get high reasoning effort."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
         get_chat_model("gpt-5-nano")
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "high",
+            "summary": "auto",
+        }
 
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        get_chat_model("gpt-5.2", provider="openai")
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "high",
+            "summary": "auto",
+        }
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_base_url_override(self, mock_init, monkeypatch):
@@ -765,8 +819,55 @@ class TestAutoConfig:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "http://127.0.0.1:8000/codex/v1"
         assert call_kwargs["api_key"] == "ccproxy-oauth"
-        # Proxy mode: reasoning skipped (triggers Responses API → rs_ 404)
+        # Proxy mode: reasoning skipped (Chat Completions doesn't support it)
         assert "reasoning" not in call_kwargs
+        # Proxy mode: Chat Completions + no streaming (ccproxy workarounds)
+        assert call_kwargs["use_responses_api"] is False
+        assert call_kwargs["streaming"] is False
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_localhost_non_ccproxy_not_downgraded(self, mock_init, monkeypatch):
+        """Local OpenAI-compatible endpoints (vLLM, etc.) are not affected by ccproxy workarounds."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-local-key")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "http://127.0.0.1:8080/v1"
+        # NOT ccproxy: reasoning should be applied, no forced Chat Completions
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert "use_responses_api" not in call_kwargs
+        assert "streaming" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_codex_path_but_wrong_key_not_ccproxy(self, mock_init, monkeypatch):
+        """ccproxy detection requires both /codex/ path AND ccproxy-oauth key."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert "use_responses_api" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_key_but_wrong_path_not_ccproxy(
+        self, mock_init, monkeypatch
+    ):
+        """ccproxy detection requires both /codex/ path AND ccproxy-oauth key."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert "use_responses_api" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_no_base_url_when_unset(self, mock_init, monkeypatch):
@@ -790,3 +891,73 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["include_thoughts"] is True
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_false(self, mock_init, monkeypatch):
+        """use_responses_api=false forces Chat Completions and drops reasoning."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "false")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is False
+        assert "reasoning" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_true(self, mock_init, monkeypatch):
+        """use_responses_api=true explicitly enables the Responses API."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "true")
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is True
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_default_unchanged(self, mock_init, monkeypatch):
+        """Empty use_responses_api preserves default behavior (no kwarg set)."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "use_responses_api" not in call_kwargs
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    @pytest.mark.parametrize("env_value", ["FALSE", " false ", "False"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_false_normalization(
+        self, mock_init, monkeypatch, env_value
+    ):
+        """Case/whitespace variants of 'false' are normalized correctly."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", env_value)
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is False
+        assert "reasoning" not in call_kwargs
+
+    @pytest.mark.parametrize("env_value", ["TRUE", " true ", "True"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_use_responses_api_true_normalization(
+        self, mock_init, monkeypatch, env_value
+    ):
+        """Case/whitespace variants of 'true' are normalized correctly."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", env_value)
+
+        get_chat_model("gpt-5-nano", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is True

@@ -384,24 +384,24 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
         )
 
         def _run_ws():
-            # Workaround: nest_asyncio (used by the main process) patches
-            # the event loop policy globally but does NOT patch Handle._run
-            # for context re-entry (versions < 1.7).  The SDK creates its
-            # own event loop in this thread; its transport callbacks hit
-            #   RuntimeError: cannot enter context: … is already entered
-            # Fix: patch Handle._run to retry with a context copy.
-            _orig_handle_run = asyncio.Handle._run
+            # Root cause: lark_oapi.ws.client stores the event loop in a
+            # *module-level* variable at import time.  When imported from
+            # the main thread this captures the main loop (which has
+            # nest_asyncio patches).  The SDK then calls
+            # loop.run_until_complete() from THIS thread on that *main*
+            # loop, causing cross-thread task-tracking conflicts:
+            #   RuntimeError: Leaving task … does not match the current task
+            #   AttributeError: 'NoneType' object has no attribute 'select'
+            #
+            # Fix: create a fresh event loop for this thread and replace
+            # the module-level ``loop`` variable so the SDK uses an
+            # isolated loop with no cross-thread interaction.
+            import lark_oapi.ws.client as _ws_mod
 
-            def _safe_handle_run(self):
-                try:
-                    self._context.run(self._callback, *self._args)
-                except RuntimeError as exc:
-                    if "cannot enter context" not in str(exc):
-                        raise
-                    ctx = self._context.copy()
-                    ctx.run(self._callback, *self._args)
+            fresh_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(fresh_loop)
+            _ws_mod.loop = fresh_loop
 
-            asyncio.Handle._run = _safe_handle_run
             try:
                 ws_client.start()
             except Exception:
@@ -410,8 +410,6 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
                     "The channel will no longer receive messages. "
                     "Check app_id/app_secret and connection limits."
                 )
-            finally:
-                asyncio.Handle._run = _orig_handle_run
 
         self._lark_ws_thread = threading.Thread(target=_run_ws, daemon=True)
         self._lark_ws_thread.start()

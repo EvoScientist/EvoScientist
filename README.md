@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.0.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.0.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -46,26 +46,38 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 <table>
   <tr>
-    <td align="center" valign="top" width="25%">
+      <td align="center" valign="top" width="33%">
       <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_awards.JPG" height="180" alt="ICAIS 2025 Awards"/>
       <br />
       <sub><b>Best Paper & Appraisal Award</b></sub>
     </td>
-    <td align="center" valign="top" width="25%">
+    <td align="center" valign="top" width="33%">
       <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_best_paper.png" height="180" alt="Best Paper"/>
       <br />
       <sub><b>AI-Generated Best Paper</b></sub>
     </td>
-    <td align="center" valign="top" width="25%">
+    <td align="center" valign="top" width="33%">
       <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/deepresearch_bench_2.JPG" height="180" alt="DeepResearch Bench II #1"/>
       <br />
       <sub><b>#1 on DeepResearch Bench II</b></sub>
     </td>
-    <td align="center" valign="top" width="25%">
+  </tr>
+</table>
+
+<br />
+
+<table>
+  <tr>
+          </td>
+    <td align="center" valign="top" width="50%">
       <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_code.png" height="180" alt="AstaBench Code & Execution #1"/>
       <br />
       <sub><b>#1 on AstaBench Code & Execution</b></sub>
     </td>
+    <td align="center" valign="top" width="50%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_data.png" height="180" alt="AstaBench Data Analysis #1"/>
+      <br />
+      <sub><b>#1 on AstaBench Data Analysis</b></sub>
   </tr>
 </table>
 
@@ -96,13 +108,17 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **🌐 Multi-Provider** — Anthropic, OpenAI, Google, MiniMax, NVIDIA — one config to switch.
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
+- **🔄 Code Generation Modes** — More Effort (iterative refinement), continuously improving code quality.
+- **⚡ Adaptive Tools** — Per-turn tool selection keeps only relevant tools visible, reducing noise.
+- **✂️ Context Editing** — Dynamic system prompt rewriting based on conversation state.
 - **🔌 MCP & Skills** — Plug in MCP servers or install skills from GitHub on the fly.
 
 > [!TIP]
 > Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other CLI coding agents.
 
 ## 🔥 News
-- **[25 Mar 2026]** 🥇 Ranked #1 on [AstaBench Code & Execution](https://huggingface.co/spaces/allenai/asta-bench-leaderboard) at submission time! [**Leaderboard**](https://allenai-asta-bench-leaderboard.hf.space/code-execution) 👈
+- **[26 Mar 2026]** 🥇 Ranked #1 on [AstaBench Data Analysis](https://allenai-asta-bench-leaderboard.hf.space/home) at submission time! [**Leaderboard**](https://allenai-asta-bench-leaderboard.hf.space/data-analysis) 👈
+- **[25 Mar 2026]** 🥇 Ranked #1 on [AstaBench Code & Execution](https://allenai-asta-bench-leaderboard.hf.space/home) at submission time! [**Leaderboard**](https://allenai-asta-bench-leaderboard.hf.space/code-execution) 👈
 - **[13 Mar 2026]** 🚀 [**EvoScientist**](https://github.com/EvoScientist/EvoScientist) officially debuts!
 - **[11 Mar 2026]** ⛳ Technical Report is live! [**Check it out**](https://arxiv.org/abs/2603.08127) 👈
 - **[06 Mar 2026]** 🥇 Ranked #1 on [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) at submission time! [**Leaderboard**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
@@ -141,6 +157,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 uv tool install EvoScientist
 ```
+
+> [!NOTE]
+> To update an existing installation to the latest version, use `uv tool upgrade`:
+> ```bash
+> uv tool upgrade EvoScientist
+> ```
 
 Or install into the current environment instead:
 

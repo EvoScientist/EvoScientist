@@ -1,6 +1,6 @@
 [project]
 name = "EvoScientist"
-version = "0.0.4"
+version = "0.0.6"
 description = "EvoScientist: Towards Self-Evolving AI Scientists for End-to-End Scientific Discovery"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,7 @@ dependencies = [
     "langchain-nvidia-ai-endpoints>=0.3",
     "langchain-google-genai>=4.2.1",
     "langchain-ollama>=1.0",
+    "langchain-openrouter>=0.2.1",
     "tavily-python>=0.7",
     "pyyaml>=6.0",
     "rich>=14.0",
@@ -65,7 +66,7 @@ wechat = ["pycryptodome>=3.20"]
 feishu = ["lark-oapi>=1.4.0"]
 qq = ["qq-botpy>=1.0"]
 stt = ["faster-whisper>=1.0"]
-oauth = ["ccproxy-api>=0.2.4"]
+oauth = ["ccproxy-api>=0.2.7"]
 all-channels = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",
