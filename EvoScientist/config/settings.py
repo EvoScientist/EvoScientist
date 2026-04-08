@@ -92,6 +92,7 @@ class EvoScientistConfig:
     show_thinking: bool = True
     ui_backend: Literal["cli", "tui"] = "tui"
     log_level: str = "warning"
+    reasoning_effort: str = "high"
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -377,6 +378,7 @@ _ENV_MAPPINGS = {
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
+    "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
@@ -476,6 +478,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["OLLAMA_BASE_URL"] = config.ollama_base_url
     if config.tavily_api_key and not os.environ.get("TAVILY_API_KEY"):
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
+    if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
+        os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
     if config.use_responses_api and not os.environ.get(
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):

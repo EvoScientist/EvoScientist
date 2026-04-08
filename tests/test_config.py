@@ -82,6 +82,7 @@ class TestEvoScientistConfig:
         assert config.show_thinking is True
         assert config.ui_backend == "tui"
         assert config.log_level == "warning"
+        assert config.reasoning_effort == "high"
         assert config.ollama_base_url == ""
         assert config.channel_debug_tracing is False
         assert config.imessage_enabled is False
@@ -365,6 +366,13 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_LOG_LEVEL", "DEBUG")
         config = get_effective_config()
         assert config.log_level == "DEBUG"
+
+    def test_env_reasoning_effort_override(self, temp_config_dir, monkeypatch):
+        """Reasoning effort can be selected via environment variable."""
+        save_config(EvoScientistConfig(reasoning_effort="medium"))
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "high")
+        config = get_effective_config()
+        assert config.reasoning_effort == "high"
 
     def test_env_channel_debug_tracing_override(self, temp_config_dir, monkeypatch):
         """Channel tracing can be enabled via environment variable."""
