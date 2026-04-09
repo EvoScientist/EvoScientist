@@ -142,7 +142,7 @@ def test_typing_manager_emits_trace_events(caplog):
             channel_name="test",
         )
         await mgr.start("chat1")
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
         await mgr.stop("chat1")
 
     with caplog.at_level(logging.DEBUG):

@@ -36,8 +36,6 @@ def _run_serve_once(
     debug: bool = False,
     cwd: str | None = None,
 ):
-    import nest_asyncio
-
     import EvoScientist.config as config_mod
 
     order: list[tuple[str, str | None]] = []
@@ -75,7 +73,6 @@ def _run_serve_once(
     )
     monkeypatch.setattr(commands, "_channels_stop", _fake_channels_stop)
     monkeypatch.setattr(commands, "_message_queue", _InterruptQueue())
-    monkeypatch.setattr(nest_asyncio, "apply", lambda: None)
 
     def _fake_get_effective_config(cli_overrides=None):
         captured["cli_overrides"] = dict(cli_overrides or {})
