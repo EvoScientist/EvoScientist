@@ -139,8 +139,8 @@ def _patch_ccproxy_codex_compat() -> None:
             result = _orig_get(self)
             if result is not None:
                 output = result.get("output")
-                if not output:
-                    # output is None/empty — force rebuild from accumulated items
+                if output is None:
+                    # output field lost — force rebuild from accumulated items
                     return None
             return result
 
