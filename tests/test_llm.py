@@ -914,11 +914,11 @@ class TestAutoConfig:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "http://127.0.0.1:8000/codex/v1"
         assert call_kwargs["api_key"] == "ccproxy-oauth"
-        # Proxy mode: reasoning skipped (Chat Completions doesn't support it)
+        # Proxy mode: reasoning skipped (ccproxy untested)
         assert "reasoning" not in call_kwargs
-        # Proxy mode: Chat Completions + no streaming (ccproxy workarounds)
-        assert call_kwargs["use_responses_api"] is False
-        assert call_kwargs["streaming"] is False
+        # Proxy mode: Responses API (bypasses format chain), streaming ON
+        assert call_kwargs["use_responses_api"] is True
+        assert "streaming" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_localhost_non_ccproxy_not_downgraded(self, mock_init, monkeypatch):

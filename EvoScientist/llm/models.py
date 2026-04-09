@@ -16,6 +16,7 @@ from langchain.chat_models import init_chat_model
 
 from .patches import (
     _is_ccproxy_codex,
+    _patch_ccproxy_system_to_developer,
     _patch_openai_compat_content,
     _patch_openrouter_reasoning_details,
 )
@@ -321,14 +322,17 @@ def get_chat_model(
             kwargs["base_url"] = base_url
             _is_openai_proxy = _is_ccproxy_codex()
             if _is_openai_proxy:
-                # Default to Chat Completions for ccproxy: its Chat
-                # Completions → Responses API converter handles system messages
-                # correctly; its native Responses API endpoint does not.
-                # (User can override via EVOSCIENTIST_USE_RESPONSES_API=true.)
-                kwargs.setdefault("use_responses_api", False)
-                # Default streaming off: ccproxy duplicates tool call names
-                # in streaming Chat Completions chunks.
-                kwargs.setdefault("streaming", False)
+                # Use Responses API for ccproxy: bypasses the format chain
+                # converter (Chat→Responses→Chat) which returns 502 on
+                # complex responses.  System messages are converted to
+                # developer role by _patch_ccproxy_system_to_developer().
+                kwargs.setdefault("use_responses_api", True)
+                # Streaming must stay ON for Responses API: ccproxy's
+                # StreamingBufferService loses output when assembling
+                # non-streaming responses.  (The old streaming=False was
+                # for Chat Completions tool_call duplication — not an issue
+                # with the Responses API SSE format.)
+                kwargs.pop("streaming", None)  # remove if set elsewhere
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key
@@ -431,6 +435,9 @@ def get_chat_model(
         _is_third_party or _is_openai_proxy
     ) and _original_provider not in _no_patch_providers:
         _patch_openai_compat_content(chat_model)
+
+    if _is_openai_proxy:
+        _patch_ccproxy_system_to_developer(chat_model)
 
     return chat_model
 
