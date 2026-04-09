@@ -21,8 +21,33 @@ from .base import Channel
 from .bus import MessageBus
 from .bus.events import OutboundMessage
 from .consumer import InboundConsumer
+from .debug import emit_debug_event
 
 logger = logging.getLogger(__name__)
+
+
+def _channel_trace_enabled(channel: Channel) -> bool:
+    """Check if debug tracing is enabled on the channel."""
+    try:
+        return channel.is_debug_trace_enabled()
+    except Exception:
+        return False
+
+
+async def _deliver_outbound(channel: Channel, msg: OutboundMessage) -> None:
+    """Deliver an outbound message, including any media attachments."""
+    if msg.content:
+        sent = await channel.send(msg)
+        if not sent:
+            raise RuntimeError("send() returned False")
+    for media_path in msg.media:
+        media_ok = await channel.send_media(
+            recipient=msg.chat_id,
+            file_path=media_path,
+            metadata=msg.metadata,
+        )
+        if not media_ok:
+            raise RuntimeError(f"send_media() returned False for {media_path}")
 
 
 async def standalone_outbound_dispatcher(
@@ -42,9 +67,16 @@ async def standalone_outbound_dispatcher(
             break
 
         try:
-            if msg.content:
-                await channel.send(msg)
+            await _deliver_outbound(channel, msg)
         except Exception as e:
+            emit_debug_event(
+                logger,
+                "standalone_dispatch_error",
+                channel=channel.name,
+                enabled=_channel_trace_enabled(channel),
+                recipient=msg.recipient,
+                error=str(e),
+            )
             logger.error(f"Error sending outbound: {e}")
 
 
@@ -105,8 +137,8 @@ async def _async_main(
             except asyncio.QueueEmpty:
                 break
             try:
-                if msg.content:
-                    await asyncio.wait_for(channel.send(msg), timeout=5.0)
+                await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
+                if msg.content or msg.media:
                     drained += 1
             except Exception:
                 pass

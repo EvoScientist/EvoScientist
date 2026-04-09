@@ -85,7 +85,6 @@ class EvoScientistConfig:
     # LLM Settings
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5"
-    reasoning_effort: str = ""  # OpenRouter reasoning effort: "xhigh"|"high"|"medium"|"low"|"minimal"|"none"|"" (default=high)
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -94,13 +93,13 @@ class EvoScientistConfig:
     # UI Settings
     show_thinking: bool = True
     ui_backend: Literal["cli", "tui"] = "tui"
-    log_level: str = (
-        ""  # "DEBUG" | "WARNING" | "" (empty = check env var EVOSCIENTIST_LOG_LEVEL)
-    )
+    log_level: str = "warning"
+    reasoning_effort: str = "high"
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
     channel_send_thinking: bool = True  # forward thinking to any channel
+    channel_debug_tracing: bool = False  # emit extra inbound diagnostics at DEBUG
     require_mention: str = "group"  # "always" | "group" | "off"
     text_chunk_limit: int = 0  # 0 = use capability default
     allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
@@ -382,6 +381,9 @@ _ENV_MAPPINGS = {
     "default_mode": "EVOSCIENTIST_DEFAULT_MODE",
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
+    "log_level": "EVOSCIENTIST_LOG_LEVEL",
+    "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
+    "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
 }
@@ -484,9 +486,9 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["OLLAMA_BASE_URL"] = config.ollama_base_url
     if config.tavily_api_key and not os.environ.get("TAVILY_API_KEY"):
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
+    if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
+        os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
     if config.use_responses_api and not os.environ.get(
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):
         os.environ["EVOSCIENTIST_USE_RESPONSES_API"] = config.use_responses_api
-    if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
-        os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort

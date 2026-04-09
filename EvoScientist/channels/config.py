@@ -29,6 +29,7 @@ class BaseChannelConfig:
     text_chunk_limit: int = 4096
     proxy: str | None = None
     include_attachments: bool = True
+    debug_trace: bool = False
     accounts: dict | None = None  # multi-account config mapping
 
 

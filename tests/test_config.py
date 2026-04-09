@@ -81,7 +81,10 @@ class TestEvoScientistConfig:
         assert config.default_workdir == ""
         assert config.show_thinking is True
         assert config.ui_backend == "tui"
+        assert config.log_level == "warning"
+        assert config.reasoning_effort == "high"
         assert config.ollama_base_url == ""
+        assert config.channel_debug_tracing is False
         assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
@@ -278,6 +281,16 @@ class TestGetSetValues:
         set_config_value("imessage_allowed_senders", "+1234567890,+0987654321")
         assert get_config_value("imessage_allowed_senders") == "+1234567890,+0987654321"
 
+    def test_set_channel_debug_tracing_coercion(self, temp_config_dir, clean_env):
+        """Test that channel_debug_tracing is coerced from string to bool."""
+        save_config(EvoScientistConfig())
+
+        set_config_value("channel_debug_tracing", "true")
+        assert get_config_value("channel_debug_tracing") is True
+
+        set_config_value("channel_debug_tracing", "false")
+        assert get_config_value("channel_debug_tracing") is False
+
     def test_list_config(self, temp_config_dir, clean_env):
         """Test listing all config values."""
         config = EvoScientistConfig(provider="openai", model="gpt-4o")
@@ -346,6 +359,27 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "tui")
         config = get_effective_config()
         assert config.ui_backend == "tui"
+
+    def test_env_log_level_override(self, temp_config_dir, monkeypatch):
+        """Log level can be selected via environment variable."""
+        save_config(EvoScientistConfig(log_level="warning"))
+        monkeypatch.setenv("EVOSCIENTIST_LOG_LEVEL", "DEBUG")
+        config = get_effective_config()
+        assert config.log_level == "DEBUG"
+
+    def test_env_reasoning_effort_override(self, temp_config_dir, monkeypatch):
+        """Reasoning effort can be selected via environment variable."""
+        save_config(EvoScientistConfig(reasoning_effort="medium"))
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "high")
+        config = get_effective_config()
+        assert config.reasoning_effort == "high"
+
+    def test_env_channel_debug_tracing_override(self, temp_config_dir, monkeypatch):
+        """Channel tracing can be enabled via environment variable."""
+        save_config(EvoScientistConfig(channel_debug_tracing=False))
+        monkeypatch.setenv("EVOSCIENTIST_CHANNEL_DEBUG_TRACING", "true")
+        config = get_effective_config()
+        assert config.channel_debug_tracing is True
 
     def test_env_api_key_override(self, temp_config_dir, monkeypatch):
         """Test API keys from env override file."""

@@ -19,6 +19,7 @@ from typing import Any
 from ..paths import MEDIA_DIR
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
+from .debug import TraceMixin, debug_trace_enabled
 from .formatter import UnifiedFormatter
 from .plugin import ChannelMeta, ChannelPlugin
 
@@ -252,7 +253,7 @@ class RawIncoming:
     was_mentioned: bool = True  # default True so DMs always pass
 
 
-class Channel(ChannelPlugin, ABC):
+class Channel(TraceMixin, ChannelPlugin, ABC):
     """Abstract base class for messaging channels.
 
     Subclasses must implement:
@@ -298,12 +299,21 @@ class Channel(ChannelPlugin, ABC):
         )
         self._running = False
 
+        # Global tracing can be enabled via shared config/env even when
+        # individual channel factories have not been updated yet.
+        self._debug_trace: bool = bool(getattr(config, "debug_trace", False)) or (
+            debug_trace_enabled()
+        )
+        self._trace_logger = _logger
+
         # Typing indicator — delegated to TypingManager
         from .middleware import TypingManager
 
         self._typing_manager = TypingManager(
             self._send_typing_action,
             interval=self._typing_interval,
+            debug_trace=self._debug_trace,
+            channel_name=self.name,
         )
         # Keep legacy dict reference for any subclass that touches it directly
         self._typing_tasks = self._typing_manager._tasks
@@ -407,6 +417,10 @@ class Channel(ChannelPlugin, ABC):
                 )
             )
         return middlewares
+
+    def is_debug_trace_enabled(self) -> bool:
+        """Return whether extra per-message diagnostics should be emitted."""
+        return self._debug_trace
 
     @abstractmethod
     async def start(self) -> None:
@@ -515,9 +529,10 @@ class Channel(ChannelPlugin, ABC):
             chat_id = self._resolve_chat_id(message)
             limit = self._get_chunk_limit()
             async with self._acquire_send_lock(chat_id):
-                pairs = self._prepare_chunks(message.content, limit)
                 had_error = False
-                for i, (formatted, raw) in enumerate(pairs):
+                for i, (formatted, raw) in enumerate(
+                    self._prepare_chunks(message.content, limit)
+                ):
                     reply_to = self._resolve_reply_to(message.reply_to, i)
                     try:
                         await self._send_with_retry(
@@ -526,6 +541,13 @@ class Channel(ChannelPlugin, ABC):
                             )
                         )
                     except Exception as chunk_err:
+                        self._trace_event(
+                            "outbound_send_chunk_error",
+                            chat_id=chat_id,
+                            reply_to=reply_to,
+                            chunk_index=i,
+                            error_type=type(chunk_err).__name__,
+                        )
                         _logger.error(f"{self.name} chunk {i} send error: {chunk_err}")
                         had_error = True
             return not had_error
@@ -629,6 +651,12 @@ class Channel(ChannelPlugin, ABC):
             if formatted != raw and any(
                 p in str(e).lower() for p in self._format_fallback_patterns
             ):
+                self._trace_event(
+                    "outbound_format_fallback",
+                    error=str(e),
+                    formatted_len=len(formatted),
+                    raw_len=len(raw),
+                )
                 await send_fn(raw)
             else:
                 raise
@@ -792,15 +820,25 @@ class Channel(ChannelPlugin, ABC):
         """
         from .retry import retry_async
 
+        def _on_retry(info):
+            self._trace_event(
+                "outbound_send_retry",
+                attempt=info.attempt,
+                max_attempts=info.max_attempts,
+                backoff_s=round(info.delay_s, 2),
+                error_type=type(info.error).__name__,
+            )
+            _logger.warning(
+                f"{self.name} send retry {info.attempt}/{info.max_attempts} "
+                f"in {info.delay_s:.2f}s: {info.error}"
+            )
+
         return await retry_async(
             coro_factory,
             config=self._retry_config,
             should_retry=lambda exc, _: self._extract_retry_after(exc) is not None,
             retry_after_s=self._extract_retry_after,
-            on_retry=lambda info: _logger.warning(
-                f"{self.name} send retry {info.attempt}/{info.max_attempts} "
-                f"in {info.delay_s:.2f}s: {info.error}"
-            ),
+            on_retry=_on_retry,
             label=f"{self.name}.send",
         )
 
@@ -877,7 +915,10 @@ class Channel(ChannelPlugin, ABC):
         for mw in self._inbound_middlewares:
             if current is None:
                 return None
-            current = await mw.process_inbound(current, context)
+            result = await mw.process_inbound(current, context)
+            if result is None:
+                return None
+            current = result
         if current is None:
             return None
         return self._raw_to_inbound(current)
@@ -947,6 +988,15 @@ class Channel(ChannelPlugin, ABC):
         If STT is enabled and the message contains audio files, each audio
         file is transcribed and the result is prepended to ``raw.text``.
         """
+        self._trace_event(
+            "inbound_raw",
+            sender_id=raw.sender_id,
+            chat_id=raw.chat_id,
+            message_id=raw.message_id or "-",
+            has_text=bool(raw.text),
+            media_count=len(raw.media_files),
+            is_group=raw.is_group,
+        )
         if raw.media_files and self._stt_enabled:
             from ..stt import is_audio_file, transcribe_file
 
@@ -954,17 +1004,22 @@ class Channel(ChannelPlugin, ABC):
             transcribed_files: set[str] = set()
             for fp in raw.media_files:
                 if is_audio_file(fp):
-                    text = await transcribe_file(
-                        fp,
-                        language=self._stt_language,
-                        model=self._stt_model,
-                        device=self._stt_device,
-                        compute_type=self._stt_compute_type,
-                    )
+                    try:
+                        text = await transcribe_file(
+                            fp,
+                            language=self._stt_language,
+                            model=self._stt_model,
+                            device=self._stt_device,
+                            compute_type=self._stt_compute_type,
+                        )
+                    except Exception as exc:
+                        self._trace_event("stt_error", file_path=fp, error=str(exc))
+                        continue
                     if text:
                         transcripts.append(text)
                         transcribed_files.add(fp)
-                        _logger.info(f"[STT] {self.name}: {fp} → {text[:80]}...")
+                # Non-audio files are silently skipped — no trace event
+                # to avoid log noise when messages contain many images.
             if transcripts:
                 prefix = "\n".join(transcripts)
                 raw.text = (prefix + "\n" + raw.text).strip() if raw.text else prefix
@@ -1118,15 +1173,22 @@ class Channel(ChannelPlugin, ABC):
                 await self.start()
                 backoff = 1.0
                 async for msg in self.receive():
-                    _logger.info(f"From {msg.sender_id}: {msg.content[:50]}...")
                     await self.queue_message(msg)
             except asyncio.CancelledError:
                 break
             except ChannelError as e:
+                self._trace_event(
+                    "channel_fatal_error",
+                    error_type=type(e).__name__,
+                )
                 _logger.error(f"Channel {self.name} fatal error: {e}")
                 self._running = False
                 break
             except Exception as e:
+                self._trace_event(
+                    "channel_runtime_error",
+                    error_type=type(e).__name__,
+                )
                 _logger.error(f"Channel {self.name} error: {e}")
             finally:
                 # Preserve reconnect intent across stop()

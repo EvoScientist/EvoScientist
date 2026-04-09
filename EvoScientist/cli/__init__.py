@@ -39,5 +39,5 @@ def main():
     # Priority: env var > config file > default (WARNING)
     config = load_config()
     _log_level = os.environ.get("EVOSCIENTIST_LOG_LEVEL", "") or config.log_level
-    _configure_logging(debug=_log_level.upper() == "DEBUG")
+    _configure_logging()
     app()
