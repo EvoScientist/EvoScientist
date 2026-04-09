@@ -380,9 +380,7 @@ def _patch_ccproxy_system_to_developer(model: Any) -> None:
         async def _patched_agenerate(
             messages: list[BaseMessage], *args: Any, **kwargs: Any
         ) -> Any:
-            return await orig_agenerate(
-                _system_to_developer(messages), *args, **kwargs
-            )
+            return await orig_agenerate(_system_to_developer(messages), *args, **kwargs)
 
         model._agenerate = _patched_agenerate
 
