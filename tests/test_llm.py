@@ -39,6 +39,8 @@ class TestModelsRegistry:
         assert "volcengine" in providers
         assert "dashscope" in providers
         assert "deepseek" in providers
+        assert "moonshot" in providers
+        assert "kimi-coding" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -57,6 +59,8 @@ class TestModelsRegistry:
             "custom-openai",
             "custom-anthropic",
             "deepseek",
+            "moonshot",
+            "kimi-coding",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
@@ -690,6 +694,97 @@ class TestFlattenMessageContent:
 
         content = [{"type": "thinking", "text": "thought"}]
         assert _flatten_message_content(content) == ""
+
+
+# =============================================================================
+# Test _patch_openai_compat_content (all 4 paths)
+# =============================================================================
+
+
+class TestPatchOpenAICompatContent:
+    """Verify content flattening covers _generate, _agenerate, _stream, _astream."""
+
+    def _make_model(self):
+        """Create a minimal mock model with all 4 methods."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        model = MagicMock()
+        model._generate = MagicMock(return_value="gen_result")
+        model._agenerate = AsyncMock(return_value="agen_result")
+        model._stream = MagicMock(return_value=iter(["chunk1"]))
+        model._astream = AsyncMock()
+        return model
+
+    def test_generate_flattened(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
+        model._generate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == "hello"
+
+    @pytest.mark.anyio
+    async def test_agenerate_flattened(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._agenerate
+        _patch_openai_compat_content(model)
+
+        msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
+        await model._agenerate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == "hello"
+
+    def test_stream_flattened(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._stream
+        _patch_openai_compat_content(model)
+
+        msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
+        list(model._stream([msg]))
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == "hello"
+
+    @pytest.mark.anyio
+    async def test_astream_flattened(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        received_msgs = []
+
+        async def _fake_astream(messages, *args, **kwargs):
+            received_msgs.extend(messages)
+            for chunk in ["c1", "c2"]:
+                yield chunk
+
+        model._astream = _fake_astream
+        _patch_openai_compat_content(model)
+
+        msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
+        chunks = []
+        async for c in model._astream([msg]):
+            chunks.append(c)
+
+        assert chunks == ["c1", "c2"]
+        assert received_msgs[0].content == "hello"
 
 
 # =============================================================================

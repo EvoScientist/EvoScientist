@@ -479,6 +479,63 @@ def validate_dashscope_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_moonshot_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Moonshot API key by making a test request.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://api.moonshot.cn/v1",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if any(
+            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
+def validate_kimi_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Kimi Coding Plan API key by making a test request.
+
+    Uses the Anthropic-compatible endpoint at api.kimi.com/coding/.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url="https://api.kimi.com/coding/",
+            default_headers={"User-Agent": "claude-code/0.1.0"},
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if any(
+            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
 def validate_tavily_key(api_key: str) -> tuple[bool, str]:
     """Validate a Tavily API key by making a test request.
 
@@ -652,6 +709,14 @@ def _step_provider(config: EvoScientistConfig) -> str:
             title="DeepSeek (DeepSeek-R1, DeepSeek-V3)",
             value="deepseek",
         ),
+        Choice(
+            title="Moonshot (月之暗面 — Moonshot models)",
+            value="moonshot",
+        ),
+        Choice(
+            title="Kimi Coding Plan (Kimi 代码计划 — coding-focused)",
+            value="kimi-coding",
+        ),
         # Local
         Choice(title="Ollama (local models)", value="ollama"),
         # Third-party / aggregator
@@ -750,6 +815,16 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "DashScope",
             config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
             validate_dashscope_key,
+        ),
+        "moonshot": (
+            "Moonshot",
+            config.moonshot_api_key or os.environ.get("MOONSHOT_API_KEY", ""),
+            validate_moonshot_key,
+        ),
+        "kimi-coding": (
+            "Kimi Coding Plan",
+            config.kimi_api_key or os.environ.get("KIMI_API_KEY", ""),
+            validate_kimi_key,
         ),
         "custom-openai": (
             "OpenAI-compatible",
@@ -2789,6 +2864,8 @@ def run_onboard(skip_validation: bool = False) -> bool:
             "zhipu-code": "zhipu_api_key",
             "volcengine": "volcengine_api_key",
             "dashscope": "dashscope_api_key",
+            "moonshot": "moonshot_api_key",
+            "kimi-coding": "kimi_api_key",
             "custom-openai": "custom_openai_api_key",
             "custom-anthropic": "custom_anthropic_api_key",
         }
