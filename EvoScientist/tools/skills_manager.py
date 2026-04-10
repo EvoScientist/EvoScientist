@@ -546,10 +546,24 @@ def uninstall_skill(name: str) -> dict:
 
         # Safety: resolved path must still be inside the search dir
         if not str(target_path).startswith(str(search_dir)):
-            return {"success": False, "error": f"Cannot uninstall system skill: {name}"}
+            return {"success": False, "error": f"Invalid skill path: {name}"}
 
         shutil.rmtree(target_path)
         return {"success": True, "name": name}
+
+    # Check if it's a built-in skill (read-only, cannot be uninstalled)
+    from ..EvoScientist import SKILLS_DIR
+
+    builtin_dir = Path(SKILLS_DIR)
+    if builtin_dir.exists():
+        for entry in builtin_dir.iterdir():
+            if entry.is_dir() and _validate_skill_dir(entry):
+                info = _parse_skill_md(entry / "SKILL.md")
+                if info.name == clean_name or entry.name == clean_name:
+                    return {
+                        "success": False,
+                        "error": f"'{name}' is a built-in skill and cannot be uninstalled.",
+                    }
 
     return {"success": False, "error": f"Skill not found: {name}"}
 
