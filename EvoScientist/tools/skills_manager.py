@@ -291,7 +291,13 @@ def install_skill(
     dest_dir = dest_dir or (
         str(paths.GLOBAL_SKILLS_DIR) if global_install else str(paths.USER_SKILLS_DIR)
     )
-    os.makedirs(dest_dir, exist_ok=True)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        return {
+            "success": False,
+            "error": f"Cannot create install directory '{dest_dir}': {e}",
+        }
 
     if _is_github_url(source):
         return _install_from_github(source, dest_dir)
@@ -364,7 +370,7 @@ def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -
         }
 
     target_path = (Path(dest_dir) / skill_name).resolve()
-    if not str(target_path).startswith(str(Path(dest_dir).resolve())):
+    if not target_path.is_relative_to(Path(dest_dir).resolve()):
         return {
             "success": False,
             "error": f"Skill name escapes destination: {skill_info.name!r}",
@@ -549,7 +555,7 @@ def uninstall_skill(name: str) -> dict:
                 continue
 
         # Safety: resolved path must still be inside the search dir
-        if not str(target_path).startswith(str(search_dir)):
+        if not target_path.is_relative_to(search_dir):
             return {"success": False, "error": f"Invalid skill path: {name}"}
 
         shutil.rmtree(target_path)
