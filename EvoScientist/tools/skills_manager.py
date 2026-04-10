@@ -1,7 +1,8 @@
 """Skill installation and management for EvoScientist.
 
 This module provides functions for installing, listing, and uninstalling user skills.
-Skills are installed to USER_SKILLS_DIR (defaults to <workspace>/skills/).
+Skills are installed to GLOBAL_SKILLS_DIR by default (~/.config/evoscientist/skills/).
+Pass global_install=False to install to USER_SKILLS_DIR (<workspace>/skills/) instead.
 
 Supported installation sources:
 - Local directory paths
@@ -11,15 +12,18 @@ Supported installation sources:
 Usage:
     from EvoScientist.tools.skills_manager import install_skill, list_skills, uninstall_skill
 
-    # Install from local path
+    # Install from local path (global by default)
     install_skill("./my-skill")
+
+    # Install to workspace only
+    install_skill("./my-skill", global_install=False)
 
     # Install from GitHub
     install_skill("https://github.com/user/repo/tree/main/my-skill")
 
-    # List installed skills
+    # List installed skills (source: "workspace", "global", or "builtin")
     for skill in list_skills():
-        print(skill["name"], skill["description"])
+        print(skill.name, skill.source, skill.description)
 
     # Uninstall a skill
     uninstall_skill("my-skill")
@@ -80,7 +84,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
 
     Args:
         skill_md_path: Path to the SKILL.md file.
-        source: Origin label (e.g. "user", "system").
+        source: Origin label (e.g. "workspace", "global", "builtin").
 
     Returns:
         SkillInfo with path set to the skill's parent directory.
