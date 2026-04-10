@@ -566,7 +566,7 @@ We welcome contributions from developers, researchers, and AI coding agents at a
 - [Discord](https://discord.gg/AZ9ZMXkunY) — Ask questions, share findings, and collaborate with researchers and developers in real-time.
 - [WeChat](https://github.com/EvoScientist/EvoScientist/blob/main/.github/assets/cn_info.md) — Connect with our Chinese-speaking research community.
 
-  <img src=".github/assets/wechat_group.jpeg" alt="WeChat QR Code" width="200"/>
+  <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/wechat_group.jpeg" alt="WeChat QR Code" width="200"/>
 
 Every contribution brings us one step closer to a future where AI accelerates scientific breakthroughs for all of humanity.
 
