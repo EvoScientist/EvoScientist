@@ -78,7 +78,9 @@ def _cmd_install_skill(args: str) -> None:
             "  /install-skill https://github.com/user/repo/tree/main/skill-name"
         )
         console.print("  /install-skill user/repo@skill-name")
-        console.print("  /install-skill ./my-skill --local  [dim](workspace only)[/dim]")
+        console.print(
+            "  /install-skill ./my-skill --local  [dim](workspace only)[/dim]"
+        )
         console.print()
         return
 

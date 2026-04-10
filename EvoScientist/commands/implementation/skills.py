@@ -32,7 +32,11 @@ class SkillsCommand(Command):
             return
 
         sections = [
-            ("Workspace Skills", [s for s in skills if s.source == "workspace"], "green"),
+            (
+                "Workspace Skills",
+                [s for s in skills if s.source == "workspace"],
+                "green",
+            ),
             ("Global Skills", [s for s in skills if s.source == "global"], "cyan"),
             ("Built-in Skills", [s for s in skills if s.source == "builtin"], "blue"),
         ]
@@ -95,6 +99,7 @@ class InstallSkill(Command):
             return
 
         from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+
         dest = USER_SKILLS_DIR if local else GLOBAL_SKILLS_DIR
         ctx.ui.append_system(f"Installing skill from: {source}", style="dim")
         ctx.ui.append_system(
@@ -169,6 +174,7 @@ class InstallSkills(Command):
 
         # Detect installed skills (both global and workspace tiers)
         from ...paths import GLOBAL_SKILLS_DIR
+
         installed_names: set[str] = set()
         for skills_dir in (_Path(GLOBAL_SKILLS_DIR), _Path(USER_SKILLS_DIR)):
             if skills_dir.exists():
