@@ -537,7 +537,7 @@ def uninstall_skill(name: str) -> dict:
 
         target_path = (search_dir / clean_name).resolve()
 
-        if not target_path.exists():
+        if not target_path.exists() or not _validate_skill_dir(target_path):
             # Try to find by skill name in SKILL.md (dir name may differ)
             for entry in search_dir.iterdir():
                 if entry.is_dir() and _validate_skill_dir(entry):
