@@ -27,6 +27,16 @@ USER_SKILLS_DIR = _env_path("EVOSCIENTIST_SKILLS_DIR") or (WORKSPACE_ROOT / "ski
 MEDIA_DIR = _env_path("EVOSCIENTIST_MEDIA_DIR") or (WORKSPACE_ROOT / "media")
 
 
+def _global_skills_dir() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "evoscientist" / "skills"
+
+
+# Global skills: shared across all workspaces (~/.config/evoscientist/skills/)
+GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
+
+
 def set_workspace_root(path: str | Path) -> None:
     """Update workspace root and re-derive dependent directories.
 
@@ -59,6 +69,10 @@ def ensure_dirs() -> None:
     """
     for path in (MEMORY_DIR, USER_SKILLS_DIR):
         path.mkdir(parents=True, exist_ok=True)
+    try:
+        GLOBAL_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        pass  # read-only environments — skip silently
 
 
 def default_workspace_dir() -> Path:

@@ -287,70 +287,93 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
 
 
 class MergedReadOnlyBackend(BackendProtocol):
-    """Read-only backend that merges two directories.
+    """Read-only backend that merges up to three skill directories.
 
-    Reads from *primary* first (user skills in workspace/skills/),
-    falls back to *secondary* (system skills in ./skills/).
-    User skills override system skills with the same name.
+    Priority (high → low):
+    1. primary   — workspace/skills/  (project-local)
+    2. global    — ~/.config/evoscientist/skills/  (user global, optional)
+    3. secondary — EvoScientist/skills/  (built-in, PyPI)
 
-    Both directories share the same virtual path namespace — the agent
-    sees all skills under /skills/ regardless of which backend serves them.
+    Higher-priority skills override lower-priority skills with the same name.
+    All directories share the same virtual path namespace (/skills/).
     """
 
-    def __init__(self, primary_dir: str, secondary_dir: str):
+    def __init__(
+        self,
+        primary_dir: str,
+        secondary_dir: str,
+        global_dir: str | None = None,
+    ):
         self._primary = ReadOnlyFilesystemBackend(
             root_dir=primary_dir, virtual_mode=True
+        )
+        self._global = (
+            ReadOnlyFilesystemBackend(root_dir=global_dir, virtual_mode=True)
+            if global_dir
+            else None
         )
         self._secondary = ReadOnlyFilesystemBackend(
             root_dir=secondary_dir, virtual_mode=True
         )
 
-    # -- read: try primary first, fall back to secondary --
+    def _backends(self):
+        """Yield backends in priority order: primary → global → secondary."""
+        yield self._primary
+        if self._global:
+            yield self._global
+        yield self._secondary
+
+    # -- read: try each tier in priority order --
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
-        try:
-            result = self._primary.read(file_path, offset, limit)
-            if hasattr(result, "error"):
-                if result.error is None:
+        for backend in list(self._backends())[:-1]:
+            try:
+                result = backend.read(file_path, offset, limit)
+                if hasattr(result, "error"):
+                    if result.error is None:
+                        return result
+                elif not str(result).startswith("Error:"):
                     return result
-            elif not str(result).startswith("Error:"):
-                return result
-        except (ValueError, FileNotFoundError, OSError):
-            pass
+            except (ValueError, FileNotFoundError, OSError):
+                pass
         return self._secondary.read(file_path, offset, limit)
 
-    # -- ls: merge both, primary wins on name conflicts --
+    # -- ls: merge all tiers, higher priority wins on name conflicts --
 
     def ls(self, path: str = "/") -> LsResult:
-        secondary_result = self._secondary.ls(path)
-        primary_result = self._primary.ls(path)
-        secondary_items = {item["path"]: item for item in (secondary_result.entries or [])}
-        primary_items = {item["path"]: item for item in (primary_result.entries or [])}
-        secondary_items.update(primary_items)  # primary overrides
-        return LsResult(entries=sorted(secondary_items.values(), key=lambda x: x["path"]))
+        merged: dict = {}
+        for backend in reversed(list(self._backends())):
+            result = backend.ls(path)
+            for item in result.entries or []:
+                merged[item["path"]] = item
+        return LsResult(entries=sorted(merged.values(), key=lambda x: x["path"]))
 
-    # -- grep: search both, deduplicate --
+    # -- grep: search all tiers --
 
     def grep(
         self, pattern: str, path: str | None = None, glob: str | None = None
     ) -> GrepResult:
-        secondary_result = self._secondary.grep(pattern, path, glob)
-        primary_result = self._primary.grep(pattern, path, glob)
-        matches = (secondary_result.matches or []) + (primary_result.matches or [])
+        matches = []
+        for backend in self._backends():
+            try:
+                result = backend.grep(pattern, path, glob)
+                matches.extend(result.matches or [])
+            except Exception:
+                pass
         return GrepResult(matches=matches)
 
-    # -- glob: merge both --
+    # -- glob: merge all tiers, higher priority wins on name conflicts --
 
     def glob(self, pattern: str, path: str = "/") -> GlobResult:
-        secondary_result = self._secondary.glob(pattern, path)
-        secondary = {item["path"]: item for item in (secondary_result.matches or [])}
-        try:
-            primary_result = self._primary.glob(pattern, path)
-            primary = {item["path"]: item for item in (primary_result.matches or [])}
-            secondary.update(primary)
-        except Exception:
-            pass
-        return GlobResult(matches=sorted(secondary.values(), key=lambda x: x["path"]))
+        merged: dict = {}
+        for backend in reversed(list(self._backends())):
+            try:
+                result = backend.glob(pattern, path)
+                for item in result.matches or []:
+                    merged[item["path"]] = item
+            except Exception:
+                pass
+        return GlobResult(matches=sorted(merged.values(), key=lambda x: x["path"]))
 
     # -- write / edit: blocked --
 
@@ -373,12 +396,16 @@ class MergedReadOnlyBackend(BackendProtocol):
     # -- download / upload --
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Download files, trying primary then secondary."""
+        """Download files, trying each tier in priority order."""
+        backends = list(self._backends())
         responses: list[FileDownloadResponse] = []
         for path in paths:
-            resp = self._primary.download_files([path])[0]
-            if resp.error is not None:
-                resp = self._secondary.download_files([path])[0]
+            resp = backends[-1].download_files([path])[0]
+            for backend in backends[:-1]:
+                candidate = backend.download_files([path])[0]
+                if candidate.error is None:
+                    resp = candidate
+                    break
             responses.append(resp)
         return responses
 

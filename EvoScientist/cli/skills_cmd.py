@@ -7,8 +7,8 @@ from .agent import _shorten_path
 
 
 def _cmd_list_skills() -> None:
-    """List all available skills (user and system)."""
-    from ..paths import USER_SKILLS_DIR
+    """List all available skills (workspace, global, and built-in)."""
+    from ..paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
     from ..tools.skills_manager import list_skills
 
     skills = list_skills(include_system=True)
@@ -17,57 +17,80 @@ def _cmd_list_skills() -> None:
         console.print("[dim]No skills available.[/dim]")
         console.print("[dim]Install with:[/dim] /install-skill <path-or-url>")
         console.print(
-            f"[dim]Skills directory:[/dim] [cyan]{_shorten_path(str(USER_SKILLS_DIR))}[/cyan]"
+            f"[dim]Global skills:[/dim] [cyan]{_shorten_path(str(GLOBAL_SKILLS_DIR))}[/cyan]"
         )
         console.print()
         return
 
-    user_skills = [s for s in skills if s.source == "user"]
-    system_skills = [s for s in skills if s.source == "system"]
+    workspace_skills = [s for s in skills if s.source == "workspace"]
+    global_skills = [s for s in skills if s.source == "global"]
+    builtin_skills = [s for s in skills if s.source == "builtin"]
 
-    if user_skills:
-        console.print(f"[bold]User Skills[/bold] ({len(user_skills)}):")
-        for skill in user_skills:
+    sections = [
+        ("Workspace Skills", workspace_skills, "green"),
+        ("Global Skills", global_skills, "cyan"),
+        ("Built-in Skills", builtin_skills, "blue"),
+    ]
+
+    printed = False
+    for title, group, color in sections:
+        if not group:
+            continue
+        if printed:
+            console.print()
+        console.print(f"[bold]{title}[/bold] ({len(group)}):")
+        for skill in group:
             tags_str = f" [dim]({', '.join(skill.tags)})[/dim]" if skill.tags else ""
             console.print(
-                f"  [green]{skill.name}[/green] - {skill.description}{tags_str}"
+                f"  [{color}]{skill.name}[/{color}] - {skill.description}{tags_str}"
             )
-
-    if user_skills and system_skills:
-        console.print()
-
-    if system_skills:
-        console.print(f"[bold]Built-in Skills[/bold] ({len(system_skills)}):")
-        for skill in system_skills:
-            tags_str = f" [dim]({', '.join(skill.tags)})[/dim]" if skill.tags else ""
-            console.print(
-                f"  [cyan]{skill.name}[/cyan] - {skill.description}{tags_str}"
-            )
+        printed = True
 
     console.print(
-        f"\n[dim]User skills folder:[/dim] [green]{_shorten_path(str(USER_SKILLS_DIR))}[/green]"
+        f"\n[dim]Global skills:[/dim] [cyan]{_shorten_path(str(GLOBAL_SKILLS_DIR))}[/cyan]"
+    )
+    console.print(
+        f"[dim]Workspace skills:[/dim] [green]{_shorten_path(str(USER_SKILLS_DIR))}[/green]"
     )
     console.print()
 
 
-def _cmd_install_skill(source: str) -> None:
-    """Install a skill from local path or GitHub URL."""
+def _cmd_install_skill(args: str) -> None:
+    """Install a skill from local path or GitHub URL.
+
+    By default, installs to the global skills directory (~/.config/evoscientist/skills/).
+    Append --local to install to the current workspace instead.
+
+    Usage: /install-skill <path-or-url> [--local]
+    """
+    from ..paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
     from ..tools.skills_manager import install_skill
 
+    # Parse --local flag out of the args string
+    local = "--local" in args.split()
+    source = args.replace("--local", "").strip()
+
     if not source:
-        console.print("[red]Usage:[/red] /install-skill <path-or-url>")
+        console.print("[red]Usage:[/red] /install-skill <path-or-url> [--local]")
         console.print("[dim]Examples:[/dim]")
         console.print("  /install-skill ./my-skill")
         console.print(
             "  /install-skill https://github.com/user/repo/tree/main/skill-name"
         )
         console.print("  /install-skill user/repo@skill-name")
+        console.print("  /install-skill ./my-skill --local  [dim](workspace only)[/dim]")
         console.print()
         return
 
+    dest_label = (
+        f"[cyan]{_shorten_path(str(USER_SKILLS_DIR))}[/cyan] [dim](workspace)[/dim]"
+        if local
+        else f"[cyan]{_shorten_path(str(GLOBAL_SKILLS_DIR))}[/cyan] [dim](global)[/dim]"
+    )
     console.print(f"[dim]Installing skill from:[/dim] {source}")
+    console.print(f"[dim]Destination:[/dim] {dest_label}")
 
-    result = install_skill(source)
+    result = install_skill(source, global_install=not local)
 
     if result.get("batch"):
         # Batch install — multiple skills
@@ -128,7 +151,7 @@ def _cmd_install_skills(args: str = "") -> None:
     from prompt_toolkit.styles import Style as PtStyle
     from questionary import Choice
 
-    from ..paths import USER_SKILLS_DIR
+    from ..paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
     from ..tools.skills_manager import fetch_remote_skill_index, install_skill
 
     _PICKER_STYLE = PtStyle.from_dict(
@@ -189,11 +212,11 @@ def _cmd_install_skills(args: str = "") -> None:
         console.print()
         return
 
-    # Detect already-installed skills
-    skills_dir = Path(USER_SKILLS_DIR)
+    # Detect already-installed skills (both global and workspace tiers)
     installed_names: set[str] = set()
-    if skills_dir.exists():
-        installed_names = {e.name for e in skills_dir.iterdir() if e.is_dir()}
+    for skills_dir in (Path(GLOBAL_SKILLS_DIR), Path(USER_SKILLS_DIR)):
+        if skills_dir.exists():
+            installed_names.update(e.name for e in skills_dir.iterdir() if e.is_dir())
 
     pre_filter_tag = args.strip().lower() if args else ""
 
@@ -288,10 +311,10 @@ def _cmd_install_skills(args: str = "") -> None:
         console.print()
         return
 
-    # Step 4: Install selected skills
+    # Step 4: Install selected skills (default: global)
     installed_count = 0
     for source in selected:
-        result = install_skill(source)
+        result = install_skill(source, global_install=True)
         if result.get("batch"):
             for item in result.get("installed", []):
                 console.print(f"[green]Installed:[/green] {item['name']}")

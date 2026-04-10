@@ -51,7 +51,7 @@ class SkillInfo:
     name: str
     description: str
     path: Path
-    source: str  # "user" or "system"
+    source: str  # "workspace", "global", or "builtin"
     tags: list[str] = field(default_factory=list)
 
 
@@ -263,12 +263,19 @@ def _sanitize_name(name: str) -> str | None:
     return name
 
 
-def install_skill(source: str, dest_dir: str | None = None) -> dict:
+def install_skill(
+    source: str,
+    dest_dir: str | None = None,
+    global_install: bool = True,
+) -> dict:
     """Install a skill from a local path or GitHub URL.
 
     Args:
         source: Local directory path or GitHub URL/shorthand.
-        dest_dir: Destination directory (defaults to USER_SKILLS_DIR).
+        dest_dir: Explicit destination directory (overrides global_install).
+        global_install: If True (default), install to GLOBAL_SKILLS_DIR
+            (~/.config/evoscientist/skills/). If False, install to the
+            workspace-local USER_SKILLS_DIR.
 
     Returns:
         Dictionary with installation result:
@@ -277,7 +284,9 @@ def install_skill(source: str, dest_dir: str | None = None) -> dict:
         - path: installed path (if successful)
         - error: error message (if failed)
     """
-    dest_dir = dest_dir or str(paths.USER_SKILLS_DIR)
+    dest_dir = dest_dir or (
+        str(paths.GLOBAL_SKILLS_DIR) if global_install else str(paths.USER_SKILLS_DIR)
+    )
     os.makedirs(dest_dir, exist_ok=True)
 
     if _is_github_url(source):
@@ -454,41 +463,50 @@ def _install_from_github(source: str, dest_dir: str) -> dict:
 
 
 def list_skills(include_system: bool = False) -> list[SkillInfo]:
-    """List all installed user skills.
+    """List all installed skills across all tiers.
+
+    Priority order: workspace > global > builtin.
+    Higher-priority skills shadow lower-priority skills with the same name.
 
     Args:
-        include_system: If True, also include system (built-in) skills.
+        include_system: If True, also include built-in (PyPI) skills.
 
     Returns:
-        List of SkillInfo objects for each installed skill.
+        List of SkillInfo objects for each skill, deduplicated by name.
     """
     skills: list[SkillInfo] = []
+    seen: set[str] = set()  # dedup by parsed skill name (not directory name)
 
-    # User skills
-    user_dir = Path(paths.USER_SKILLS_DIR)
-    if user_dir.exists():
-        for entry in sorted(user_dir.iterdir()):
+    def _add_tier(skill_dir: Path, source: str, check_seen: bool = True) -> None:
+        if not skill_dir.exists():
+            return
+        for entry in sorted(skill_dir.iterdir()):
             if entry.is_dir() and _validate_skill_dir(entry):
-                skills.append(_parse_skill_md(entry / "SKILL.md", source="user"))
+                info = _parse_skill_md(entry / "SKILL.md", source=source)
+                if check_seen and info.name in seen:
+                    continue
+                skills.append(info)
+                seen.add(info.name)
 
-    # System skills (optional)
+    # Tier 1: workspace-local skills (always highest priority, no dedup needed)
+    _add_tier(Path(paths.USER_SKILLS_DIR), source="workspace", check_seen=False)
+
+    # Tier 2: global skills (~/.config/evoscientist/skills/)
+    _add_tier(Path(paths.GLOBAL_SKILLS_DIR), source="global")
+
+    # Tier 3: built-in skills (optional)
     if include_system:
         from ..EvoScientist import SKILLS_DIR
 
-        system_dir = Path(SKILLS_DIR)
-        if system_dir.exists():
-            for entry in sorted(system_dir.iterdir()):
-                if entry.is_dir() and _validate_skill_dir(entry):
-                    # Skip if user has overridden this skill
-                    if any(s.name == entry.name for s in skills):
-                        continue
-                    skills.append(_parse_skill_md(entry / "SKILL.md", source="system"))
+        _add_tier(Path(SKILLS_DIR), source="builtin")
 
     return skills
 
 
 def uninstall_skill(name: str) -> dict:
-    """Uninstall a user-installed skill.
+    """Uninstall a skill from workspace or global tier.
+
+    Searches workspace first, then global. Built-in skills cannot be uninstalled.
 
     Args:
         name: Name of the skill to uninstall.
@@ -498,38 +516,42 @@ def uninstall_skill(name: str) -> dict:
         - success: bool
         - error: error message (if failed)
     """
-    user_dir = Path(paths.USER_SKILLS_DIR).resolve()
-
     # Validate name to prevent path traversal
     clean_name = _sanitize_name(name)
     if not clean_name:
         return {"success": False, "error": f"Invalid skill name: {name!r}"}
 
-    target_path = (user_dir / clean_name).resolve()
+    # Search workspace tier first, then global tier
+    search_dirs = [
+        Path(paths.USER_SKILLS_DIR).resolve(),
+        Path(paths.GLOBAL_SKILLS_DIR).resolve(),
+    ]
 
-    if not target_path.exists():
-        # Try to find by directory name (in case name differs from dir name)
-        found = None
-        if user_dir.exists():
-            for entry in user_dir.iterdir():
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+
+        target_path = (search_dir / clean_name).resolve()
+
+        if not target_path.exists():
+            # Try to find by skill name in SKILL.md (dir name may differ)
+            for entry in search_dir.iterdir():
                 if entry.is_dir() and _validate_skill_dir(entry):
                     info = _parse_skill_md(entry / "SKILL.md")
                     if info.name == clean_name:
-                        found = entry.resolve()
+                        target_path = entry.resolve()
                         break
+            else:
+                continue
 
-        if not found:
-            return {"success": False, "error": f"Skill not found: {name}"}
-        target_path = found
+        # Safety: resolved path must still be inside the search dir
+        if not str(target_path).startswith(str(search_dir)):
+            return {"success": False, "error": f"Cannot uninstall system skill: {name}"}
 
-    # Check resolved path is still inside user_dir
-    if not str(target_path).startswith(str(user_dir)):
-        return {"success": False, "error": f"Cannot uninstall system skill: {name}"}
+        shutil.rmtree(target_path)
+        return {"success": True, "name": name}
 
-    # Remove the skill directory
-    shutil.rmtree(target_path)
-
-    return {"success": True, "name": name}
+    return {"success": False, "error": f"Skill not found: {name}"}
 
 
 def get_skill_info(name: str) -> SkillInfo | None:

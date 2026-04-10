@@ -259,6 +259,7 @@ def _get_default_backend():
     set_active_workspace(workspace_dir)
     memory_dir = str(_paths_mod.MEMORY_DIR)
     user_skills_dir = str(_paths_mod.USER_SKILLS_DIR)
+    global_skills_dir = str(_paths_mod.GLOBAL_SKILLS_DIR)
 
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
@@ -267,6 +268,7 @@ def _get_default_backend():
     )
     sk_backend = MergedReadOnlyBackend(
         primary_dir=user_skills_dir,
+        global_dir=global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
     mem_backend = FilesystemBackend(
@@ -395,6 +397,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
     # Read paths dynamically so runtime set_workspace_root() changes are picked up
     _mem_dir = str(_paths.MEMORY_DIR)
     _usr_skills_dir = str(_paths.USER_SKILLS_DIR)
+    _global_skills_dir = str(_paths.GLOBAL_SKILLS_DIR)
 
     # Always construct fresh backends from current paths (avoids stale
     # module-level backend when workspace root changed at runtime).
@@ -406,6 +409,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
     )
     sk_backend = MergedReadOnlyBackend(
         primary_dir=_usr_skills_dir,
+        global_dir=_global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
     # Memory always uses SHARED directory (not per-session) for cross-session persistence

@@ -25,10 +25,13 @@ from EvoScientist.tools.skills_manager import (
 
 @pytest.fixture
 def temp_skills_dir(tmp_path):
-    """Create a temporary skills directory."""
+    """Create a temporary skills directory, isolated from the real global tier."""
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
-    return skills_dir
+    empty_global = tmp_path / "global_skills"
+    empty_global.mkdir()
+    with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global):
+        yield skills_dir
 
 
 @pytest.fixture
@@ -288,7 +291,7 @@ class TestListSkills:
             assert len(skills) == 1
             assert skills[0].name == "sample-skill"
             assert skills[0].description == "A sample skill for testing"
-            assert skills[0].source == "user"
+            assert skills[0].source == "workspace"
 
     def test_list_multiple_skills(self, tmp_path, temp_skills_dir):
         # Create and install multiple skills

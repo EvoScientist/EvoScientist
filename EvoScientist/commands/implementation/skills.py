@@ -16,7 +16,7 @@ class SkillsCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...cli.agent import _shorten_path
-        from ...paths import USER_SKILLS_DIR
+        from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
         from ...tools.skills_manager import list_skills
 
         skills = list_skills(include_system=True)
@@ -26,38 +26,32 @@ class SkillsCommand(Command):
                 "Install with: /install-skill <path-or-url>", style="dim"
             )
             ctx.ui.append_system(
-                f"Skills directory: {_shorten_path(str(USER_SKILLS_DIR))}",
+                f"Global skills: {_shorten_path(str(GLOBAL_SKILLS_DIR))}",
                 style="dim",
             )
             return
 
-        user_skills = [s for s in skills if s.source == "user"]
-        system_skills = [s for s in skills if s.source == "system"]
+        sections = [
+            ("Workspace Skills", [s for s in skills if s.source == "workspace"], "green"),
+            ("Global Skills", [s for s in skills if s.source == "global"], "cyan"),
+            ("Built-in Skills", [s for s in skills if s.source == "builtin"], "blue"),
+        ]
 
-        if user_skills:
-            table = Table(title=f"User Skills ({len(user_skills)})", show_header=True)
-            table.add_column("Name", style="green")
+        for title, group, color in sections:
+            if not group:
+                continue
+            table = Table(title=f"{title} ({len(group)})", show_header=True)
+            table.add_column("Name", style=color)
             table.add_column("Description", style="dim")
             table.add_column("Tags", style="dim")
-            for s in user_skills:
-                tags = "\n".join(f"· {t}" for t in s.tags[:4]) if s.tags else ""
-                table.add_row(s.name, s.description, tags)
-            ctx.ui.mount_renderable(table)
-
-        if system_skills:
-            table = Table(
-                title=f"Built-in Skills ({len(system_skills)})", show_header=True
-            )
-            table.add_column("Name", style="cyan")
-            table.add_column("Description", style="dim")
-            table.add_column("Tags", style="dim")
-            for s in system_skills:
+            for s in group:
                 tags = "\n".join(f"· {t}" for t in s.tags[:4]) if s.tags else ""
                 table.add_row(s.name, s.description, tags)
             ctx.ui.mount_renderable(table)
 
         ctx.ui.append_system(
-            f"User skills folder: {_shorten_path(str(USER_SKILLS_DIR))}",
+            f"Global: {_shorten_path(str(GLOBAL_SKILLS_DIR))}  "
+            f"Workspace: {_shorten_path(str(USER_SKILLS_DIR))}",
             style="dim",
         )
 
@@ -80,9 +74,14 @@ class InstallSkill(Command):
         from ...cli.agent import _shorten_path
         from ...tools.skills_manager import install_skill
 
-        source = args[0] if args else ""
+        raw = " ".join(args)
+        local = "--local" in args
+        source = raw.replace("--local", "").strip()
+
         if not source:
-            ctx.ui.append_system("Usage: /install-skill <path-or-url>", style="yellow")
+            ctx.ui.append_system(
+                "Usage: /install-skill <path-or-url> [--local]", style="yellow"
+            )
             ctx.ui.append_system("Examples:", style="dim")
             ctx.ui.append_system("  /install-skill ./my-skill", style="dim")
             ctx.ui.append_system(
@@ -90,17 +89,40 @@ class InstallSkill(Command):
                 style="dim",
             )
             ctx.ui.append_system("  /install-skill user/repo@skill-name", style="dim")
+            ctx.ui.append_system(
+                "  /install-skill ./my-skill --local  (workspace only)", style="dim"
+            )
             return
 
+        from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+        dest = USER_SKILLS_DIR if local else GLOBAL_SKILLS_DIR
         ctx.ui.append_system(f"Installing skill from: {source}", style="dim")
-        # For simplicity, calling install_skill directly (might block loop if slow?
-        # But install_skill doesn't seem to be async)
-        result = install_skill(source)
-        if result["success"]:
+        ctx.ui.append_system(
+            f"Destination: {_shorten_path(str(dest))} "
+            f"({'workspace' if local else 'global'})",
+            style="dim",
+        )
+        result = install_skill(source, global_install=not local)
+        if result.get("batch"):
+            for item in result.get("installed", []):
+                ctx.ui.append_system(f"Installed: {item['name']}", style="green")
+                ctx.ui.append_system(
+                    f"  Description: {item.get('description', '(none)')}", style="dim"
+                )
+            for item in result.get("failed", []):
+                ctx.ui.append_system(
+                    f"Failed: {item['name']} — {item['error']}", style="red"
+                )
+            installed_count = len(result.get("installed", []))
+            if installed_count:
+                ctx.ui.append_system(
+                    f"{installed_count} skill(s) installed. Reload with /new to apply.",
+                    style="dim",
+                )
+        elif result.get("success"):
             ctx.ui.append_system(f"Installed: {result['name']}", style="green")
             ctx.ui.append_system(
-                f"Description: {result.get('description', '(none)')}",
-                style="dim",
+                f"Description: {result.get('description', '(none)')}", style="dim"
             )
             ctx.ui.append_system(f"Path: {_shorten_path(result['path'])}", style="dim")
             ctx.ui.append_system("Reload with /new to apply.", style="dim")
@@ -145,11 +167,14 @@ class InstallSkills(Command):
             ctx.ui.append_system("No skills found.", style="yellow")
             return
 
-        # Detect installed skills
-        skills_dir = _Path(USER_SKILLS_DIR)
+        # Detect installed skills (both global and workspace tiers)
+        from ...paths import GLOBAL_SKILLS_DIR
         installed_names: set[str] = set()
-        if skills_dir.exists():
-            installed_names = {e.name for e in skills_dir.iterdir() if e.is_dir()}
+        for skills_dir in (_Path(GLOBAL_SKILLS_DIR), _Path(USER_SKILLS_DIR)):
+            if skills_dir.exists():
+                installed_names.update(
+                    e.name for e in skills_dir.iterdir() if e.is_dir()
+                )
 
         selected_sources: list[str] | None = None
 
@@ -190,7 +215,7 @@ class InstallSkills(Command):
         # Install selected skills
         installed_count = 0
         for source in selected_sources:
-            result = install_skill(source)
+            result = install_skill(source, global_install=True)
             if result.get("batch"):
                 for item in result.get("installed", []):
                     ctx.ui.append_system(f"Installed: {item['name']}", style="green")
