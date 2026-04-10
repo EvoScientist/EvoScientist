@@ -13,6 +13,9 @@ from deepagents.backends.protocol import (
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
     WriteResult,
 )
 
@@ -307,46 +310,47 @@ class MergedReadOnlyBackend(BackendProtocol):
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         try:
             result = self._primary.read(file_path, offset, limit)
-            if not result.startswith("Error:"):
+            if hasattr(result, "error"):
+                if result.error is None:
+                    return result
+            elif not str(result).startswith("Error:"):
                 return result
         except (ValueError, FileNotFoundError, OSError):
             pass
         return self._secondary.read(file_path, offset, limit)
 
-    # -- ls_info: merge both, primary wins on name conflicts --
+    # -- ls: merge both, primary wins on name conflicts --
 
-    def ls_info(self, path: str = "/") -> list:
-        secondary_items = {item["path"]: item for item in self._secondary.ls_info(path)}
-        primary_items = {item["path"]: item for item in self._primary.ls_info(path)}
+    def ls(self, path: str = "/") -> LsResult:
+        secondary_result = self._secondary.ls(path)
+        primary_result = self._primary.ls(path)
+        secondary_items = {item["path"]: item for item in (secondary_result.entries or [])}
+        primary_items = {item["path"]: item for item in (primary_result.entries or [])}
         secondary_items.update(primary_items)  # primary overrides
-        return sorted(secondary_items.values(), key=lambda x: x["path"])
+        return LsResult(entries=sorted(secondary_items.values(), key=lambda x: x["path"]))
 
-    # -- grep_raw: search both, deduplicate --
+    # -- grep: search both, deduplicate --
 
-    def grep_raw(
+    def grep(
         self, pattern: str, path: str | None = None, glob: str | None = None
-    ) -> list:
-        results = self._secondary.grep_raw(pattern, path, glob)
-        try:
-            results += self._primary.grep_raw(pattern, path, glob)
-        except Exception:
-            pass
-        return results
+    ) -> GrepResult:
+        secondary_result = self._secondary.grep(pattern, path, glob)
+        primary_result = self._primary.grep(pattern, path, glob)
+        matches = (secondary_result.matches or []) + (primary_result.matches or [])
+        return GrepResult(matches=matches)
 
-    # -- glob_info: merge both --
+    # -- glob: merge both --
 
-    def glob_info(self, pattern: str, path: str = "/") -> list:
-        secondary = {
-            item["path"]: item for item in self._secondary.glob_info(pattern, path)
-        }
+    def glob(self, pattern: str, path: str = "/") -> GlobResult:
+        secondary_result = self._secondary.glob(pattern, path)
+        secondary = {item["path"]: item for item in (secondary_result.matches or [])}
         try:
-            primary = {
-                item["path"]: item for item in self._primary.glob_info(pattern, path)
-            }
+            primary_result = self._primary.glob(pattern, path)
+            primary = {item["path"]: item for item in (primary_result.matches or [])}
             secondary.update(primary)
         except Exception:
             pass
-        return sorted(secondary.values(), key=lambda x: x["path"])
+        return GlobResult(matches=sorted(secondary.values(), key=lambda x: x["path"]))
 
     # -- write / edit: blocked --
 
