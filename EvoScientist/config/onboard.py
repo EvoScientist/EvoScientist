@@ -2035,7 +2035,7 @@ def _step_mcp_servers() -> list[str]:
     all_installed = all(srv.name in existing_config for srv in servers)
     if all_installed:
         console.print(
-            "  [green]\u2713 All recommended MCP servers are already configured.[/green]"
+            "[green]\u2713 All recommended MCP servers are already configured.[/green]"
         )
         return []
 
