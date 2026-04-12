@@ -153,6 +153,9 @@ def _apply_summarization_event(messages: list, event: dict | None) -> list:
     except (KeyError, TypeError, ValueError):
         return list(messages)
 
+    if summary_message is None:
+        return list(messages)
+
     if cutoff_index < 0 or cutoff_index > len(messages):
         return list(messages)
 
