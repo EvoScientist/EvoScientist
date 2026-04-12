@@ -113,7 +113,13 @@ async def _load_checkpoint_messages(
     Returns a list of LangChain message objects, or an empty list on failure.
     """
     channel_values = await _load_checkpoint_channel_values(conn, thread_id, serde)
-    return channel_values.get("messages", [])
+    messages = channel_values.get("messages", [])
+    if not isinstance(messages, list):
+        return []
+    event = channel_values.get("_summarization_event")
+    return _apply_summarization_event(
+        messages, event if isinstance(event, dict) else None
+    )
 
 
 async def _load_checkpoint_channel_values(
