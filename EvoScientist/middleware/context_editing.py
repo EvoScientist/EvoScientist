@@ -30,8 +30,8 @@ def compute_context_editing_trigger(
     before ``SummarizationMiddleware`` (~85% / 170k).
     """
     context_window = get_context_window(model)
-    if context_window is not None:
-        return int(context_window * fraction)
+    if context_window is not None and context_window > 0:
+        return max(1, int(context_window * fraction))
     return fallback
 
 

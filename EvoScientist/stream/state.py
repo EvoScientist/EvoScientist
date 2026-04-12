@@ -287,8 +287,14 @@ class StreamState:
             self.summarization_text += event.get("content", "")
 
         elif event_type == "usage_stats":
-            input_tokens = event.get("input_tokens", 0)
-            output_tokens = event.get("output_tokens", 0)
+            try:
+                input_tokens = max(0, int(event.get("input_tokens") or 0))
+            except (TypeError, ValueError):
+                input_tokens = 0
+            try:
+                output_tokens = max(0, int(event.get("output_tokens") or 0))
+            except (TypeError, ValueError):
+                output_tokens = 0
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             if input_tokens > 0:

@@ -430,7 +430,7 @@ def cmd_interactive(
                 _rebuild_status_snapshot()
         elif event_type == "text":
             _set_status_streaming_text(stream_state.response_text)
-        elif event_type == "done":
+        elif event_type in ("done", "error"):
             _set_status_streaming_text("")
 
     async def _resolve_thread_id(tid: str) -> str | None:
@@ -1066,6 +1066,14 @@ def cmd_interactive(
                             )
                             if summary_renderable is not None:
                                 console.print(summary_renderable)
+                            if result.status == "ok" and result.tokens_after > 0:
+                                state["status_last_input_tokens"] = result.tokens_after
+                                state["status_base_snapshot"] = (
+                                    make_usage_status_snapshot(
+                                        result.tokens_after,
+                                        model_name=model,
+                                    )
+                                )
                             await _refresh_status_snapshot(
                                 reset_streaming_text=True,
                             )

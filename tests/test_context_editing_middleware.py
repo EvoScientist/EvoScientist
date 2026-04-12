@@ -24,14 +24,14 @@ def test_compute_trigger_with_1m_profile():
 
 
 def test_compute_trigger_with_context_length_attr():
-    model = MagicMock()
+    model = MagicMock(spec=["context_length", "profile"])
     model.context_length = 1_000_000
     model.profile = None
     assert compute_context_editing_trigger(model) == 500_000  # 50%
 
 
 def test_compute_trigger_with_num_ctx():
-    model = MagicMock()
+    model = MagicMock(spec=["num_ctx", "profile"])
     model.num_ctx = 32_768
     model.profile = None
     assert compute_context_editing_trigger(model) == 16_384  # 50%

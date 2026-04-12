@@ -28,7 +28,9 @@ def _coerce_positive_int(value: Any) -> int | None:
     if isinstance(value, int):
         return value if value > 0 else None
     if isinstance(value, float):
-        return int(value) if value > 0 else None
+        if value > 0 and value.is_integer():
+            return int(value)
+        return None
     if isinstance(value, str):
         normalized = value.strip().replace(",", "").replace("_", "")
         if normalized.isdigit():
