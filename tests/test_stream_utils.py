@@ -4,6 +4,7 @@ from EvoScientist.stream.utils import (
     _shorten_path,
     count_lines,
     format_tool_compact,
+    format_tool_compact_with_result,
     has_args,
     is_success,
     truncate,
@@ -99,6 +100,14 @@ class TestFormatToolCompact:
         result = format_tool_compact("read_file", {"path": "/memory/MEMORY.md"})
         assert result == "Reading memory"
 
+    def test_read_file_memory_file_path_alias(self):
+        result = format_tool_compact("read_file", {"file_path": "/memory/MEMORY.md"})
+        assert result == "Reading memory"
+
+    def test_read_file_any_memory_file(self):
+        result = format_tool_compact("read_file", {"path": "/memory/history.md"})
+        assert result == "Reading memory"
+
     def test_write_file_memory(self):
         result = format_tool_compact("write_file", {"path": "/MEMORY.md"})
         assert result == "Updating memory"
@@ -109,6 +118,36 @@ class TestFormatToolCompact:
     def test_edit_file_memory(self):
         result = format_tool_compact("edit_file", {"path": "/memory/MEMORY.md"})
         assert result == "Updating memory"
+
+    def test_write_edit_any_memory_file(self):
+        write_result = format_tool_compact("write_file", {"path": "/memory/soul.md"})
+        edit_result = format_tool_compact(
+            "edit_file", {"path": "/memory/skills-context.md"}
+        )
+        assert write_result == "Updating memory"
+        assert edit_result == "Updating memory"
+
+    def test_memory_display_inferred_from_result_when_args_sparse(self):
+        read_result = format_tool_compact_with_result(
+            "read_file",
+            {},
+            "# EvoScientist Memory\n\nFounder: Zachary",
+        )
+        assert read_result == "Reading memory"
+
+        edit_result = format_tool_compact_with_result(
+            "edit_file",
+            {},
+            "Successfully replaced 1 instance(s) of the string in '/memory/MEMORY.md'",
+        )
+        assert edit_result == "Updating memory"
+
+        write_result = format_tool_compact_with_result(
+            "write_file",
+            {},
+            "Wrote updated content to '/memory/history.md'",
+        )
+        assert write_result == "Updating memory"
 
     def test_glob(self):
         result = format_tool_compact("glob", {"pattern": "*.py"})

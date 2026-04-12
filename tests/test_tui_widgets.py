@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import unittest
+from unittest.mock import AsyncMock
 
 # ---------------------------------------------------------------------------
 # Textual might not be installed — skip entire module if missing
@@ -21,8 +22,10 @@ class TestLoadingWidget(unittest.TestCase):
 
     def test_construction(self):
         from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+        from EvoScientist.cli.widgets.timed_status_widget import TimedStatusWidget
 
         w = LoadingWidget()
+        assert isinstance(w, TimedStatusWidget)
         assert w._frame == 0
         assert w._elapsed == 0.0
         assert w._timer_handle is None
@@ -31,6 +34,49 @@ class TestLoadingWidget(unittest.TestCase):
         from EvoScientist.cli.widgets.loading_widget import _SPINNER_FRAMES
 
         assert len(_SPINNER_FRAMES) > 0
+
+    def test_tick_advances_spinner_and_elapsed(self):
+        from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+
+        w = LoadingWidget()
+        w._tick()
+        assert w._frame == 1
+        assert w._elapsed == 0.1
+
+    def test_cleanup_stops_timer_and_removes(self):
+        from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+
+        class _Timer:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        w = LoadingWidget()
+        timer = _Timer()
+        w._timer_handle = timer
+        w.remove = AsyncMock()
+
+        import asyncio
+
+        asyncio.run(w.cleanup())
+
+        assert timer.stopped is True
+        assert w._timer_handle is None
+        w.remove.assert_awaited_once()
+
+
+@unittest.skipUnless(_has_textual, "textual not installed")
+class TestCompactingWidget(unittest.TestCase):
+    """CompactingWidget construction and cleanup."""
+
+    def test_construction(self):
+        from EvoScientist.cli.widgets.compacting_widget import CompactingWidget
+
+        w = CompactingWidget()
+        assert w._elapsed == 0.0
+        assert w._timer_handle is None
 
 
 @unittest.skipUnless(_has_textual, "textual not installed")
@@ -69,6 +115,40 @@ class TestThinkingWidget(unittest.TestCase):
         # Simulate finalize without DOM
         w._is_active = False
         assert w._is_active is False
+
+
+class TestSummarizationStateMachine(unittest.TestCase):
+    """Summary panel lifecycle decisions in the TUI event loop."""
+
+    def test_summary_continuation_events_do_not_finalize(self):
+        from EvoScientist.cli.tui_interactive import (
+            _should_finalize_active_summarization,
+        )
+
+        for event_type in ("summarization_start", "summarization", "usage_stats"):
+            assert _should_finalize_active_summarization(event_type) is False
+
+    def test_non_summary_events_finalize_active_summary(self):
+        from EvoScientist.cli.tui_interactive import (
+            _should_finalize_active_summarization,
+        )
+
+        for event_type in (
+            "thinking",
+            "text",
+            "tool_call",
+            "tool_result",
+            "tool_selection",
+            "subagent_start",
+            "subagent_tool_call",
+            "subagent_tool_result",
+            "subagent_end",
+            "ask_user",
+            "interrupt",
+            "done",
+            "error",
+        ):
+            assert _should_finalize_active_summarization(event_type) is True
 
 
 @unittest.skipUnless(_has_textual, "textual not installed")
@@ -120,6 +200,28 @@ class TestToolCallWidget(unittest.TestCase):
         assert w._status == "error"
         w._status = "interrupted"
         assert w._status == "interrupted"
+
+    def test_memory_tool_header_uses_result_inference(self):
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+        w = ToolCallWidget("edit_file", {}, "mem-1")
+        w._result_content = (
+            "Successfully replaced 1 instance(s) of the string in '/memory/MEMORY.md'"
+        )
+
+        class _Header:
+            def __init__(self) -> None:
+                self.updated = None
+
+            def update(self, value) -> None:
+                self.updated = value
+
+        header = _Header()
+        w.query_one = lambda selector, cls=None: header  # type: ignore[assignment]
+        w._status = "success"
+        w._render_header()
+
+        assert "Updating memory" in header.updated.plain
 
     def test_result_summary_truncation(self):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget

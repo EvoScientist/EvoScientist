@@ -7,6 +7,9 @@ import unittest
 from datetime import UTC
 from unittest.mock import patch
 
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
 from EvoScientist.sessions import (
     AGENT_NAME,
     _format_relative_time,
@@ -15,6 +18,7 @@ from EvoScientist.sessions import (
     generate_thread_id,
     get_db_path,
     get_most_recent,
+    get_thread_messages,
     get_thread_metadata,
     list_threads,
     thread_exists,
@@ -248,6 +252,71 @@ class TestThreadFunctions(unittest.TestCase):
 
     def test_delete_nonexistent(self):
         assert not _run(delete_thread("nope1234"))
+
+    def test_get_thread_messages_applies_summarization_event(self):
+        async def _insert():
+            import aiosqlite
+
+            serde = JsonPlusSerializer()
+            messages = [
+                HumanMessage(content="first"),
+                AIMessage(content="second"),
+                HumanMessage(content="third"),
+            ]
+            summary_message = AIMessage(content="summary")
+            checkpoint = {
+                "channel_values": {
+                    "messages": messages,
+                    "_summarization_event": {
+                        "cutoff_index": 2,
+                        "summary_message": summary_message,
+                        "file_path": None,
+                    },
+                }
+            }
+            meta = json.dumps(
+                {
+                    "agent_name": AGENT_NAME,
+                    "updated_at": "2025-01-25T10:00:00+00:00",
+                }
+            )
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO checkpoints (
+                        thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata
+                    ) VALUES (?, '', ?, ?, ?, ?)
+                    """,
+                    (
+                        "sum12345",
+                        "cp_sum",
+                        *serde.dumps_typed(checkpoint),
+                        meta,
+                    ),
+                )
+                await conn.commit()
+
+        async def _cleanup():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?",
+                    ("sum12345",),
+                )
+                await conn.commit()
+
+        _run(_insert())
+        try:
+            messages = _run(get_thread_messages("sum12345"))
+            assert len(messages) == 2
+            assert isinstance(messages[0], AIMessage)
+            assert messages[0].content == "summary"
+            assert isinstance(messages[1], HumanMessage)
+            assert messages[1].content == "third"
+        finally:
+            _run(_cleanup())
 
     # -- Agent isolation: OtherAgent data should never be visible --
 

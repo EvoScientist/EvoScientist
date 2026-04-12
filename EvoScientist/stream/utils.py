@@ -106,6 +106,19 @@ def _shorten_path(path: str, max_len: int = 40) -> str:
     return path
 
 
+def _tool_path_arg(args: dict | None) -> str:
+    """Return the best-effort path argument used by file tools."""
+    if not isinstance(args, dict):
+        return ""
+    return str(args.get("path") or args.get("file_path") or "")
+
+
+def _is_memory_path(path: str) -> bool:
+    """Return True when a virtual path targets the shared memory directory."""
+    normalized = (path or "").strip()
+    return normalized == "/memory" or normalized.startswith("/memory/")
+
+
 def format_tool_compact(name: str, args: dict | None) -> str:
     """Format as compact tool call string: ToolName(key_arg).
 
@@ -127,20 +140,20 @@ def format_tool_compact(name: str, args: dict | None) -> str:
 
     # File operations (with special case for memory files)
     if name_lower == "read_file":
-        path = args.get("path", "")
-        if path.endswith("/MEMORY.md") or path == "/MEMORY.md":
+        path = _tool_path_arg(args)
+        if _is_memory_path(path) or path.endswith("/MEMORY.md") or path == "/MEMORY.md":
             return "Reading memory"
         return f"read_file({_shorten_path(path)})"
 
     if name_lower == "write_file":
-        path = args.get("path", "")
-        if path.endswith("/MEMORY.md") or path == "/MEMORY.md":
+        path = _tool_path_arg(args)
+        if _is_memory_path(path) or path.endswith("/MEMORY.md") or path == "/MEMORY.md":
             return "Updating memory"
         return f"write_file({_shorten_path(path)})"
 
     if name_lower == "edit_file":
-        path = args.get("path", "")
-        if path.endswith("/MEMORY.md") or path == "/MEMORY.md":
+        path = _tool_path_arg(args)
+        if _is_memory_path(path) or path.endswith("/MEMORY.md") or path == "/MEMORY.md":
             return "Updating memory"
         return f"edit_file({_shorten_path(path)})"
 
@@ -218,6 +231,36 @@ def format_tool_compact(name: str, args: dict | None) -> str:
         params_str = params_str[:47] + "\u2026"
 
     return f"{name}({params_str})"
+
+
+def format_tool_compact_with_result(
+    name: str,
+    args: dict | None,
+    result_content: str = "",
+) -> str:
+    """Format tool labels with a small amount of result-based inference.
+
+    Some providers stream sparse file-tool args, especially for memory reads
+    and edits. Reuse the CLI inference here so all frontends keep the same
+    display names.
+    """
+    compact = format_tool_compact(name, args)
+    name_lower = name.lower()
+    result_content = result_content or ""
+
+    if name_lower in ("write_file", "edit_file"):
+        if (
+            "/memory/" in result_content
+            or "/MEMORY.md" in result_content
+            or "MEMORY.md" in result_content
+        ):
+            return "Updating memory"
+    elif name_lower == "read_file":
+        path = _tool_path_arg(args)
+        if not path and "# EvoScientist Memory" in result_content:
+            return "Reading memory"
+
+    return compact
 
 
 def format_tree_output(lines: list[str], max_lines: int = 5, indent: str = "  ") -> str:

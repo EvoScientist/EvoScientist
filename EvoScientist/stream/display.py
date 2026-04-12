@@ -6,6 +6,7 @@ Also provides the shared console and formatter globals.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -30,7 +31,13 @@ from .state import (
     _build_todo_stats,
     _parse_todo_items,
 )
-from .utils import DisplayLimits, ToolStatus, format_tool_compact, is_success
+from .utils import (
+    DisplayLimits,
+    ToolStatus,
+    format_tool_compact,
+    format_tool_compact_with_result,
+    is_success,
+)
 
 # ---------------------------------------------------------------------------
 # Shared globals
@@ -174,21 +181,11 @@ def _render_tool_call_line(tc: dict, tr: dict | None) -> Text:
         style = "bold yellow" if not is_task else "bold cyan"
         indicator = "\u25b6" if is_task else ToolStatus.RUNNING.value
 
-    # Try to get display name from args first
-    tool_compact = format_tool_compact(tc["name"], tc.get("args"))
-
-    # If args were empty and we have a result, try to infer memory operations from result
-    tool_name = tc.get("name", "").lower()
-    if tool_name in ("write_file", "edit_file") and tr is not None:
-        result_content = tr.get("content", "")
-        if "/MEMORY.md" in result_content or "MEMORY.md" in result_content:
-            tool_compact = "Updating memory"
-    elif tool_name == "read_file" and tr is not None:
-        result_content = tr.get("content", "")
-        # read_file result doesn't contain path, check if args is empty and result looks like memory
-        args = tc.get("args") or {}
-        if not args.get("path") and "# EvoScientist Memory" in result_content:
-            tool_compact = "Reading memory"
+    tool_compact = format_tool_compact_with_result(
+        tc["name"],
+        tc.get("args"),
+        tr.get("content", "") if tr is not None else "",
+    )
 
     tool_text = Text()
     tool_text.append(f"{indicator} ", style=style)
@@ -226,9 +223,6 @@ def _render_subagent_section(sa: "SubAgentState", compact: bool = False) -> list
             completed.append((tc, tr))
         else:
             pending.append(tc)
-
-    succeeded = sum(1 for _, tr in completed if tr.get("success", True))
-    _ = len(completed) - succeeded  # failed count, unused for now
 
     # Build display name
     display_name = f"Cooking with {sa.name}"
@@ -394,7 +388,9 @@ def create_streaming_display(
     total_input_tokens: int = 0,
     total_output_tokens: int = 0,
     summarization_text: str = "",
+    is_summarizing: bool = False,
     selected_tools: list | None = None,
+    status_footer: Any | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -409,6 +405,8 @@ def create_streaming_display(
     # Initial waiting state
     if is_waiting and not thinking_text and not response_text and not tool_calls:
         elements.append(Spinner("dots", text=" Thinking...", style="cyan"))
+        if status_footer is not None:
+            elements.append(status_footer)
         return Group(*elements)
 
     # Thinking panel
@@ -454,16 +452,30 @@ def create_streaming_display(
         )
 
     # Summarization panel (context was compressed by LangGraph middleware)
-    if summarization_text:
+    if is_summarizing and not summarization_text:
+        elements.append(
+            Panel(
+                Text("Summarizing...", style="dim italic"),
+                title="Context Summarizing...",
+                border_style="#f59e0b",
+                padding=(0, 1),
+            )
+        )
+    elif summarization_text:
         summary_display = summarization_text.rstrip()
         n = len(summary_display)
         char_label = f"{n / 1000:.1f}k chars" if n >= 1000 else f"{n:,} chars"
         if n > 300:
             summary_display = summary_display[:300] + " ..."
+        title = (
+            f"Context Summarizing... ({char_label})"
+            if is_summarizing
+            else f"Context Summarized ({char_label})"
+        )
         elements.append(
             Panel(
                 Text(summary_display, style="dim italic"),
-                title=f"Context Summarized ({char_label})",
+                title=title,
                 border_style="#f59e0b",
                 padding=(0, 1),
             )
@@ -671,8 +683,25 @@ def create_streaming_display(
             elements.append(response_markdown or Markdown(response_text))
 
     if not elements:
-        return Group(Spinner("dots", text=" Processing...", style="cyan"))
+        elements.append(Spinner("dots", text=" Processing...", style="cyan"))
+    if status_footer is not None:
+        elements.append(status_footer)
     return Group(*elements)
+
+
+def resolve_final_status_footer(
+    interactive: bool,
+    status_footer_builder: Callable[[], Any] | None,
+) -> Any | None:
+    """Resolve the footer to keep in the last Live frame.
+
+    Interactive CLI sessions redraw prompt_toolkit's own bottom toolbar as soon
+    as Rich Live exits, so keeping the Rich footer in that final frame causes a
+    duplicate status bar.
+    """
+    if interactive:
+        return None
+    return status_footer_builder() if status_footer_builder else None
 
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1066,8 @@ def _run_streaming(
     on_thinking: Callable[[str], None] | None = None,
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
+    on_stream_event: Callable[[str, Any], Any] | None = None,
+    status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
@@ -1161,11 +1192,19 @@ def _run_streaming(
                             _media_sent.add(rf_path)
                             on_file_write(real_path)
 
+            if on_stream_event is not None:
+                callback_result = on_stream_event(event_type, state)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+
             live.update(
                 create_streaming_display(
                     **state.get_display_args(),
                     show_thinking=show_thinking,
                     response_markdown=state.get_response_markdown(),
+                    status_footer=(
+                        status_footer_builder() if status_footer_builder else None
+                    ),
                 )
             )
 
@@ -1175,7 +1214,14 @@ def _run_streaming(
         transient=False,
         vertical_overflow="visible",
     ) as live:
-        live.update(create_streaming_display(is_waiting=True))
+        live.update(
+            create_streaming_display(
+                is_waiting=True,
+                status_footer=(
+                    status_footer_builder() if status_footer_builder else None
+                ),
+            )
+        )
         # Determine how to run the async streaming coroutine.
         # - In TUI mode (Textual), there's already a running event loop;
         #   nest_asyncio is needed to allow run_until_complete inside it.
@@ -1232,6 +1278,9 @@ def _run_streaming(
                         **state.get_display_args(),
                         show_thinking=show_thinking,
                         response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
                     )
                 elif interactive:
                     final_display = create_streaming_display(
@@ -1240,6 +1289,9 @@ def _run_streaming(
                         is_final=True,
                         final_show_thinking=False,
                         response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
                     )
                 else:
                     final_display = create_streaming_display(
@@ -1249,6 +1301,9 @@ def _run_streaming(
                         final_show_thinking=True,
                         final_thinking_max_length=DisplayLimits.THINKING_FINAL,
                         response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
                     )
                 live.update(final_display)
                 live.refresh()
@@ -1278,6 +1333,8 @@ def _run_streaming(
             on_thinking=on_thinking,
             on_todo=on_todo,
             on_file_write=on_file_write,
+            on_stream_event=on_stream_event,
+            status_footer_builder=status_footer_builder,
             metadata=metadata,
             hitl_prompt_fn=hitl_prompt_fn,
             ask_user_prompt_fn=ask_user_prompt_fn,
@@ -1305,6 +1362,8 @@ def _run_streaming(
                 on_thinking=on_thinking,
                 on_todo=on_todo,
                 on_file_write=on_file_write,
+                on_stream_event=on_stream_event,
+                status_footer_builder=status_footer_builder,
                 metadata=metadata,
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,

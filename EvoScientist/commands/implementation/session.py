@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import ClassVar
 
 from rich.table import Table
@@ -15,14 +16,53 @@ class CompactCommand(Command):
     description = "Compact conversation to free context"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        from ...cli.commands import compact_conversation, render_compact_result
-
-        ctx.ui.append_system("Compacting conversation...")
-        result = await compact_conversation(
-            agent=ctx.agent,
-            thread_id=ctx.thread_id,
+        from ...cli.commands import (
+            build_compact_summary_renderable,
+            compact_conversation,
+            render_compact_result,
         )
+
+        start_indicator = getattr(ctx.ui, "start_compacting_indicator", None)
+        stop_indicator = getattr(ctx.ui, "stop_compacting_indicator", None)
+        using_indicator = callable(start_indicator) and callable(stop_indicator)
+
+        if using_indicator:
+            maybe = start_indicator()
+            if inspect.isawaitable(maybe):
+                await maybe
+        else:
+            ctx.ui.append_system("Compacting conversation...")
+
+        try:
+            result = await compact_conversation(
+                agent=ctx.agent,
+                thread_id=ctx.thread_id,
+                input_tokens_hint=ctx.input_tokens_hint,
+            )
+        finally:
+            if using_indicator:
+                maybe = stop_indicator()
+                if inspect.isawaitable(maybe):
+                    await maybe
+
         ctx.ui.mount_renderable(render_compact_result(result))
+        summary_renderable = build_compact_summary_renderable(result)
+        if summary_renderable is not None:
+            ctx.ui.mount_renderable(summary_renderable)
+        # Push the reduced token count to the status bar immediately so it
+        # reflects the new context without waiting for the next LLM call.
+        # Only when input_tokens_hint was available: tokens_after is then
+        # LLM-level (includes system + tool overhead), matching the unit that
+        # _status_last_input_tokens expects. Without a hint, tokens_after is
+        # message-level only and would produce a misleadingly low reading.
+        if (
+            result.status == "ok"
+            and result.tokens_after > 0
+            and ctx.input_tokens_hint is not None
+        ):
+            update_fn = getattr(ctx.ui, "update_status_after_compact", None)
+            if callable(update_fn):
+                update_fn(result.tokens_after)
 
 
 class ThreadsCommand(Command):
@@ -89,7 +129,6 @@ class ResumeCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-
         from ...sessions import (
             get_thread_metadata,
             list_threads,

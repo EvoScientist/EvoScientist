@@ -10,7 +10,7 @@ from textual.events import Click
 from textual.widgets import Static
 
 from ...stream.diff_format import build_edit_diff
-from ...stream.utils import format_tool_compact
+from ...stream.utils import format_tool_compact_with_result
 from .timestamp_mixin import show_timestamp_toast
 
 _SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
@@ -100,7 +100,11 @@ class ToolCallWidget(Vertical):
             self._render_status()
 
     def _render_header(self) -> None:
-        compact = format_tool_compact(self._tool_name, self._tool_args)
+        compact = format_tool_compact_with_result(
+            self._tool_name,
+            self._tool_args,
+            self._result_content,
+        )
         header = self.query_one(".tool-header", Static)
         line = Text()
         if self._status == "running":

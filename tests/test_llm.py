@@ -144,7 +144,7 @@ class TestGetModelInfo:
     def test_returns_correct_info(self):
         """Test that get_model_info returns correct info."""
         model_id, provider = get_model_info("gpt-5-nano")
-        assert model_id == "gpt-5-nano-2025-08-07"
+        assert model_id == "gpt-5-nano"
         assert provider == "openai"
 
 
@@ -187,7 +187,7 @@ class TestGetChatModel:
         get_chat_model("gpt-5-mini")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "gpt-5-mini-2025-08-07"
+        assert call_kwargs["model"] == "gpt-5-mini"
         assert call_kwargs["model_provider"] == "openai"
 
     @patch("EvoScientist.llm.models.init_chat_model")

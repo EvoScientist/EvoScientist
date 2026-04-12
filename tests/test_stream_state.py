@@ -664,6 +664,8 @@ class TestUsageStatsAccumulated:
         )
         assert state.total_input_tokens == 100
         assert state.total_output_tokens == 50
+        assert state.last_input_tokens == 100
+        assert state.last_output_tokens == 50
 
     def test_multiple_usage_events_accumulate(self):
         state = StreamState()
@@ -675,6 +677,21 @@ class TestUsageStatsAccumulated:
         )
         assert state.total_input_tokens == 300
         assert state.total_output_tokens == 130
+        assert state.last_input_tokens == 200
+        assert state.last_output_tokens == 80
+
+    def test_zero_usage_event_does_not_clear_last_seen_values(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "usage_stats", "input_tokens": 100, "output_tokens": 50}
+        )
+        state.handle_event(
+            {"type": "usage_stats", "input_tokens": 0, "output_tokens": 0}
+        )
+        assert state.total_input_tokens == 100
+        assert state.total_output_tokens == 50
+        assert state.last_input_tokens == 100
+        assert state.last_output_tokens == 50
 
     def test_usage_stats_in_display_args(self):
         state = StreamState()

@@ -5,6 +5,7 @@ import logging
 import queue
 import random
 import sys
+from datetime import datetime
 from typing import Any
 
 import typer  # type: ignore[import-untyped]
@@ -59,6 +60,23 @@ from .skills_cmd import (
     _cmd_install_skills,
     _cmd_list_skills,
     _cmd_uninstall_skill,
+)
+from .status_bar import (
+    STATUS_BAD,
+    STATUS_BAR_BG,
+    STATUS_CRITICAL,
+    STATUS_DIM,
+    STATUS_GOOD,
+    STATUS_STRONG,
+    STATUS_TEXT,
+    STATUS_WARN,
+    apply_assistant_text_to_snapshot,
+    apply_user_text_to_snapshot,
+    build_session_status_snapshot,
+    build_status_fragments,
+    build_status_text,
+    make_empty_status_snapshot,
+    make_usage_status_snapshot,
 )
 from .tui_interactive import run_textual_interactive
 from .tui_runtime import resolve_ui_backend, run_streaming
@@ -156,6 +174,13 @@ _COMPLETION_STYLE = PtStyle.from_dict(
         "completion-menu.meta.completion.current": "bg:default default bold noreverse",
         "scrollbar.background": "bg:default",
         "scrollbar.button": "bg:default",
+        "status-bar": f"bg:{STATUS_BAR_BG} {STATUS_TEXT}",
+        "status-bar-strong": f"bg:{STATUS_BAR_BG} {STATUS_STRONG} bold",
+        "status-bar-dim": f"bg:{STATUS_BAR_BG} {STATUS_DIM}",
+        "status-bar-good": f"bg:{STATUS_BAR_BG} {STATUS_GOOD} bold",
+        "status-bar-warn": f"bg:{STATUS_BAR_BG} {STATUS_WARN} bold",
+        "status-bar-bad": f"bg:{STATUS_BAR_BG} {STATUS_BAD} bold",
+        "status-bar-critical": f"bg:{STATUS_BAR_BG} {STATUS_CRITICAL} bold",
     }
 )
 
@@ -312,7 +337,101 @@ def cmd_interactive(
         "running": True,
         "resumed": False,
         "ui_backend": resolved_ui_backend,
+        "status_started_at": datetime.now(),
+        "status_base_snapshot": make_empty_status_snapshot(model),
+        "status_snapshot": make_empty_status_snapshot(model),
+        "status_streaming_text": "",
+        "status_last_input_tokens": None,
     }
+
+    def _rebuild_status_snapshot() -> None:
+        """Compose the visible snapshot from thread state + live output."""
+        state["status_snapshot"] = apply_assistant_text_to_snapshot(
+            state["status_base_snapshot"],
+            state["status_streaming_text"],
+        )
+
+    def _set_status_streaming_text(text: str | None) -> None:
+        """Update the in-flight assistant overlay used by the status bar."""
+        new_text = text or ""
+        if new_text == state["status_streaming_text"]:
+            return
+        state["status_streaming_text"] = new_text
+        _rebuild_status_snapshot()
+
+    async def _refresh_status_snapshot(
+        pending_user_text: str | None = None,
+        *,
+        reset_streaming_text: bool = True,
+    ) -> None:
+        """Recompute the persistent status-bar snapshot for the active thread."""
+        pending = (pending_user_text or "").strip()
+        if pending:
+            if state["status_last_input_tokens"] is not None:
+                state["status_base_snapshot"] = apply_user_text_to_snapshot(
+                    make_usage_status_snapshot(
+                        state["status_last_input_tokens"],
+                        model_name=model,
+                    ),
+                    pending,
+                )
+            else:
+                state["status_base_snapshot"] = await build_session_status_snapshot(
+                    state["thread_id"],
+                    model_name=model,
+                    pending_user_text=pending,
+                )
+        elif state["status_last_input_tokens"] is not None:
+            state["status_base_snapshot"] = make_usage_status_snapshot(
+                state["status_last_input_tokens"],
+                model_name=model,
+            )
+        else:
+            state["status_base_snapshot"] = await build_session_status_snapshot(
+                state["thread_id"],
+                model_name=model,
+            )
+        if reset_streaming_text:
+            state["status_streaming_text"] = ""
+        _rebuild_status_snapshot()
+
+    def _bottom_toolbar():
+        """Render the persistent bottom status bar for prompt_toolkit."""
+        try:
+            from prompt_toolkit.application import get_app
+
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = console.size.width
+        return build_status_fragments(
+            state["status_snapshot"],
+            state["status_started_at"],
+            width,
+        )
+
+    def _stream_status_footer():
+        """Render the live Rich footer used during streaming output."""
+        return build_status_text(
+            state["status_snapshot"],
+            state["status_started_at"],
+            console.size.width,
+        )
+
+    async def _handle_stream_status_event(event_type: str, stream_state) -> None:
+        """Keep the CLI status bar aligned with live stream progress."""
+        if event_type == "usage_stats":
+            last_input_tokens = getattr(stream_state, "last_input_tokens", 0)
+            if last_input_tokens > 0:
+                state["status_last_input_tokens"] = last_input_tokens
+                state["status_base_snapshot"] = make_usage_status_snapshot(
+                    last_input_tokens,
+                    model_name=model,
+                )
+                _rebuild_status_snapshot()
+        elif event_type == "text":
+            _set_status_streaming_text(stream_state.response_text)
+        elif event_type == "done":
+            _set_status_streaming_text("")
 
     async def _resolve_thread_id(tid: str) -> str | None:
         """Resolve a (possibly partial) thread ID. Returns full ID or None."""
@@ -517,12 +636,15 @@ def cmd_interactive(
         state["resumed"] = True
         if ws:
             state["workspace_dir"] = ws
+        state["status_started_at"] = datetime.now()
+        state["status_last_input_tokens"] = None
         console.print("[dim]Loading session...[/dim]")
         state["agent"] = _load_agent(
             workspace_dir=state["workspace_dir"],
             checkpointer=checkpointer,
             config=config,
         )
+        await _refresh_status_snapshot(reset_streaming_text=True)
         # Sync shared refs if channel is running
         if _channels_is_running():
             _ch_mod._cli_agent = state["agent"]
@@ -563,6 +685,8 @@ def cmd_interactive(
                     ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
                     state["thread_id"] = resolved
                     state["resumed"] = True
+                    state["status_started_at"] = datetime.now()
+                    state["status_last_input_tokens"] = None
                     if ws:
                         state["workspace_dir"] = ws
 
@@ -572,6 +696,7 @@ def cmd_interactive(
                 checkpointer=checkpointer,
                 config=config,
             )
+            await _refresh_status_snapshot(reset_streaming_text=True)
 
             # Print banner
             if state["resumed"]:
@@ -690,6 +815,9 @@ def cmd_interactive(
 
                 meta = build_metadata(state["workspace_dir"], model)
                 try:
+                    await _refresh_status_snapshot(
+                        msg.content, reset_streaming_text=True
+                    )
                     response = run_streaming(
                         ui_backend=state["ui_backend"],
                         agent=state["agent"],
@@ -703,12 +831,15 @@ def cmd_interactive(
                         on_file_write=_send_media_to_channel,
                         hitl_prompt_fn=_channel_hitl_prompt,
                         ask_user_prompt_fn=_channel_ask_user,
+                        on_stream_event=_handle_stream_status_event,
+                        status_footer_builder=_stream_status_footer,
                     )
                 except Exception as e:
                     response = f"Error: {e}"
                     console.print(f"[red]Channel error: {e}[/red]")
 
                 _set_channel_response(msg.msg_id, response)
+                await _refresh_status_snapshot(reset_streaming_text=True)
 
                 tx = Text()
                 tx.append(f"[{msg.channel_type}: Replied to ", style="dim")
@@ -793,7 +924,9 @@ def cmd_interactive(
                 while state["running"]:
                     try:
                         user_input = await session.prompt_async(
-                            HTML("<ansiblue><b>\u276f</b></ansiblue> ")
+                            HTML("<ansiblue><b>\u276f</b></ansiblue> "),
+                            bottom_toolbar=_bottom_toolbar,
+                            refresh_interval=1.0,
                         )
                         user_input = user_input.strip()
 
@@ -839,6 +972,9 @@ def cmd_interactive(
                             )
                             state["thread_id"] = generate_thread_id()
                             state["resumed"] = False
+                            state["status_started_at"] = datetime.now()
+                            state["status_last_input_tokens"] = None
+                            await _refresh_status_snapshot(reset_streaming_text=True)
                             # Sync channel refs so the queue checker uses the new agent
                             if _channels_is_running():
                                 _ch_mod._cli_agent = state["agent"]
@@ -909,6 +1045,7 @@ def cmd_interactive(
 
                         if user_input.lower() == "/compact":
                             from .commands import (
+                                build_compact_summary_renderable,
                                 compact_conversation,
                                 render_compact_result,
                             )
@@ -919,8 +1056,19 @@ def cmd_interactive(
                                 result = await compact_conversation(
                                     agent=state["agent"],
                                     thread_id=state["thread_id"],
+                                    input_tokens_hint=state.get(
+                                        "status_last_input_tokens"
+                                    ),
                                 )
                             console.print(render_compact_result(result))
+                            summary_renderable = build_compact_summary_renderable(
+                                result
+                            )
+                            if summary_renderable is not None:
+                                console.print(summary_renderable)
+                            await _refresh_status_snapshot(
+                                reset_streaming_text=True,
+                            )
                             continue
 
                         # Resolve @file mentions — inject file contents inline
@@ -935,6 +1083,9 @@ def cmd_interactive(
                             console.print(f"[yellow]⚠ {escape(w)}[/yellow]")
                         console.print()
                         meta = build_metadata(state["workspace_dir"], model)
+                        await _refresh_status_snapshot(
+                            message_to_send, reset_streaming_text=True
+                        )
                         run_streaming(
                             ui_backend=state["ui_backend"],
                             agent=state["agent"],
@@ -943,7 +1094,10 @@ def cmd_interactive(
                             show_thinking=show_thinking,
                             interactive=True,
                             metadata=meta,
+                            on_stream_event=_handle_stream_status_event,
+                            status_footer_builder=_stream_status_footer,
                         )
+                        await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
                         _print_separator()
 

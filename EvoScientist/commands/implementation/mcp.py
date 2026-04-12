@@ -13,7 +13,6 @@ class MCPCommand(Command):
     description = "Manage MCP servers"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-
         if not args or args[0] == "list":
             await self._mcp_list(ctx)
             return

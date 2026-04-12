@@ -55,7 +55,9 @@ class CommandContext:
     workspace_dir: str | None = None
     checkpointer: Any = None
     config: Any = None
-    # Add other fields as needed (e.g., current model, provider)
+    # Real LLM input token count from last usage_metadata (includes system
+    # prompt + tool schemas).  Used by /compact for accurate display.
+    input_tokens_hint: int | None = None
 
 
 class Command(ABC):

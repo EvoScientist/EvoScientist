@@ -92,9 +92,9 @@ def package_skill(skill_path, output_dir=None):
 
     # Create the .skill file (zip format)
     try:
-        with zipfile.ZipFile(skill_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(skill_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
             # Walk through the skill directory, excluding build artifacts
-            for file_path in skill_path.rglob('*'):
+            for file_path in skill_path.rglob("*"):
                 if not file_path.is_file():
                     continue
                 arcname = file_path.relative_to(skill_path.parent)
@@ -114,12 +114,17 @@ def package_skill(skill_path, output_dir=None):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(
         description="Package a skill folder into a distributable .skill file"
     )
     parser.add_argument("skill_path", help="Path to the skill folder")
-    parser.add_argument("output_dir", nargs="?", default=None,
-                        help="Output directory for the .skill file (default: current directory)")
+    parser.add_argument(
+        "output_dir",
+        nargs="?",
+        default=None,
+        help="Output directory for the .skill file (default: current directory)",
+    )
     args = parser.parse_args()
 
     print(f"📦 Packaging skill: {args.skill_path}")

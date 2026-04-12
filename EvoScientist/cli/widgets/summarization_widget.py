@@ -15,13 +15,14 @@ from __future__ import annotations
 from rich.panel import Panel
 from rich.text import Text
 from textual.events import Click
-from textual.widgets import Static
+
+from .timed_status_widget import TimedStatusWidget
 
 _MAX_COLLAPSED_CHARS = 80
 _MAX_EXPANDED_CHARS = 3000
 
 
-class SummarizationWidget(Static):
+class SummarizationWidget(TimedStatusWidget):
     """Collapsible panel showing context summarization.
 
     Streams text via ``append_text()`` (shows live spinner while active).
@@ -44,10 +45,13 @@ class SummarizationWidget(Static):
     """
 
     def __init__(self) -> None:
-        super().__init__("")
+        super().__init__()
         self._content = ""
         self._collapsed = True
         self._is_active = True  # still receiving chunks
+
+    def _should_tick(self) -> bool:
+        return self._is_active
 
     def _char_count_label(self) -> str:
         n = len(self._content)
@@ -56,12 +60,13 @@ class SummarizationWidget(Static):
         return f"{n:,} chars"
 
     def _refresh_display(self) -> None:
+        secs = self.elapsed_seconds
         if not self._content:
             if self._is_active:
                 self.update(
                     Panel(
                         Text("Summarizing...", style="dim italic"),
-                        title="Context Summarizing",
+                        title=f"Context Summarizing... ({secs}s)",
                         border_style="#f59e0b",
                         padding=(0, 1),
                     )
@@ -72,7 +77,7 @@ class SummarizationWidget(Static):
 
         if self._is_active:
             # While streaming: show latest content tail (like thinking widget)
-            title = "Context Summarizing..."
+            title = f"Context Summarizing... ({secs}s)"
             tail = self._content.rstrip()
             if len(tail) > 200:
                 tail = tail[-200:]
@@ -110,6 +115,7 @@ class SummarizationWidget(Static):
         """Mark streaming as complete — switch to collapsed preview."""
         self._is_active = False
         self._collapsed = True
+        self._stop_timer()
         self._refresh_display()
 
     def set_content(self, text: str) -> None:

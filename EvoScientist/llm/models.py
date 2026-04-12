@@ -80,16 +80,16 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-sonnet-4-5", "claude-sonnet-4-5", "anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # OpenAI
-    ("gpt-5.4", "gpt-5.4-2026-03-05", "openai"),
+    ("gpt-5.4", "gpt-5.4", "openai"),
     ("gpt-5.4-mini", "gpt-5.4-mini", "openai"),
     ("gpt-5.4-nano", "gpt-5.4-nano", "openai"),
     ("gpt-5.3-codex", "gpt-5.3-codex", "openai"),
     ("gpt-5.2-codex", "gpt-5.2-codex", "openai"),
-    ("gpt-5.2", "gpt-5.2-2025-12-11", "openai"),
-    ("gpt-5.1", "gpt-5.1-2025-11-13", "openai"),
-    ("gpt-5", "gpt-5-2025-08-07", "openai"),
-    ("gpt-5-mini", "gpt-5-mini-2025-08-07", "openai"),
-    ("gpt-5-nano", "gpt-5-nano-2025-08-07", "openai"),
+    ("gpt-5.2", "gpt-5.2", "openai"),
+    ("gpt-5.1", "gpt-5.1", "openai"),
+    ("gpt-5", "gpt-5", "openai"),
+    ("gpt-5-mini", "gpt-5-mini", "openai"),
+    ("gpt-5-nano", "gpt-5-nano", "openai"),
     # Google GenAI
     ("gemini-3.1-pro", "gemini-3.1-pro-preview", "google-genai"),
     (

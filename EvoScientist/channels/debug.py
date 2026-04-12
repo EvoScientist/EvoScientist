@@ -68,7 +68,7 @@ def _stringify(value: Any) -> str:
         return value.replace("\n", "\\n")
     if isinstance(value, Mapping):
         return f"<map:{len(value)}>"
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return f"<seq:{len(value)}>"
     return str(value).replace("\n", "\\n")
 

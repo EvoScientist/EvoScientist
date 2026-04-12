@@ -61,11 +61,10 @@ class TestCompactCutoffZero:
         mock_middleware_inst._determine_cutoff_index.return_value = 0
 
         mock_middleware_cls = MagicMock(return_value=mock_middleware_inst)
+        model = SimpleNamespace(profile={"max_input_tokens": 1000})
 
         with (
-            patch(
-                "EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()
-            ),
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
             patch(
                 "EvoScientist.EvoScientist._get_default_backend",
                 return_value=MagicMock(),
@@ -110,14 +109,13 @@ class TestCompactNegligibleSavings:
         mock_middleware_inst._partition_messages.return_value = (msgs[:1], msgs[1:])
 
         mock_middleware_cls = MagicMock(return_value=mock_middleware_inst)
+        model = SimpleNamespace(profile={"max_input_tokens": 50_000})
 
-        # to_summarize=200, to_keep=22000 → total=22200, 200/22200 < 2%
-        token_values = iter([200, 22000])
+        # effective=22200 (44%), to_summarize=200, to_keep=22000 → 200/22200 < 2%
+        token_values = iter([22_200, 200, 22_000])
 
         with (
-            patch(
-                "EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()
-            ),
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
             patch(
                 "EvoScientist.EvoScientist._get_default_backend",
                 return_value=MagicMock(),
@@ -168,14 +166,13 @@ class TestCompactNegligibleSavings:
         mock_middleware_inst._compute_state_cutoff.return_value = 2
 
         mock_middleware_cls = MagicMock(return_value=mock_middleware_inst)
+        model = SimpleNamespace(profile={"max_input_tokens": 40_000})
 
-        # to_summarize=5000, to_keep=15000 → total=20000, 5000/20000=25% > 2%
-        token_values = iter([5000, 15000, 500])
+        # effective=20000 (50%), to_summarize=5000, to_keep=15000 → 25% > 2%
+        token_values = iter([20_000, 5_000, 15_000, 500])
 
         with (
-            patch(
-                "EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()
-            ),
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
             patch(
                 "EvoScientist.EvoScientist._get_default_backend",
                 return_value=MagicMock(),
@@ -201,6 +198,48 @@ class TestCompactNegligibleSavings:
 
 class TestCompactSuccess:
     """Normal compaction flow."""
+
+    def test_manual_threshold_blocks_low_context_compaction(self):
+        from EvoScientist.cli.commands import compact_conversation
+
+        agent = MagicMock()
+        msgs = [MagicMock() for _ in range(20)]
+        snapshot = SimpleNamespace(
+            values={"messages": msgs, "_summarization_event": None}
+        )
+        agent.aget_state = AsyncMock(return_value=snapshot)
+
+        mock_middleware_inst = MagicMock()
+        mock_middleware_inst._apply_event_to_messages.return_value = msgs
+        mock_middleware_cls = MagicMock(return_value=mock_middleware_inst)
+        model = SimpleNamespace(profile={"max_input_tokens": 100_000})
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
+            patch(
+                "EvoScientist.EvoScientist._get_default_backend",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deepagents.middleware.summarization.SummarizationMiddleware",
+                mock_middleware_cls,
+            ),
+            patch(
+                "deepagents.middleware.summarization.compute_summarization_defaults",
+                return_value={"keep": ("messages", 6)},
+            ),
+            patch(
+                "langchain_core.messages.utils.count_tokens_approximately",
+                return_value=30_000,
+            ),
+        ):
+            result = _run(compact_conversation(agent=agent, thread_id="tid-1"))
+
+        assert result.status == "noop"
+        assert "40%" in result.message
+        assert result.context_percent == 30
+        mock_middleware_inst._determine_cutoff_index.assert_not_called()
+        mock_middleware_inst._acreate_summary.assert_not_called()
 
     def test_successful_compaction(self):
         from langchain_core.messages import HumanMessage
@@ -231,14 +270,13 @@ class TestCompactSuccess:
         mock_middleware_inst._compute_state_cutoff.return_value = 15
 
         mock_middleware_cls = MagicMock(return_value=mock_middleware_inst)
+        model = SimpleNamespace(profile={"max_input_tokens": 10_000})
 
-        # count_tokens_approximately returns different values per call
-        token_values = iter([5000, 1000, 200])
+        # effective=6000 (60%), then summarize/keep/summary accounting
+        token_values = iter([6000, 5000, 1000, 200])
 
         with (
-            patch(
-                "EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()
-            ),
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
             patch(
                 "EvoScientist.EvoScientist._get_default_backend",
                 return_value=MagicMock(),
@@ -264,6 +302,9 @@ class TestCompactSuccess:
         assert result.tokens_before == 6000
         assert result.tokens_after == 1200
         assert result.pct_decrease == 80
+        # context_percent reflects usage AFTER compact (12%), not before (60%)
+        assert result.context_percent == 12
+        assert result.summary_text == "Summary text"
         agent.aupdate_state.assert_awaited_once()
 
         # Verify the event structure passed to aupdate_state
@@ -300,11 +341,10 @@ class TestCompactSuccess:
         mock_middleware_inst._compute_state_cutoff.return_value = 7
 
         mock_middleware_cls = MagicMock(return_value=mock_middleware_inst)
+        model = SimpleNamespace(profile={"max_input_tokens": 2_000})
 
         with (
-            patch(
-                "EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()
-            ),
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
             patch(
                 "EvoScientist.EvoScientist._get_default_backend",
                 return_value=MagicMock(),
@@ -360,6 +400,75 @@ class TestRenderCompactResult:
         text = render_compact_result(result)
         assert "Failed to read state" in text.plain
 
+
+class TestCompactCommandUI:
+    """TUI-specific compact progress indicator behavior."""
+
+    def test_command_uses_tui_indicator_when_available(self):
+        from EvoScientist.cli.commands import CompactResult
+        from EvoScientist.commands.base import CommandContext
+        from EvoScientist.commands.implementation.session import CompactCommand
+
+        class _UI:
+            supports_interactive = True
+
+            def __init__(self) -> None:
+                self.system_messages: list[str] = []
+                self.renderables: list[object] = []
+                self.started = 0
+                self.stopped = 0
+                self.updated_tokens: list[int] = []
+
+            def append_system(self, text: str, style: str = "dim") -> None:
+                self.system_messages.append(text)
+
+            def mount_renderable(self, renderable):
+                self.renderables.append(renderable)
+
+            async def start_compacting_indicator(self) -> None:
+                self.started += 1
+
+            async def stop_compacting_indicator(self) -> None:
+                self.stopped += 1
+
+            def update_status_after_compact(self, tokens_after: int) -> None:
+                self.updated_tokens.append(tokens_after)
+
+        ui = _UI()
+        # input_tokens_hint must be set for update_status_after_compact to fire
+        # (without it, tokens_after is message-level and the unit would be wrong)
+        ctx = CommandContext(
+            agent=MagicMock(), thread_id="tid-1", ui=ui, input_tokens_hint=5000
+        )
+        result = CompactResult(
+            "ok",
+            "Compacted",
+            tokens_after=1200,
+            summary_text="summary body",
+        )
+
+        with (
+            patch(
+                "EvoScientist.cli.commands.compact_conversation",
+                AsyncMock(return_value=result),
+            ),
+            patch(
+                "EvoScientist.cli.commands.render_compact_result",
+                return_value="result-panel",
+            ),
+            patch(
+                "EvoScientist.cli.commands.build_compact_summary_renderable",
+                return_value="summary-panel",
+            ),
+        ):
+            _run(CompactCommand().execute(ctx, []))
+
+        assert ui.started == 1
+        assert ui.stopped == 1
+        assert ui.system_messages == []
+        assert ui.renderables == ["result-panel", "summary-panel"]
+        assert ui.updated_tokens == [1200]
+
     def test_render_ok(self):
         from EvoScientist.cli.commands import CompactResult, render_compact_result
 
@@ -373,6 +482,8 @@ class TestRenderCompactResult:
             tokens_summarized=5000,
             tokens_summary=200,
             pct_decrease=80,
+            context_window=10_000,
+            context_percent=60,
         )
         text = render_compact_result(result)
         plain = text.plain
@@ -381,6 +492,19 @@ class TestRenderCompactResult:
         assert "1,200" in plain
         assert "80%" in plain
         assert "5 messages unchanged" in plain
+        assert "60% used" in plain
+
+    def test_build_compact_summary_renderable(self):
+        from EvoScientist.cli.commands import (
+            CompactResult,
+            build_compact_summary_renderable,
+        )
+
+        result = CompactResult("ok", "Compacted", summary_text="Summary body")
+        renderable = build_compact_summary_renderable(result)
+
+        assert renderable is not None
+        assert renderable.summary_text == "Summary body"
 
     def test_str_fallback(self):
         from EvoScientist.cli.commands import CompactResult

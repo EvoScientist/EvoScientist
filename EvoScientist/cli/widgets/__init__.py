@@ -3,6 +3,8 @@
 from .approval_widget import ApprovalWidget
 from .ask_user_widget import AskUserWidget
 from .assistant_message import AssistantMessage
+from .compact_summary_widget import CompactSummaryWidget
+from .compacting_widget import CompactingWidget
 from .loading_widget import LoadingWidget
 from .subagent_widget import SubAgentWidget
 from .summarization_widget import SummarizationWidget
@@ -18,6 +20,8 @@ __all__ = [
     "ApprovalWidget",
     "AskUserWidget",
     "AssistantMessage",
+    "CompactSummaryWidget",
+    "CompactingWidget",
     "LoadingWidget",
     "SubAgentWidget",
     "SummarizationWidget",

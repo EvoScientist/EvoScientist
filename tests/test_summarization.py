@@ -25,6 +25,11 @@ class TestSummarizationEmitter:
         ev = StreamEventEmitter.summarization("")
         assert ev.data["content"] == ""
 
+    def test_start_event(self):
+        ev = StreamEventEmitter.summarization_start()
+        assert ev.type == "summarization_start"
+        assert ev.data["type"] == "summarization_start"
+
 
 # ---------------------------------------------------------------------------
 # StreamState
@@ -37,12 +42,20 @@ class TestSummarizationState:
     def test_initial_state(self):
         state = StreamState()
         assert state.summarization_text == ""
+        assert state.is_summarizing is False
+
+    def test_handle_summarization_start(self):
+        state = StreamState()
+        etype = state.handle_event({"type": "summarization_start"})
+        assert etype == "summarization_start"
+        assert state.is_summarizing is True
 
     def test_handle_summarization(self):
         state = StreamState()
         etype = state.handle_event({"type": "summarization", "content": "summary"})
         assert etype == "summarization"
         assert state.summarization_text == "summary"
+        assert state.is_summarizing is True
 
     def test_accumulates_chunks(self):
         """Summarization chunks are accumulated (streaming)."""
@@ -57,6 +70,7 @@ class TestSummarizationState:
         args = state.get_display_args()
         assert "summarization_text" in args
         assert args["summarization_text"] == "ctx"
+        assert args["is_summarizing"] is True
 
     def test_does_not_affect_thinking(self):
         state = StreamState()
@@ -71,6 +85,13 @@ class TestSummarizationState:
         state.handle_event({"type": "summarization", "content": "sum"})
         assert state.response_text == "hello"
         assert state.summarization_text == "sum"
+
+    def test_text_ends_summarizing_state(self):
+        state = StreamState()
+        state.handle_event({"type": "summarization_start"})
+        state.handle_event({"type": "summarization", "content": "sum"})
+        state.handle_event({"type": "text", "content": "hello"})
+        assert state.is_summarizing is False
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +131,28 @@ class TestSummarizationRichDisplay:
         rendered = _render_group(group)
         assert "Context Summarized" in rendered
 
+    def test_panel_rendered_while_summarizing(self):
+        from EvoScientist.stream.display import create_streaming_display
+
+        group = create_streaming_display(
+            summarization_text="The conversation was about ML.",
+            is_summarizing=True,
+            response_text="ok",
+        )
+        rendered = _render_group(group)
+        assert "Context Summarizing..." in rendered
+
+    def test_panel_rendered_start_placeholder(self):
+        from EvoScientist.stream.display import create_streaming_display
+
+        group = create_streaming_display(
+            summarization_text="",
+            is_summarizing=True,
+            response_text="ok",
+        )
+        rendered = _render_group(group)
+        assert "Context Summarizing..." in rendered
+
     def test_long_text_truncated(self):
         from EvoScientist.stream.display import create_streaming_display
 
@@ -136,6 +179,8 @@ class TestSummarizationWidget:
         w = SummarizationWidget()
         assert w._collapsed is True
         assert w._content == ""
+        assert w._elapsed == 0.0
+        assert w._timer_handle is None
 
     def test_set_content(self):
         from EvoScientist.cli.widgets.summarization_widget import SummarizationWidget
@@ -170,11 +215,22 @@ class TestSummarizationWidget:
     def test_finalize(self):
         from EvoScientist.cli.widgets.summarization_widget import SummarizationWidget
 
+        class _Timer:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
         w = SummarizationWidget()
         w.append_text("some summary")
+        timer = _Timer()
+        w._timer_handle = timer
         w.finalize()
         assert w._is_active is False
         assert w._collapsed is True
+        assert timer.stopped is True
+        assert w._timer_handle is None
 
     def test_toggle_collapsed(self):
         from EvoScientist.cli.widgets.summarization_widget import SummarizationWidget
@@ -185,6 +241,31 @@ class TestSummarizationWidget:
         assert w._collapsed is False
         w._collapsed = not w._collapsed
         assert w._collapsed is True
+
+
+class TestCompactSummaryWidget:
+    """CompactSummaryWidget (manual /compact result panel)."""
+
+    def test_init_collapsed(self):
+        from EvoScientist.cli.widgets.compact_summary_widget import CompactSummaryWidget
+
+        w = CompactSummaryWidget("summary content")
+        assert w._collapsed is True
+        assert w._content == "summary content"
+
+    def test_char_count_label(self):
+        from EvoScientist.cli.widgets.compact_summary_widget import CompactSummaryWidget
+
+        w = CompactSummaryWidget("hello")
+        assert w._char_count_label() == "5 chars"
+
+    def test_toggle_collapsed(self):
+        from EvoScientist.cli.widgets.compact_summary_widget import CompactSummaryWidget
+
+        w = CompactSummaryWidget("hello world")
+        assert w._collapsed is True
+        w._collapsed = not w._collapsed
+        assert w._collapsed is False
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ from .utils import DisplayLimits, is_success
 # Safety net: older ccproxy versions may embed thinking as XML tags in content
 # strings.  Strip them so they never leak to users or channels.
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
+_SUMMARY_TAG_RE = re.compile(
+    r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE
+)
 
 
 def _strip_legacy_thinking_tags(content: str) -> str:
@@ -101,12 +104,84 @@ def _extract_summarization_text(msg: Any) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
             elif isinstance(block, str):
                 parts.append(block)
         return "".join(parts)
     return ""
+
+
+def _extract_summary_message_text(summary_message: Any) -> str:
+    """Extract user-facing summary text from a stored summarization event.
+
+    DeepAgents persists summary messages as ``HumanMessage`` objects with wrapper
+    text like ``Here is a summary of the conversation to date:`` or an XML-ish
+    ``<summary>...</summary>`` block.  For UI display we only want the summary
+    body itself.
+    """
+    text = _extract_summarization_text(summary_message)
+    if not text:
+        return ""
+
+    match = _SUMMARY_TAG_RE.search(text)
+    if match:
+        return match.group(1).strip()
+
+    prefix = "Here is a summary of the conversation to date:"
+    if text.startswith(prefix):
+        return text[len(prefix) :].strip()
+
+    return text.strip()
+
+
+def _find_summarization_event_payload(data: Any) -> dict[str, Any] | None:
+    """Find a `_summarization_event` dict anywhere inside an updates payload."""
+    seen: set[int] = set()
+    stack: list[Any] = [data]
+
+    while stack:
+        item = stack.pop()
+        item_id = id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+
+        if isinstance(item, dict):
+            event = item.get("_summarization_event")
+            if isinstance(event, dict):
+                return event
+            stack.extend(item.values())
+            continue
+
+        if isinstance(item, list | tuple):
+            stack.extend(item)
+            continue
+
+        if hasattr(item, "__dict__"):
+            try:
+                stack.append(vars(item))
+            except TypeError:
+                pass
+
+    return None
+
+
+def _summarization_event_signature(
+    event: dict[str, Any] | None,
+) -> tuple[Any, ...] | None:
+    """Build a stable signature for a persisted summarization event."""
+    if not isinstance(event, dict):
+        return None
+    summary_message = event.get("summary_message")
+    summary_text = _extract_summary_message_text(summary_message)
+    return (
+        event.get("cutoff_index"),
+        event.get("file_path"),
+        summary_text,
+    )
 
 
 async def stream_agent_events(
@@ -361,9 +436,22 @@ async def stream_agent_events(
         astream_input = message
 
     _summarization_in_progress = False
+    _baseline_summarization_signature: tuple[Any, ...] | None = None
     _tool_selection_suppressing = False  # True while buffering selector JSON
     _tool_selection_buffer = ""  # accumulates JSON chunks for parse attempt
     _tool_selection_was_active = False  # True after suppression, triggers Panel
+
+    if hasattr(agent, "aget_state"):
+        try:
+            snapshot = await agent.aget_state(config)
+            values = getattr(snapshot, "values", None)
+            if isinstance(values, dict):
+                baseline_event = _find_summarization_event_payload(values)
+                _baseline_summarization_signature = _summarization_event_signature(
+                    baseline_event
+                )
+        except Exception:
+            pass
 
     try:
         async for chunk in agent.astream(
@@ -452,6 +540,21 @@ async def stream_agent_events(
                             yield emitter.interrupt(
                                 interrupt_id, action_reqs, review_cfgs
                             ).data
+                summarization_event = _find_summarization_event_payload(data)
+                if summarization_event and not _summarization_in_progress:
+                    signature = _summarization_event_signature(summarization_event)
+                    if (
+                        signature is not None
+                        and signature == _baseline_summarization_signature
+                    ):
+                        continue
+                    summary_text = _extract_summary_message_text(
+                        summarization_event.get("summary_message")
+                    )
+                    if summary_text:
+                        yield emitter.summarization_start().data
+                        _summarization_in_progress = True
+                        yield emitter.summarization(summary_text).data
                 continue
             if mode_str != "messages":
                 continue
@@ -472,10 +575,11 @@ async def stream_agent_events(
                 isinstance(metadata, dict)
                 and metadata.get("lc_source") == "summarization"
             ):
-                if not _summarization_in_progress:
-                    _summarization_in_progress = True
                 chunk_text = _extract_summarization_text(msg)
                 if chunk_text:
+                    if not _summarization_in_progress:
+                        yield emitter.summarization_start().data
+                    _summarization_in_progress = True
                     yield emitter.summarization(chunk_text).data
                 continue
 
@@ -485,7 +589,7 @@ async def stream_agent_events(
             # the _selector_active flag is not visible in the streaming loop.
             # Uses _tool_selection_suppressing to track suppression state
             # and emits a tool_selection event from the tracker ContextVar.
-            if isinstance(msg, (AIMessageChunk, AIMessage)):
+            if isinstance(msg, AIMessageChunk | AIMessage):
                 _raw = msg.content
                 _text = (
                     _raw
@@ -609,7 +713,7 @@ async def stream_agent_events(
                 )
 
             # Extract token usage from main-agent AIMessages
-            if isinstance(msg, (AIMessageChunk, AIMessage)) and not subagent:
+            if isinstance(msg, AIMessageChunk | AIMessage) and not subagent:
                 usage = getattr(msg, "usage_metadata", None)
                 if usage:
                     inp = (
@@ -626,7 +730,7 @@ async def stream_agent_events(
                         yield emitter.usage_stats(inp, out).data
 
             # Process AIMessageChunk / AIMessage
-            if isinstance(msg, (AIMessageChunk, AIMessage)):
+            if isinstance(msg, AIMessageChunk | AIMessage):
                 if subagent:
                     # Sub-agent content -- emit sub-agent events
                     for ev in _process_chunk_content(msg, emitter, subagent_tracker):

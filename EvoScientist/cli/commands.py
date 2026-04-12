@@ -13,6 +13,7 @@ import typer  # type: ignore[import-untyped]
 from rich.markup import escape
 from rich.table import Table
 
+from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
 from ..stream.display import console
 from ._app import app, channel_app, config_app, mcp_app
@@ -100,6 +101,10 @@ def channel_setup():
 # Compact helper
 # =============================================================================
 
+_COMPACT_CONTEXT_WINDOW_FALLBACK = DEFAULT_CONTEXT_WINDOW_FALLBACK
+_MANUAL_COMPACT_MIN_FRACTION = 0.40
+_MANUAL_COMPACT_MIN_PERCENT = int(_MANUAL_COMPACT_MIN_FRACTION * 100)
+
 
 class CompactResult:
     """Structured result from compact_conversation.
@@ -114,14 +119,20 @@ class CompactResult:
         tokens_summarized: Tokens in the summarized portion (before).
         tokens_summary: Tokens in the summary message (after).
         pct_decrease: Percentage decrease.
+        context_window: Model context window used for thresholding.
+        context_percent: Effective context utilization percent.
+        summary_text: Human-readable compact summary content for UI display.
     """
 
     __slots__ = (
+        "context_percent",
+        "context_window",
         "message",
         "messages_compacted",
         "messages_kept",
         "pct_decrease",
         "status",
+        "summary_text",
         "tokens_after",
         "tokens_before",
         "tokens_summarized",
@@ -140,6 +151,9 @@ class CompactResult:
         tokens_summarized: int = 0,
         tokens_summary: int = 0,
         pct_decrease: int = 0,
+        context_window: int = 0,
+        context_percent: int = 0,
+        summary_text: str = "",
     ):
         self.status = status
         self.message = message
@@ -150,9 +164,38 @@ class CompactResult:
         self.tokens_summarized = tokens_summarized
         self.tokens_summary = tokens_summary
         self.pct_decrease = pct_decrease
+        self.context_window = context_window
+        self.context_percent = context_percent
+        self.summary_text = summary_text
 
     def __str__(self) -> str:
         return self.message
+
+
+class CompactSummaryRenderable:
+    """Rich renderable payload for the manual compact summary content."""
+
+    __slots__ = ("summary_text",)
+
+    def __init__(self, summary_text: str):
+        self.summary_text = (summary_text or "").strip()
+
+    def __rich_console__(self, console, options):
+        yield render_compact_summary_panel(self.summary_text)
+
+
+def _resolve_context_window(
+    model: Any, fallback: int = _COMPACT_CONTEXT_WINDOW_FALLBACK
+) -> int:
+    """Resolve a model context window with a stable fallback."""
+    return resolve_context_window(model, fallback=fallback)
+
+
+def _percent_used(tokens: int, context_window: int) -> int:
+    """Return a clamped utilization percent."""
+    if context_window <= 0:
+        return 0
+    return max(0, min(100, round((tokens / context_window) * 100)))
 
 
 def render_compact_result(result: CompactResult):  # -> rich.text.Text
@@ -167,19 +210,23 @@ def render_compact_result(result: CompactResult):  # -> rich.text.Text
 
     if result.status == "noop":
         output.append("○ ", style="dim")
-        output.append("Nothing to compact", style="dim")
+        output.append("Manual compact not needed", style="dim")
         if result.tokens_before > 0:
-            output.append(" — conversation is ~", style="dim")
+            output.append("  [", style="dim")
             output.append(f"{result.tokens_before:,}", style="cyan")
-            output.append(" tokens, within retention budget", style="dim")
-        elif result.message:
-            # Extract reason from message (e.g. "no messages")
-            output.append(
-                f" — {result.message.split('—')[-1].strip()}"
-                if "—" in result.message
-                else "",
-                style="dim",
-            )
+            if result.context_window > 0:
+                output.append(" / ", style="dim")
+                output.append(f"{result.context_window:,}", style="cyan")
+                output.append(" tokens", style="dim")
+                output.append("  │  ", style="dim")
+                output.append(f"{result.context_percent}%", style="cyan")
+                output.append(" of window", style="dim")
+            else:
+                output.append(" tokens", style="dim")
+            output.append("]", style="dim")
+        if result.message:
+            output.append("\n  ", style="")
+            output.append(result.message, style="dim")
         return output
 
     if result.status == "error":
@@ -210,16 +257,56 @@ def render_compact_result(result: CompactResult):  # -> rich.text.Text
     output.append("Kept: ", style="dim")
     output.append(f"{result.messages_kept}", style="cyan")
     output.append(" messages unchanged", style="dim")
+    if result.context_window > 0:
+        output.append("  │  ", style="dim")
+        output.append("Window: ", style="dim")
+        output.append(f"{result.context_percent}%", style="cyan")
+        output.append(" used", style="dim")
 
     return output
 
 
-async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResult:
+def render_compact_summary_panel(summary_text: str):
+    """Render the compacted summary content as a Rich panel."""
+    from rich.panel import Panel
+    from rich.text import Text
+
+    content = (summary_text or "").strip()
+    body = Text(content or "(empty summary)", style="dim italic")
+    return Panel(
+        body,
+        title="Context Compacted",
+        border_style="#f59e0b",
+        padding=(0, 1),
+    )
+
+
+def build_compact_summary_renderable(
+    result: CompactResult,
+) -> CompactSummaryRenderable | None:
+    """Build the UI summary payload for a successful compact operation."""
+    if result.status != "ok" or not result.summary_text.strip():
+        return None
+    return CompactSummaryRenderable(result.summary_text)
+
+
+async def compact_conversation(
+    agent: Any,
+    thread_id: str | None,
+    *,
+    input_tokens_hint: int | None = None,
+) -> CompactResult:
     """Compact the conversation by summarizing old messages.
 
     Reads the agent's checkpointed state, creates a temporary
     ``SummarizationMiddleware``, generates a summary, and writes
     the compacted state back via ``aupdate_state``.
+
+    ``input_tokens_hint`` is the real LLM input token count from the last
+    ``usage_metadata`` (includes system prompt + tool schemas).  When
+    provided it is used for the display values in ``CompactResult`` so the
+    panel stays in sync with the status bar; the internal compact logic
+    (cutoff determination) still uses message-level token counts.
 
     Returns a structured ``CompactResult``.
     """
@@ -257,6 +344,7 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
         )
 
     backend = _get_default_backend()
+    context_window = _resolve_context_window(model)
 
     defaults = compute_summarization_defaults(model)
     middleware = SummarizationMiddleware(
@@ -269,15 +357,38 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
     # Rebuild effective message list accounting for prior compaction
     event = state_snapshot.values.get("_summarization_event")
     effective = middleware._apply_event_to_messages(messages, event)
+    effective_tokens = count_tokens_approximately(effective)
+
+    # For display and threshold we prefer the real LLM input token count
+    # (includes system prompt + tool schemas) so the panel stays in sync with
+    # the status bar.  The internal compact logic (cutoff, partition, savings)
+    # still uses effective_tokens (message-level) because compact only reduces
+    # messages, not the constant system/tool overhead.
+    display_tokens = (
+        input_tokens_hint
+        if input_tokens_hint is not None and input_tokens_hint > 0
+        else effective_tokens
+    )
+    display_percent = _percent_used(display_tokens, context_window)
+
+    if display_percent < _MANUAL_COMPACT_MIN_PERCENT:
+        return CompactResult(
+            "noop",
+            "Conversation is below the manual compact threshold "
+            f"({display_percent}% < {_MANUAL_COMPACT_MIN_PERCENT}%).",
+            tokens_before=display_tokens,
+            context_window=context_window,
+            context_percent=display_percent,
+        )
 
     cutoff = middleware._determine_cutoff_index(effective)
     if cutoff == 0:
-        conv_tokens = count_tokens_approximately(effective)
         return CompactResult(
             "noop",
-            f"Nothing to compact — conversation (~{conv_tokens:,} tokens) "
-            f"is within the retention budget.",
-            tokens_before=conv_tokens,
+            f"Conversation (~{display_tokens:,} tokens) is within the retention budget.",
+            tokens_before=display_tokens,
+            context_window=context_window,
+            context_percent=display_percent,
         )
 
     to_summarize, to_keep = middleware._partition_messages(effective, cutoff)
@@ -300,7 +411,9 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
             f"Nothing to compact — only {len(to_summarize)} message(s) "
             f"({tokens_summarized:,} tokens) would be summarized, "
             f"not worth the overhead.",
-            tokens_before=tokens_before,
+            tokens_before=display_tokens,
+            context_window=context_window,
+            context_percent=display_percent,
         )
 
     # Generate summary (LLM call)
@@ -325,7 +438,7 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
 
     summary_msg = middleware._build_new_messages_with_path(summary, file_path)[0]
 
-    # Compute token savings
+    # Compute token savings (message-level, used for pct calculation)
     tokens_summary = count_tokens_approximately([summary_msg])
     tokens_after = tokens_summary + tokens_kept
     pct = (
@@ -334,11 +447,18 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
         else 0
     )
 
+    # Adjust display totals: preserve real overhead (system + tools) by
+    # offsetting from input_tokens_hint rather than using bare message counts.
+    msg_reduction = tokens_before - tokens_after  # how many message tokens saved
+    display_before = display_tokens
+    display_after = max(0, display_tokens - msg_reduction)
+    display_after_percent = _percent_used(display_after, context_window)
+
     # Append savings note to summary message for model awareness
     savings_note = (
         f"\n\n{len(to_summarize)} messages were compacted "
         f"({tokens_summarized:,} → {tokens_summary:,} tokens). "
-        f"Total context: {tokens_before:,} → {tokens_after:,} tokens "
+        f"Total context: {display_before:,} → {display_after:,} tokens "
         f"({pct}% decrease), "
         f"{len(to_keep)} messages unchanged."
     )
@@ -357,14 +477,17 @@ async def compact_conversation(agent: Any, thread_id: str | None) -> CompactResu
     return CompactResult(
         "ok",
         f"Compacted {len(to_summarize)} messages "
-        f"({tokens_before:,} → {tokens_after:,} tokens, {pct}% decrease)",
+        f"({display_before:,} → {display_after:,} tokens, {pct}% decrease)",
         messages_compacted=len(to_summarize),
         messages_kept=len(to_keep),
-        tokens_before=tokens_before,
-        tokens_after=tokens_after,
+        tokens_before=display_before,
+        tokens_after=display_after,
         tokens_summarized=tokens_summarized,
         tokens_summary=tokens_summary,
         pct_decrease=pct,
+        context_window=context_window,
+        context_percent=display_after_percent,
+        summary_text=summary,
     )
 
 

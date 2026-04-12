@@ -20,7 +20,8 @@ from scripts.utils import parse_skill_md
 
 def _init_config():
     """Initialize EvoSci config and apply env vars (once per process)."""
-    from EvoScientist.config import get_effective_config, apply_config_to_env
+    from EvoScientist.config import apply_config_to_env, get_effective_config
+
     config = get_effective_config()
     apply_config_to_env(config)
     return config
@@ -39,9 +40,10 @@ def run_single_query(
     the LLM sees a system prompt with available skills and decides whether to
     call load_skill.
     """
-    from EvoScientist.llm import get_chat_model
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_core.tools import tool
+
+    from EvoScientist.llm import get_chat_model
 
     config = _init_config()
 
@@ -76,10 +78,12 @@ If no skill is relevant, respond directly to the user without calling any tools.
             **eval_kwargs,
         )
         model_with_tools = chat_model.bind_tools([load_skill])
-        response = model_with_tools.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=query),
-        ])
+        response = model_with_tools.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=query),
+            ]
+        )
 
         # Check if the model called load_skill with the right skill name
         if hasattr(response, "tool_calls") and response.tool_calls:
@@ -109,10 +113,17 @@ A user sends this request: "{query}"
 Would you load the "{skill_name}" skill to help with this request?
 Answer with ONLY "YES" or "NO"."""
             response = chat_model.invoke([HumanMessage(content=fallback_prompt)])
-            text = response.content if isinstance(response.content, str) else str(response.content)
+            text = (
+                response.content
+                if isinstance(response.content, str)
+                else str(response.content)
+            )
             return text.strip().upper().startswith("YES")
         except Exception:
-            print(f"Warning: query failed for both tool-calling and fallback: {e}", file=sys.stderr)
+            print(
+                f"Warning: query failed for both tool-calling and fallback: {e}",
+                file=sys.stderr,
+            )
             return False
 
 
@@ -165,14 +176,16 @@ def run_eval(
             did_pass = trigger_rate >= trigger_threshold
         else:
             did_pass = trigger_rate < trigger_threshold
-        results.append({
-            "query": query,
-            "should_trigger": should_trigger,
-            "trigger_rate": trigger_rate,
-            "triggers": sum(triggers),
-            "runs": len(triggers),
-            "pass": did_pass,
-        })
+        results.append(
+            {
+                "query": query,
+                "should_trigger": should_trigger,
+                "trigger_rate": trigger_rate,
+                "triggers": sum(triggers),
+                "runs": len(triggers),
+                "pass": did_pass,
+            }
+        )
 
     passed = sum(1 for r in results if r["pass"])
     total = len(results)
@@ -190,16 +203,34 @@ def run_eval(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run trigger evaluation for a skill description")
+    parser = argparse.ArgumentParser(
+        description="Run trigger evaluation for a skill description"
+    )
     parser.add_argument("--eval-set", required=True, help="Path to eval set JSON file")
     parser.add_argument("--skill-path", required=True, help="Path to skill directory")
-    parser.add_argument("--description", default=None, help="Override description to test")
-    parser.add_argument("--num-workers", type=int, default=10, help="Number of parallel workers")
-    parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
-    parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
-    parser.add_argument("--model", default=None, help="Model to use (default: user's configured model)")
-    parser.add_argument("--provider", default=None, help="LLM provider (default: user's configured provider)")
-    parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
+    parser.add_argument(
+        "--description", default=None, help="Override description to test"
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=10, help="Number of parallel workers"
+    )
+    parser.add_argument(
+        "--runs-per-query", type=int, default=3, help="Number of runs per query"
+    )
+    parser.add_argument(
+        "--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold"
+    )
+    parser.add_argument(
+        "--model", default=None, help="Model to use (default: user's configured model)"
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="LLM provider (default: user's configured provider)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Print progress to stderr"
+    )
     args = parser.parse_args()
 
     eval_set = json.loads(Path(args.eval_set).read_text())
@@ -228,11 +259,16 @@ def main():
 
     if args.verbose:
         summary = output["summary"]
-        print(f"Results: {summary['passed']}/{summary['total']} passed", file=sys.stderr)
+        print(
+            f"Results: {summary['passed']}/{summary['total']} passed", file=sys.stderr
+        )
         for r in output["results"]:
             status = "PASS" if r["pass"] else "FAIL"
             rate_str = f"{r['triggers']}/{r['runs']}"
-            print(f"  [{status}] rate={rate_str} expected={r['should_trigger']}: {r['query'][:70]}", file=sys.stderr)
+            print(
+                f"  [{status}] rate={rate_str} expected={r['should_trigger']}: {r['query'][:70]}",
+                file=sys.stderr,
+            )
 
     print(json.dumps(output, indent=2))
 

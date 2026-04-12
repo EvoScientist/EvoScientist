@@ -12,6 +12,7 @@ import queue
 import random
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, ClassVar
 
 from rich.console import Group
@@ -44,6 +45,18 @@ from .channel import (
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .history_suggester import HistorySuggester
+from .status_bar import (
+    STATUS_BAR_BG,
+    STATUS_DIM,
+    STATUS_HINT_BUSY,
+    STATUS_HINT_IDLE,
+    apply_assistant_text_to_snapshot,
+    apply_user_text_to_snapshot,
+    build_session_status_snapshot,
+    build_status_text,
+    make_empty_status_snapshot,
+    make_usage_status_snapshot,
+)
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -168,6 +181,18 @@ def _is_final_response(state: StreamState) -> bool:
     return not has_pending and not any_active_sa and not state.is_processing
 
 
+_SUMMARY_CONTINUATION_EVENTS = {
+    "summarization_start",
+    "summarization",
+    "usage_stats",
+}
+
+
+def _should_finalize_active_summarization(event_type: str) -> bool:
+    """Return whether an active summary panel should stop for this event."""
+    return bool(event_type) and event_type not in _SUMMARY_CONTINUATION_EVENTS
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -193,6 +218,7 @@ def run_textual_interactive(
         from .clipboard import copy_selection_to_clipboard, get_clipboard_text
         from .widgets import (
             AssistantMessage,
+            CompactingWidget,
             LoadingWidget,
             SubAgentWidget,
             SummarizationWidget,
@@ -233,7 +259,7 @@ def run_textual_interactive(
         }
         #input-shell {
             height: auto;
-            padding: 0 2 1 2;
+            padding: 0 2 0 2;
             background: #16161a;
         }
         #input-row {
@@ -278,8 +304,9 @@ def run_textual_interactive(
         }
         #status {
             height: 1;
+            min-height: 1;
             background: #171a20;
-            color: #f59e0b;
+            color: #cbd5e1;
             padding: 0 1;
         }
         """
@@ -331,6 +358,12 @@ def run_textual_interactive(
             self._history_saved_input: str = ""  # saved current input before browsing
             self._background_tasks: set[asyncio.Task] = set()
             self._quit_pending: bool = False
+            self._status_started_at = datetime.now()
+            self._status_base_snapshot = make_empty_status_snapshot(model)
+            self._status_snapshot = self._status_base_snapshot
+            self._status_streaming_text = ""
+            self._status_last_input_tokens: int | None = None
+            self._compacting_widget: CompactingWidget | None = None
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -339,6 +372,12 @@ def run_textual_interactive(
 
         def mount_renderable(self, renderable: Any) -> None:
             self._mount_renderable(renderable)
+
+        async def start_compacting_indicator(self) -> None:
+            await self._start_compacting_indicator()
+
+        async def stop_compacting_indicator(self) -> None:
+            await self._stop_compacting_indicator()
 
         async def wait_for_thread_pick(
             self, threads: list[dict], current_thread: str, title: str
@@ -412,11 +451,19 @@ def run_textual_interactive(
                 workspace_dir=self._workspace_dir,
                 checkpointer=self._checkpointer,
             )
+            self._status_started_at = datetime.now()
+            self._status_base_snapshot = make_empty_status_snapshot(model)
+            self._status_snapshot = self._status_base_snapshot
+            self._status_streaming_text = ""
+            self._status_last_input_tokens = None
             if _channels_is_running():
                 _ch_mod._cli_agent = self._agent
                 _ch_mod._cli_thread_id = self._conversation_tid
             self._render_welcome()
             self._render_status()
+            refresh_task = asyncio.create_task(self._refresh_status_snapshot())
+            self._background_tasks.add(refresh_task)
+            refresh_task.add_done_callback(self._background_tasks.discard)
             self.append_system(f"New session: {self._conversation_tid}", style="green")
 
         async def handle_session_resume(
@@ -430,10 +477,16 @@ def run_textual_interactive(
                 workspace_dir=self._workspace_dir,
                 checkpointer=self._checkpointer,
             )
+            self._status_started_at = datetime.now()
+            self._status_base_snapshot = make_empty_status_snapshot(model)
+            self._status_snapshot = self._status_base_snapshot
+            self._status_streaming_text = ""
+            self._status_last_input_tokens = None
             if _channels_is_running():
                 _ch_mod._cli_agent = self._agent
                 _ch_mod._cli_thread_id = self._conversation_tid
             self._render_welcome()
+            await self._refresh_status_snapshot()
             self._render_status()
             self.append_system(f"Resumed session: {thread_id}", style="green")
             await self._render_history(thread_id)
@@ -465,6 +518,10 @@ def run_textual_interactive(
         def on_mount(self) -> None:
             self._render_welcome()
             self._render_status()
+            self.set_interval(1.0, self._render_status)
+            refresh_task = asyncio.create_task(self._refresh_status_snapshot())
+            self._background_tasks.add(refresh_task)
+            refresh_task.add_done_callback(self._background_tasks.discard)
             prompt = self.query_one("#prompt", ChatTextArea)
             prompt.before_submit = self._handle_completion_enter
             prompt.focus()
@@ -561,8 +618,41 @@ def run_textual_interactive(
         def _mount_renderable(self, renderable: Any) -> None:
             """Mount a Rich renderable (e.g. Table) as a Static widget."""
             container = self.query_one("#chat", VerticalScroll)
-            container.mount(Static(renderable))
+            try:
+                from .commands import CompactSummaryRenderable
+                from .widgets.compact_summary_widget import CompactSummaryWidget
+            except Exception:
+                CompactSummaryRenderable = None  # type: ignore[assignment]
+
+            if CompactSummaryRenderable is not None and isinstance(
+                renderable, CompactSummaryRenderable
+            ):
+                container.mount(CompactSummaryWidget(renderable.summary_text))
+            else:
+                container.mount(Static(renderable))
             container.scroll_end(animate=False)
+
+        async def _start_compacting_indicator(self) -> None:
+            """Show a transient timer widget while /compact is running."""
+            await self._stop_compacting_indicator()
+            container = self.query_one("#chat", VerticalScroll)
+            widget = CompactingWidget()
+            self._compacting_widget = widget
+            await container.mount(widget)
+            container.scroll_end(animate=False)
+
+        async def _stop_compacting_indicator(self) -> None:
+            """Remove the transient /compact progress widget, if present."""
+            widget = self._compacting_widget
+            self._compacting_widget = None
+            if widget is not None:
+                try:
+                    await widget.cleanup()
+                except Exception:
+                    try:
+                        await widget.remove()
+                    except Exception:
+                        pass
 
         async def _wait_for_approval(self, approval_widget) -> Any:
             """Wait for user to interact with an ApprovalWidget.
@@ -796,6 +886,11 @@ def run_textual_interactive(
                     except Exception:
                         pass
 
+            def _finalize_active_summarization() -> None:
+                """Stop the active summary timer once the stream moves on."""
+                if summarization_w is not None and summarization_w._is_active:
+                    summarization_w.finalize()
+
             async def _collapse_completed_tools() -> None:
                 """Hide older completed tool widgets; show summary line."""
                 nonlocal collapse_summary_w
@@ -882,6 +977,12 @@ def run_textual_interactive(
                     ):
                         event_type = state.handle_event(event)
 
+                        if event_type == "usage_stats":
+                            self._set_status_usage_baseline(state.last_input_tokens)
+
+                        if _should_finalize_active_summarization(event_type):
+                            _finalize_active_summarization()
+
                         # -- Channel callbacks (thinking, todo, media) --
                         if (
                             on_thinking_cb
@@ -930,6 +1031,7 @@ def run_textual_interactive(
                             "thinking",
                             "text",
                             "tool_call",
+                            "summarization_start",
                             "summarization",
                         ):
                             await loading.cleanup()
@@ -942,12 +1044,27 @@ def run_textual_interactive(
                                 await container.mount(thinking_w)
                             thinking_w.append_text(event.get("content", ""))
 
+                        elif event_type == "summarization_start":
+                            if (
+                                summarization_w is not None
+                                and not summarization_w._is_active
+                            ):
+                                summarization_w = None
+                            if summarization_w is None:
+                                summarization_w = SummarizationWidget()
+                                await container.mount(summarization_w)
+
                         elif event_type == "summarization":
                             content = event.get("content", "")
+                            if (
+                                summarization_w is not None
+                                and not summarization_w._is_active
+                            ):
+                                summarization_w = None
+                            if summarization_w is None:
+                                summarization_w = SummarizationWidget()
+                                await container.mount(summarization_w)
                             if content:
-                                if summarization_w is None:
-                                    summarization_w = SummarizationWidget()
-                                    await container.mount(summarization_w)
                                 summarization_w.append_text(content)
 
                         elif event_type == "tool_selection":
@@ -961,12 +1078,6 @@ def run_textual_interactive(
                                 _schedule_scroll()
 
                         elif event_type == "text":
-                            # Finalize summarization widget when regular text resumes
-                            if (
-                                summarization_w is not None
-                                and summarization_w._is_active
-                            ):
-                                summarization_w.finalize()
                             if thinking_w is not None and thinking_w._is_active:
                                 thinking_w.finalize()
                             # Clear processing indicator
@@ -999,6 +1110,7 @@ def run_textual_interactive(
                                     await assistant_w.append_content(
                                         event.get("content", ""),
                                     )
+                                self._set_status_streaming_text(state.response_text)
 
                         elif event_type == "tool_call":
                             tool_name = event.get("name", "unknown")
@@ -1276,12 +1388,6 @@ def run_textual_interactive(
                                 )
 
                         elif event_type == "done":
-                            # Finalize summarization if still active
-                            if (
-                                summarization_w is not None
-                                and summarization_w._is_active
-                            ):
-                                summarization_w.finalize()
                             # Clean up transient indicators
                             await _remove_w(narration_w)
                             narration_w = None
@@ -1415,18 +1521,19 @@ def run_textual_interactive(
 
         async def _run_turn(self, user_text: str) -> None:
             """Handle a user turn: stream agent response with widgets."""
-            self._busy = True
-            self._render_status()
             cancelled = False
-
-            # Resolve @file mentions — inject file contents before sending to agent.
-            # Use self._workspace_dir (current session) not the startup-captured
-            # workspace_dir closure, which becomes stale after /new or /resume.
-            _, message_to_send, file_warnings = await asyncio.to_thread(
-                resolve_file_mentions, user_text, self._workspace_dir
-            )
-
             try:
+                self._busy = True
+                self._render_status()
+
+                # Resolve @file mentions — inject file contents before sending to agent.
+                # Use self._workspace_dir (current session) not the startup-captured
+                # workspace_dir closure, which becomes stale after /new or /resume.
+                _, message_to_send, file_warnings = await asyncio.to_thread(
+                    resolve_file_mentions, user_text, self._workspace_dir
+                )
+                await self._refresh_status_snapshot(message_to_send)
+
                 await self._stream_with_widgets(
                     message_to_send,
                     display_text=user_text,
@@ -1438,6 +1545,7 @@ def run_textual_interactive(
             finally:
                 self._busy = False
                 self._run_task = None
+                await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
                 self.query_one("#prompt", ChatTextArea).focus()
 
@@ -1456,144 +1564,160 @@ def run_textual_interactive(
               (streaming response)
               [channel: Replied to sender]
             """
-            self._busy = True
-            self._render_status()
-
-            prompt_widget = self.query_one("#prompt", ChatTextArea)
-            prompt_widget.disabled = True
-
-            # Mount user message first, then "Received" label
-            container = self.query_one("#chat", VerticalScroll)
-            await container.mount(UserMessage(msg.content))
-            self._append_system(
-                f"[{msg.channel_type}: Received from {msg.sender}]",
-                style="dim",
-            )
-            container.scroll_end(animate=False)
-
-            # Build channel callbacks (fire-and-forget to avoid blocking UI)
-            def _send_to_channel(coro, label: str) -> None:
-                loop = _ch_mod._bus_loop
-                if not loop:
-                    return
-                future = asyncio.run_coroutine_threadsafe(coro, loop)
-                future.add_done_callback(
-                    lambda f: (
-                        _channel_logger.debug(f"{label} send failed: {f.exception()}")
-                        if f.exception()
-                        else None
-                    )
-                )
-
-            def _send_thinking(thinking: str) -> None:
-                ch = msg.channel_ref
-                if ch and ch.send_thinking:
-                    _send_to_channel(
-                        ch.send_thinking_message(
-                            sender=msg.chat_id,
-                            thinking=thinking,
-                            metadata=msg.metadata,
-                        ),
-                        "Thinking",
-                    )
-
-            def _send_todo(items: list[dict]) -> None:
-                from ..channels.consumer import _format_todo_list
-
-                if msg.channel_ref:
-                    _send_to_channel(
-                        msg.channel_ref.send_todo_message(
-                            sender=msg.chat_id,
-                            content=_format_todo_list(items),
-                            metadata=msg.metadata,
-                        ),
-                        "Todo",
-                    )
-
-            def _send_media(file_path: str) -> None:
-                if msg.channel_ref:
-                    _send_to_channel(
-                        msg.channel_ref.send_media(
-                            recipient=msg.chat_id,
-                            file_path=file_path,
-                            metadata=msg.metadata,
-                        ),
-                        "Media",
-                    )
-
-            def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
-                """Send HITL approval prompt to channel user and wait for reply.
-
-                This runs in a thread (called via asyncio.to_thread) so it can
-                block without freezing the Textual event loop.
-                """
-                return _ch_mod.channel_hitl_prompt(action_requests, msg)
-
-            def _channel_ask_user(ask_user_data: dict) -> dict:
-                """Send ask_user questions to channel user and wait for reply.
-
-                This runs in a thread (called via asyncio.to_thread) so it can
-                block without freezing the Textual event loop.
-                """
-                return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
-
-            from ..commands.channel_ui import ChannelCommandUI
-
-            # Handle slash commands from channel
-            if msg.content.strip().startswith("/"):
-                ctx = CommandContext(
-                    agent=self._agent,
-                    thread_id=self._conversation_tid,
-                    ui=ChannelCommandUI(
-                        msg,
-                        append_system_callback=self._append_system,
-                        start_new_session_callback=self.start_new_session,
-                        handle_session_resume_callback=self.handle_session_resume,
-                    ),
-                    workspace_dir=self._workspace_dir,
-                    checkpointer=self._checkpointer,
-                )
-                if await cmd_manager.execute(msg.content, ctx):
-                    self._append_system(
-                        f"[{msg.channel_type}: Executed command from {msg.sender}]",
-                        style="dim",
-                    )
-                    _set_channel_response(
-                        msg.msg_id, f"Command executed: {msg.content}"
-                    )
-                    self._busy = False
-                    self._render_status()
-                    prompt_widget.disabled = False
-                    prompt_widget.focus()
-                    return
-
-            response = ""
+            prompt_widget = None
             try:
-                response = await self._stream_with_widgets(
-                    msg.content,
-                    on_thinking_cb=_send_thinking
-                    if self._channel_send_thinking
-                    else None,
-                    on_todo_cb=_send_todo,
-                    on_media_cb=_send_media,
-                    skip_user_message=True,
-                    channel_hitl_fn=_channel_hitl_prompt,
-                    channel_ask_user_fn=_channel_ask_user,
+                self._busy = True
+                await self._refresh_status_snapshot(msg.content)
+                self._render_status()
+
+                prompt_widget = self.query_one("#prompt", ChatTextArea)
+                prompt_widget.disabled = True
+
+                # Mount user message first, then "Received" label
+                container = self.query_one("#chat", VerticalScroll)
+                await container.mount(UserMessage(msg.content))
+                self._append_system(
+                    f"[{msg.channel_type}: Received from {msg.sender}]",
+                    style="dim",
                 )
-            except Exception as exc:
-                response = f"Error: {exc}"
-                self._append_system(f"Error: {exc}", style="red")
+                container.scroll_end(animate=False)
+
+                # Build channel callbacks (fire-and-forget to avoid blocking UI)
+                def _send_to_channel(coro, label: str) -> None:
+                    loop = _ch_mod._bus_loop
+                    if not loop:
+                        return
+                    future = asyncio.run_coroutine_threadsafe(coro, loop)
+                    future.add_done_callback(
+                        lambda f: (
+                            _channel_logger.debug(
+                                f"{label} send failed: {f.exception()}"
+                            )
+                            if f.exception()
+                            else None
+                        )
+                    )
+
+                def _send_thinking(thinking: str) -> None:
+                    ch = msg.channel_ref
+                    if ch and ch.send_thinking:
+                        _send_to_channel(
+                            ch.send_thinking_message(
+                                sender=msg.chat_id,
+                                thinking=thinking,
+                                metadata=msg.metadata,
+                            ),
+                            "Thinking",
+                        )
+
+                def _send_todo(items: list[dict]) -> None:
+                    from ..channels.consumer import _format_todo_list
+
+                    if msg.channel_ref:
+                        _send_to_channel(
+                            msg.channel_ref.send_todo_message(
+                                sender=msg.chat_id,
+                                content=_format_todo_list(items),
+                                metadata=msg.metadata,
+                            ),
+                            "Todo",
+                        )
+
+                def _send_media(file_path: str) -> None:
+                    if msg.channel_ref:
+                        _send_to_channel(
+                            msg.channel_ref.send_media(
+                                recipient=msg.chat_id,
+                                file_path=file_path,
+                                metadata=msg.metadata,
+                            ),
+                            "Media",
+                        )
+
+                def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
+                    """Send HITL approval prompt to channel user and wait for reply.
+
+                    This runs in a thread (called via asyncio.to_thread) so it can
+                    block without freezing the Textual event loop.
+                    """
+                    return _ch_mod.channel_hitl_prompt(action_requests, msg)
+
+                def _channel_ask_user(ask_user_data: dict) -> dict:
+                    """Send ask_user questions to channel user and wait for reply.
+
+                    This runs in a thread (called via asyncio.to_thread) so it can
+                    block without freezing the Textual event loop.
+                    """
+                    return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+
+                from ..commands.channel_ui import ChannelCommandUI
+
+                # Handle slash commands from channel
+                if msg.content.strip().startswith("/"):
+                    ctx = CommandContext(
+                        agent=self._agent,
+                        thread_id=self._conversation_tid,
+                        ui=ChannelCommandUI(
+                            msg,
+                            append_system_callback=self._append_system,
+                            start_new_session_callback=self.start_new_session,
+                            handle_session_resume_callback=self.handle_session_resume,
+                        ),
+                        workspace_dir=self._workspace_dir,
+                        checkpointer=self._checkpointer,
+                    )
+                    try:
+                        cmd_executed = await cmd_manager.execute(msg.content, ctx)
+                    except Exception as _cmd_exc:
+                        # Command raised — report the error and do NOT fall through
+                        # to _stream_with_widgets (which would treat the slash
+                        # command text as a plain user message to the agent).
+                        _channel_logger.debug(
+                            f"Channel command error: {_cmd_exc}", exc_info=True
+                        )
+                        _set_channel_response(msg.msg_id, f"Command error: {_cmd_exc}")
+                        return  # outer finally handles _busy / widget cleanup
+
+                    if cmd_executed:
+                        self._append_system(
+                            f"[{msg.channel_type}: Executed command from {msg.sender}]",
+                            style="dim",
+                        )
+                        _set_channel_response(
+                            msg.msg_id, f"Command executed: {msg.content}"
+                        )
+                        return  # outer finally handles _busy / widget cleanup
+
+                response = ""
+                try:
+                    response = await self._stream_with_widgets(
+                        msg.content,
+                        on_thinking_cb=_send_thinking
+                        if self._channel_send_thinking
+                        else None,
+                        on_todo_cb=_send_todo,
+                        on_media_cb=_send_media,
+                        skip_user_message=True,
+                        channel_hitl_fn=_channel_hitl_prompt,
+                        channel_ask_user_fn=_channel_ask_user,
+                    )
+                except Exception as exc:
+                    response = f"Error: {exc}"
+                    self._append_system(f"Error: {exc}", style="red")
+
+                _set_channel_response(msg.msg_id, response)
+                self._append_system(
+                    f"[{msg.channel_type}: Replied to {msg.sender}]",
+                    style="dim",
+                )
+
             finally:
                 self._busy = False
+                await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
-                prompt_widget.disabled = False
-                prompt_widget.focus()
-
-            _set_channel_response(msg.msg_id, response)
-            self._append_system(
-                f"[{msg.channel_type}: Replied to {msg.sender}]",
-                style="dim",
-            )
+                if prompt_widget is not None:
+                    prompt_widget.disabled = False
+                    prompt_widget.focus()
 
         # ── Clipboard (copy on mouse select) ─────────────────
 
@@ -1925,18 +2049,40 @@ def run_textual_interactive(
             # Echo the command so the user sees what they ran
             self._append_system(command.strip(), style="cyan")
 
+            # Block new user input while the command runs (important for slow
+            # commands like /compact that call an LLM internally).
+            prompt_widget = self.query_one("#prompt", ChatTextArea)
+            self._busy = True
+            prompt_widget.disabled = True
+            self._render_status()
+
             ctx = CommandContext(
                 agent=self._agent,
                 thread_id=self._conversation_tid,
                 ui=self,
                 workspace_dir=self._workspace_dir,
                 checkpointer=self._checkpointer,
+                input_tokens_hint=self._status_last_input_tokens,
             )
 
-            if await cmd_manager.execute(command, ctx):
-                return
+            try:
+                if await cmd_manager.execute(command, ctx):
+                    # Do NOT invalidate the usage baseline after /compact.
+                    # build_session_status_snapshot() only counts raw checkpoint
+                    # messages (~46 tokens) and misses system prompt + tool
+                    # definitions (~50K overhead). The stale pre-compact count
+                    # is far more accurate; the next LLM call will correct it.
+                    await self._refresh_status_snapshot(
+                        reset_streaming_text=True,
+                    )
+                    return
 
-            self._append_system(f"Unknown command: {command}", style="yellow")
+                self._append_system(f"Unknown command: {command}", style="yellow")
+                self._render_status()
+            finally:
+                self._busy = False
+                prompt_widget.disabled = False
+                prompt_widget.focus()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -2074,6 +2220,85 @@ def run_textual_interactive(
 
         # ── Banner & status ────────────────────────────────────
 
+        async def _refresh_status_snapshot(
+            self,
+            pending_user_text: str | None = None,
+            *,
+            reset_streaming_text: bool = True,
+        ) -> None:
+            """Recompute persistent status metrics for the active thread."""
+            pending = (pending_user_text or "").strip()
+            if pending:
+                if self._status_last_input_tokens is not None:
+                    self._status_base_snapshot = apply_user_text_to_snapshot(
+                        make_usage_status_snapshot(
+                            self._status_last_input_tokens,
+                            model_name=model,
+                        ),
+                        pending,
+                    )
+                else:
+                    self._status_base_snapshot = await build_session_status_snapshot(
+                        self._conversation_tid,
+                        model_name=model,
+                        pending_user_text=pending,
+                    )
+            elif self._status_last_input_tokens is not None:
+                self._status_base_snapshot = make_usage_status_snapshot(
+                    self._status_last_input_tokens,
+                    model_name=model,
+                )
+            else:
+                self._status_base_snapshot = await build_session_status_snapshot(
+                    self._conversation_tid,
+                    model_name=model,
+                )
+            if reset_streaming_text:
+                self._status_streaming_text = ""
+            self._rebuild_status_snapshot()
+
+        def _set_status_usage_baseline(self, input_tokens: int) -> None:
+            """Promote the latest real prompt usage into the status-bar base."""
+            if input_tokens <= 0:
+                return
+            self._status_last_input_tokens = input_tokens
+            self._status_base_snapshot = make_usage_status_snapshot(
+                input_tokens,
+                model_name=model,
+            )
+            self._rebuild_status_snapshot()
+
+        def update_status_after_compact(self, tokens_after: int) -> None:
+            """Update the status bar immediately after a successful /compact.
+
+            Called by CompactCommand so the bar reflects the reduced context
+            without waiting for the next LLM call.
+            """
+            if tokens_after <= 0:
+                return
+            self._status_last_input_tokens = tokens_after
+            self._status_base_snapshot = make_usage_status_snapshot(
+                tokens_after,
+                model_name=model,
+            )
+            self._rebuild_status_snapshot()
+
+        def _set_status_streaming_text(self, text: str | None) -> None:
+            """Update in-flight assistant text shown in the context bar."""
+            new_text = text or ""
+            if new_text == self._status_streaming_text:
+                return
+            self._status_streaming_text = new_text
+            self._rebuild_status_snapshot()
+
+        def _rebuild_status_snapshot(self) -> None:
+            """Compose the displayed snapshot from base state + live overlay."""
+            self._status_snapshot = apply_assistant_text_to_snapshot(
+                self._status_base_snapshot,
+                self._status_streaming_text,
+            )
+            self._render_status()
+
         def _render_welcome(self) -> None:
             channels_info: list[tuple[str, bool, str]] | None = None
             try:
@@ -2112,20 +2337,33 @@ def run_textual_interactive(
 
         def _render_status(self) -> None:
             status = self.query_one("#status", Static)
-            if self._busy:
-                left = "vibe researching..."
-                left_style = "bold #f59e0b"
-            else:
-                left = "/help for commands"
-                left_style = "#f59e0b"
-
-            status.update(
-                Text.assemble(
-                    (left, left_style),
-                    ("  ", ""),
-                    ("EvoScientist", "dim"),
-                )
+            width = (
+                getattr(status.size, "width", 0)
+                or getattr(status.content_region, "width", 0)
+                or getattr(self.screen.size, "width", 0)
+                or 80
             )
+            if self._busy:
+                hint_label = "vibe researching..."
+                hint_style = f"on {STATUS_BAR_BG} {STATUS_HINT_BUSY} bold"
+            else:
+                hint_label = "/help for commands"
+                hint_style = f"on {STATUS_BAR_BG} {STATUS_HINT_IDLE}"
+
+            hint = Text.assemble(
+                (hint_label, hint_style),
+                (" │ ", f"on {STATUS_BAR_BG} {STATUS_DIM}"),
+            )
+            remaining_width = max(1, width - len(hint.plain))
+            metrics = build_status_text(
+                self._status_snapshot,
+                self._status_started_at,
+                remaining_width,
+            )
+            line = Text(no_wrap=True, overflow="crop")
+            line.append_text(hint)
+            line.append_text(metrics)
+            status.update(line)
 
     # ── Media forwarding helper (module-level) ──────────────
 

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from langchain_core.language_models import BaseChatModel
 
+from ..llm.context_window import get_context_window
+
 
 def compute_context_editing_trigger(
     model: BaseChatModel,
@@ -23,18 +25,13 @@ def compute_context_editing_trigger(
 ) -> int:
     """Compute ClearToolUsesEdit trigger based on model context window.
 
-    Uses 50% of ``max_input_tokens`` when a model profile is available,
-    otherwise falls back to a fixed token count.  This fires well before
-    ``SummarizationMiddleware`` (~85% / 170k).
+    Uses 50% of the best available model context window when metadata is
+    available, otherwise falls back to a fixed token count. This fires well
+    before ``SummarizationMiddleware`` (~85% / 170k).
     """
-    profile = getattr(model, "profile", None)
-    if (
-        profile is not None
-        and isinstance(profile, dict)
-        and isinstance(profile.get("max_input_tokens"), int)
-        and profile["max_input_tokens"] > 0
-    ):
-        return int(profile["max_input_tokens"] * fraction)
+    context_window = get_context_window(model)
+    if context_window is not None:
+        return int(context_window * fraction)
     return fallback
 
 
