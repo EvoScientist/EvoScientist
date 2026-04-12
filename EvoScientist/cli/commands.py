@@ -613,6 +613,11 @@ def serve(
     ),
     auto_approve: bool = typer.Option(
         False,
+        "--auto-approve",
+        help="Skip tool approval prompts for HITL actions",
+    ),
+    auto_mode: bool = typer.Option(
+        False,
         "--auto-mode",
         help="Run unattended: skip ask_user and tool approval prompts",
     ),
@@ -637,7 +642,11 @@ def serve(
     cli_overrides = {}
     if auto_approve:
         cli_overrides["auto_approve"] = True
-    if ask_user:
+    if auto_mode:
+        cli_overrides["auto_mode"] = True
+        cli_overrides["auto_approve"] = True
+        cli_overrides["enable_ask_user"] = False
+    elif ask_user:
         cli_overrides["enable_ask_user"] = True
     if debug:
         cli_overrides["log_level"] = "DEBUG"
@@ -1092,6 +1101,11 @@ def _main_callback(
     ),
     auto_approve: bool = typer.Option(
         False,
+        "--auto-approve",
+        help="Skip tool approval prompts for HITL actions",
+    ),
+    auto_mode: bool = typer.Option(
+        False,
         "--auto-mode",
         help="Run unattended: skip ask_user and tool approval prompts",
     ),
@@ -1131,7 +1145,11 @@ def _main_callback(
         cli_overrides["ui_backend"] = ui
     if auto_approve:
         cli_overrides["auto_approve"] = True
-    if ask_user:
+    if auto_mode:
+        cli_overrides["auto_mode"] = True
+        cli_overrides["auto_approve"] = True
+        cli_overrides["enable_ask_user"] = False
+    elif ask_user:
         cli_overrides["enable_ask_user"] = True
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):

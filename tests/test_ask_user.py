@@ -1,6 +1,6 @@
 """Tests for the ask_user middleware, stream events, state, and UI helpers."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -387,6 +387,56 @@ class TestConfig:
 
         cfg = EvoScientistConfig(enable_ask_user=False)
         assert cfg.enable_ask_user is False
+
+    def test_auto_mode_default_is_false(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cfg = EvoScientistConfig()
+        assert cfg.auto_mode is False
+
+    def test_auto_mode_set_to_true(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cfg = EvoScientistConfig(auto_mode=True)
+        assert cfg.auto_mode is True
+
+
+@patch("EvoScientist.middleware.create_tool_selector_middleware", return_value=[])
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_auto_approve_still_includes_ask_user_middleware(
+    mock_config, mock_model, mock_tool_selector
+):
+    cfg = MagicMock()
+    cfg.enable_ask_user = True
+    cfg.auto_approve = True
+    cfg.auto_mode = False
+    mock_config.return_value = cfg
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    type_names = [type(m).__name__ for m in _get_default_middleware()]
+    assert "AskUserMiddleware" in type_names
+
+
+@patch("EvoScientist.middleware.create_tool_selector_middleware", return_value=[])
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_auto_mode_disables_ask_user_middleware(
+    mock_config, mock_model, mock_tool_selector
+):
+    cfg = MagicMock()
+    cfg.enable_ask_user = True
+    cfg.auto_approve = True
+    cfg.auto_mode = True
+    mock_config.return_value = cfg
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    type_names = [type(m).__name__ for m in _get_default_middleware()]
+    assert "AskUserMiddleware" not in type_names
 
 
 # ---------------------------------------------------------------------------

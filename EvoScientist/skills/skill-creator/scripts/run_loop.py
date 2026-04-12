@@ -109,11 +109,21 @@ def run_loop(
         )
         eval_elapsed = time.time() - t0
 
-        # Split results back into train/test by position (run_eval preserves
-        # query order, and all_queries = train_set + test_set)
-        n_train = len(train_set)
-        train_result_list = all_results["results"][:n_train]
-        test_result_list = all_results["results"][n_train:]
+        # Split results back into train/test by query identity.
+        # Use count-based matching to handle duplicate queries correctly.
+        # (run_eval uses as_completed so results are not in submission order)
+        from collections import Counter
+
+        train_query_budget = Counter(q["query"] for q in train_set)
+        train_result_list = []
+        test_result_list = []
+        for r in all_results["results"]:
+            q = r["query"]
+            if train_query_budget[q] > 0:
+                train_result_list.append(r)
+                train_query_budget[q] -= 1
+            else:
+                test_result_list.append(r)
 
         train_passed = sum(1 for r in train_result_list if r["pass"])
         train_total = len(train_result_list)

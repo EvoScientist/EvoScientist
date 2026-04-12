@@ -112,23 +112,8 @@ async def _load_checkpoint_messages(
 
     Returns a list of LangChain message objects, or an empty list on failure.
     """
-    query = """
-        SELECT type, checkpoint
-        FROM checkpoints
-        WHERE thread_id = ?
-          AND json_extract(metadata, '$.agent_name') = ?
-        ORDER BY checkpoint_id DESC
-        LIMIT 1
-    """
-    async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
-        row = await cur.fetchone()
-        if not row or not row[0] or not row[1]:
-            return []
-        try:
-            data = serde.loads_typed((row[0], row[1]))
-            return data.get("channel_values", {}).get("messages", [])
-        except (ValueError, TypeError, KeyError):
-            return []
+    channel_values = await _load_checkpoint_channel_values(conn, thread_id, serde)
+    return channel_values.get("messages", [])
 
 
 async def _load_checkpoint_channel_values(

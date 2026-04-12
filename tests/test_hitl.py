@@ -273,6 +273,12 @@ class TestHitlConfig:
         cfg = EvoScientistConfig()
         assert cfg.auto_approve is False
 
+    def test_auto_mode_default(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cfg = EvoScientistConfig()
+        assert cfg.auto_mode is False
+
     def test_shell_allow_list_default(self):
         from EvoScientist.config.settings import EvoScientistConfig
 
@@ -284,6 +290,12 @@ class TestHitlConfig:
 
         cfg = EvoScientistConfig(auto_approve=True)
         assert cfg.auto_approve is True
+
+    def test_auto_mode_set(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cfg = EvoScientistConfig(auto_mode=True)
+        assert cfg.auto_mode is True
 
     def test_shell_allow_list_set(self):
         from EvoScientist.config.settings import EvoScientistConfig

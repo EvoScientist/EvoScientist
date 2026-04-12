@@ -305,7 +305,7 @@ def _get_default_middleware():
         create_memory_middleware(memory_dir, extraction_model=model),
     ]
 
-    if cfg.enable_ask_user and not cfg.auto_approve:
+    if cfg.enable_ask_user and not cfg.auto_mode:
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
@@ -433,7 +433,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         *create_tool_selector_middleware(),
         create_memory_middleware(_mem_dir, extraction_model=model),
     ]
-    if cfg.enable_ask_user and not cfg.auto_approve:
+    if cfg.enable_ask_user and not cfg.auto_mode:
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())

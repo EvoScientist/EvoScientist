@@ -14,6 +14,9 @@ def _make_config(
     channel_send_thinking: bool = True,
     log_level: str = "warning",
     channel_debug_tracing: bool = False,
+    auto_approve: bool = False,
+    auto_mode: bool = False,
+    enable_ask_user: bool = True,
 ):
     return SimpleNamespace(
         channel_enabled="telegram",
@@ -21,6 +24,9 @@ def _make_config(
         channel_send_thinking=channel_send_thinking,
         log_level=log_level,
         channel_debug_tracing=channel_debug_tracing,
+        auto_approve=auto_approve,
+        auto_mode=auto_mode,
+        enable_ask_user=enable_ask_user,
         provider="anthropic",
         anthropic_auth_mode="api_key",
         openai_auth_mode="api_key",
@@ -35,6 +41,9 @@ def _run_serve_once(
     no_thinking: bool = False,
     debug: bool = False,
     cwd: str | None = None,
+    auto_approve: bool = False,
+    auto_mode: bool = False,
+    ask_user: bool = False,
 ):
     import EvoScientist.config as config_mod
 
@@ -90,8 +99,9 @@ def _run_serve_once(
         no_thinking=no_thinking,
         workdir=workdir,
         debug=debug,
-        auto_approve=False,
-        ask_user=False,
+        auto_approve=auto_approve,
+        auto_mode=auto_mode,
+        ask_user=ask_user,
     )
     return order, captured
 
@@ -195,3 +205,38 @@ def test_serve_debug_sets_log_level_and_channel_trace(monkeypatch, tmp_path):
         "channel_debug_tracing": True,
     }
     assert configure_calls == [("DEBUG", "true")]
+
+
+def test_serve_auto_approve_only_sets_auto_approve(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(default_workdir=ws, enable_ask_user=True)
+
+    _, captured = _run_serve_once(
+        monkeypatch,
+        config,
+        workdir=ws,
+        auto_approve=True,
+    )
+
+    assert captured["cli_overrides"] == {"auto_approve": True}
+
+
+def test_serve_auto_mode_implies_auto_approve_and_disables_ask_user(
+    monkeypatch, tmp_path
+):
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(default_workdir=ws, enable_ask_user=True)
+
+    _, captured = _run_serve_once(
+        monkeypatch,
+        config,
+        workdir=ws,
+        auto_mode=True,
+        ask_user=True,
+    )
+
+    assert captured["cli_overrides"] == {
+        "auto_mode": True,
+        "auto_approve": True,
+        "enable_ask_user": False,
+    }

@@ -194,6 +194,7 @@ class EvoScientistConfig:
 
     # HITL (Human-in-the-Loop) Settings
     auto_approve: bool = False  # Auto-approve all tool executions without prompting
+    auto_mode: bool = False  # Run unattended: imply auto_approve and disable ask_user
     shell_allow_list: str = ""  # Comma-separated shell command prefixes to auto-approve
 
     # Agent features
