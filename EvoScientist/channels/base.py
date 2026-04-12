@@ -536,11 +536,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                     reply_to = self._resolve_reply_to(message.reply_to, i)
                     try:
                         await self._send_with_retry(
-                            lambda _cid=chat_id,
-                            _fmt=formatted,
-                            _raw=raw,
-                            _reply=reply_to,
-                            _meta=message.metadata: (
+                            lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
                                 self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
                             )
                         )
