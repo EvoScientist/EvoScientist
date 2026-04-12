@@ -116,10 +116,11 @@ async def _load_checkpoint_messages(
         SELECT type, checkpoint
         FROM checkpoints
         WHERE thread_id = ?
+          AND json_extract(metadata, '$.agent_name') = ?
         ORDER BY checkpoint_id DESC
         LIMIT 1
     """
-    async with conn.execute(query, (thread_id,)) as cur:
+    async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
         row = await cur.fetchone()
         if not row or not row[0] or not row[1]:
             return []
@@ -140,10 +141,11 @@ async def _load_checkpoint_channel_values(
         SELECT type, checkpoint
         FROM checkpoints
         WHERE thread_id = ?
+          AND json_extract(metadata, '$.agent_name') = ?
         ORDER BY checkpoint_id DESC
         LIMIT 1
     """
-    async with conn.execute(query, (thread_id,)) as cur:
+    async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
         row = await cur.fetchone()
         if not row or not row[0] or not row[1]:
             return {}

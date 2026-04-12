@@ -104,8 +104,8 @@ def validate_skill(skill_path, *, strict=False):
             )
 
     # Validate compatibility field if present (optional)
-    compatibility = frontmatter.get("compatibility", "")
-    if compatibility:
+    if "compatibility" in frontmatter:
+        compatibility = frontmatter.get("compatibility")
         if not isinstance(compatibility, str):
             return (
                 False,

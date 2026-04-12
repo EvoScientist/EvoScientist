@@ -613,8 +613,8 @@ def serve(
     ),
     auto_approve: bool = typer.Option(
         False,
-        "--auto-approve",
-        help="Auto-approve all tool executions without prompting",
+        "--auto-mode",
+        help="Run unattended: skip ask_user and tool approval prompts",
     ),
     ask_user: bool = typer.Option(
         False,
@@ -1092,8 +1092,8 @@ def _main_callback(
     ),
     auto_approve: bool = typer.Option(
         False,
-        "--auto-approve",
-        help="Auto-approve all tool executions without prompting",
+        "--auto-mode",
+        help="Run unattended: skip ask_user and tool approval prompts",
     ),
     ask_user: bool = typer.Option(
         False,

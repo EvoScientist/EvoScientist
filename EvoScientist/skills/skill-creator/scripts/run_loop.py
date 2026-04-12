@@ -109,14 +109,11 @@ def run_loop(
         )
         eval_elapsed = time.time() - t0
 
-        # Split results back into train/test by matching queries
-        train_queries_set = {q["query"] for q in train_set}
-        train_result_list = [
-            r for r in all_results["results"] if r["query"] in train_queries_set
-        ]
-        test_result_list = [
-            r for r in all_results["results"] if r["query"] not in train_queries_set
-        ]
+        # Split results back into train/test by position (run_eval preserves
+        # query order, and all_queries = train_set + test_set)
+        n_train = len(train_set)
+        train_result_list = all_results["results"][:n_train]
+        test_result_list = all_results["results"][n_train:]
 
         train_passed = sum(1 for r in train_result_list if r["pass"])
         train_total = len(train_result_list)
