@@ -1526,6 +1526,11 @@ _RECOMMENDED_SKILLS = [
         "label": "HuggingFace Skills  (dataset creation, model training & evaluation, third party by HuggingFace)",
         "source": "huggingface/skills@skills",
     },
+    # ── Third-party (MiniMax-AI) ──
+    {
+        "label": "MiniMax Skills  (text, image, video, speech & music generation via MiniMax AI, third party by MiniMax-AI)",
+        "source": "MiniMax-AI/cli@skill",
+    },
 ]
 
 
