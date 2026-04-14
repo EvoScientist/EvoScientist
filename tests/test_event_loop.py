@@ -235,6 +235,55 @@ class TestMultipleStreamingCalls:
         assert result == "final answer"
         assert sent_thinking == [thinking.rstrip()]
 
+    def test_recursive_streaming_sends_new_thinking_after_resume(self):
+        """Genuinely new thinking in resumed rounds should be relayed."""
+        from EvoScientist.stream.display import _run_streaming
+
+        mock_agent = Mock()
+        thinking_r1 = "Initial plan. " * 20
+        thinking_r2 = "Revised plan. " * 20
+        stream_calls = 0
+
+        async def mock_stream(*args, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                yield {"type": "thinking", "content": thinking_r1}
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "tool_call_id": "tc-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+
+            yield {"type": "thinking", "content": thinking_r2}
+            yield {"type": "text", "content": "final answer"}
+            yield {"type": "done", "response": "final answer"}
+
+        sent_thinking: list[str] = []
+
+        with patch(
+            "EvoScientist.stream.display.stream_agent_events",
+            side_effect=mock_stream,
+        ):
+            with patch("EvoScientist.stream.display.Live"):
+                result = _run_streaming(
+                    agent=mock_agent,
+                    message="test message",
+                    thread_id="thread1",
+                    show_thinking=False,
+                    interactive=True,
+                    on_thinking=sent_thinking.append,
+                    ask_user_prompt_fn=lambda _data: {
+                        "answers": ["yes"],
+                        "status": "answered",
+                    },
+                )
+
+        assert result == "final answer"
+        assert sent_thinking == [thinking_r1.rstrip(), thinking_r2.rstrip()]
+
 
 class TestEventLoopThreadSafety:
     """Tests for thread safety edge cases."""

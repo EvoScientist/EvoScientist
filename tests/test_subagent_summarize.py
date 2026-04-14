@@ -432,6 +432,81 @@ class TestConsumerSubagentTextFallback:
 
         _run(_test())
 
+    def test_new_thinking_relayed_after_resume(self):
+        """Genuinely different thinking in round 2 should be sent."""
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        mgr.register(_StubChannel())
+
+        channel = mgr.get_channel("stub")
+        assert channel is not None
+        channel.send_thinking_message = AsyncMock()
+
+        consumer = InboundConsumer(
+            bus=bus,
+            manager=mgr,
+            agent=MagicMock(),
+            thread_id="",
+            max_concurrent=2,
+            max_pending=10,
+            inference_timeout=5.0,
+            drain_timeout=1.0,
+            send_thinking=True,
+        )
+        consumer._resolve_ask_user = AsyncMock(  # type: ignore[method-assign]
+            return_value={"answers": ["yes"], "status": "answered"}
+        )
+
+        thinking_r1 = "Initial plan. " * 20
+        thinking_r2 = "Revised plan. " * 20
+        stream_calls = 0
+
+        async def _fake_stream(agent, message, thread_id, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                yield {"type": "thinking", "content": thinking_r1}
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "tool_call_id": "tc-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+
+            yield {"type": "thinking", "content": thinking_r2}
+            yield {"type": "text", "content": "final answer"}
+            yield {"type": "done", "content": "final answer"}
+
+        async def _test():
+            with patch(
+                "EvoScientist.stream.events.stream_agent_events",
+                new=_fake_stream,
+            ):
+                await bus.publish_inbound(
+                    BusInbound(
+                        channel="stub",
+                        sender_id="u1",
+                        chat_id="c1",
+                        content="analyze papers",
+                    )
+                )
+
+                task = asyncio.create_task(consumer.run())
+                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+
+                assert outbound.content == "final answer"
+                assert channel.send_thinking_message.await_count == 2
+                call1 = channel.send_thinking_message.await_args_list[0]
+                call2 = channel.send_thinking_message.await_args_list[1]
+                assert call1.args[1] == thinking_r1.rstrip()
+                assert call2.args[1] == thinking_r2.rstrip()
+
+                await consumer.stop()
+                await task
+
+        _run(_test())
+
     def test_no_response_fallback_when_both_empty(self):
         """When both final_content and subagent_text are empty, 'No response' is used."""
         events = [

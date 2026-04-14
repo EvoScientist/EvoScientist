@@ -456,7 +456,7 @@ class InboundConsumer:
             if channel:
                 await channel.start_typing(msg.chat_id)
 
-            thinking_sent_once = False
+            _last_sent_thinking: str | None = None
 
             for _hitl_round in range(_MAX_HITL_ROUNDS):
                 final_content = ""
@@ -467,19 +467,14 @@ class InboundConsumer:
                 interrupt_data: dict | None = None
 
                 async def _flush_thinking_buffer() -> bool:
-                    """Send the current thinking buffer once for this root run."""
-                    nonlocal thinking_sent, thinking_sent_once
-                    if (
-                        not channel
-                        or thinking_sent
-                        or thinking_sent_once
-                        or not thinking_buffer
-                    ):
+                    """Send the current thinking buffer, dedup by content."""
+                    nonlocal thinking_sent, _last_sent_thinking
+                    if not channel or thinking_sent or not thinking_buffer:
                         return False
 
                     full_thinking = "".join(thinking_buffer).rstrip()
                     thinking_buffer.clear()
-                    if not full_thinking:
+                    if not full_thinking or full_thinking == _last_sent_thinking:
                         return False
 
                     await channel.send_thinking_message(
@@ -488,7 +483,7 @@ class InboundConsumer:
                         msg.metadata,
                     )
                     thinking_sent = True
-                    thinking_sent_once = True
+                    _last_sent_thinking = full_thinking
                     return True
 
                 async for event in _timeout_aiter(
