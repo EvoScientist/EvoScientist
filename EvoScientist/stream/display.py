@@ -1121,14 +1121,14 @@ def _run_streaming(
             # thinking is still delivered.
             if (
                 on_thinking
-                and _sent_thinking_text is None
                 and event_type != "thinking"
                 and state.thinking_text
                 and len(state.thinking_text) >= _MIN_THINKING_LEN
             ):
                 current = state.thinking_text.rstrip()
-                on_thinking(current)
-                _sent_thinking_text = current
+                if current != _sent_thinking_text:
+                    on_thinking(current)
+                    _sent_thinking_text = current
 
             # Send todo list to channel on first write_todos tool_call
             if (
