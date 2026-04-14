@@ -466,14 +466,16 @@ class InboundConsumer:
                 thinking_sent = False
                 interrupt_data: dict | None = None
 
-                async def _flush_thinking_buffer() -> bool:
+                async def _flush_thinking_buffer(
+                    buffer: list[str] = thinking_buffer,
+                ) -> bool:
                     """Send the current thinking buffer, dedup by content."""
                     nonlocal thinking_sent, _last_sent_thinking
-                    if not channel or thinking_sent or not thinking_buffer:
+                    if not channel or thinking_sent or not buffer:
                         return False
 
-                    full_thinking = "".join(thinking_buffer).rstrip()
-                    thinking_buffer.clear()
+                    full_thinking = "".join(buffer).rstrip()
+                    buffer.clear()
                     if not full_thinking or full_thinking == _last_sent_thinking:
                         return False
 
