@@ -524,7 +524,7 @@ class TestThirdPartyRouting:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "anthropic"
-        assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
+        assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
         assert call_kwargs["api_key"] == "mm-key-123"
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -532,12 +532,12 @@ class TestThirdPartyRouting:
         """MINIMAX_BASE_URL env var should override the default base URL."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
-        monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic")
+        monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
 
         get_chat_model("MiniMax-M2.5", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
+        assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_gets_thinking(self, mock_init, monkeypatch):
@@ -574,7 +574,7 @@ class TestThirdPartyRouting:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model"] == "MiniMax-M2.5-highspeed"
         assert call_kwargs["model_provider"] == "anthropic"
-        assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
+        assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_anthropic_via_routed_dict(self, mock_init, monkeypatch):
@@ -605,7 +605,7 @@ class TestMiniMaxProvider:
 
         assert "minimax" in _ANTHROPIC_ROUTED_PROVIDERS
         base_url, api_key_env = _ANTHROPIC_ROUTED_PROVIDERS["minimax"]
-        assert base_url == "https://api.minimax.io/anthropic"
+        assert base_url == "https://api.minimaxi.com/anthropic"
         assert api_key_env == "MINIMAX_API_KEY"
 
     def test_minimax_not_in_openai_routed_providers(self):

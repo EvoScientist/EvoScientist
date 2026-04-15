@@ -21,7 +21,7 @@ from .patches import (
     _patch_openrouter_reasoning_details,
 )
 
-_MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimax.io/anthropic"
+_MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -102,7 +102,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash", "gemini-2.5-flash", "google-genai"),
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
-    # MiniMax (direct API — Anthropic-compatible at api.minimax.io)
+    # MiniMax (direct API — Anthropic-compatible; default: api.minimaxi.com, global: api.minimax.io)
     ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
     ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
     ("minimax-m2.5", "MiniMax-M2.5", "minimax"),

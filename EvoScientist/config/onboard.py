@@ -280,7 +280,7 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
 
 def validate_minimax_key(
     api_key: str,
-    base_url: str = "https://api.minimax.io/anthropic",
+    base_url: str = "https://api.minimaxi.com/anthropic",
 ) -> tuple[bool, str]:
     """Validate a MiniMax API key without consuming tokens.
 
@@ -791,10 +791,10 @@ def _step_minimax_region(config: EvoScientistConfig) -> str:
         The selected base URL.
     """
     current = config.minimax_base_url or os.environ.get("MINIMAX_BASE_URL", "")
-    if current == _MINIMAX_REGIONS["cn"]:
-        default = "cn"
-    else:
+    if current == _MINIMAX_REGIONS["global"]:
         default = "global"
+    else:
+        default = "cn"
 
     region = questionary.select(
         "Select MiniMax API region (must match where your key was created):",
@@ -835,7 +835,7 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
                 key,
                 base_url=config.minimax_base_url
                 or os.environ.get(
-                    "MINIMAX_BASE_URL", "https://api.minimax.io/anthropic"
+                    "MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"
                 ),
             ),
         ),

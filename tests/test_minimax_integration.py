@@ -1,10 +1,10 @@
 """Integration tests for MiniMax direct provider.
 
 These tests validate that the MiniMax provider can connect to the real
-MiniMax API (api.minimax.io/anthropic) and produce chat completions.
+MiniMax API (api.minimaxi.com/anthropic by default) and produce chat completions.
 
 Requires MINIMAX_API_KEY environment variable to be set.
-Optionally set MINIMAX_BASE_URL for mainland China (api.minimaxi.com/anthropic).
+Optionally set MINIMAX_BASE_URL to https://api.minimax.io/anthropic for Global keys.
 """
 
 import os
