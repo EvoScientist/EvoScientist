@@ -318,10 +318,9 @@ def validate_minimax_key(
             k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
         ):
             return False, "Invalid API key"
-        if any(k in error_str for k in ("400", "bad_request", "bad request")):
-            # Auth passed but empty model was rejected → key is valid
-            return True, "Valid"
-        return False, f"Error: {e}"
+        # Any non-auth error (400 bad model, 500 insufficient balance, etc.)
+        # means the key itself was accepted → treat as valid.
+        return True, "Valid"
 
 
 def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
