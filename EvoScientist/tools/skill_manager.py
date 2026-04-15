@@ -83,8 +83,8 @@ def skill_manager(
             if include_system:
                 return "No skills found."
             return "No user skills installed. Use action='install' to add skills, or set include_system=True to see built-in skills."
-        user_skills = [s for s in skills if s.source == "user"]
-        system_skills = [s for s in skills if s.source == "system"]
+        user_skills = [s for s in skills if s.source in ("workspace", "global")]
+        system_skills = [s for s in skills if s.source == "builtin"]
         lines = []
         if user_skills:
             lines.append(f"User Skills ({len(user_skills)}):")

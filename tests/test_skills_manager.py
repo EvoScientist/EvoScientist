@@ -671,3 +671,125 @@ class TestFetchRemoteSkillIndex:
 
         assert call_count == 1  # Only cloned once
         assert index1 == index2
+
+
+# =============================================================================
+# Tests for skill_manager tool — action="list" filtering
+# =============================================================================
+
+
+class TestSkillManagerList:
+    """Tests for the skill_manager() tool's action='list' output.
+
+    These tests verify that the source-based filtering in skill_manager.py
+    correctly maps skills_manager.py's tier names ("workspace", "global",
+    "builtin") to the User Skills / System Skills display sections.
+    """
+
+    def _make_skill(self, tmp_path, name, description="A skill"):
+        skill_dir = tmp_path / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n"
+        )
+        return skill_dir
+
+    def test_list_user_skills_workspace(self, tmp_path):
+        """Workspace-tier skills appear under 'User Skills'."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "ws-skill")
+        install_skill(str(tmp_path / "ws-skill"), str(workspace_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke({"action": "list", "include_system": False})
+
+        assert "User Skills (1)" in result
+        assert "ws-skill" in result
+        assert "System Skills" not in result
+
+    def test_list_user_skills_global(self, tmp_path):
+        """Global-tier skills appear under 'User Skills'."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "global-skill")
+        install_skill(str(tmp_path / "global-skill"), str(global_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke({"action": "list", "include_system": False})
+
+        assert "User Skills (1)" in result
+        assert "global-skill" in result
+
+    def test_list_include_system_shows_both_sections(self, tmp_path):
+        """include_system=True shows both User Skills and System Skills sections."""
+        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skills_manager import SkillInfo
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "user-skill")
+        install_skill(str(tmp_path / "user-skill"), str(workspace_dir))
+
+        builtin_skill = SkillInfo(
+            name="builtin-skill",
+            description="A built-in skill",
+            path=tmp_path / "builtin-skill",
+            source="builtin",
+        )
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch(
+                "EvoScientist.tools.skills_manager.list_skills",
+                return_value=[
+                    SkillInfo(
+                        name="user-skill",
+                        description="A user skill",
+                        path=workspace_dir / "user-skill",
+                        source="workspace",
+                    ),
+                    builtin_skill,
+                ],
+            ),
+        ):
+            result = skill_manager.invoke({"action": "list", "include_system": True})
+
+        assert "User Skills (1)" in result
+        assert "user-skill" in result
+        assert "System Skills (1)" in result
+        assert "builtin-skill" in result
+
+    def test_list_no_user_skills_returns_message(self, tmp_path):
+        """Empty workspace and global dirs return the 'no user skills' message."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke({"action": "list", "include_system": False})
+
+        assert "No user skills installed" in result
