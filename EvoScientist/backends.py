@@ -286,16 +286,17 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
         )
 
 
-class MergedReadOnlyBackend(BackendProtocol):
-    """Read-only backend that merges up to three skill directories.
+class MergedSkillsBackend(BackendProtocol):
+    """Skills backend that merges up to three skill directories.
 
     Priority (high → low):
-    1. primary   — workspace/skills/  (project-local)
-    2. global    — ~/.config/evoscientist/skills/  (user global, optional)
-    3. secondary — EvoScientist/skills/  (built-in, PyPI)
+    1. primary   — workspace/skills/  (project-local, writable)
+    2. global    — ~/.config/evoscientist/skills/  (user global, read-only)
+    3. secondary — EvoScientist/skills/  (built-in, PyPI, read-only)
 
     Higher-priority skills override lower-priority skills with the same name.
     All directories share the same virtual path namespace (/skills/).
+    Only the workspace tier (primary) allows write and edit operations.
     """
 
     def __init__(
@@ -304,9 +305,7 @@ class MergedReadOnlyBackend(BackendProtocol):
         secondary_dir: str,
         global_dir: str | None = None,
     ):
-        self._primary = ReadOnlyFilesystemBackend(
-            root_dir=primary_dir, virtual_mode=True
-        )
+        self._primary = FilesystemBackend(root_dir=primary_dir, virtual_mode=True)
         self._global = (
             ReadOnlyFilesystemBackend(root_dir=global_dir, virtual_mode=True)
             if global_dir
@@ -375,12 +374,10 @@ class MergedReadOnlyBackend(BackendProtocol):
                 pass
         return GlobResult(matches=sorted(merged.values(), key=lambda x: x["path"]))
 
-    # -- write / edit: blocked --
+    # -- write / edit: only workspace/skills/ (primary) is writable --
 
     def write(self, file_path: str, content: str) -> WriteResult:
-        return WriteResult(
-            error="This directory is read-only. Write operations are not permitted here."
-        )
+        return self._primary.write(file_path, content)
 
     def edit(
         self,
@@ -389,9 +386,7 @@ class MergedReadOnlyBackend(BackendProtocol):
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
-        return EditResult(
-            error="This directory is read-only. Edit operations are not permitted here."
-        )
+        return self._primary.edit(file_path, old_string, new_string, replace_all)
 
     # -- download / upload --
 
@@ -410,10 +405,7 @@ class MergedReadOnlyBackend(BackendProtocol):
         return responses
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        return [
-            FileUploadResponse(path=path, error="permission_denied")
-            for path, _ in files
-        ]
+        return self._primary.upload_files(files)
 
 
 class CustomSandboxBackend(LocalShellBackend):

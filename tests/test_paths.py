@@ -102,4 +102,4 @@ class TestEnsureDirsUsesUpdatedPaths:
         paths.ensure_dirs()
 
         assert (new_root / "memory").is_dir()
-        assert (new_root / "skills").is_dir()
+        assert not (new_root / "skills").exists()  # skills created on demand by install_skill()
