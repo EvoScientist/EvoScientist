@@ -253,7 +253,7 @@ def _get_default_backend():
     """Build the default composite backend from current paths."""
     from deepagents.backends import CompositeBackend, FilesystemBackend
 
-    from .backends import CustomSandboxBackend, MergedReadOnlyBackend
+    from .backends import CustomSandboxBackend, MergedSkillsBackend
 
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
@@ -266,7 +266,7 @@ def _get_default_backend():
         virtual_mode=True,
         timeout=300,
     )
-    sk_backend = MergedReadOnlyBackend(
+    sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
         global_dir=global_skills_dir,
         secondary_dir=SKILLS_DIR,
@@ -367,7 +367,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
     from deepagents.backends import CompositeBackend, FilesystemBackend
 
     from . import paths as _paths
-    from .backends import CustomSandboxBackend, MergedReadOnlyBackend
+    from .backends import CustomSandboxBackend, MergedSkillsBackend
     from .middleware import (
         ContextOverflowMapperMiddleware,
         ToolErrorHandlerMiddleware,
@@ -407,7 +407,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         virtual_mode=True,
         timeout=300,
     )
-    sk_backend = MergedReadOnlyBackend(
+    sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,
         global_dir=_global_skills_dir,
         secondary_dir=SKILLS_DIR,

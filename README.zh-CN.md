@@ -273,7 +273,8 @@ EvoSci onboard
 export ANTHROPIC_API_KEY="sk-..."   # Claude  — console.anthropic.com
 export OPENAI_API_KEY="sk-..."      # GPT    — platform.openai.com
 export GOOGLE_API_KEY="AI..."       # Gemini  — aistudio.google.com/api-keys
-export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com (Anthropic-compatible)
+export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com（默认，中国大陆）或 platform.minimax.io（国际版）
+export MINIMAX_BASE_URL="https://api.minimax.io/anthropic"  # 仅国际版需要设置（默认: https://api.minimaxi.com/anthropic）
 export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
 
 # 网络搜索（可选）

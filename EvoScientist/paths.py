@@ -62,17 +62,15 @@ def set_workspace_root(path: str | Path) -> None:
 
 
 def ensure_dirs() -> None:
-    """Create runtime subdirectories (memory, skills) if they do not exist.
+    """Create runtime subdirectories if they do not exist.
+
+    Only memory is created eagerly — skills directories are created on demand
+    by install_skill() when the user first installs a skill.
 
     Does NOT create the workspace root itself — it should already exist
     (either the user's cwd or a directory they specified).
     """
-    for path in (MEMORY_DIR, USER_SKILLS_DIR):
-        path.mkdir(parents=True, exist_ok=True)
-    try:
-        GLOBAL_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        pass  # read-only environments — skip silently
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def default_workspace_dir() -> Path:

@@ -528,6 +528,18 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "mm-key-123"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_base_url_env_override(self, mock_init, monkeypatch):
+        """MINIMAX_BASE_URL env var should override the default base URL."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
+        monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
+
+        get_chat_model("MiniMax-M2.5", provider="minimax")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_gets_thinking(self, mock_init, monkeypatch):
         """MiniMax provider should get auto-thinking (thinking-capable via Anthropic)."""
         mock_init.return_value = "mock_model"

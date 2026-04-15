@@ -102,7 +102,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash", "gemini-2.5-flash", "google-genai"),
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
-    # MiniMax (direct API — Anthropic-compatible at api.minimaxi.com)
+    # MiniMax (direct API — Anthropic-compatible; default: api.minimaxi.com, global: api.minimax.io)
     ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
     ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
     ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
@@ -392,6 +392,8 @@ def get_chat_model(
                     "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
                 )
             base_url = base_url.rstrip("/")
+        elif provider == "minimax":
+            base_url = os.environ.get("MINIMAX_BASE_URL", base_url_default).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:

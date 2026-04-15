@@ -264,7 +264,8 @@ Set at least one LLM provider key and (optionally) a search key:
 export ANTHROPIC_API_KEY="sk-..."   # Claude  — console.anthropic.com
 export OPENAI_API_KEY="sk-..."      # GPT    — platform.openai.com
 export GOOGLE_API_KEY="AI..."       # Gemini  — aistudio.google.com/api-keys
-export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com (Anthropic-compatible)
+export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com (China, default) or platform.minimax.io (Global)
+export MINIMAX_BASE_URL="https://api.minimax.io/anthropic"  # only needed for Global keys (default: https://api.minimaxi.com/anthropic)
 export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
 
 # Web search (optional)
