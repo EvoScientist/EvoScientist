@@ -67,6 +67,7 @@ class EvoScientistConfig:
     nvidia_api_key: str = ""
     google_api_key: str = ""
     minimax_api_key: str = ""
+    minimax_base_url: str = ""
     siliconflow_api_key: str = ""
     openrouter_api_key: str = ""
     deepseek_api_key: str = ""
@@ -365,6 +366,7 @@ _ENV_MAPPINGS = {
     "nvidia_api_key": "NVIDIA_API_KEY",
     "google_api_key": "GOOGLE_API_KEY",
     "minimax_api_key": "MINIMAX_API_KEY",
+    "minimax_base_url": "MINIMAX_BASE_URL",
     "siliconflow_api_key": "SILICONFLOW_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
@@ -455,6 +457,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["GOOGLE_API_KEY"] = config.google_api_key
     if config.minimax_api_key and not os.environ.get("MINIMAX_API_KEY"):
         os.environ["MINIMAX_API_KEY"] = config.minimax_api_key
+    if config.minimax_base_url and not os.environ.get("MINIMAX_BASE_URL"):
+        os.environ["MINIMAX_BASE_URL"] = config.minimax_base_url
     if config.siliconflow_api_key and not os.environ.get("SILICONFLOW_API_KEY"):
         os.environ["SILICONFLOW_API_KEY"] = config.siliconflow_api_key
     if config.openrouter_api_key and not os.environ.get("OPENROUTER_API_KEY"):

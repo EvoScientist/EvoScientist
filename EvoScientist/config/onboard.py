@@ -278,10 +278,19 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
-def validate_minimax_key(api_key: str) -> tuple[bool, str]:
-    """Validate a MiniMax API key by making a test request.
+def validate_minimax_key(
+    api_key: str,
+    base_url: str = "https://api.minimax.io/anthropic",
+) -> tuple[bool, str]:
+    """Validate a MiniMax API key without consuming tokens.
 
-    Uses the Anthropic-compatible endpoint at api.minimaxi.com.
+    Sends a messages.create() with an empty model string.  MiniMax checks
+    auth *before* validating request params, so a valid key returns 400
+    (bad model) while an invalid key returns 401.
+
+    Args:
+        api_key: The MiniMax API key to validate.
+        base_url: Anthropic-compatible endpoint (global or mainland China).
 
     Returns:
         Tuple of (is_valid, message).
@@ -294,9 +303,14 @@ def validate_minimax_key(api_key: str) -> tuple[bool, str]:
 
         client = anthropic.Anthropic(
             api_key=api_key,
-            base_url="https://api.minimaxi.com/anthropic",
+            base_url=base_url,
         )
-        client.models.list()
+        client.messages.create(
+            model="",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        # Unexpected success — treat as valid
         return True, "Valid"
     except Exception as e:
         error_str = str(e).lower()
@@ -304,6 +318,9 @@ def validate_minimax_key(api_key: str) -> tuple[bool, str]:
             k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
         ):
             return False, "Invalid API key"
+        if any(k in error_str for k in ("400", "bad_request", "bad request")):
+            # Auth passed but empty model was rejected → key is valid
+            return True, "Valid"
         return False, f"Error: {e}"
 
 
@@ -758,6 +775,51 @@ def _step_provider(config: EvoScientistConfig) -> str:
     return provider
 
 
+_MINIMAX_REGIONS: dict[str, str] = {
+    "global": "https://api.minimax.io/anthropic",
+    "cn": "https://api.minimaxi.com/anthropic",
+}
+
+
+def _step_minimax_region(config: EvoScientistConfig) -> str:
+    """Step 2a (MiniMax): Select API region.
+
+    MiniMax has two regional endpoints — Global (api.minimax.io) and
+    Mainland China (api.minimaxi.com).  API keys are region-bound.
+
+    Returns:
+        The selected base URL.
+    """
+    current = config.minimax_base_url or os.environ.get("MINIMAX_BASE_URL", "")
+    if current == _MINIMAX_REGIONS["cn"]:
+        default = "cn"
+    else:
+        default = "global"
+
+    region = questionary.select(
+        "Select MiniMax API region (must match where your key was created):",
+        choices=[
+            Choice(
+                title="Global (api.minimax.io — platform.minimax.io keys)",
+                value="global",
+            ),
+            Choice(
+                title="Mainland China (api.minimaxi.com — platform.minimaxi.com keys)",
+                value="cn",
+            ),
+        ],
+        default=default,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
+    ).ask()
+
+    if region is None:
+        raise KeyboardInterrupt()
+
+    return _MINIMAX_REGIONS[region]
+
+
 def _provider_key_info(config: EvoScientistConfig, provider: str):
     """Return (display_name, current_value, validate_fn) for a provider."""
     mapping = {
@@ -769,7 +831,13 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
         "minimax": (
             "MiniMax",
             config.minimax_api_key or os.environ.get("MINIMAX_API_KEY", ""),
-            validate_minimax_key,
+            lambda key: validate_minimax_key(
+                key,
+                base_url=config.minimax_base_url
+                or os.environ.get(
+                    "MINIMAX_BASE_URL", "https://api.minimax.io/anthropic"
+                ),
+            ),
         ),
         "nvidia": (
             "NVIDIA",
@@ -2819,7 +2887,7 @@ def run_onboard(skip_validation: bool = False) -> bool:
         provider = _step_provider(config)
         config.provider = provider
 
-        # Step 2a: Base URL (custom-openai, custom-anthropic, or ollama provider)
+        # Step 2a: Base URL (custom-openai, custom-anthropic, minimax, or ollama)
         ollama_detected_models: list[str] = []
         if provider == "custom-openai":
             current_base_url = config.custom_openai_base_url or os.environ.get(
@@ -2833,6 +2901,8 @@ def run_onboard(skip_validation: bool = False) -> bool:
             )
             base_url = _step_base_url(config, current_value=current_base_url)
             config.custom_anthropic_base_url = base_url
+        elif provider == "minimax":
+            config.minimax_base_url = _step_minimax_region(config)
         elif provider == "ollama":
             ollama_url, ollama_detected_models = _step_ollama_base_url(config)
             config.ollama_base_url = ollama_url
