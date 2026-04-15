@@ -312,15 +312,14 @@ def validate_minimax_key(
         )
         # Unexpected success — treat as valid
         return True, "Valid"
-    except Exception as e:
-        error_str = str(e).lower()
-        if any(
-            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
-        ):
-            return False, "Invalid API key"
-        # Any non-auth error (400 bad model, 500 insufficient balance, etc.)
-        # means the key itself was accepted → treat as valid.
+    except anthropic.AuthenticationError:
+        return False, "Invalid API key"
+    except anthropic.APIStatusError:
+        # Any non-auth HTTP error (400 bad model, 500 insufficient balance,
+        # etc.) means the key itself was accepted → treat as valid.
         return True, "Valid"
+    except Exception as e:
+        return False, f"Error: {e}"
 
 
 def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
