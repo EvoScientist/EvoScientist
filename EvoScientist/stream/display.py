@@ -987,16 +987,31 @@ def _get_event_loop() -> asyncio.AbstractEventLoop:
 def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
     """Interactive console Q&A for ask_user events.
 
-    Presents questions via ``prompt_toolkit.prompt()`` (not ``input()``)
-    for proper CJK IME support and styled prompts without cursor drift.
+    Presents multiple-choice questions with arrow-key navigation via
+    ``questionary.select()`` and free-text questions via
+    ``questionary.text()`` with required-field validation.  Matches the
+    questionary style used throughout the rest of the CLI.
     """
-    from prompt_toolkit import prompt as pt_prompt  # type: ignore[import-untyped]
-    from prompt_toolkit.formatted_text import HTML  # type: ignore[import-untyped]
+    import questionary  # type: ignore[import-untyped]
+    from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untyped]
+
+    # Matches _PICKER_STYLE in cli/interactive.py — gray non-selected, bold selected.
+    _PICKER_STYLE = PtStyle.from_dict(
+        {
+            "questionmark": "#888888",
+            "question": "",
+            "pointer": "bold",
+            "highlighted": "bold",
+            "text": "#888888",
+            "answer": "bold",
+        }
+    )
 
     questions = ask_user_data.get("questions", [])
     if not questions:
         return {"answers": [], "status": "answered"}
 
+    total = len(questions)
     console.print()
     console.print(
         Panel(
@@ -1013,43 +1028,57 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
             q_text = q.get("question", "")
             q_type = q.get("type", "text")
             required = q.get("required", True)
-            tag = " [dim](optional)[/dim]" if not required else ""
-            console.print(f"  [bold]{i + 1}. {q_text}[/bold]{tag}")
+            optional_suffix = " (optional)" if not required else ""
+            prompt_text = f"({i + 1}/{total}) {q_text}{optional_suffix}"
 
             if q_type == "multiple_choice":
                 choices = q.get("choices", [])
-                for j, choice in enumerate(choices):
-                    label = choice.get("value", str(choice))
-                    letter = chr(ord("A") + j)
-                    console.print(Text(f"     {letter}. {label}", style="dim"))
-                other_letter = chr(ord("A") + len(choices))
-                console.print(
-                    Text(f"     {other_letter}. Other (type your answer)", style="dim")
-                )
+                choice_labels = [c.get("value", str(c)) for c in choices]
+                other_label = "Other (type your answer)"
+                choice_labels.append(other_label)
 
-                letters = "/".join(chr(ord("A") + k) for k in range(len(choices) + 1))
-                raw = pt_prompt(
-                    HTML(f"  <b><style fg='#1565c0'>Choice [{letters}]:</style></b> ")
-                ).strip()
-                if raw.upper() == other_letter:
-                    raw = pt_prompt(
-                        HTML("  <b><style fg='#42a5f5'>&gt; Your answer:</style></b> ")
-                    ).strip()
-                    answers.append(raw)
-                elif len(raw) == 1 and raw.upper().isalpha():
-                    idx = ord(raw.upper()) - ord("A")
-                    if 0 <= idx < len(choices):
-                        answers.append(choices[idx].get("value", raw))
-                    else:
-                        answers.append(raw)
-                else:
-                    answers.append(raw)
+                selected = questionary.select(
+                    prompt_text,
+                    choices=choice_labels,
+                    style=_PICKER_STYLE,
+                ).ask()
+
+                if selected is None:  # Ctrl+C
+                    raise KeyboardInterrupt
+
+                if selected == other_label:
+                    selected = questionary.text(
+                        "Your answer:",
+                        style=_PICKER_STYLE,
+                    ).ask()
+                    if selected is None:
+                        raise KeyboardInterrupt
+
+                answers.append(selected)
+
             else:
-                raw = pt_prompt(
-                    HTML("  <b><style fg='#42a5f5'>&gt; Answer:</style></b> ")
-                ).strip()
-                answers.append(raw)
+
+                def _make_validator(is_required: bool):
+                    def _validate(v: str) -> bool | str:
+                        if is_required and not v.strip():
+                            return "This field is required."
+                        return True
+
+                    return _validate
+
+                answer = questionary.text(
+                    prompt_text,
+                    validate=_make_validator(required),
+                    style=_PICKER_STYLE,
+                ).ask()
+
+                if answer is None:  # Ctrl+C
+                    raise KeyboardInterrupt
+
+                answers.append(answer)
+
             console.print()
+
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]  Cancelled.[/dim]")
         return {"status": "cancelled"}

@@ -445,30 +445,37 @@ def test_auto_mode_disables_ask_user_middleware(
 
 
 class TestRichCLIPrompt:
-    """Test _resolve_ask_user_prompt with mocked prompt_toolkit.prompt()."""
-
-    _PT_PROMPT = "prompt_toolkit.prompt"
+    """Test _resolve_ask_user_prompt with mocked questionary."""
 
     def test_text_question_returns_answered(self):
+        from unittest.mock import MagicMock
+
         from EvoScientist.stream.display import _resolve_ask_user_prompt
 
         data = {
             "questions": [{"question": "What dataset?", "type": "text"}],
             "tool_call_id": "tc_1",
         }
-        with patch(self._PT_PROMPT, side_effect=["CIFAR-10"]):
+        mock_text = MagicMock()
+        mock_text.return_value.ask.return_value = "CIFAR-10"
+        with patch("questionary.text", mock_text):
             result = _resolve_ask_user_prompt(data)
         assert result["status"] == "answered"
         assert result["answers"] == ["CIFAR-10"]
 
     def test_keyboard_interrupt_returns_cancelled(self):
+        from unittest.mock import MagicMock
+
         from EvoScientist.stream.display import _resolve_ask_user_prompt
 
         data = {
             "questions": [{"question": "What?", "type": "text"}],
             "tool_call_id": "tc_1",
         }
-        with patch(self._PT_PROMPT, side_effect=KeyboardInterrupt):
+        # questionary returns None when user presses Ctrl+C
+        mock_text = MagicMock()
+        mock_text.return_value.ask.return_value = None
+        with patch("questionary.text", mock_text):
             result = _resolve_ask_user_prompt(data)
         assert result["status"] == "cancelled"
 
@@ -480,7 +487,9 @@ class TestRichCLIPrompt:
         assert result["status"] == "answered"
         assert result["answers"] == []
 
-    def test_multiple_choice_letter_mapping(self):
+    def test_multiple_choice_selection(self):
+        from unittest.mock import MagicMock
+
         from EvoScientist.stream.display import _resolve_ask_user_prompt
 
         data = {
@@ -493,10 +502,39 @@ class TestRichCLIPrompt:
             ],
             "tool_call_id": "tc_1",
         }
-        with patch(self._PT_PROMPT, side_effect=["B"]):
+        mock_select = MagicMock()
+        mock_select.return_value.ask.return_value = "ImageNet"
+        with patch("questionary.select", mock_select):
             result = _resolve_ask_user_prompt(data)
         assert result["status"] == "answered"
         assert result["answers"] == ["ImageNet"]
+
+    def test_multiple_choice_other_option(self):
+        from unittest.mock import MagicMock
+
+        from EvoScientist.stream.display import _resolve_ask_user_prompt
+
+        data = {
+            "questions": [
+                {
+                    "question": "Which?",
+                    "type": "multiple_choice",
+                    "choices": [{"value": "CIFAR-10"}, {"value": "ImageNet"}],
+                }
+            ],
+            "tool_call_id": "tc_1",
+        }
+        mock_select = MagicMock()
+        mock_select.return_value.ask.return_value = "Other (type your answer)"
+        mock_text = MagicMock()
+        mock_text.return_value.ask.return_value = "custom dataset"
+        with (
+            patch("questionary.select", mock_select),
+            patch("questionary.text", mock_text),
+        ):
+            result = _resolve_ask_user_prompt(data)
+        assert result["status"] == "answered"
+        assert result["answers"] == ["custom dataset"]
 
 
 # ---------------------------------------------------------------------------
