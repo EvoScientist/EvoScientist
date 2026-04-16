@@ -4,7 +4,7 @@ Automatically extracts and persists long-term memory (user profile, research
 preferences, experiment conclusions) from conversations.
 
 Two mechanisms:
-1. **Injection** (every LLM call): Reads ``/memory/MEMORY.md`` and appends it
+1. **Injection** (every LLM call): Reads ``/memories/MEMORY.md`` and appends it
    to the system prompt so the agent always has context.
 2. **Extraction** (threshold-triggered): When the conversation exceeds a
    configurable message count, uses an LLM call to pull out structured facts
@@ -17,7 +17,7 @@ from EvoScientist.middleware import EvoMemoryMiddleware
 
 middleware = EvoMemoryMiddleware(
     backend=my_backend,          # or backend factory
-    memory_path="/memory/MEMORY.md",
+    memory_path="/memories/MEMORY.md",
     extraction_model=chat_model,
     trigger=("messages", 20),
 )
@@ -168,7 +168,7 @@ Use this to personalize your responses and avoid re-asking known information.
 - An experiment completes with notable conclusions
 
 **How to update memory:**
-- If `/memory/MEMORY.md` does not exist yet, use `write_file` to create it
+- If `/memories/MEMORY.md` does not exist yet, use `write_file` to create it
 - If it already exists, use `edit_file` to update specific sections
 - Use this markdown structure:
 
@@ -446,7 +446,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     Args:
         backend: Backend instance or factory for reading/writing memory files.
-        memory_path: Virtual path to MEMORY.md (default ``/memory/MEMORY.md``).
+        memory_path: Virtual path to MEMORY.md (default ``/memories/MEMORY.md``).
         extraction_model: Chat model used for extraction (can be a cheap/fast
             model like ``claude-haiku``). If ``None``, automatic extraction is
             disabled and only prompt injection + manual ``edit_file`` works.
@@ -461,7 +461,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self,
         *,
         backend: BACKEND_TYPES,
-        memory_path: str = "/memory/MEMORY.md",
+        memory_path: str = "/memories/MEMORY.md",
         extraction_model: BaseChatModel | None = None,
         trigger: tuple[str, int] = ("messages", 20),
     ) -> None:
@@ -687,7 +687,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 logger.debug("Failed to load memory during modify_request: %s", e)
         # Use placeholder when memory file doesn't exist yet
         if not memory_content:
-            memory_content = "(No memory saved yet. Create `/memory/MEMORY.md` when you learn important information.)"
+            memory_content = "(No memory saved yet. Create `/memories/MEMORY.md` when you learn important information.)"
 
         from deepagents.middleware._utils import append_to_system_message
 
@@ -802,7 +802,7 @@ def create_memory_middleware(
     """
     from deepagents.backends import FilesystemBackend
 
-    from ..paths import MEMORY_DIR as _DEFAULT_MEMORY_DIR
+    from ..paths import MEMORIES_DIR as _DEFAULT_MEMORY_DIR
 
     if memory_dir is None:
         memory_dir = str(_DEFAULT_MEMORY_DIR)

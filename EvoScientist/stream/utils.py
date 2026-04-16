@@ -114,9 +114,9 @@ def _tool_path_arg(args: dict | None) -> str:
 
 
 def _is_memory_path(path: str) -> bool:
-    """Return True when a virtual path targets the shared memory directory."""
+    """Return True when a virtual path targets the global memories directory."""
     normalized = (path or "").strip()
-    return normalized == "/memory" or normalized.startswith("/memory/")
+    return normalized == "/memories" or normalized.startswith("/memories/")
 
 
 def format_tool_compact(name: str, args: dict | None) -> str:
@@ -250,7 +250,7 @@ def format_tool_compact_with_result(
 
     if name_lower in ("write_file", "edit_file"):
         if (
-            "/memory/" in result_content
+            "/memories/" in result_content
             or "/MEMORY.md" in result_content
             or "MEMORY.md" in result_content
         ):

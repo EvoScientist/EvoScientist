@@ -206,7 +206,7 @@ class TestToolCallWidget(unittest.TestCase):
 
         w = ToolCallWidget("edit_file", {}, "mem-1")
         w._result_content = (
-            "Successfully replaced 1 instance(s) of the string in '/memory/MEMORY.md'"
+            "Successfully replaced 1 instance(s) of the string in '/memories/MEMORY.md'"
         )
 
         class _Header:

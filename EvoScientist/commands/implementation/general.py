@@ -49,7 +49,7 @@ class CurrentCommand(Command):
                 f"Workspace: {_shorten_path(ctx.workspace_dir)}",
                 style="dim",
             )
-        memory_path = paths.MEMORY_DIR
+        memory_path = paths.MEMORIES_DIR
         if memory_path:
             from ...cli.agent import _shorten_path
 

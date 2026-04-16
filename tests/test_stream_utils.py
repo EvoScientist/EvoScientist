@@ -95,37 +95,46 @@ class TestFormatToolCompact:
         result = format_tool_compact("edit_file", {"path": "f.py"})
         assert result == "edit_file(f.py)"
 
-    # Memory file special display
-    def test_read_file_memory(self):
-        result = format_tool_compact("read_file", {"path": "/memory/MEMORY.md"})
+    # Global memory file special display (/memories/ = global)
+    def test_read_file_global_memory(self):
+        result = format_tool_compact("read_file", {"path": "/memories/MEMORY.md"})
         assert result == "Reading memory"
 
-    def test_read_file_memory_file_path_alias(self):
-        result = format_tool_compact("read_file", {"file_path": "/memory/MEMORY.md"})
+    def test_read_file_global_memory_file_path_alias(self):
+        result = format_tool_compact("read_file", {"file_path": "/memories/MEMORY.md"})
         assert result == "Reading memory"
 
-    def test_read_file_any_memory_file(self):
-        result = format_tool_compact("read_file", {"path": "/memory/history.md"})
+    def test_read_file_any_global_memory_file(self):
+        result = format_tool_compact("read_file", {"path": "/memories/history.md"})
         assert result == "Reading memory"
 
-    def test_write_file_memory(self):
+    def test_write_file_global_memory(self):
         result = format_tool_compact("write_file", {"path": "/MEMORY.md"})
         assert result == "Updating memory"
-        # Also covers paths with /memory/ prefix
-        result2 = format_tool_compact("write_file", {"path": "/memory/MEMORY.md"})
+        # Also covers paths with /memories/ prefix
+        result2 = format_tool_compact("write_file", {"path": "/memories/MEMORY.md"})
         assert result2 == "Updating memory"
 
-    def test_edit_file_memory(self):
-        result = format_tool_compact("edit_file", {"path": "/memory/MEMORY.md"})
+    def test_edit_file_global_memory(self):
+        result = format_tool_compact("edit_file", {"path": "/memories/MEMORY.md"})
         assert result == "Updating memory"
 
-    def test_write_edit_any_memory_file(self):
-        write_result = format_tool_compact("write_file", {"path": "/memory/soul.md"})
+    def test_write_edit_any_global_memory_file(self):
+        write_result = format_tool_compact("write_file", {"path": "/memories/soul.md"})
         edit_result = format_tool_compact(
-            "edit_file", {"path": "/memory/skills-context.md"}
+            "edit_file", {"path": "/memories/skills-context.md"}
         )
         assert write_result == "Updating memory"
         assert edit_result == "Updating memory"
+
+    # Project-local /memory/ files show normal tool display
+    def test_read_file_project_memory(self):
+        result = format_tool_compact("read_file", {"path": "/memory/ideation-memory.md"})
+        assert result == "read_file(/memory/ideation-memory.md)"
+
+    def test_edit_file_project_memory(self):
+        result = format_tool_compact("edit_file", {"path": "/memory/experiment-memory.md"})
+        assert result == "edit_file(/memory/experiment-memory.md)"
 
     def test_memory_display_inferred_from_result_when_args_sparse(self):
         read_result = format_tool_compact_with_result(
@@ -138,16 +147,24 @@ class TestFormatToolCompact:
         edit_result = format_tool_compact_with_result(
             "edit_file",
             {},
-            "Successfully replaced 1 instance(s) of the string in '/memory/MEMORY.md'",
+            "Successfully replaced 1 instance(s) of the string in '/memories/MEMORY.md'",
         )
         assert edit_result == "Updating memory"
 
         write_result = format_tool_compact_with_result(
             "write_file",
             {},
-            "Wrote updated content to '/memory/history.md'",
+            "Wrote updated content to '/memories/history.md'",
         )
         assert write_result == "Updating memory"
+
+    def test_project_memory_result_not_special(self):
+        result = format_tool_compact_with_result(
+            "write_file",
+            {},
+            "Wrote updated content to '/memory/ideation-memory.md'",
+        )
+        assert result != "Updating memory"
 
     def test_glob(self):
         result = format_tool_compact("glob", {"pattern": "*.py"})

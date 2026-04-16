@@ -294,7 +294,7 @@ def cmd_interactive(
 
     from .. import paths
 
-    memory_dir = str(paths.MEMORY_DIR)
+    memory_dir = str(paths.MEMORIES_DIR)
 
     from ..config.settings import get_config_dir
 

@@ -257,7 +257,7 @@ def _get_default_backend():
 
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
-    memory_dir = str(_paths_mod.MEMORY_DIR)
+    memory_dir = str(_paths_mod.MEMORIES_DIR)
     user_skills_dir = str(_paths_mod.USER_SKILLS_DIR)
     global_skills_dir = str(_paths_mod.GLOBAL_SKILLS_DIR)
 
@@ -279,7 +279,7 @@ def _get_default_backend():
         default=ws_backend,
         routes={
             "/skills/": sk_backend,
-            "/memory/": mem_backend,
+            "/memories/": mem_backend,
         },
     )
 
@@ -296,7 +296,7 @@ def _get_default_middleware():
 
     cfg = _ensure_config()
     model = _ensure_chat_model()
-    memory_dir = str(_paths_mod.MEMORY_DIR)
+    memory_dir = str(_paths_mod.MEMORIES_DIR)
     mw = [
         create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
@@ -395,7 +395,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         workspace_dir = str(_paths.WORKSPACE_ROOT)
 
     # Read paths dynamically so runtime set_workspace_root() changes are picked up
-    _mem_dir = str(_paths.MEMORY_DIR)
+    _mem_dir = str(_paths.MEMORIES_DIR)
     _usr_skills_dir = str(_paths.USER_SKILLS_DIR)
     _global_skills_dir = str(_paths.GLOBAL_SKILLS_DIR)
 
@@ -412,7 +412,6 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         global_dir=_global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
-    # Memory always uses SHARED directory (not per-session) for cross-session persistence
     mem_backend = FilesystemBackend(
         root_dir=_mem_dir,
         virtual_mode=True,
@@ -421,7 +420,7 @@ def create_cli_agent(workspace_dir: str | None = None, checkpointer=None, config
         default=ws_backend,
         routes={
             "/skills/": sk_backend,
-            "/memory/": mem_backend,
+            "/memories/": mem_backend,
         },
     )
 
