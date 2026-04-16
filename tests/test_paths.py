@@ -15,6 +15,7 @@ def _restore_paths():
         "WORKSPACE_ROOT": paths.WORKSPACE_ROOT,
         "RUNS_DIR": paths.RUNS_DIR,
         "MEMORIES_DIR": paths.MEMORIES_DIR,
+        "MEMORY_DIR": paths.MEMORY_DIR,
         "USER_SKILLS_DIR": paths.USER_SKILLS_DIR,
         "_active_workspace": paths._active_workspace,
     }
@@ -22,7 +23,7 @@ def _restore_paths():
     paths.WORKSPACE_ROOT = orig["WORKSPACE_ROOT"]
     paths.RUNS_DIR = orig["RUNS_DIR"]
     paths.MEMORIES_DIR = orig["MEMORIES_DIR"]
-    paths.MEMORY_DIR = paths.MEMORIES_DIR  # keep alias in sync
+    paths.MEMORY_DIR = orig["MEMORY_DIR"]
     paths.USER_SKILLS_DIR = orig["USER_SKILLS_DIR"]
     paths._active_workspace = orig["_active_workspace"]
 

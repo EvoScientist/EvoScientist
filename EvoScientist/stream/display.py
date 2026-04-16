@@ -1031,9 +1031,20 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
             optional_suffix = " (optional)" if not required else ""
             prompt_text = f"({i + 1}/{total}) {q_text}{optional_suffix}"
 
+            def _make_validator(is_required: bool):
+                def _validate(v: str) -> bool | str:
+                    if is_required and not v.strip():
+                        return "This field is required."
+                    return True
+
+                return _validate
+
             if q_type == "multiple_choice":
                 choices = q.get("choices", [])
                 choice_labels = [c.get("value", str(c)) for c in choices]
+                skip_label = "Skip"
+                if not required:
+                    choice_labels.append(skip_label)
                 other_label = "Other (type your answer)"
                 choice_labels.append(other_label)
 
@@ -1046,19 +1057,15 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                 if selected is None:  # Ctrl+C
                     raise KeyboardInterrupt
 
+                if selected == skip_label:
+                    answers.append("")
+                    console.print()
+                    continue
+
                 if selected == other_label:
-
-                    def _make_other_validator(is_required: bool):
-                        def _validate(v: str) -> bool | str:
-                            if is_required and not v.strip():
-                                return "This field is required."
-                            return True
-
-                        return _validate
-
                     selected = questionary.text(
                         "Your answer:",
-                        validate=_make_other_validator(required),
+                        validate=_make_validator(required),
                         style=_PICKER_STYLE,
                     ).ask()
                     if selected is None:
@@ -1067,15 +1074,6 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                 answers.append(selected)
 
             else:
-
-                def _make_validator(is_required: bool):
-                    def _validate(v: str) -> bool | str:
-                        if is_required and not v.strip():
-                            return "This field is required."
-                        return True
-
-                    return _validate
-
                 answer = questionary.text(
                     prompt_text,
                     validate=_make_validator(required),
