@@ -993,19 +993,8 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
     questionary style used throughout the rest of the CLI.
     """
     import questionary  # type: ignore[import-untyped]
-    from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untyped]
 
-    # Matches _PICKER_STYLE in cli/interactive.py — gray non-selected, bold selected.
-    _PICKER_STYLE = PtStyle.from_dict(
-        {
-            "questionmark": "#888888",
-            "question": "",
-            "pointer": "bold",
-            "highlighted": "bold",
-            "text": "#888888",
-            "answer": "bold",
-        }
-    )
+    from ..cli.interactive import _PICKER_STYLE
 
     questions = ask_user_data.get("questions", [])
     if not questions:

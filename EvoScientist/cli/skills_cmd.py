@@ -150,22 +150,11 @@ def _cmd_install_skills(args: str = "") -> None:
     from collections import Counter
 
     import questionary
-    from prompt_toolkit.styles import Style as PtStyle
     from questionary import Choice
 
     from ..paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
     from ..tools.skills_manager import fetch_remote_skill_index, install_skill
-
-    _PICKER_STYLE = PtStyle.from_dict(
-        {
-            "questionmark": "#888888",
-            "question": "",
-            "pointer": "bold",
-            "highlighted": "bold",
-            "text": "#888888",
-            "answer": "bold",
-        }
-    )
+    from .interactive import _PICKER_STYLE
 
     # Installed-item indicator style for disabled checkbox choices.
     _INSTALLED_INDICATOR = ("fg:#4caf50", "✓ ")
