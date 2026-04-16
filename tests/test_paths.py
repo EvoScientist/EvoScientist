@@ -102,7 +102,9 @@ class TestEnsureDirsUsesUpdatedPaths:
 
         custom_mem = tmp_path / "memories"
 
-        with mock.patch.dict(os.environ, {"EVOSCIENTIST_MEMORIES_DIR": str(custom_mem)}):
+        with mock.patch.dict(
+            os.environ, {"EVOSCIENTIST_MEMORIES_DIR": str(custom_mem)}
+        ):
             paths.set_workspace_root(new_root)
             paths.ensure_dirs()
 

@@ -129,11 +129,15 @@ class TestFormatToolCompact:
 
     # Project-local /memory/ files show normal tool display
     def test_read_file_project_memory(self):
-        result = format_tool_compact("read_file", {"path": "/memory/ideation-memory.md"})
+        result = format_tool_compact(
+            "read_file", {"path": "/memory/ideation-memory.md"}
+        )
         assert result == "read_file(/memory/ideation-memory.md)"
 
     def test_edit_file_project_memory(self):
-        result = format_tool_compact("edit_file", {"path": "/memory/experiment-memory.md"})
+        result = format_tool_compact(
+            "edit_file", {"path": "/memory/experiment-memory.md"}
+        )
         assert result == "edit_file(/memory/experiment-memory.md)"
 
     def test_memory_display_inferred_from_result_when_args_sparse(self):
