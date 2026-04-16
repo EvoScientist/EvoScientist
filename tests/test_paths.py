@@ -30,8 +30,13 @@ def _restore_paths():
 class TestSetWorkspaceRoot:
     """Tests for set_workspace_root()."""
 
-    def test_updates_derived_dirs(self, tmp_path):
+    def test_updates_derived_dirs(self, tmp_path, monkeypatch):
         """set_workspace_root should update WORKSPACE_ROOT and all derived dirs."""
+        monkeypatch.delenv("EVOSCIENTIST_MEMORIES_DIR", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_RUNS_DIR", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SKILLS_DIR", raising=False)
+
         new_root = tmp_path / "my_workspace"
         new_root.mkdir()
 

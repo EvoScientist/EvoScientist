@@ -1047,8 +1047,18 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                     raise KeyboardInterrupt
 
                 if selected == other_label:
+
+                    def _make_other_validator(is_required: bool):
+                        def _validate(v: str) -> bool | str:
+                            if is_required and not v.strip():
+                                return "This field is required."
+                            return True
+
+                        return _validate
+
                     selected = questionary.text(
                         "Your answer:",
+                        validate=_make_other_validator(required),
                         style=_PICKER_STYLE,
                     ).ask()
                     if selected is None:
