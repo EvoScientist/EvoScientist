@@ -2,6 +2,11 @@
 
 <h3 align="center">Customize your EvoScientist — harness it, make it yours.</h3>
 
+| Example                                                     | Description                                                                     |
+|------------------------------------------------------------|---------------------------------------------------------------------------------|
+| [Survey literature](examples/survey-literature/README.md)   | Run EvoScientist with the `paper-navigator` skill to produce a bilingual, conference-grade literature survey |
+
+
 | Recipe                                                     | Description                                                                     |
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
 | [macOS 24/7 Deployment](recipes/deployment-macos-24h.md)   | Run EvoScientist as an always-on service on macOS with OAuth + Telegram + STT   |
