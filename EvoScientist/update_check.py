@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import time
-from pathlib import Path
+
+from .config.settings import get_config_dir
 
 logger = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/EvoScientist/json"
-CACHE_DIR = Path("~/.config/evoscientist").expanduser()
+CACHE_DIR = get_config_dir()
 CACHE_FILE = CACHE_DIR / "latest_version.json"
 CACHE_TTL = 86_400  # 24 hours
 

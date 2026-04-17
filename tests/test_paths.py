@@ -14,16 +14,22 @@ def _restore_paths():
     orig = {
         "WORKSPACE_ROOT": paths.WORKSPACE_ROOT,
         "RUNS_DIR": paths.RUNS_DIR,
+        "DATA_DIR": paths.DATA_DIR,
         "MEMORIES_DIR": paths.MEMORIES_DIR,
         "MEMORY_DIR": paths.MEMORY_DIR,
+        "GLOBAL_SKILLS_DIR": paths.GLOBAL_SKILLS_DIR,
+        "GLOBAL_MEMORIES_DIR": paths.GLOBAL_MEMORIES_DIR,
         "USER_SKILLS_DIR": paths.USER_SKILLS_DIR,
         "_active_workspace": paths._active_workspace,
     }
     yield
     paths.WORKSPACE_ROOT = orig["WORKSPACE_ROOT"]
     paths.RUNS_DIR = orig["RUNS_DIR"]
+    paths.DATA_DIR = orig["DATA_DIR"]
     paths.MEMORIES_DIR = orig["MEMORIES_DIR"]
     paths.MEMORY_DIR = orig["MEMORY_DIR"]
+    paths.GLOBAL_SKILLS_DIR = orig["GLOBAL_SKILLS_DIR"]
+    paths.GLOBAL_MEMORIES_DIR = orig["GLOBAL_MEMORIES_DIR"]
     paths.USER_SKILLS_DIR = orig["USER_SKILLS_DIR"]
     paths._active_workspace = orig["_active_workspace"]
 
@@ -120,3 +126,104 @@ class TestEnsureDirsUsesUpdatedPaths:
             assert not (
                 new_root / "skills"
             ).exists()  # skills created on demand by install_skill()
+
+
+class TestDataDir:
+    """Tests for DATA_DIR and global data-dir helpers."""
+
+    def test_global_skills_dir_under_data_dir(self):
+        """GLOBAL_SKILLS_DIR must live under DATA_DIR."""
+        assert paths.GLOBAL_SKILLS_DIR == paths.DATA_DIR / "skills"
+
+    def test_global_memories_dir_under_data_dir(self):
+        """GLOBAL_MEMORIES_DIR must live under DATA_DIR."""
+        assert paths.GLOBAL_MEMORIES_DIR == paths.DATA_DIR / "memories"
+
+
+class TestLegacySessionsDbMigration:
+    """Tests for migrate_legacy_sessions_db() — transitional helper.
+
+    Tests redirect ``DATA_DIR`` and ``Path.home()`` so the real user home
+    is never touched.
+    """
+
+    def _setup(self, tmp_path, monkeypatch):
+        """Redirect data dir to tmp_path/new_data and Path.home() to
+        tmp_path/fake_home so legacy resolves to tmp_path/fake_home/.config/evoscientist.
+        """
+        data_dir = tmp_path / "new_data"
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        legacy_dir = fake_home / ".config" / "evoscientist"
+        monkeypatch.setattr(paths, "DATA_DIR", data_dir)
+        monkeypatch.setattr(paths.Path, "home", classmethod(lambda cls: fake_home))
+        return data_dir, legacy_dir
+
+    def test_copies_sqlite_trio_when_legacy_exists(self, tmp_path, monkeypatch):
+        """All three SQLite files should be copied to the new location."""
+        data_dir, legacy_dir = self._setup(tmp_path, monkeypatch)
+        legacy_dir.mkdir(parents=True)
+        for name in ("sessions.db", "sessions.db-wal", "sessions.db-shm"):
+            (legacy_dir / name).write_bytes(b"stub-" + name.encode())
+
+        paths.migrate_legacy_sessions_db()
+
+        for name in ("sessions.db", "sessions.db-wal", "sessions.db-shm"):
+            assert (data_dir / name).read_bytes() == b"stub-" + name.encode()
+            # Legacy files must remain (copy, not move)
+            assert (legacy_dir / name).exists()
+        assert (data_dir / ".migrated").exists()
+
+    def test_idempotent_via_marker(self, tmp_path, monkeypatch):
+        """Once .migrated exists, migration should be a no-op."""
+        data_dir, legacy_dir = self._setup(tmp_path, monkeypatch)
+        data_dir.mkdir()
+        (data_dir / ".migrated").touch()
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "sessions.db").write_bytes(b"should-not-copy")
+
+        paths.migrate_legacy_sessions_db()
+
+        assert not (data_dir / "sessions.db").exists()
+
+    def test_no_legacy_just_creates_marker(self, tmp_path, monkeypatch):
+        """When legacy dir doesn't exist, only the marker is created."""
+        data_dir, _ = self._setup(tmp_path, monkeypatch)
+
+        paths.migrate_legacy_sessions_db()
+
+        assert data_dir.is_dir()
+        assert (data_dir / ".migrated").exists()
+        assert not (data_dir / "sessions.db").exists()
+
+    def test_does_not_overwrite_existing_files(self, tmp_path, monkeypatch):
+        """If new location already has a file, don't overwrite it."""
+        data_dir, legacy_dir = self._setup(tmp_path, monkeypatch)
+        data_dir.mkdir()
+        (data_dir / "sessions.db").write_bytes(b"new-content-keep")
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "sessions.db").write_bytes(b"legacy-content")
+
+        paths.migrate_legacy_sessions_db()
+
+        assert (data_dir / "sessions.db").read_bytes() == b"new-content-keep"
+
+    def test_marker_not_written_on_partial_failure(self, tmp_path, monkeypatch):
+        """If any copy fails, the .migrated marker must not be written."""
+        data_dir, legacy_dir = self._setup(tmp_path, monkeypatch)
+        legacy_dir.mkdir(parents=True)
+        for name in ("sessions.db", "sessions.db-wal"):
+            (legacy_dir / name).write_bytes(b"ok")
+
+        real_copy2 = paths.shutil.copy2
+
+        def flaky_copy2(src, dst, *args, **kwargs):
+            if str(src).endswith("sessions.db-wal"):
+                raise OSError("simulated I/O failure")
+            return real_copy2(src, dst, *args, **kwargs)
+
+        with mock.patch.object(paths.shutil, "copy2", side_effect=flaky_copy2):
+            paths.migrate_legacy_sessions_db()
+
+        assert (data_dir / "sessions.db").exists()  # main db copied
+        assert not (data_dir / ".migrated").exists()  # retry allowed

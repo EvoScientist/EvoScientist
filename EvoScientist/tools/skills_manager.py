@@ -1,7 +1,7 @@
 """Skill installation and management for EvoScientist.
 
 This module provides functions for installing, listing, and uninstalling user skills.
-Skills are installed to GLOBAL_SKILLS_DIR by default (~/.config/evoscientist/skills/).
+Skills are installed to GLOBAL_SKILLS_DIR by default (~/.evoscientist/skills/).
 Pass global_install=False to install to USER_SKILLS_DIR (<workspace>/skills/) instead.
 
 Supported installation sources:
@@ -278,7 +278,7 @@ def install_skill(
         source: Local directory path or GitHub URL/shorthand.
         dest_dir: Explicit destination directory (overrides global_install).
         global_install: If True (default), install to GLOBAL_SKILLS_DIR
-            (~/.config/evoscientist/skills/). If False, install to the
+            (~/.evoscientist/skills/). If False, install to the
             workspace-local USER_SKILLS_DIR.
 
     Returns:
@@ -501,7 +501,7 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
     # Tier 1: workspace-local skills (always highest priority, no dedup needed)
     _add_tier(Path(paths.USER_SKILLS_DIR), source="workspace", check_seen=False)
 
-    # Tier 2: global skills (~/.config/evoscientist/skills/)
+    # Tier 2: global skills (~/.evoscientist/skills/)
     _add_tier(Path(paths.GLOBAL_SKILLS_DIR), source="global")
 
     # Tier 3: built-in skills (optional)

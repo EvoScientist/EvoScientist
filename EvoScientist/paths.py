@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _expand(path: str) -> Path:
@@ -26,22 +30,32 @@ USER_SKILLS_DIR = _env_path("EVOSCIENTIST_SKILLS_DIR") or (WORKSPACE_ROOT / "ski
 MEDIA_DIR = _env_path("EVOSCIENTIST_MEDIA_DIR") or (WORKSPACE_ROOT / "media")
 
 
+def _global_data_dir() -> Path:
+    """Global application data directory (~/.evoscientist/ by default).
+
+    This is the base for sessions.db, skills/, memories/, history — things
+    that are NOT configuration but application state. Config files (config.yaml,
+    mcp.yaml) continue to live in XDG_CONFIG_HOME.
+    """
+    return Path.home() / ".evoscientist"
+
+
+# Global data dir: ~/.evoscientist/ by default, overridable via env var.
+DATA_DIR: Path = _env_path("EVOSCIENTIST_DATA_DIR") or _global_data_dir()
+
+
 def _global_skills_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "evoscientist" / "skills"
+    return DATA_DIR / "skills"
 
 
 def _global_memories_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "evoscientist" / "memories"
+    return DATA_DIR / "memories"
 
 
-# Global skills: shared across all workspaces (~/.config/evoscientist/skills/)
+# Global skills: shared across all workspaces (~/.evoscientist/skills/)
 GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
 
-# Global memories: shared across all workspaces (~/.config/evoscientist/memories/)
+# Global memories: shared across all workspaces (~/.evoscientist/memories/)
 GLOBAL_MEMORIES_DIR: Path = _global_memories_dir()
 
 # Memories dir: global by default, overridable via env var.
@@ -52,6 +66,73 @@ MEMORIES_DIR: Path = (
     or GLOBAL_MEMORIES_DIR
 )
 MEMORY_DIR = MEMORIES_DIR  # backward compat alias
+
+
+# DEPRECATED(0.1.0): remove this migration helper and its call site below.
+def migrate_legacy_sessions_db() -> None:
+    """One-time migration: copy sessions.db (and its WAL/SHM siblings) from
+    ~/.config/evoscientist/ to ~/.evoscientist/.
+
+    Scope is intentionally narrow — only the SQLite trio, because users can't
+    easily move those by hand. User-facing files (skills/, memories/, history)
+    are migrated via an agent prompt documented in the release notes.
+
+    Idempotent via ``.migrated`` marker file. The marker is not written when
+    a copy fails, so transient I/O errors don't permanently block retry.
+    """
+    marker = DATA_DIR / ".migrated"
+    if marker.exists():
+        return
+
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
+        return
+
+    legacy = Path.home() / ".config" / "evoscientist"
+    if not legacy.exists():
+        marker.touch()
+        return
+
+    migrated: list[str] = []
+    failed: list[str] = []
+    for name in ("sessions.db", "sessions.db-wal", "sessions.db-shm"):
+        src = legacy / name
+        dst = DATA_DIR / name
+        if not src.exists():
+            continue
+        if dst.exists():
+            continue  # already migrated
+        try:
+            shutil.copy2(src, dst)
+            migrated.append(name)
+        except OSError as e:
+            logger.warning("Failed to migrate %s: %s", src, e)
+            failed.append(name)
+
+    if migrated:
+        logger.info(
+            "Migrated legacy session DB from %s to %s: %s. "
+            "Legacy files are kept as backup; this auto-migration will be "
+            "removed in EvoScientist 0.1.0.",
+            legacy,
+            DATA_DIR,
+            ", ".join(migrated),
+        )
+
+    # Only write the marker when there were no failures — preserves retry
+    # on transient I/O errors.
+    if not failed:
+        marker.touch()
+
+
+# DEPRECATED(0.1.0): remove this call together with migrate_legacy_sessions_db().
+try:
+    migrate_legacy_sessions_db()
+except Exception:
+    # Never block startup on migration failures
+    logger.exception("Legacy session DB migration failed; continuing without it.")
 
 
 def set_workspace_root(path: str | Path) -> None:
@@ -90,12 +171,14 @@ def set_workspace_root(path: str | Path) -> None:
 def ensure_dirs() -> None:
     """Create runtime subdirectories if they do not exist.
 
-    Only memories is created eagerly — skills directories are created on demand
-    by install_skill() when the user first installs a skill.
+    Creates DATA_DIR (and MEMORIES_DIR as its subdir). Skills directories
+    are created on demand by ``install_skill()`` when the user first
+    installs a skill.
 
     Does NOT create the workspace root itself — it should already exist
     (either the user's cwd or a directory they specified).
     """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
 
 

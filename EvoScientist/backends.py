@@ -291,7 +291,7 @@ class MergedSkillsBackend(BackendProtocol):
 
     Priority (high → low):
     1. primary   — workspace/skills/  (project-local, writable)
-    2. global    — ~/.config/evoscientist/skills/  (user global, read-only)
+    2. global    — ~/.evoscientist/skills/  (user global, read-only)
     3. secondary — EvoScientist/skills/  (built-in, PyPI, read-only)
 
     Higher-priority skills override lower-priority skills with the same name.

@@ -22,7 +22,7 @@ import EvoScientist.cli.channel as _ch_mod
 
 from ..commands import CommandContext
 from ..commands import manager as cmd_manager
-from ..config.settings import get_config_dir
+from ..paths import DATA_DIR
 from ..sessions import (
     find_similar_threads,
     generate_thread_id,
@@ -353,7 +353,7 @@ def run_textual_interactive(
             self._picker_future: asyncio.Future | None = None
             self._browser_future: asyncio.Future | None = None
             self._mcp_browser_future: asyncio.Future | None = None
-            self._history_suggester = HistorySuggester(get_config_dir() / "history")
+            self._history_suggester = HistorySuggester(DATA_DIR / "history")
             self._history_index: int = -1  # -1 = not browsing history
             self._history_saved_input: str = ""  # saved current input before browsing
             self._background_tasks: set[asyncio.Task] = set()
