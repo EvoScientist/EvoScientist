@@ -90,7 +90,14 @@ def migrate_legacy_sessions_db() -> None:
         logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
         return
 
-    legacy = Path.home() / ".config" / "evoscientist"
+    # Resolve legacy source via XDG_CONFIG_HOME (matches config.settings.get_config_dir).
+    # Inlined here to avoid importing config.settings at paths load time.
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    legacy = (
+        (Path(xdg) / "evoscientist")
+        if xdg
+        else (Path.home() / ".config" / "evoscientist")
+    )
     if not legacy.exists():
         marker.touch()
         return

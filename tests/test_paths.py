@@ -208,6 +208,22 @@ class TestLegacySessionsDbMigration:
 
         assert (data_dir / "sessions.db").read_bytes() == b"new-content-keep"
 
+    def test_respects_xdg_config_home(self, tmp_path, monkeypatch):
+        """Legacy source must honor XDG_CONFIG_HOME so users who customize it
+        don't silently get skipped by the migration."""
+        data_dir = tmp_path / "new_data"
+        xdg = tmp_path / "xdg"
+        legacy_dir = xdg / "evoscientist"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "sessions.db").write_bytes(b"xdg-db")
+
+        monkeypatch.setattr(paths, "DATA_DIR", data_dir)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+        paths.migrate_legacy_sessions_db()
+
+        assert (data_dir / "sessions.db").read_bytes() == b"xdg-db"
+
     def test_marker_not_written_on_partial_failure(self, tmp_path, monkeypatch):
         """If any copy fails, the .migrated marker must not be written."""
         data_dir, legacy_dir = self._setup(tmp_path, monkeypatch)
