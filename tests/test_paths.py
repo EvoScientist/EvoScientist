@@ -150,7 +150,12 @@ class TestLegacySessionsDbMigration:
     def _setup(self, tmp_path, monkeypatch):
         """Redirect data dir to tmp_path/new_data and Path.home() to
         tmp_path/fake_home so legacy resolves to tmp_path/fake_home/.config/evoscientist.
+
+        Clears XDG_CONFIG_HOME so the legacy resolver deterministically uses
+        the Path.home() fallback. Tests that want the XDG branch set the
+        env var explicitly.
         """
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
         data_dir = tmp_path / "new_data"
         fake_home = tmp_path / "fake_home"
         fake_home.mkdir()
