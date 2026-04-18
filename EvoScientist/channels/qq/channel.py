@@ -230,8 +230,7 @@ class QQChannel(Channel):
             )
         except Exception as plain_exc:
             logger.error(
-                "QQ plain fallback also failed (chat_id=%s, msg_id=%s, "
-                "seq=%s): %r",
+                "QQ plain fallback also failed (chat_id=%s, msg_id=%s, seq=%s): %r",
                 chat_id,
                 msg_id,
                 fallback_seq,

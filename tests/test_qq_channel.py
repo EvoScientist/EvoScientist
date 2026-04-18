@@ -109,7 +109,9 @@ class TestQQChannelSend:
         channel = self._make_ready_channel()
         channel._client.api.post_c2c_message = AsyncMock(
             side_effect=[
-                RuntimeError('{"code": 304014, "message": "markdown template not configured"}'),
+                RuntimeError(
+                    '{"code": 304014, "message": "markdown template not configured"}'
+                ),
                 None,
             ]
         )
