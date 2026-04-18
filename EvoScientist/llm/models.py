@@ -74,6 +74,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
     ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
     # Anthropic (ordered by capability)
+    ("claude-opus-4-7", "claude-opus-4-7", "anthropic"),
     ("claude-opus-4-6", "claude-opus-4-6", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
     ("claude-opus-4-5", "claude-opus-4-5", "anthropic"),
@@ -125,6 +126,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
+    ("claude-opus-4.7", "anthropic/claude-opus-4.7", "openrouter"),
     ("claude-opus-4.6", "anthropic/claude-opus-4.6", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
     ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
@@ -223,7 +225,7 @@ def _apply_auto_config(
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
             pass
-        elif model_id.endswith("4-6"):
+        elif model_id.endswith(("4-6", "4-7")):
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs.setdefault("effort", "max")
         else:
