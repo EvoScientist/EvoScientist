@@ -71,7 +71,10 @@ class TestQQChannelSend:
         assert second["msg_type"] == 0
         assert second["content"] == "Title\n\n• item"
         assert second["msg_id"] == "evt_2"
-        assert second["msg_seq"] == 1
+        # Plain fallback consumes a fresh msg_seq — QQ may have already
+        # counted the failed markdown attempt, so re-using seq would
+        # trigger "duplicate msg_seq".
+        assert second["msg_seq"] == 2
 
     def test_send_does_not_fallback_on_transport_error(self):
         channel = self._make_ready_channel()
@@ -99,3 +102,36 @@ class TestQQChannelSend:
         sent = channel._client.api.post_c2c_message.await_args.kwargs
         assert sent["msg_type"] == 2
         assert "content" not in sent
+
+    def test_send_falls_back_on_qq_server_error_code(self):
+        """QQ server-side markdown errors (e.g. 304014 template not configured)
+        should trigger plain-text fallback with a fresh msg_seq."""
+        channel = self._make_ready_channel()
+        channel._client.api.post_c2c_message = AsyncMock(
+            side_effect=[
+                RuntimeError('{"code": 304014, "message": "markdown template not configured"}'),
+                None,
+            ]
+        )
+        msg = OutboundMessage(
+            channel="qq",
+            chat_id="openid",
+            content="## Title",
+            metadata={
+                "chat_id": "openid",
+                "event_id": "evt_4",
+                "msg_type": "c2c",
+            },
+        )
+
+        assert _run(channel.send(msg)) is True
+
+        assert channel._client.api.post_c2c_message.await_count == 2
+        first = channel._client.api.post_c2c_message.await_args_list[0].kwargs
+        second = channel._client.api.post_c2c_message.await_args_list[1].kwargs
+
+        assert first["msg_type"] == 2
+        assert first["msg_seq"] == 1
+        assert second["msg_type"] == 0
+        # Fresh seq on fallback — avoids QQ "duplicate msg_seq" rejection.
+        assert second["msg_seq"] == 2

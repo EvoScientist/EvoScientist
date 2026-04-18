@@ -200,12 +200,58 @@ class QQChannel(Channel):
             return
         except Exception as exc:
             if not self._should_fallback_to_plain_text(exc):
+                logger.error(
+                    "QQ markdown send failed with non-fallbackable error "
+                    "(chat_id=%s, msg_id=%s, seq=%s): %r",
+                    chat_id,
+                    msg_id,
+                    seq,
+                    exc,
+                )
                 raise
             self._record_markdown_fallback(chat_id, raw_text, exc)
-            logger.debug("QQ markdown send failed, falling back to plain text: %s", exc)
+            logger.warning(
+                "QQ markdown send failed, falling back to plain text "
+                "(chat_id=%s, msg_id=%s, seq=%s): %r",
+                chat_id,
+                msg_id,
+                seq,
+                exc,
+            )
 
+        # QQ may have already consumed `seq` server-side even on failure.
+        # Reusing it for the plain retry triggers "duplicate msg_seq", so
+        # always advance to a fresh seq before the fallback send.
+        fallback_seq = self._next_msg_seq(msg_id)
         plain_text = self._plain_formatter.format(raw_text)
-        await self._post_plain_message(chat_id, plain_text, msg_type, msg_id, seq)
+        try:
+            await self._post_plain_message(
+                chat_id, plain_text, msg_type, msg_id, fallback_seq
+            )
+        except Exception as plain_exc:
+            logger.error(
+                "QQ plain fallback also failed (chat_id=%s, msg_id=%s, "
+                "seq=%s): %r",
+                chat_id,
+                msg_id,
+                fallback_seq,
+                plain_exc,
+            )
+            raise
+
+    # QQ server-side error codes / fragments that indicate the markdown
+    # request itself is invalid (template not configured, format rejected,
+    # content audit, etc.). Seeing any of these means we should retry with
+    # plain text rather than re-raise.
+    _QQ_MARKDOWN_ERROR_MARKERS: ClassVar[tuple[str, ...]] = (
+        "304014",  # markdown template not configured
+        "304023",  # content failed audit
+        "304003",  # invalid markdown params
+        "40034059",  # generic send message failed (often markdown-related)
+        "markdown",  # any message mentioning markdown
+        "模版",  # CN: template
+        "审核",  # CN: audit
+    )
 
     def _should_fallback_to_plain_text(self, exc: Exception) -> bool:
         """Return True only for markdown compatibility/validation failures."""
@@ -214,17 +260,20 @@ class QQChannel(Channel):
 
         msg = str(exc).lower()
         compatibility_tokens = ("unsupported", "unexpected", "unknown", "invalid")
-        return (
-            "unexpected keyword argument" in msg
-            or (
-                "markdown" in msg
-                and any(token in msg for token in compatibility_tokens)
-            )
-            or (
-                "msg_type" in msg
-                and any(token in msg for token in compatibility_tokens)
-            )
-        )
+
+        if "unexpected keyword argument" in msg:
+            return True
+        if "markdown" in msg and any(token in msg for token in compatibility_tokens):
+            return True
+        if "msg_type" in msg and any(token in msg for token in compatibility_tokens):
+            return True
+
+        # QQ-specific server error codes returned by qq-botpy as strings.
+        raw = str(exc)
+        for marker in self._QQ_MARKDOWN_ERROR_MARKERS:
+            if marker in raw or marker.lower() in msg:
+                return True
+        return False
 
     def _record_markdown_fallback(
         self,
