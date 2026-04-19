@@ -41,11 +41,10 @@ class TestGenerateThreadId(unittest.TestCase):
 
 
 class TestGetDbPath(unittest.TestCase):
-    def test_uses_config_dir(self):
+    def test_uses_data_dir(self):
         path = get_db_path()
         assert str(path).endswith("sessions.db")
-        assert ".config" in str(path)
-        assert "evoscientist" in str(path)
+        assert ".evoscientist" in str(path)
 
 
 class TestFormatRelativeTime(unittest.TestCase):

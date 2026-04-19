@@ -58,7 +58,7 @@ def _cmd_list_skills() -> None:
 def _cmd_install_skill(args: str) -> None:
     """Install a skill from local path or GitHub URL.
 
-    By default, installs to the global skills directory (~/.config/evoscientist/skills/).
+    By default, installs to the global skills directory (~/.evoscientist/skills/).
     Append --local to install to the current workspace instead.
 
     Usage: /install-skill <path-or-url> [--local]

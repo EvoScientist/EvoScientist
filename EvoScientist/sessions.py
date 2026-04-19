@@ -64,13 +64,13 @@ def _to_short_path(path: str) -> str:
 def get_db_path() -> Path:
     """Return the sessions database path, creating parents.
 
-    Reuses ``get_config_dir()`` for XDG_CONFIG_HOME support, then applies
+    Uses ``paths.DATA_DIR`` (~/.evoscientist/ by default), then applies
     a best-effort Windows 8.3 short-path conversion on the *directory*
     (which exists after ``mkdir``) so sqlite3 can handle non-ASCII paths.
     """
-    from .config.settings import get_config_dir
+    from .paths import DATA_DIR
 
-    db_dir = get_config_dir()
+    db_dir = DATA_DIR
     db_dir.mkdir(parents=True, exist_ok=True)
     return Path(_to_short_path(str(db_dir))) / "sessions.db"
 

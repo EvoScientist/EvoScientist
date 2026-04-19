@@ -296,11 +296,8 @@ def cmd_interactive(
 
     memory_dir = str(paths.MEMORIES_DIR)
 
-    from ..config.settings import get_config_dir
-
-    config_dir = get_config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    history_file = str(config_dir / "history")
+    paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    history_file = str(paths.DATA_DIR / "history")
 
     # Key bindings: Enter submits, Alt+Enter (Option+Enter) inserts newline
     _kb = KeyBindings()

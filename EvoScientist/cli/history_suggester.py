@@ -1,7 +1,7 @@
 """History-based auto-suggest for Textual TUI Input widget.
 
 Reads prompt_toolkit FileHistory format so Rich CLI and TUI share the same
-history file at ~/.config/evoscientist/history.
+history file at ~/.evoscientist/history.
 """
 
 from __future__ import annotations
