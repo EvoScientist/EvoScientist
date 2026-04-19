@@ -103,6 +103,35 @@ class TestQQChannelSend:
         assert sent["msg_type"] == 2
         assert "content" not in sent
 
+    def test_send_does_not_fallback_when_transport_error_mentions_markdown(self):
+        """A transport-layer error whose message incidentally contains the word
+        "markdown" must NOT be reclassified as a markdown compatibility failure,
+        otherwise genuine send failures get silently swallowed as plain-text."""
+        channel = self._make_ready_channel()
+
+        async def _send_once(coro_factory, max_retries=3):
+            return await coro_factory()
+
+        channel._send_with_retry = _send_once
+        channel._client.api.post_c2c_message = AsyncMock(
+            side_effect=ConnectionError(
+                "failed to post markdown message: ConnectionReset"
+            )
+        )
+        msg = OutboundMessage(
+            channel="qq",
+            chat_id="openid",
+            content="## Title",
+            metadata={
+                "chat_id": "openid",
+                "event_id": "evt_transport",
+                "msg_type": "c2c",
+            },
+        )
+
+        assert _run(channel.send(msg)) is False
+        channel._client.api.post_c2c_message.assert_awaited_once()
+
     def test_send_falls_back_on_qq_server_error_code(self):
         """QQ server-side markdown errors (e.g. 304014 template not configured)
         should trigger plain-text fallback with a fresh msg_seq."""

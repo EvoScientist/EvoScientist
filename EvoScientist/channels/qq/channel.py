@@ -244,11 +244,10 @@ class QQChannel(Channel):
     # plain text rather than re-raise.
     _QQ_MARKDOWN_ERROR_MARKERS: ClassVar[tuple[str, ...]] = (
         "304014",  # markdown template not configured
-        "304023",  # content failed audit
         "304003",  # invalid markdown params
         "40034059",  # generic send message failed (often markdown-related)
-        "markdown",  # any message mentioning markdown
-        "模版",  # CN: template
+        "模板",  # CN: template (standard form)
+        "模版",  # CN: template (variant form)
         "审核",  # CN: audit
     )
 
