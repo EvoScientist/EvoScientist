@@ -19,6 +19,7 @@ from rich.console import Group
 from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
+from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
 from ..commands import CommandContext
 from ..commands import manager as cmd_manager
@@ -747,7 +748,7 @@ def run_textual_interactive(
                 return {"answers": result.get("answers", []), "status": "answered"}
             return {"status": "cancelled"}
 
-        async def _wait_for_thread_pick(self, picker_widget) -> str | None:
+        async def _wait_for_thread_pick(self, picker_widget: ThreadPickerWidget) -> str | None:
             """Wait for user to pick a thread from ThreadPickerWidget.
 
             Returns the selected thread_id, or ``None`` on cancel/timeout.
@@ -951,7 +952,7 @@ def run_textual_interactive(
                     lambda: container.scroll_end(animate=False),
                 )
 
-            metadata = build_metadata(self._workspace_dir, model)
+            metadata = build_metadata(self._workspace_dir, self._current_model)
             response = ""
 
             async def _remove_w(w: Static | None) -> None:
@@ -2146,6 +2147,9 @@ def run_textual_interactive(
                     # Sync agent back if command replaced it (e.g. /model)
                     if ctx.agent is not self._agent:
                         self._agent = ctx.agent
+                        if _channels_is_running():
+                            _ch_mod._cli_agent = self._agent
+                            _ch_mod._cli_thread_id = self._conversation_tid
                     # Do NOT invalidate the usage baseline after /compact.
                     # build_session_status_snapshot() only counts raw checkpoint
                     # messages (~46 tokens) and misses system prompt + tool
@@ -2368,10 +2372,11 @@ def run_textual_interactive(
             self._rebuild_status_snapshot()
 
         def update_status_after_model_change(self, new_model: str) -> None:
-            """Update the status bar after /model switches the LLM."""
+            """Update the status bar and welcome banner after /model switches the LLM."""
             self._current_model = new_model
             self._status_base_snapshot = make_empty_status_snapshot(new_model)
             self._rebuild_status_snapshot()
+            self._render_welcome()
 
         def _set_status_streaming_text(self, text: str | None) -> None:
             """Update in-flight assistant text shown in the context bar."""
@@ -2418,7 +2423,7 @@ def run_textual_interactive(
                     thread_id=self._conversation_tid,
                     workspace_dir=self._workspace_dir,
                     mode=mode,
-                    model=model,
+                    model=self._current_model,
                     provider=provider,
                     ui_backend="tui",
                     channels=channels_info,

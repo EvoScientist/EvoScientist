@@ -43,27 +43,28 @@ class TestExtractModelAndProvider:
                 ["nonexistent-model-xyz"], fallback_provider="anthropic"
             )
 
-    def test_unknown_model_with_provider_ok(self):
+    def test_unknown_model_with_provider_still_raises(self):
         from EvoScientist.commands.implementation.model import (
             extract_model_and_provider,
         )
 
+        # Unknown models are always rejected, even with an explicit provider
+        with pytest.raises(ValueError, match="Unknown model"):
+            extract_model_and_provider(
+                ["my-custom-model", "custom-openai"], fallback_provider="anthropic"
+            )
+
+    def test_provider_override_on_known_model(self):
+        from EvoScientist.commands.implementation.model import (
+            extract_model_and_provider,
+        )
+
+        # Known model with explicit provider override uses the override
         name, prov = extract_model_and_provider(
-            ["my-custom-model", "custom-openai"], fallback_provider="anthropic"
+            ["claude-sonnet-4-6", "openrouter"], fallback_provider="anthropic"
         )
-        assert name == "my-custom-model"
-        assert prov == "custom-openai"
-
-    def test_fallback_provider_used_when_model_not_in_registry(self):
-        from EvoScientist.commands.implementation.model import (
-            extract_model_and_provider,
-        )
-
-        # With an explicit provider override, fallback is not used
-        _, prov = extract_model_and_provider(
-            ["whatever", "nvidia"], fallback_provider="anthropic"
-        )
-        assert prov == "nvidia"
+        assert name == "claude-sonnet-4-6"
+        assert prov == "openrouter"
 
 
 class TestModelCommandUnknownModel:

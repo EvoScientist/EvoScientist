@@ -27,7 +27,7 @@ def extract_model_and_provider(
     model_name = args[0]
     provider_override = args[1] if len(args) > 1 else None
 
-    if model_name not in MODELS and provider_override is None:
+    if model_name not in MODELS:
         raise ValueError(f"Unknown model '{model_name}'")
 
     if provider_override:
@@ -54,7 +54,7 @@ class ModelCommand(Command):
         ),
         Argument(
             name="--save",
-            type=str,
+            type=bool,
             description="Save the choice to config file",
             required=False,
         ),
@@ -108,18 +108,39 @@ class ModelCommand(Command):
         *,
         save: bool = False,
     ) -> None:
+        import copy
+
+        from ...cli.agent import _load_agent
         from ...EvoScientist import _ensure_config, set_chat_model
 
+        cfg = _ensure_config()
+
+        # Build a temporary config to verify the agent can be created
+        # before mutating any global state.
+        temp_cfg = copy.copy(cfg)
+        temp_cfg.model = model_name
+        temp_cfg.provider = provider
+
+        try:
+            new_agent = _load_agent(
+                workspace_dir=ctx.workspace_dir,
+                checkpointer=ctx.checkpointer,
+                config=temp_cfg,
+            )
+        except Exception as e:
+            ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
+            return
+
+        # Agent built successfully — now commit the change globally.
         try:
             set_chat_model(model_name, provider=provider)
         except Exception as e:
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return
 
-        # Update cached config so status bar and new agents pick up the change
-        cfg = _ensure_config()
         cfg.model = model_name
         cfg.provider = provider
+        ctx.agent = new_agent
 
         # Persist to config file if --save was given
         if save:
@@ -127,16 +148,6 @@ class ModelCommand(Command):
 
             set_config_value("model", model_name)
             set_config_value("provider", provider)
-
-        # Rebuild the agent so subsequent turns use the new model
-        from ...cli.agent import _load_agent
-
-        new_agent = _load_agent(
-            workspace_dir=ctx.workspace_dir,
-            checkpointer=ctx.checkpointer,
-            config=cfg,
-        )
-        ctx.agent = new_agent
 
         # Propagate to channel module if channels are running
         try:

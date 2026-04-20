@@ -1141,6 +1141,9 @@ def cmd_interactive(
                                 checkpointer=checkpointer,
                                 config=cfg,
                             )
+                            if _channels_is_running():
+                                _ch_mod._cli_agent = state["agent"]
+                                _ch_mod._cli_thread_id = state["thread_id"]
                             state["status_base_snapshot"] = make_empty_status_snapshot(
                                 model_name
                             )
