@@ -1095,7 +1095,7 @@ def cmd_interactive(
                             if arg_parts:
                                 try:
                                     model_name, prov = extract_model_and_provider(
-                                        arg_parts, fallback_provider=cfg.provider
+                                        arg_parts
                                     )
                                 except ValueError:
                                     console.print(

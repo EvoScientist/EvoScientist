@@ -17,8 +17,7 @@ class TestExtractModelAndProvider:
         )
 
         name, prov = extract_model_and_provider(
-            ["claude-sonnet-4-6"], fallback_provider="anthropic"
-        )
+            ["claude-sonnet-4-6"]        )
         assert name == "claude-sonnet-4-6"
         assert prov == "anthropic"
 
@@ -28,8 +27,7 @@ class TestExtractModelAndProvider:
         )
 
         name, prov = extract_model_and_provider(
-            ["claude-sonnet-4-6", "openrouter"], fallback_provider="anthropic"
-        )
+            ["claude-sonnet-4-6", "openrouter"]        )
         assert name == "claude-sonnet-4-6"
         assert prov == "openrouter"
 
@@ -40,8 +38,7 @@ class TestExtractModelAndProvider:
 
         with pytest.raises(ValueError, match="Unknown model"):
             extract_model_and_provider(
-                ["nonexistent-model-xyz"], fallback_provider="anthropic"
-            )
+                ["nonexistent-model-xyz"]            )
 
     def test_unknown_model_with_provider_still_raises(self):
         from EvoScientist.commands.implementation.model import (
@@ -51,8 +48,7 @@ class TestExtractModelAndProvider:
         # Unknown models are always rejected, even with an explicit provider
         with pytest.raises(ValueError, match="Unknown model"):
             extract_model_and_provider(
-                ["my-custom-model", "custom-openai"], fallback_provider="anthropic"
-            )
+                ["my-custom-model", "custom-openai"]            )
 
     def test_provider_override_on_known_model(self):
         from EvoScientist.commands.implementation.model import (
@@ -61,8 +57,7 @@ class TestExtractModelAndProvider:
 
         # Known model with explicit provider override uses the override
         name, prov = extract_model_and_provider(
-            ["claude-sonnet-4-6", "openrouter"], fallback_provider="anthropic"
-        )
+            ["claude-sonnet-4-6", "openrouter"]        )
         assert name == "claude-sonnet-4-6"
         assert prov == "openrouter"
 
@@ -250,6 +245,8 @@ class TestModelCommandFailure:
 
         ctx = MagicMock()
         ctx.ui = ui
+        ctx.workspace_dir = "/tmp/test"
+        ctx.checkpointer = MagicMock()
 
         with (
             patch(
@@ -257,12 +254,17 @@ class TestModelCommandFailure:
                 return_value=cfg,
             ),
             patch(
+                "EvoScientist.cli.agent._load_agent",
+                return_value=MagicMock(),
+            ),
+            patch(
                 "EvoScientist.EvoScientist.set_chat_model",
                 side_effect=RuntimeError("API key missing"),
-            ),
+            ) as mock_set,
         ):
             _run(cmd.execute(ctx, ["claude-opus-4-6"]))
 
+        mock_set.assert_called_once()
         ui.append_system.assert_called_once()
         call_args = ui.append_system.call_args
         assert "Failed to switch model" in call_args[0][0]

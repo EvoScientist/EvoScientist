@@ -361,6 +361,7 @@ def run_textual_interactive(
             self._background_tasks: set[asyncio.Task] = set()
             self._quit_pending: bool = False
             self._current_model: str | None = model
+            self._current_provider: str | None = provider
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(self._current_model)
             self._status_snapshot = self._status_base_snapshot
@@ -2371,9 +2372,13 @@ def run_textual_interactive(
             )
             self._rebuild_status_snapshot()
 
-        def update_status_after_model_change(self, new_model: str) -> None:
+        def update_status_after_model_change(
+            self, new_model: str, new_provider: str | None = None
+        ) -> None:
             """Update the status bar and welcome banner after /model switches the LLM."""
             self._current_model = new_model
+            if new_provider is not None:
+                self._current_provider = new_provider
             self._status_base_snapshot = make_empty_status_snapshot(new_model)
             self._rebuild_status_snapshot()
             self._render_welcome()
@@ -2424,7 +2429,7 @@ def run_textual_interactive(
                     workspace_dir=self._workspace_dir,
                     mode=mode,
                     model=self._current_model,
-                    provider=provider,
+                    provider=self._current_provider,
                     ui_backend="tui",
                     channels=channels_info,
                 )

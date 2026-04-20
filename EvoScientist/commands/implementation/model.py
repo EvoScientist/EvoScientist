@@ -6,21 +6,17 @@ from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
 
-def extract_model_and_provider(
-    args: list[str], fallback_provider: str
-) -> tuple[str, str]:
+def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
     """Parse model name and provider from argument list.
 
     Args:
         args: Non-empty argument list (model_name [provider]).
-        fallback_provider: Provider to use when not specified and model
-            is not in the registry.
 
     Returns:
         ``(model_name, provider)`` tuple.
 
     Raises:
-        ValueError: If the model is unknown and no provider was given.
+        ValueError: If the model is not in the registry.
     """
     from ...llm.models import MODELS
 
@@ -32,10 +28,8 @@ def extract_model_and_provider(
 
     if provider_override:
         provider = provider_override
-    elif model_name in MODELS:
-        _, provider = MODELS[model_name]
     else:
-        provider = fallback_provider
+        _, provider = MODELS[model_name]
 
     return model_name, provider
 
@@ -74,9 +68,7 @@ class ModelCommand(Command):
 
         if args:
             try:
-                model_name, provider = extract_model_and_provider(
-                    args, fallback_provider=current_provider
-                )
+                model_name, provider = extract_model_and_provider(args)
             except ValueError:
                 ctx.ui.append_system(
                     f"Unknown model '{args[0]}'. Use /model to browse available models.",
@@ -88,6 +80,13 @@ class ModelCommand(Command):
             return
 
         # Interactive picker
+        if not ctx.ui.supports_interactive:
+            ctx.ui.append_system(
+                "Usage: /model <name> [provider] [--save]",
+                style="yellow",
+            )
+            return
+
         entries = list_models_by_provider()
         result = await ctx.ui.wait_for_model_pick(
             entries,
@@ -161,7 +160,7 @@ class ModelCommand(Command):
         # Update status bar if available
         update_model_fn = getattr(ctx.ui, "update_status_after_model_change", None)
         if callable(update_model_fn):
-            update_model_fn(model_name)
+            update_model_fn(model_name, provider)
 
         saved_note = " (saved to config)" if save else ""
         ctx.ui.append_system(
