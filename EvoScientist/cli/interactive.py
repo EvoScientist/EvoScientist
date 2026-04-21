@@ -41,7 +41,7 @@ from ..sessions import (
     list_threads,
     thread_exists,
 )
-from ..stream.display import console
+from ..stream.console import console
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .agent import _create_session_workspace, _load_agent, _shorten_path
 from .channel import (

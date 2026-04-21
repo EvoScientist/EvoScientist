@@ -13,7 +13,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from rich.console import Console, Group  # type: ignore[import-untyped]
+from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
 from rich.markdown import Markdown  # type: ignore[import-untyped]
 from rich.panel import Panel  # type: ignore[import-untyped]
@@ -21,6 +21,7 @@ from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
 from ..paths import resolve_virtual_path
+from .console import console
 from .diff_format import build_edit_diff
 from .events import stream_agent_events
 from .formatter import ToolResultFormatter
@@ -45,11 +46,6 @@ from .utils import (
 
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
-
-console = Console(
-    legacy_windows=(sys.platform == "win32"),
-    no_color=os.getenv("NO_COLOR") is not None,
-)
 
 formatter = ToolResultFormatter()
 

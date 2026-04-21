@@ -365,7 +365,7 @@ def install_mcp_server(
     if print_fn is None:
 
         def print_fn(text: str, style: str = "") -> None:
-            from ..stream.display import console
+            from ..stream.console import console
 
             console.print(f"[{style}]{text}[/{style}]" if style else text)
 

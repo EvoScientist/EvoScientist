@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ..stream.display import console
+from ..stream.console import console
 from .agent import _shorten_path
 
 

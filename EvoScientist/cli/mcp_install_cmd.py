@@ -20,7 +20,7 @@ from ..mcp.registry import (
     install_mcp_server,
     install_mcp_servers,
 )
-from ..stream.display import console
+from ..stream.console import console
 from .interactive import _PICKER_STYLE
 
 _INSTALLED_INDICATOR = ("fg:#4caf50", "\u2713 ")

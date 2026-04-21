@@ -4,7 +4,7 @@ from typing import Any
 
 from rich.table import Table
 
-from ..stream.display import console
+from ..stream.console import console
 
 
 def _mcp_list_servers() -> None:

@@ -34,6 +34,7 @@ dependencies = [
     "langgraph-cli[inmem]>=0.4",
     "langgraph-checkpoint-sqlite>=3.0.0",
     "httpx>=0.27",
+    "lazy-loader>=0.5",
     "markdownify>=0.14",
     "nest-asyncio>=1.6",
     "langchain-mcp-adapters>=0.1",

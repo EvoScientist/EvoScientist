@@ -15,7 +15,7 @@ from rich.table import Table
 
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
-from ..stream.display import console
+from ..stream.console import console
 from ._app import app, channel_app, config_app, mcp_app
 from ._constants import build_metadata
 from .agent import (
@@ -33,7 +33,6 @@ from .channel import (
     channel_ask_user_prompt,
     channel_hitl_prompt,
 )
-from .interactive import cmd_interactive, cmd_run
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
     _mcp_edit_server_fields,
@@ -41,7 +40,6 @@ from .mcp_ui import (
     _mcp_remove_server,
     _show_mcp_config,
 )
-from .tui_runtime import run_streaming
 
 # =============================================================================
 # Onboard command
@@ -515,6 +513,7 @@ def _serve_process_message(
     import asyncio
 
     from .channel import _bus_loop
+    from .tui_runtime import run_streaming
 
     console.print(
         f"[dim][{msg.channel_type}] {msg.sender}: {escape(msg.content[:80])}[/dim]"
@@ -1279,6 +1278,7 @@ def _main_callback(
         import asyncio
 
         from ..sessions import generate_thread_id, get_checkpointer
+        from .interactive import cmd_run
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
@@ -1304,6 +1304,8 @@ def _main_callback(
         nest_asyncio.apply()
         asyncio.get_event_loop().run_until_complete(_single_shot())
     else:
+        from .interactive import cmd_interactive
+
         # Interactive mode (default) — checkpointer managed inside cmd_interactive
         cmd_interactive(
             show_thinking=show_thinking,

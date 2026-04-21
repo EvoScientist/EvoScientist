@@ -2,7 +2,13 @@
 
 from datetime import UTC, datetime
 
-from ..sessions import AGENT_NAME
+
+def _agent_name() -> str:
+    # Deferred import: ``sessions`` pulls in langgraph/aiosqlite (~300 ms)
+    # and is only needed when ``build_metadata`` is actually called.
+    from ..sessions import AGENT_NAME
+
+    return AGENT_NAME
 
 WELCOME_SLOGANS = [
     "Ready for vibe research? What do you want cooking?",
@@ -34,7 +40,7 @@ LOGO_GRADIENT = ["#1a237e", "#1565c0", "#1e88e5", "#42a5f5", "#64b5f6", "#90caf9
 def build_metadata(workspace_dir: str | None, model: str | None) -> dict:
     """Build metadata dict for LangGraph checkpoint persistence."""
     return {
-        "agent_name": AGENT_NAME,
+        "agent_name": _agent_name(),
         "updated_at": datetime.now(UTC).isoformat(),
         "workspace_dir": workspace_dir or "",
         "model": model or "",

@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ..stream.display import console
+from ..stream.console import console
 
 _channel_logger = logging.getLogger(__name__)
 
