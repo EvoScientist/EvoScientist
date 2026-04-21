@@ -159,133 +159,6 @@ def pip_install_hint() -> str:
     return "pip install"
 
 
-def install_pip_package(package: str, *, verify_command: str | None = None) -> bool:
-    """Silently install a pip package.
-
-    Install strategy:
-
-    1. **uv tool environment** (evosci installed via ``uv tool install``):
-       use ``uv tool install <tool> --with <pkg>`` so the dependency lands
-       in uv's receipt and survives ``uv tool upgrade``. Existing
-       ``--with`` packages are preserved.
-
-    2. **Otherwise, when ``uv`` is available**: prefer
-       ``uv tool install <pkg>`` — installs as a standalone tool with its
-       binary symlinked under ``~/.local/bin``. Survives ``uv sync`` and
-       evosci upgrades (the source-install failure mode of the old
-       ``uv pip install`` path).
-
-    3. **Fallback**: ``uv pip install --python sys.executable`` or
-       ``python -m pip install`` into the current venv. This path *is*
-       removed by a subsequent ``uv sync``, but it's the only option for
-       packages without a console-script entry point.
-
-    Args:
-        package: PEP 508 requirement spec.
-        verify_command: CLI entry-point name to check for after step (2).
-            When provided and the command isn't resolvable on PATH after
-            ``uv tool install``, we fall through to step (3).
-
-    Returns True if installation succeeded.
-    """
-    # ---- uv tool env: durable install via `uv tool install --with` ----
-    if _is_uv_tool_env() and shutil.which("uv"):
-        tool_name = _uv_tool_name()
-        if tool_name:
-            existing = _uv_tool_existing_requirements()
-            cmd = ["uv", "tool", "install", tool_name, "-q"]
-            for spec in existing.values():
-                cmd += ["--with", spec]
-            if _bare_package_name(package) not in existing:
-                cmd += ["--with", package]
-            try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=180
-                )
-                if result.returncode == 0:
-                    import importlib
-
-                    importlib.invalidate_caches()
-                    return True
-                logger.info(
-                    "uv tool install %s --with %s failed (exit %d); falling back",
-                    tool_name,
-                    package,
-                    result.returncode,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-                logger.info(
-                    "uv tool install --with %s errored (%s); falling back",
-                    package,
-                    exc,
-                )
-            # Fall through to legacy methods. Note: for MCP CLIs (verify_command
-            # set) this may land in the standalone `uv tool install <pkg>`
-            # branch, producing a *separate* uv tool entry rather than updating
-            # evoscientist's receipt — intentional as a recovery path.
-
-    has_uv = bool(shutil.which("uv"))
-
-    # ---- Standalone uv tool install (survives `uv sync` / evosci upgrade) --
-    # Only safe for packages whose sole deliverable is a CLI binary:
-    # `uv tool install` creates an isolated env, so a library installed this
-    # way is NOT importable from the active venv. Callers that expect to
-    # import the package must omit ``verify_command`` to skip this branch.
-    if has_uv and verify_command:
-        try:
-            result = subprocess.run(
-                ["uv", "tool", "install", "-q", package],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if result.returncode == 0:
-                import importlib
-
-                importlib.invalidate_caches()
-                # Package installed, but `uv tool install` silently
-                # produces no bin when the package lacks a console-script
-                # entry point. Verify by looking for the binary in
-                # `uv tool dir --bin` specifically — not via PATH, which
-                # may return a stale `.venv/bin/` copy under `uv run`.
-                if _uv_tool_bin(verify_command) is not None:
-                    return True
-                logger.info(
-                    "uv tool install %s succeeded but %s missing from uv "
-                    "tool bin dir; falling back to pip install into current venv",
-                    package,
-                    verify_command,
-                )
-            else:
-                logger.info(
-                    "uv tool install %s failed (exit %d); falling back to pip install",
-                    package,
-                    result.returncode,
-                )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            logger.info("uv tool install %s errored (%s); falling back", package, exc)
-
-    # ---- Fallback: pip install into current venv ----
-    commands: list[list[str]] = []
-    if has_uv:
-        commands.append(
-            ["uv", "pip", "install", "--python", sys.executable, "-q", package]
-        )
-    commands.append([sys.executable, "-m", "pip", "install", "-q", package])
-
-    for cmd in commands:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
-                import importlib
-
-                importlib.invalidate_caches()
-                return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return False
-
-
 def _uv_tool_bin_dir() -> Path | None:
     """Return uv's tool bin directory — where ``uv tool install`` places
     symlinks (typically ``~/.local/bin``). ``None`` when uv isn't
@@ -329,6 +202,145 @@ def _uv_tool_bin(command: str) -> Path | None:
         if cand_exe.is_file():
             return cand_exe
     return None
+
+
+def _install_with_uv_tool_env(package: str) -> bool:
+    """Install *package* into the evosci uv-tool env via ``--with``.
+
+    Only does anything when the current interpreter is inside a uv tool
+    env; otherwise returns False immediately. On success the package is
+    recorded in uv's receipt and survives ``uv tool upgrade evoscientist``.
+    """
+    if not (_is_uv_tool_env() and shutil.which("uv")):
+        return False
+    tool_name = _uv_tool_name()
+    if not tool_name:
+        return False
+    existing = _uv_tool_existing_requirements()
+    cmd = ["uv", "tool", "install", tool_name, "-q"]
+    for spec in existing.values():
+        cmd += ["--with", spec]
+    if _bare_package_name(package) not in existing:
+        cmd += ["--with", package]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode == 0:
+            import importlib
+
+            importlib.invalidate_caches()
+            return True
+        logger.info(
+            "uv tool install %s --with %s failed (exit %d); falling back",
+            tool_name,
+            package,
+            result.returncode,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.info(
+            "uv tool install --with %s errored (%s); falling back", package, exc
+        )
+    return False
+
+
+def _install_via_pip(package: str) -> bool:
+    """Install *package* into the active venv via ``uv pip`` or ``pip``.
+
+    Importable from the current interpreter on success. Not durable under
+    ``uv sync`` — the reconcile will remove anything not in the lockfile.
+    """
+    commands: list[list[str]] = []
+    if shutil.which("uv"):
+        commands.append(
+            ["uv", "pip", "install", "--python", sys.executable, "-q", package]
+        )
+    commands.append([sys.executable, "-m", "pip", "install", "-q", package])
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                import importlib
+
+                importlib.invalidate_caches()
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return False
+
+
+def install_library(package: str) -> bool:
+    """Install a package that will be imported from the active environment.
+
+    Strategy:
+
+    1. **uv tool env**: ``uv tool install evoscientist --with <pkg>`` —
+       package lands in evosci's isolated env and is importable from it.
+    2. **Fallback**: ``uv pip install`` / ``pip install`` into the active
+       venv. Not durable under ``uv sync``, but there's no better option
+       for libraries outside a uv tool env.
+
+    Does not use standalone ``uv tool install <pkg>`` — that creates an
+    isolated env the caller can't import from.
+    """
+    if _install_with_uv_tool_env(package):
+        return True
+    return _install_via_pip(package)
+
+
+def install_cli_tool(package: str, *, verify_command: str) -> bool:
+    """Install a package whose primary deliverable is a CLI binary.
+
+    Strategy:
+
+    1. **uv tool env**: ``uv tool install evoscientist --with <pkg>`` —
+       durable via uv's receipt, binary resolvable via the tool's bin dir.
+    2. **Standalone ``uv tool install <pkg>``**: binary symlinked under
+       ``~/.local/bin`` (``uv tool dir --bin``); survives ``uv sync``.
+    3. **Fallback**: ``uv pip install`` / ``pip install`` into the active
+       venv. Not durable — wiped by ``uv sync`` — but covers the case
+       where ``uv`` isn't available or the package has no console-script.
+
+    *verify_command* is the CLI name expected to appear after step 2; if
+    it's missing from ``uv tool dir --bin`` we fall through to step 3.
+    """
+    # No bin-dir verify for step 1: in a uv-tool env the binary lands in
+    # evosci's own bin dir (next to sys.executable), not in `uv tool dir
+    # --bin`. `_resolve_command_path` picks it up via its sys.executable
+    # branch.
+    if _install_with_uv_tool_env(package):
+        return True
+    if shutil.which("uv"):
+        try:
+            result = subprocess.run(
+                ["uv", "tool", "install", "-q", package],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if result.returncode == 0:
+                import importlib
+
+                importlib.invalidate_caches()
+                # `uv tool install` silently produces no bin when the
+                # package lacks a console-script. Check the uv-tool bin
+                # dir directly rather than PATH, which under `uv run`
+                # resolves stale `.venv/bin/` copies first.
+                if _uv_tool_bin(verify_command) is not None:
+                    return True
+                logger.info(
+                    "uv tool install %s succeeded but %s missing from uv "
+                    "tool bin dir; falling back to pip install into current venv",
+                    package,
+                    verify_command,
+                )
+            else:
+                logger.info(
+                    "uv tool install %s failed (exit %d); falling back to pip install",
+                    package,
+                    result.returncode,
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.info("uv tool install %s errored (%s); falling back", package, exc)
+    return _install_via_pip(package)
 
 
 def _resolve_command_path(command: str) -> str:
@@ -516,7 +528,11 @@ def install_mcp_server(
     # Pip package
     if entry.pip_package:
         print_fn(f"  Installing {entry.pip_package}...", "dim")
-        if not install_pip_package(entry.pip_package, verify_command=entry.command):
+        if entry.command:
+            ok = install_cli_tool(entry.pip_package, verify_command=entry.command)
+        else:
+            ok = install_library(entry.pip_package)
+        if not ok:
             print_fn(f"  Failed: {pip_install_hint()} {entry.pip_package}", "red")
             return False
 

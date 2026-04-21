@@ -927,9 +927,9 @@ class TestUvToolCompat:
         monkeypatch.setattr(reg.shutil, "which", lambda x: None)
         assert reg.pip_install_hint() == "pip install"
 
-    # -- install_pip_package --
+    # -- install_library / install_cli_tool --
 
-    def test_install_pip_package_uv_tool_env_uses_uv_tool_install(
+    def test_install_library_uv_tool_env_uses_uv_tool_install(
         self, monkeypatch, tmp_path
     ):
         """In a uv tool env, should use ``uv tool install --with`` for durability."""
@@ -957,7 +957,7 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        result = reg.install_pip_package("new-mcp-server")
+        result = reg.install_library("new-mcp-server")
         assert result is True
         assert len(captured) == 1
         cmd = captured[0]
@@ -969,9 +969,7 @@ class TestUvToolCompat:
         assert "existing-pkg" in with_args
         assert "new-mcp-server" in with_args
 
-    def test_install_pip_package_uv_tool_env_no_duplicate_with(
-        self, monkeypatch, tmp_path
-    ):
+    def test_install_library_uv_tool_env_no_duplicate_with(self, monkeypatch, tmp_path):
         """If the package is already in the receipt, don't add it twice."""
         import EvoScientist.mcp.registry as reg
 
@@ -996,14 +994,12 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        reg.install_pip_package("arxiv-mcp-server")
+        reg.install_library("arxiv-mcp-server")
         cmd = captured[0]
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert with_args.count("arxiv-mcp-server") == 1
 
-    def test_install_pip_package_uv_tool_preserves_specifiers(
-        self, monkeypatch, tmp_path
-    ):
+    def test_install_library_uv_tool_preserves_specifiers(self, monkeypatch, tmp_path):
         """Existing --with specs with extras/versions must be preserved."""
         import EvoScientist.mcp.registry as reg
 
@@ -1029,14 +1025,14 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        reg.install_pip_package("new-pkg")
+        reg.install_library("new-pkg")
         cmd = captured[0]
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert "rich>=13.0" in with_args
         assert "requests[socks]" in with_args
         assert "new-pkg" in with_args
 
-    def test_install_pip_package_uv_tool_dedup_with_version_spec(
+    def test_install_library_uv_tool_dedup_with_version_spec(
         self, monkeypatch, tmp_path
     ):
         """Dedup must match bare name even if package arg has version spec."""
@@ -1064,18 +1060,16 @@ class TestUvToolCompat:
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         # package arg has version constraint — should still dedup against "rich"
-        reg.install_pip_package("rich>=14.0")
+        reg.install_library("rich>=14.0")
         cmd = captured[0]
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         # Should keep the existing spec, not add a duplicate
         assert with_args.count("rich>=13.0") == 1
         assert "rich>=14.0" not in with_args
 
-    def test_install_pip_package_uv_tool_falls_back_on_failure(
-        self, monkeypatch, tmp_path
-    ):
-        """If ``uv tool install --with`` fails, fall back to ``uv pip install``
-        when ``verify_command`` isn't set (library install)."""
+    def test_install_library_uv_tool_falls_back_on_failure(self, monkeypatch, tmp_path):
+        """install_library: if ``uv tool install --with`` fails, fall back
+        to ``uv pip install`` — standalone uv tool install is NEVER tried."""
         import EvoScientist.mcp.registry as reg
 
         venv = tmp_path / "uv" / "tools" / "evoscientist"
@@ -1098,20 +1092,19 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        result = reg.install_pip_package("some-package")
+        result = reg.install_library("some-package")
         assert result is True
-        # No verify_command → standalone `uv tool install <pkg>` is skipped.
         # Order: uv tool install --with (fail), uv pip install (ok).
         assert len(commands) == 2
         assert commands[0][:3] == ["uv", "tool", "install"]
         assert "--with" in commands[0]
         assert commands[1][:3] == ["uv", "pip", "install"]
 
-    def test_install_pip_package_uv_tool_with_verify_tries_standalone(
+    def test_install_cli_tool_uv_tool_env_tries_standalone_on_failure(
         self, monkeypatch, tmp_path
     ):
-        """In uv-tool env with ``verify_command``: ``--with`` fails →
-        standalone ``uv tool install`` is tried before pip."""
+        """install_cli_tool: uv-tool env, --with fails → standalone uv tool
+        install is tried, then pip fallback."""
         import EvoScientist.mcp.registry as reg
 
         venv = tmp_path / "uv" / "tools" / "evoscientist"
@@ -1134,7 +1127,7 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        result = reg.install_pip_package("some-cli", verify_command="some-cli")
+        result = reg.install_cli_tool("some-cli", verify_command="some-cli")
         assert result is True
         assert len(commands) == 3
         assert commands[0][:3] == ["uv", "tool", "install"]
@@ -1143,13 +1136,9 @@ class TestUvToolCompat:
         assert "--with" not in commands[1]
         assert commands[2][:3] == ["uv", "pip", "install"]
 
-    def test_install_pip_package_skips_uv_tool_without_verify_command(
-        self, monkeypatch
-    ):
-        """Without ``verify_command`` the non-uv-tool path must skip
-        ``uv tool install <pkg>`` — library callers rely on the package
-        being importable from the active venv, which standalone uv tools
-        are not."""
+    def test_install_library_goes_straight_to_pip_outside_uv_tool(self, monkeypatch):
+        """install_library outside a uv-tool env must skip ``uv tool install
+        <pkg>`` entirely — standalone uv tools aren't importable."""
         import sys
 
         import EvoScientist.mcp.registry as reg
@@ -1165,17 +1154,17 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        result = reg.install_pip_package("some-library")
+        result = reg.install_library("some-library")
         assert result is True
         assert len(captured) == 1
         assert captured[0][:3] == ["uv", "pip", "install"]
         assert sys.executable in captured[0]
 
-    def test_install_pip_package_with_verify_prefers_uv_tool_install(
+    def test_install_cli_tool_prefers_standalone_uv_tool_install(
         self, monkeypatch, tmp_path
     ):
-        """Non-uv-tool env, ``verify_command`` found in uv-tool bin dir:
-        ``uv tool install <pkg>`` is used so the binary survives uv sync."""
+        """install_cli_tool outside a uv-tool env: standalone ``uv tool
+        install <pkg>`` is preferred so the binary survives uv sync."""
         import EvoScientist.mcp.registry as reg
 
         captured: list[list[str]] = []
@@ -1196,17 +1185,16 @@ class TestUvToolCompat:
         monkeypatch.setattr(
             reg, "_uv_tool_bin", lambda cmd: fake_bin if cmd == "some-cli" else None
         )
-        result = reg.install_pip_package("some-cli", verify_command="some-cli")
+        result = reg.install_cli_tool("some-cli", verify_command="some-cli")
         assert result is True
         assert len(captured) == 1
         assert captured[0][:3] == ["uv", "tool", "install"]
         assert "some-cli" in captured[0]
 
-    def test_install_pip_package_verify_command_missing_triggers_fallback(
-        self, monkeypatch
-    ):
-        """When ``verify_command`` isn't in the uv-tool bin dir after
-        ``uv tool install``, fall through to ``uv pip install``."""
+    def test_install_cli_tool_missing_bin_triggers_pip_fallback(self, monkeypatch):
+        """install_cli_tool: if the binary isn't in uv's tool bin dir after
+        ``uv tool install`` (e.g. package has no console-script), fall
+        through to ``uv pip install``."""
         import sys
 
         import EvoScientist.mcp.registry as reg
@@ -1222,10 +1210,8 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        # uv-tool bin dir exists, but the expected binary isn't in it
-        # (entry-point-less package).
         monkeypatch.setattr(reg, "_uv_tool_bin", lambda cmd: None)
-        result = reg.install_pip_package(
+        result = reg.install_cli_tool(
             "lib-without-entrypoint", verify_command="ghost-cli"
         )
         assert result is True
@@ -1234,11 +1220,10 @@ class TestUvToolCompat:
         assert "--python" in captured[1]
         assert sys.executable in captured[1]
 
-    def test_install_pip_package_verify_command_present_short_circuits(
-        self, monkeypatch, tmp_path
-    ):
-        """``uv tool install`` success + verify_command present in uv-tool
-        bin dir = no pip fallback, even if a stale copy exists in the venv."""
+    def test_install_cli_tool_bin_present_short_circuits(self, monkeypatch, tmp_path):
+        """install_cli_tool: ``uv tool install`` success + binary present in
+        uv-tool bin dir ⇒ no pip fallback, even if a stale copy exists in
+        the venv on PATH."""
         import EvoScientist.mcp.registry as reg
 
         captured: list[list[str]] = []
@@ -1247,8 +1232,6 @@ class TestUvToolCompat:
             captured.append(cmd)
             return type("R", (), {"returncode": 0})()
 
-        # Stale venv binary would be returned by shutil.which — irrelevant
-        # now because the verify looks at the uv-tool bin dir directly.
         fake_bin = tmp_path / "arxiv-mcp-server"
         fake_bin.write_text("#!/bin/sh\n")
         fake_bin.chmod(0o755)
@@ -1264,16 +1247,18 @@ class TestUvToolCompat:
         monkeypatch.setattr(reg.shutil, "which", fake_which)
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         monkeypatch.setattr(
-            reg, "_uv_tool_bin", lambda cmd: fake_bin if cmd == "arxiv-mcp-server" else None
+            reg,
+            "_uv_tool_bin",
+            lambda cmd: fake_bin if cmd == "arxiv-mcp-server" else None,
         )
-        result = reg.install_pip_package(
+        result = reg.install_cli_tool(
             "arxiv-mcp-server", verify_command="arxiv-mcp-server"
         )
         assert result is True
         assert len(captured) == 1
         assert captured[0][:3] == ["uv", "tool", "install"]
 
-    def test_install_pip_package_falls_back_to_pip_when_no_uv(self, monkeypatch):
+    def test_install_library_falls_back_to_pip_when_no_uv(self, monkeypatch):
         import sys
 
         import EvoScientist.mcp.registry as reg
@@ -1288,7 +1273,7 @@ class TestUvToolCompat:
         monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
         monkeypatch.setattr(reg.shutil, "which", lambda x: None)
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        reg.install_pip_package("some-package")
+        reg.install_library("some-package")
         assert len(captured) == 1
         assert sys.executable in captured[0]
         assert "-m" in captured[0]
