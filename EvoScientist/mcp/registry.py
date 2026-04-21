@@ -26,6 +26,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for function-local caches that legitimately store ``None``.
+_UNSET = object()
+
 
 # =============================================================================
 # Data model
@@ -240,14 +243,16 @@ def install_pip_package(package: str, *, verify_command: str | None = None) -> b
                 import importlib
 
                 importlib.invalidate_caches()
-                # Package installed, but `uv tool install` silently produces
-                # no bin when the package lacks a console-script entry point.
-                # Verify before claiming success; otherwise try pip fallback.
-                if shutil.which(verify_command):
+                # Package installed, but `uv tool install` silently
+                # produces no bin when the package lacks a console-script
+                # entry point. Verify by looking for the binary in
+                # `uv tool dir --bin` specifically — not via PATH, which
+                # may return a stale `.venv/bin/` copy under `uv run`.
+                if _uv_tool_bin(verify_command) is not None:
                     return True
                 logger.info(
-                    "uv tool install %s succeeded but %s not on PATH; "
-                    "falling back to pip install into current venv",
+                    "uv tool install %s succeeded but %s missing from uv "
+                    "tool bin dir; falling back to pip install into current venv",
                     package,
                     verify_command,
                 )
@@ -281,17 +286,74 @@ def install_pip_package(package: str, *, verify_command: str | None = None) -> b
     return False
 
 
+def _uv_tool_bin_dir() -> Path | None:
+    """Return uv's tool bin directory — where ``uv tool install`` places
+    symlinks (typically ``~/.local/bin``). ``None`` when uv isn't
+    available or the query fails.
+
+    Cached for the lifetime of the process.
+    """
+    cached = getattr(_uv_tool_bin_dir, "_cached", _UNSET)
+    if cached is not _UNSET:
+        return cached  # type: ignore[return-value]
+    result: Path | None = None
+    if shutil.which("uv"):
+        try:
+            proc = subprocess.run(
+                ["uv", "tool", "dir", "--bin"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode == 0:
+                path = proc.stdout.strip()
+                if path:
+                    result = Path(path)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    _uv_tool_bin_dir._cached = result  # type: ignore[attr-defined]
+    return result
+
+
+def _uv_tool_bin(command: str) -> Path | None:
+    """Return the executable path for *command* in ``uv tool dir --bin``
+    if it exists, else ``None``."""
+    tool_bin = _uv_tool_bin_dir()
+    if tool_bin is None:
+        return None
+    cand = tool_bin / command
+    if cand.is_file() and os.access(cand, os.X_OK):
+        return cand
+    if os.name == "nt":
+        cand_exe = cand.with_suffix(".exe")
+        if cand_exe.is_file():
+            return cand_exe
+    return None
+
+
 def _resolve_command_path(command: str) -> str:
     """Resolve a command to its full path after pip installation.
 
-    Checks PATH first (standard case), then the bin directory of the current
-    Python interpreter — handles uv tool envs where a newly installed binary
-    is not on PATH but lives alongside the tool's Python executable.
+    Resolution order:
+
+    1. Absolute path — return as-is.
+    2. ``uv tool dir --bin`` — prefer this over any ``.venv/bin/``
+       shadow. ``uv run`` puts the project venv first on PATH, so a
+       stale venv copy of a package (from an earlier ``uv pip install``
+       that's since been superseded by ``uv tool install``) would
+       otherwise mask the durable location.
+    3. PATH — ``shutil.which``.
+    4. Current interpreter's ``bin/`` — handles uv tool envs where a
+       newly installed binary isn't on PATH but lives alongside the
+       tool's Python executable.
 
     Returns the full absolute path if found, otherwise the original string.
     """
     if os.path.isabs(command):
         return command
+    tool_bin = _uv_tool_bin(command)
+    if tool_bin is not None:
+        return str(tool_bin)
     found = shutil.which(command)
     if found:
         return found

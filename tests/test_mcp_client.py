@@ -1172,9 +1172,9 @@ class TestUvToolCompat:
         assert sys.executable in captured[0]
 
     def test_install_pip_package_with_verify_prefers_uv_tool_install(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
-        """Non-uv-tool env, ``verify_command`` resolves after install:
+        """Non-uv-tool env, ``verify_command`` found in uv-tool bin dir:
         ``uv tool install <pkg>`` is used so the binary survives uv sync."""
         import EvoScientist.mcp.registry as reg
 
@@ -1184,16 +1184,18 @@ class TestUvToolCompat:
             captured.append(cmd)
             return type("R", (), {"returncode": 0})()
 
-        def fake_which(x):
-            if x == "uv":
-                return "/usr/bin/uv"
-            if x == "some-cli":
-                return "/home/u/.local/bin/some-cli"
-            return None
+        fake_bin = tmp_path / "some-cli"
+        fake_bin.write_text("#!/bin/sh\n")
+        fake_bin.chmod(0o755)
 
         monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
-        monkeypatch.setattr(reg.shutil, "which", fake_which)
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            reg, "_uv_tool_bin", lambda cmd: fake_bin if cmd == "some-cli" else None
+        )
         result = reg.install_pip_package("some-cli", verify_command="some-cli")
         assert result is True
         assert len(captured) == 1
@@ -1203,9 +1205,8 @@ class TestUvToolCompat:
     def test_install_pip_package_verify_command_missing_triggers_fallback(
         self, monkeypatch
     ):
-        """When ``verify_command`` isn't on PATH after ``uv tool install``,
-        fall through to ``uv pip install`` (handles packages with no entry
-        point)."""
+        """When ``verify_command`` isn't in the uv-tool bin dir after
+        ``uv tool install``, fall through to ``uv pip install``."""
         import sys
 
         import EvoScientist.mcp.registry as reg
@@ -1216,13 +1217,14 @@ class TestUvToolCompat:
             captured.append(cmd)
             return type("R", (), {"returncode": 0})()
 
-        # shutil.which: `uv` resolves, the verify command never does.
-        def fake_which(x):
-            return "/usr/bin/uv" if x == "uv" else None
-
         monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
-        monkeypatch.setattr(reg.shutil, "which", fake_which)
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        # uv-tool bin dir exists, but the expected binary isn't in it
+        # (entry-point-less package).
+        monkeypatch.setattr(reg, "_uv_tool_bin", lambda cmd: None)
         result = reg.install_pip_package(
             "lib-without-entrypoint", verify_command="ghost-cli"
         )
@@ -1233,10 +1235,10 @@ class TestUvToolCompat:
         assert sys.executable in captured[1]
 
     def test_install_pip_package_verify_command_present_short_circuits(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
-        """``uv tool install`` success + verify_command resolvable =
-        no pip fallback."""
+        """``uv tool install`` success + verify_command present in uv-tool
+        bin dir = no pip fallback, even if a stale copy exists in the venv."""
         import EvoScientist.mcp.registry as reg
 
         captured: list[list[str]] = []
@@ -1245,16 +1247,25 @@ class TestUvToolCompat:
             captured.append(cmd)
             return type("R", (), {"returncode": 0})()
 
+        # Stale venv binary would be returned by shutil.which — irrelevant
+        # now because the verify looks at the uv-tool bin dir directly.
+        fake_bin = tmp_path / "arxiv-mcp-server"
+        fake_bin.write_text("#!/bin/sh\n")
+        fake_bin.chmod(0o755)
+
         def fake_which(x):
             if x == "uv":
                 return "/usr/bin/uv"
             if x == "arxiv-mcp-server":
-                return "/home/u/.local/bin/arxiv-mcp-server"
+                return "/venv/bin/arxiv-mcp-server"  # stale, should NOT be trusted
             return None
 
         monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
         monkeypatch.setattr(reg.shutil, "which", fake_which)
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            reg, "_uv_tool_bin", lambda cmd: fake_bin if cmd == "arxiv-mcp-server" else None
+        )
         result = reg.install_pip_package(
             "arxiv-mcp-server", verify_command="arxiv-mcp-server"
         )
@@ -1339,6 +1350,32 @@ class TestUvToolCompat:
         import EvoScientist.mcp.registry as reg
 
         monkeypatch.setattr(reg.shutil, "which", lambda x: None)
+        monkeypatch.setattr(reg, "_uv_tool_bin", lambda cmd: None)
         monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
         result = reg._resolve_command_path("nonexistent-tool")
         assert result == "nonexistent-tool"
+
+    def test_resolve_command_path_prefers_uv_tool_over_venv_shadow(
+        self, monkeypatch, tmp_path
+    ):
+        """When both ``uv tool dir --bin`` and a venv's ``bin/`` contain the
+        command, prefer the uv-tool location so the path written to mcp.yaml
+        survives ``uv sync``."""
+        import EvoScientist.mcp.registry as reg
+
+        uv_bin_dir = tmp_path / "uv-bin"
+        uv_bin_dir.mkdir()
+        uv_copy = uv_bin_dir / "arxiv-mcp-server"
+        uv_copy.write_text("#!/bin/sh\n")
+        uv_copy.chmod(0o755)
+
+        # Stale venv copy that `uv run` would surface first via PATH.
+        venv_copy = tmp_path / "venv-bin" / "arxiv-mcp-server"
+        venv_copy.parent.mkdir()
+        venv_copy.write_text("#!/bin/sh\n")
+        venv_copy.chmod(0o755)
+
+        monkeypatch.setattr(reg, "_uv_tool_bin_dir", lambda: uv_bin_dir)
+        monkeypatch.setattr(reg.shutil, "which", lambda x: str(venv_copy))
+        result = reg._resolve_command_path("arxiv-mcp-server")
+        assert result == str(uv_copy)
