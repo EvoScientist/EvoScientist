@@ -2476,9 +2476,7 @@ def run_textual_interactive(
                 try:
                     print_resume_hint(hint_tid)
                 except Exception:
-                    _channel_logger.debug(
-                        "print_resume_hint failed", exc_info=True
-                    )
+                    _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
     import nest_asyncio  # type: ignore[import-untyped]
 
