@@ -391,7 +391,7 @@ def run_textual_interactive(
                 title=title,
             )
             await container.mount(picker)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             picker.focus()
 
             return await self._wait_for_thread_pick(picker)
@@ -408,7 +408,7 @@ def run_textual_interactive(
                 pre_filter_tag=pre_filter_tag,
             )
             await container.mount(browser)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             browser.focus()
 
             return await self._wait_for_skill_browse(browser)
@@ -425,7 +425,7 @@ def run_textual_interactive(
                 pre_filter_tag=pre_filter_tag,
             )
             await container.mount(browser)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             browser.focus()
 
             return await self._wait_for_mcp_browse(browser)
@@ -608,6 +608,32 @@ def run_textual_interactive(
             )
 
         # ── Widget helpers ─────────────────────────────────────
+
+        def _schedule_scroll_to_bottom(
+            self,
+            container: VerticalScroll,
+            *,
+            delays: tuple[float, ...] = (0.3, 0.8),
+            immediate: bool = True,
+        ) -> None:
+            """Schedule deferred scrolls so the viewport lands at the bottom.
+
+            Markdown- and list-heavy widgets lay out across multiple refresh
+            cycles, so a single ``scroll_end()`` may fire against a stale
+            ``virtual_size`` and leave the viewport mid-content. Re-schedule
+            ``scroll_end`` at each delay to follow subsequent reflows.
+            """
+            if immediate:
+                self.call_after_refresh(
+                    lambda: container.scroll_end(animate=False),
+                )
+            for delay in delays:
+                self.set_timer(
+                    delay,
+                    lambda: self.call_after_refresh(
+                        lambda: container.scroll_end(animate=False),
+                    ),
+                )
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1405,17 +1431,11 @@ def run_textual_interactive(
                                     clean or state.response_text
                                 )
                                 await container.mount(assistant_w)
-                                # Markdown rendering is async and needs multiple
-                                # layout cycles to compute final height.  Schedule
-                                # repeated deferred scrolls so long content stays
-                                # visible even when Markdown takes time to lay out.
-                                for delay in (0.15, 0.4, 0.8, 1.5):
-                                    self.set_timer(
-                                        delay,
-                                        lambda: self.call_after_refresh(
-                                            lambda: container.scroll_end(animate=False),
-                                        ),
-                                    )
+                                self._schedule_scroll_to_bottom(
+                                    container,
+                                    delays=(0.15, 0.4, 0.8, 1.5),
+                                    immediate=False,
+                                )
                             # Mount token usage stats
                             if state.total_input_tokens or state.total_output_tokens:
                                 await container.mount(
@@ -1498,18 +1518,7 @@ def run_textual_interactive(
                     ):
                         on_thinking_cb(state.thinking_text.rstrip())
                     # Final scrolls to ensure last content is visible.
-                    # Markdown layout is async — schedule multiple deferred
-                    # scrolls so long content eventually scrolls into view.
-                    self.call_after_refresh(
-                        lambda: container.scroll_end(animate=False),
-                    )
-                    for delay in (0.3, 0.8):
-                        self.set_timer(
-                            delay,
-                            lambda: self.call_after_refresh(
-                                lambda: container.scroll_end(animate=False),
-                            ),
-                        )
+                    self._schedule_scroll_to_bottom(container)
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if state.pending_interrupt is None and state.pending_ask_user is None:
@@ -2163,10 +2172,12 @@ def run_textual_interactive(
             await container.mount(
                 SystemMessage("── End of history ──", msg_style="dim")
             )
-            # Defer scroll to after Textual has recomputed virtual_size;
-            # calling scroll_end() synchronously after mount() lands at the
-            # pre-mount virtual_size and leaves the viewport mid-history.
-            self.call_after_refresh(container.scroll_end, animate=False)
+            # History can hold dozens of Markdown-heavy AssistantMessages
+            # whose async layout keeps growing virtual_size for several
+            # seconds; schedule enough retries to catch the final reflow.
+            self._schedule_scroll_to_bottom(
+                container, delays=(0.1, 0.3, 0.6, 1.0, 1.8, 3.0)
+            )
 
         # ── Quit handling ──────────────────────────────────────
 
