@@ -2163,7 +2163,10 @@ def run_textual_interactive(
             await container.mount(
                 SystemMessage("── End of history ──", msg_style="dim")
             )
-            container.scroll_end(animate=False)
+            # Defer scroll to after Textual has recomputed virtual_size;
+            # calling scroll_end() synchronously after mount() lands at the
+            # pre-mount virtual_size and leaves the viewport mid-history.
+            self.call_after_refresh(container.scroll_end, animate=False)
 
         # ── Quit handling ──────────────────────────────────────
 
@@ -2450,7 +2453,16 @@ def run_textual_interactive(
                 resumed=resumed,
                 resume_warning=resume_warning,
             )
-            await app.run_async()
+            try:
+                await app.run_async()
+            finally:
+                from .resume_hint import print_resume_hint
+
+                exit_tid = getattr(app, "_conversation_tid", None)
+                hint_tid = (
+                    exit_tid if exit_tid and await thread_exists(exit_tid) else None
+                )
+                print_resume_hint(hint_tid)
 
     import nest_asyncio  # type: ignore[import-untyped]
 

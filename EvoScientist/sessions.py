@@ -336,6 +336,22 @@ async def find_similar_threads(thread_id: str, limit: int = 5) -> list[str]:
             return [r[0] for r in rows]
 
 
+async def resolve_thread_id_prefix(tid: str) -> tuple[str | None, list[str]]:
+    """Resolve a (possibly partial) thread ID.
+
+    Returns ``(resolved_id, matches)``:
+    - ``(full_id, [])`` when *tid* is an exact hit or a unique prefix.
+    - ``(None, [a, b, ...])`` when the prefix is ambiguous (multiple matches).
+    - ``(None, [])`` when no thread matches.
+    """
+    if await thread_exists(tid):
+        return tid, []
+    similar = await find_similar_threads(tid)
+    if len(similar) == 1:
+        return similar[0], []
+    return None, similar
+
+
 async def delete_thread(thread_id: str) -> bool:
     """Delete all EvoScientist checkpoints (and writes) for *thread_id*."""
     db_path = str(get_db_path())

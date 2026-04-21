@@ -33,12 +33,12 @@ import EvoScientist.cli.channel as _ch_mod
 from ..sessions import (
     _format_relative_time,
     delete_thread,
-    find_similar_threads,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
     list_threads,
+    resolve_thread_id_prefix,
     thread_exists,
 )
 from ..stream.display import console
@@ -432,16 +432,14 @@ def cmd_interactive(
 
     async def _resolve_thread_id(tid: str) -> str | None:
         """Resolve a (possibly partial) thread ID. Returns full ID or None."""
-        if await thread_exists(tid):
-            return tid
-        similar = await find_similar_threads(tid)
-        if len(similar) == 1:
-            return similar[0]
-        if len(similar) > 1:
+        resolved, matches = await resolve_thread_id_prefix(tid)
+        if resolved:
+            return resolved
+        if matches:
             console.print(
                 f"[yellow]Ambiguous thread ID '{escape(tid)}'. Matches:[/yellow]"
             )
-            for s in similar:
+            for s in matches:
                 console.print(f"  [cyan]{s}[/cyan]")
             return None
         console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
@@ -709,6 +707,7 @@ def cmd_interactive(
                 console.print(
                     f"[green]Resumed session [yellow]{state['thread_id']}[/yellow][/green]\n"
                 )
+                await _render_history(state["thread_id"])
             else:
                 print_banner(
                     state["thread_id"],
@@ -937,7 +936,6 @@ def cmd_interactive(
 
                         # Special commands
                         if user_input.lower() in ("/exit", "/quit", "/q"):
-                            console.print("[dim]Goodbye![/dim]")
                             state["running"] = False
                             break
 
@@ -997,9 +995,6 @@ def cmd_interactive(
                                 console.print(
                                     f"[dim]Memory dir:[/dim] [cyan]{_shorten_path(memory_dir)}[/cyan]"
                                 )
-                            console.print(
-                                f"[dim]UI:[/dim] [cyan]{state['ui_backend']}[/cyan]"
-                            )
                             console.print()
                             continue
 
@@ -1107,12 +1102,12 @@ def cmd_interactive(
                         _print_separator()
 
                     except KeyboardInterrupt:
-                        console.print("\n[dim]Goodbye![/dim]")
+                        console.print()
                         state["running"] = False
                         break
                     except EOFError:
                         # Handle Ctrl+D
-                        console.print("\n[dim]Goodbye![/dim]")
+                        console.print()
                         state["running"] = False
                         break
                     except Exception as e:
@@ -1135,12 +1130,19 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
+                current_tid = state.get("thread_id")
+                if current_tid and await thread_exists(current_tid):
+                    state["resume_hint_thread_id"] = current_tid
 
     # Run the async main loop
+    from .resume_hint import print_resume_hint
+
     try:
         asyncio.run(_async_main_loop())
     except KeyboardInterrupt:
-        console.print("\n[dim]Goodbye![/dim]")
+        console.print()
+    finally:
+        print_resume_hint(state.get("resume_hint_thread_id"), console=console)
 
 
 def cmd_run(

@@ -56,10 +56,6 @@ class CurrentCommand(Command):
             ctx.ui.append_system(
                 f"Memory dir: {_shorten_path(str(memory_path))}", style="dim"
             )
-        # How to determine UI type here?
-        # Maybe ctx.ui has a name or we pass it in ctx.
-        # For now, let's keep it simple.
-        ctx.ui.append_system("UI: auto", style="dim")
 
 
 # Register commands

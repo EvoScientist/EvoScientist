@@ -21,6 +21,7 @@ from EvoScientist.sessions import (
     get_thread_messages,
     get_thread_metadata,
     list_threads,
+    resolve_thread_id_prefix,
     thread_exists,
 )
 from tests.conftest import run_async as _run
@@ -209,6 +210,26 @@ class TestThreadFunctions(unittest.TestCase):
     def test_find_similar_no_match(self):
         similar = _run(find_similar_threads("xyz"))
         assert len(similar) == 0
+
+    def test_resolve_prefix_exact_match(self):
+        resolved, matches = _run(resolve_thread_id_prefix("abc12345"))
+        assert resolved == "abc12345"
+        assert matches == []
+
+    def test_resolve_prefix_unique_prefix(self):
+        resolved, matches = _run(resolve_thread_id_prefix("def00"))
+        assert resolved == "def00001"
+        assert matches == []
+
+    def test_resolve_prefix_ambiguous(self):
+        resolved, matches = _run(resolve_thread_id_prefix("abc1"))
+        assert resolved is None
+        assert set(matches) == {"abc12345", "abc12399"}
+
+    def test_resolve_prefix_not_found(self):
+        resolved, matches = _run(resolve_thread_id_prefix("zzz"))
+        assert resolved is None
+        assert matches == []
 
     def test_get_most_recent(self):
         recent = _run(get_most_recent())
