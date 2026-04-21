@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markup import escape
 
 
 def print_resume_hint(
@@ -15,4 +16,4 @@ def print_resume_hint(
     if thread_id:
         out.print()
         out.print("[dim]Resume this session with:[/dim]")
-        out.print(f"[cyan]EvoSci --resume {thread_id}[/cyan]")
+        out.print(f"[cyan]EvoSci --resume {escape(thread_id)}[/cyan]")

@@ -323,15 +323,20 @@ async def find_similar_threads(thread_id: str, limit: int = 5) -> list[str]:
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return []
-        query = """
+        # Escape SQL LIKE wildcards so user-supplied prefixes are matched
+        # literally (e.g. `--resume %` must not match every thread).
+        escaped = (
+            thread_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        query = r"""
             SELECT DISTINCT thread_id
             FROM checkpoints
-            WHERE thread_id LIKE ?
+            WHERE thread_id LIKE ? ESCAPE '\'
               AND json_extract(metadata, '$.agent_name') = ?
             ORDER BY thread_id
             LIMIT ?
         """
-        async with conn.execute(query, (thread_id + "%", AGENT_NAME, limit)) as cur:
+        async with conn.execute(query, (escaped + "%", AGENT_NAME, limit)) as cur:
             rows = await cur.fetchall()
             return [r[0] for r in rows]
 

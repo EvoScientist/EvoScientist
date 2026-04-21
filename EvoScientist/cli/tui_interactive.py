@@ -24,11 +24,11 @@ from ..commands import CommandContext
 from ..commands import manager as cmd_manager
 from ..paths import DATA_DIR
 from ..sessions import (
-    find_similar_threads,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
+    resolve_thread_id_prefix,
     thread_exists,
 )
 from ..stream.events import stream_agent_events
@@ -2417,15 +2417,11 @@ def run_textual_interactive(
     async def _amain() -> None:
         async with get_checkpointer() as checkpointer:
             effective_workspace = workspace_dir
-            effective_thread_id = thread_id
+            effective_thread_id: str | None = None
             resumed = False
             resume_warning = ""
             if thread_id:
-                if await thread_exists(thread_id):
-                    resolved = thread_id
-                else:
-                    similar = await find_similar_threads(thread_id)
-                    resolved = similar[0] if len(similar) == 1 else None
+                resolved, matches = await resolve_thread_id_prefix(thread_id)
                 if resolved:
                     meta = await get_thread_metadata(resolved)
                     ws = (meta or {}).get("workspace_dir", "")
@@ -2433,6 +2429,11 @@ def run_textual_interactive(
                         effective_workspace = ws
                     effective_thread_id = resolved
                     resumed = True
+                elif matches:
+                    resume_warning = (
+                        f"Thread prefix '{thread_id}' is ambiguous "
+                        f"({', '.join(matches)}). Starting new session."
+                    )
                 else:
                     resume_warning = (
                         f"Thread '{thread_id}' not found. Starting new session."

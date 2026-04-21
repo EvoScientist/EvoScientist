@@ -231,6 +231,13 @@ class TestThreadFunctions(unittest.TestCase):
         assert resolved is None
         assert matches == []
 
+    def test_find_similar_escapes_sql_wildcards(self):
+        # '%' / '_' must be treated as literal characters, not SQL LIKE
+        # wildcards, so a prefix that doesn't occur verbatim returns nothing
+        # (prior buggy behavior: '%' matched every thread).
+        assert _run(find_similar_threads("%")) == []
+        assert _run(find_similar_threads("_")) == []
+
     def test_get_most_recent(self):
         recent = _run(get_most_recent())
         assert recent is not None

@@ -684,6 +684,12 @@ def cmd_interactive(
                     state["status_last_input_tokens"] = None
                     if ws:
                         state["workspace_dir"] = ws
+                else:
+                    # Resolution failed (ambiguous/not-found); the user's raw
+                    # input is still seeded in state["thread_id"] from init.
+                    # Replace with a fresh ID so a new session isn't
+                    # checkpointed under the bad prefix.
+                    state["thread_id"] = generate_thread_id()
 
             console.print("[dim]Loading agent...[/dim]")
             state["agent"] = _load_agent(

@@ -1289,12 +1289,8 @@ def _main_callback(
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
-                console.print("[dim]Loading agent...[/dim]")
-                agent = _load_agent(
-                    workspace_dir=workspace_dir,
-                    checkpointer=checkpointer,
-                    config=config,
-                )
+                # Resolve resume target first so a bad --resume/--thread-id
+                # exits before the slow _load_agent() provider setup.
                 if thread_id:
                     resolved, matches = await resolve_thread_id_prefix(thread_id)
                     if resolved:
@@ -1304,7 +1300,7 @@ def _main_callback(
                             f"[yellow]Ambiguous thread ID '{escape(thread_id)}'. Matches:[/yellow]"
                         )
                         for s in matches:
-                            console.print(f"  [cyan]{s}[/cyan]")
+                            console.print(f"  [cyan]{escape(s)}[/cyan]")
                         raise typer.Exit(1)
                     else:
                         console.print(
@@ -1313,6 +1309,12 @@ def _main_callback(
                         raise typer.Exit(1)
                 else:
                     tid = generate_thread_id()
+                console.print("[dim]Loading agent...[/dim]")
+                agent = _load_agent(
+                    workspace_dir=workspace_dir,
+                    checkpointer=checkpointer,
+                    config=config,
+                )
                 cmd_run(
                     agent,
                     prompt,
