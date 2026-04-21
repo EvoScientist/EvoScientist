@@ -164,7 +164,23 @@ class TestBuildConnections:
         assert conns["fs"]["command"].endswith("npx")
         assert conns["fs"]["args"] == ["-y", "server"]
 
-    def test_stdio_with_env(self):
+    def test_stdio_with_env(self, monkeypatch):
+        for var in (
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+        ):
+            monkeypatch.delenv(var, raising=False)
         config = {
             "fs": {
                 "transport": "stdio",
@@ -175,6 +191,29 @@ class TestBuildConnections:
         }
         conns = _build_connections(config)
         assert conns["fs"]["env"] == {"FOO": "bar"}
+
+    def test_stdio_forwards_proxy_and_cert_env(self, monkeypatch):
+        """Proxy and CA bundle env vars are forwarded to stdio subprocesses."""
+        monkeypatch.setenv("https_proxy", "http://proxy:3128")
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca.crt")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        conns = _build_connections(config)
+        assert conns["fs"]["env"]["https_proxy"] == "http://proxy:3128"
+        assert conns["fs"]["env"]["SSL_CERT_FILE"] == "/etc/ssl/certs/ca.crt"
+
+    def test_stdio_user_env_overrides_forwarded(self, monkeypatch):
+        """User-configured env takes precedence over auto-forwarded values."""
+        monkeypatch.setenv("https_proxy", "http://host-proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {"https_proxy": "http://user-proxy:9000"},
+            }
+        }
+        conns = _build_connections(config)
+        assert conns["fs"]["env"]["https_proxy"] == "http://user-proxy:9000"
 
     def test_http_connection(self):
         config = {
