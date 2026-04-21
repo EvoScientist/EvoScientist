@@ -1074,7 +1074,8 @@ class TestUvToolCompat:
     def test_install_pip_package_uv_tool_falls_back_on_failure(
         self, monkeypatch, tmp_path
     ):
-        """If ``uv tool install`` fails, fall back to ``uv pip install``."""
+        """If every ``uv tool install`` variant fails, fall back to
+        ``uv pip install``."""
         import EvoScientist.mcp.registry as reg
 
         venv = tmp_path / "uv" / "tools" / "evoscientist"
@@ -1085,11 +1086,10 @@ class TestUvToolCompat:
         )
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
 
-        call_count = 0
+        commands: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
-            nonlocal call_count
-            call_count += 1
+            commands.append(cmd)
             if cmd[:3] == ["uv", "tool", "install"]:
                 return type("R", (), {"returncode": 1})()
             return type("R", (), {"returncode": 0})()
@@ -1100,20 +1100,25 @@ class TestUvToolCompat:
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         result = reg.install_pip_package("some-package")
         assert result is True
-        assert call_count == 2  # uv tool install (fail) + uv pip install (ok)
+        # Order: uv tool install --with (fail), uv tool install <pkg> (fail),
+        # uv pip install (ok)
+        assert len(commands) == 3
+        assert commands[0][:3] == ["uv", "tool", "install"]
+        assert "--with" in commands[0]
+        assert commands[1][:3] == ["uv", "tool", "install"]
+        assert "--with" not in commands[1]
+        assert commands[2][:3] == ["uv", "pip", "install"]
 
-    def test_install_pip_package_uses_python_flag_when_uv_available(self, monkeypatch):
-        """Non-uv-tool env should use ``uv pip install --python``."""
-        import sys
-
+    def test_install_pip_package_non_uv_tool_prefers_uv_tool_install(self, monkeypatch):
+        """Non-uv-tool env: ``uv tool install <pkg>`` is tried first so the
+        package survives ``uv sync``."""
         import EvoScientist.mcp.registry as reg
 
         captured: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
             captured.append(cmd)
-            ns = type("R", (), {"returncode": 0})()
-            return ns
+            return type("R", (), {"returncode": 0})()
 
         monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
         monkeypatch.setattr(
@@ -1123,10 +1128,70 @@ class TestUvToolCompat:
         result = reg.install_pip_package("some-package")
         assert result is True
         assert len(captured) == 1
-        cmd = captured[0]
-        assert "uv" in cmd[0]
-        assert "--python" in cmd
-        assert sys.executable in cmd
+        assert captured[0][:3] == ["uv", "tool", "install"]
+        assert "some-package" in captured[0]
+
+    def test_install_pip_package_verify_command_missing_triggers_fallback(
+        self, monkeypatch
+    ):
+        """When ``verify_command`` isn't on PATH after ``uv tool install``,
+        fall through to ``uv pip install`` (handles packages with no entry
+        point)."""
+        import sys
+
+        import EvoScientist.mcp.registry as reg
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(cmd)
+            return type("R", (), {"returncode": 0})()
+
+        # shutil.which: `uv` resolves, the verify command never does.
+        def fake_which(x):
+            return "/usr/bin/uv" if x == "uv" else None
+
+        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.shutil, "which", fake_which)
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        result = reg.install_pip_package(
+            "lib-without-entrypoint", verify_command="ghost-cli"
+        )
+        assert result is True
+        assert len(captured) == 2
+        assert captured[0][:3] == ["uv", "tool", "install"]
+        assert "--python" in captured[1]
+        assert sys.executable in captured[1]
+
+    def test_install_pip_package_verify_command_present_short_circuits(
+        self, monkeypatch
+    ):
+        """``uv tool install`` success + verify_command resolvable =
+        no pip fallback."""
+        import EvoScientist.mcp.registry as reg
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(cmd)
+            return type("R", (), {"returncode": 0})()
+
+        def fake_which(x):
+            if x == "uv":
+                return "/usr/bin/uv"
+            if x == "arxiv-mcp-server":
+                return "/home/u/.local/bin/arxiv-mcp-server"
+            return None
+
+        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.shutil, "which", fake_which)
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        result = reg.install_pip_package(
+            "arxiv-mcp-server", verify_command="arxiv-mcp-server"
+        )
+        assert result is True
+        assert len(captured) == 1
+        assert captured[0][:3] == ["uv", "tool", "install"]
 
     def test_install_pip_package_falls_back_to_pip_when_no_uv(self, monkeypatch):
         import sys

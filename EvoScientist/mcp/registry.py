@@ -156,16 +156,32 @@ def pip_install_hint() -> str:
     return "pip install"
 
 
-def install_pip_package(package: str) -> bool:
+def install_pip_package(package: str, *, verify_command: str | None = None) -> bool:
     """Silently install a pip package.
 
-    In a **uv tool environment**, uses ``uv tool install <tool> --with``
-    which records the dependency in uv's receipt so it survives
-    ``uv tool upgrade``.  Existing ``--with`` packages are preserved.
+    Install strategy:
 
-    Otherwise, when ``uv`` is available, uses
-    ``uv pip install --python sys.executable``.
-    Falls back to ``python -m pip install`` when uv is not available.
+    1. **uv tool environment** (evosci installed via ``uv tool install``):
+       use ``uv tool install <tool> --with <pkg>`` so the dependency lands
+       in uv's receipt and survives ``uv tool upgrade``. Existing
+       ``--with`` packages are preserved.
+
+    2. **Otherwise, when ``uv`` is available**: prefer
+       ``uv tool install <pkg>`` — installs as a standalone tool with its
+       binary symlinked under ``~/.local/bin``. Survives ``uv sync`` and
+       evosci upgrades (the source-install failure mode of the old
+       ``uv pip install`` path).
+
+    3. **Fallback**: ``uv pip install --python sys.executable`` or
+       ``python -m pip install`` into the current venv. This path *is*
+       removed by a subsequent ``uv sync``, but it's the only option for
+       packages without a console-script entry point.
+
+    Args:
+        package: PEP 508 requirement spec.
+        verify_command: CLI entry-point name to check for after step (2).
+            When provided and the command isn't resolvable on PATH after
+            ``uv tool install``, we fall through to step (3).
 
     Returns True if installation succeeded.
     """
@@ -192,9 +208,32 @@ def install_pip_package(package: str) -> bool:
                 pass
             # Fall through to legacy methods if uv tool install failed.
 
-    # ---- Standard venv / conda / system Python ----
+    has_uv = bool(shutil.which("uv"))
+
+    # ---- Standalone uv tool install (survives `uv sync` / evosci upgrade) --
+    if has_uv:
+        try:
+            result = subprocess.run(
+                ["uv", "tool", "install", "-q", package],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if result.returncode == 0:
+                import importlib
+
+                importlib.invalidate_caches()
+                # Package installed, but `uv tool install` silently produces
+                # no bin when the package lacks a console-script entry point.
+                # Verify before claiming success; otherwise try pip fallback.
+                if verify_command is None or shutil.which(verify_command):
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # ---- Fallback: pip install into current venv ----
     commands: list[list[str]] = []
-    if shutil.which("uv"):
+    if has_uv:
         commands.append(
             ["uv", "pip", "install", "--python", sys.executable, "-q", package]
         )
@@ -386,7 +425,7 @@ def install_mcp_server(
     # Pip package
     if entry.pip_package:
         print_fn(f"  Installing {entry.pip_package}...", "dim")
-        if not install_pip_package(entry.pip_package):
+        if not install_pip_package(entry.pip_package, verify_command=entry.command):
             print_fn(f"  Failed: {pip_install_hint()} {entry.pip_package}", "red")
             return False
 
