@@ -204,14 +204,31 @@ def install_pip_package(package: str, *, verify_command: str | None = None) -> b
 
                     importlib.invalidate_caches()
                     return True
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-            # Fall through to legacy methods if uv tool install failed.
+                logger.info(
+                    "uv tool install %s --with %s failed (exit %d); falling back",
+                    tool_name,
+                    package,
+                    result.returncode,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                logger.info(
+                    "uv tool install --with %s errored (%s); falling back",
+                    package,
+                    exc,
+                )
+            # Fall through to legacy methods. Note: for MCP CLIs (verify_command
+            # set) this may land in the standalone `uv tool install <pkg>`
+            # branch, producing a *separate* uv tool entry rather than updating
+            # evoscientist's receipt — intentional as a recovery path.
 
     has_uv = bool(shutil.which("uv"))
 
     # ---- Standalone uv tool install (survives `uv sync` / evosci upgrade) --
-    if has_uv:
+    # Only safe for packages whose sole deliverable is a CLI binary:
+    # `uv tool install` creates an isolated env, so a library installed this
+    # way is NOT importable from the active venv. Callers that expect to
+    # import the package must omit ``verify_command`` to skip this branch.
+    if has_uv and verify_command:
         try:
             result = subprocess.run(
                 ["uv", "tool", "install", "-q", package],
@@ -226,10 +243,22 @@ def install_pip_package(package: str, *, verify_command: str | None = None) -> b
                 # Package installed, but `uv tool install` silently produces
                 # no bin when the package lacks a console-script entry point.
                 # Verify before claiming success; otherwise try pip fallback.
-                if verify_command is None or shutil.which(verify_command):
+                if shutil.which(verify_command):
                     return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+                logger.info(
+                    "uv tool install %s succeeded but %s not on PATH; "
+                    "falling back to pip install into current venv",
+                    package,
+                    verify_command,
+                )
+            else:
+                logger.info(
+                    "uv tool install %s failed (exit %d); falling back to pip install",
+                    package,
+                    result.returncode,
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.info("uv tool install %s errored (%s); falling back", package, exc)
 
     # ---- Fallback: pip install into current venv ----
     commands: list[list[str]] = []

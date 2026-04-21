@@ -1074,8 +1074,8 @@ class TestUvToolCompat:
     def test_install_pip_package_uv_tool_falls_back_on_failure(
         self, monkeypatch, tmp_path
     ):
-        """If every ``uv tool install`` variant fails, fall back to
-        ``uv pip install``."""
+        """If ``uv tool install --with`` fails, fall back to ``uv pip install``
+        when ``verify_command`` isn't set (library install)."""
         import EvoScientist.mcp.registry as reg
 
         venv = tmp_path / "uv" / "tools" / "evoscientist"
@@ -1100,8 +1100,42 @@ class TestUvToolCompat:
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         result = reg.install_pip_package("some-package")
         assert result is True
-        # Order: uv tool install --with (fail), uv tool install <pkg> (fail),
-        # uv pip install (ok)
+        # No verify_command → standalone `uv tool install <pkg>` is skipped.
+        # Order: uv tool install --with (fail), uv pip install (ok).
+        assert len(commands) == 2
+        assert commands[0][:3] == ["uv", "tool", "install"]
+        assert "--with" in commands[0]
+        assert commands[1][:3] == ["uv", "pip", "install"]
+
+    def test_install_pip_package_uv_tool_with_verify_tries_standalone(
+        self, monkeypatch, tmp_path
+    ):
+        """In uv-tool env with ``verify_command``: ``--with`` fails →
+        standalone ``uv tool install`` is tried before pip."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        receipt = venv / "uv-receipt.toml"
+        receipt.write_text(
+            '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
+        )
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+        commands: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            if cmd[:3] == ["uv", "tool", "install"]:
+                return type("R", (), {"returncode": 1})()
+            return type("R", (), {"returncode": 0})()
+
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        result = reg.install_pip_package("some-cli", verify_command="some-cli")
+        assert result is True
         assert len(commands) == 3
         assert commands[0][:3] == ["uv", "tool", "install"]
         assert "--with" in commands[0]
@@ -1109,9 +1143,15 @@ class TestUvToolCompat:
         assert "--with" not in commands[1]
         assert commands[2][:3] == ["uv", "pip", "install"]
 
-    def test_install_pip_package_non_uv_tool_prefers_uv_tool_install(self, monkeypatch):
-        """Non-uv-tool env: ``uv tool install <pkg>`` is tried first so the
-        package survives ``uv sync``."""
+    def test_install_pip_package_skips_uv_tool_without_verify_command(
+        self, monkeypatch
+    ):
+        """Without ``verify_command`` the non-uv-tool path must skip
+        ``uv tool install <pkg>`` — library callers rely on the package
+        being importable from the active venv, which standalone uv tools
+        are not."""
+        import sys
+
         import EvoScientist.mcp.registry as reg
 
         captured: list[list[str]] = []
@@ -1125,11 +1165,40 @@ class TestUvToolCompat:
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
-        result = reg.install_pip_package("some-package")
+        result = reg.install_pip_package("some-library")
+        assert result is True
+        assert len(captured) == 1
+        assert captured[0][:3] == ["uv", "pip", "install"]
+        assert sys.executable in captured[0]
+
+    def test_install_pip_package_with_verify_prefers_uv_tool_install(
+        self, monkeypatch
+    ):
+        """Non-uv-tool env, ``verify_command`` resolves after install:
+        ``uv tool install <pkg>`` is used so the binary survives uv sync."""
+        import EvoScientist.mcp.registry as reg
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(cmd)
+            return type("R", (), {"returncode": 0})()
+
+        def fake_which(x):
+            if x == "uv":
+                return "/usr/bin/uv"
+            if x == "some-cli":
+                return "/home/u/.local/bin/some-cli"
+            return None
+
+        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.shutil, "which", fake_which)
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        result = reg.install_pip_package("some-cli", verify_command="some-cli")
         assert result is True
         assert len(captured) == 1
         assert captured[0][:3] == ["uv", "tool", "install"]
-        assert "some-package" in captured[0]
+        assert "some-cli" in captured[0]
 
     def test_install_pip_package_verify_command_missing_triggers_fallback(
         self, monkeypatch
