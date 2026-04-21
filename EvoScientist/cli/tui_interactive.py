@@ -2459,11 +2459,26 @@ def run_textual_interactive(
             finally:
                 from .resume_hint import print_resume_hint
 
+                # Best-effort resume hint — guarded so failures here (e.g.
+                # DB teardown race during abnormal shutdown) cannot shadow
+                # the original run_async traceback.
                 exit_tid = getattr(app, "_conversation_tid", None)
-                hint_tid = (
-                    exit_tid if exit_tid and await thread_exists(exit_tid) else None
-                )
-                print_resume_hint(hint_tid)
+                hint_tid: str | None = None
+                if exit_tid:
+                    try:
+                        if await thread_exists(exit_tid):
+                            hint_tid = exit_tid
+                    except Exception:
+                        _channel_logger.debug(
+                            "resume-hint thread_exists lookup failed",
+                            exc_info=True,
+                        )
+                try:
+                    print_resume_hint(hint_tid)
+                except Exception:
+                    _channel_logger.debug(
+                        "print_resume_hint failed", exc_info=True
+                    )
 
     import nest_asyncio  # type: ignore[import-untyped]
 

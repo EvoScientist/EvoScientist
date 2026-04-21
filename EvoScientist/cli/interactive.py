@@ -1136,9 +1136,18 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
+                # Best-effort: guard so a DB lookup failure here can't
+                # shadow the original exception exiting _async_main_loop.
                 current_tid = state.get("thread_id")
-                if current_tid and await thread_exists(current_tid):
-                    state["resume_hint_thread_id"] = current_tid
+                if current_tid:
+                    try:
+                        if await thread_exists(current_tid):
+                            state["resume_hint_thread_id"] = current_tid
+                    except Exception:
+                        _channel_logger.debug(
+                            "resume-hint thread_exists lookup failed",
+                            exc_info=True,
+                        )
 
     # Run the async main loop
     from .resume_hint import print_resume_hint
@@ -1148,7 +1157,10 @@ def cmd_interactive(
     except KeyboardInterrupt:
         console.print()
     finally:
-        print_resume_hint(state.get("resume_hint_thread_id"), console=console)
+        try:
+            print_resume_hint(state.get("resume_hint_thread_id"), console=console)
+        except Exception:
+            _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
 
 def cmd_run(
