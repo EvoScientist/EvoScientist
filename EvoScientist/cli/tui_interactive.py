@@ -334,6 +334,9 @@ def run_textual_interactive(
             super().__init__()
             self._agent = agent
             self._agent_task: asyncio.Task | None = None
+            # Bumped on every `_start_background_agent_load`; callbacks
+            # from superseded loads compare against this and bail.
+            self._agent_load_id: int = 0
             self._mcp_progress: dict[str, tuple[str, str]] = {}
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value
@@ -414,6 +417,20 @@ def run_textual_interactive(
                 return
             widget.update_server(server, state, detail)
 
+        def _agent_load_pending(self) -> bool:
+            """True if a background `load_agent` task is still running.
+
+            Command and channel cleanup paths use this to avoid
+            re-enabling the prompt after `/new` or `/resume` kicks
+            off a fresh load — otherwise the user could type while
+            MCP tools are still resolving.
+            """
+            return (
+                self._agent is None
+                and self._agent_task is not None
+                and not self._agent_task.done()
+            )
+
         def _set_prompt_enabled(self, enabled: bool) -> None:
             """Enable or disable the chat input while MCP tools load.
 
@@ -437,6 +454,22 @@ def run_textual_interactive(
             real time; the chat input itself is disabled until the agent
             is ready.
             """
+            # /new or /resume can re-enter this while a prior load is still
+            # in flight. Cancel the asyncio wrapper so its done-callback
+            # doesn't overwrite the fresh session's state — but the worker
+            # thread itself keeps running, so we also need `load_id` below
+            # to filter stale progress and completion callbacks.
+            prev = self._agent_task
+            if prev is not None and not prev.done():
+                prev.cancel()
+            self._agent_load_id += 1
+            load_id = self._agent_load_id
+
+            def _gated_progress(event: str, server: str, detail: str) -> None:
+                if load_id != self._agent_load_id:
+                    return
+                self._on_mcp_progress(event, server, detail)
+
             self._agent = None
             self._prime_mcp_progress()
             self._set_prompt_enabled(False)
@@ -446,10 +479,12 @@ def run_textual_interactive(
                     load_agent,
                     workspace_dir=workspace,
                     checkpointer=self._checkpointer,
-                    on_mcp_progress=self._on_mcp_progress,
+                    on_mcp_progress=_gated_progress,
                 )
             )
-            self._agent_task.add_done_callback(self._on_agent_loaded)
+            self._agent_task.add_done_callback(
+                lambda task, lid=load_id: self._on_agent_loaded(task, lid)
+            )
 
         def _mount_mcp_loader_widget(self) -> None:
             """Mount a live progress widget at the top of ``#input-shell``.
@@ -480,10 +515,16 @@ def run_textual_interactive(
                 return
             self._mcp_loader_widget = widget
 
-        def _on_agent_loaded(self, task: asyncio.Task) -> None:
+        def _on_agent_loaded(self, task: asyncio.Task, load_id: int) -> None:
             """Runs when the background load finishes (success or error)."""
+            # Ignore completions from a superseded load (`/new` or
+            # `/resume` bumped the generation mid-flight).
+            if load_id != self._agent_load_id:
+                return
+            if task.cancelled():
+                return
             # Either path must settle the loader widget via
-            # ``_finish_loader_widget`` — otherwise an exception here leaves
+            # `_finish_loader_widget` — otherwise an exception here leaves
             # the spinner cycling indefinitely.
             try:
                 self._agent = task.result()
@@ -1729,7 +1770,11 @@ def run_textual_interactive(
                 await self._refresh_status_snapshot(message_to_send)
 
                 # Block the turn on MCP tools finishing, if still in flight.
-                await self._await_agent_ready()
+                try:
+                    await self._await_agent_ready()
+                except Exception as exc:
+                    self._append_system(f"Agent failed to load: {exc}", style="red")
+                    return
 
                 await self._stream_with_widgets(
                     message_to_send,
@@ -1766,7 +1811,15 @@ def run_textual_interactive(
                 self._busy = True
                 await self._refresh_status_snapshot(msg.content)
                 self._render_status()
-                await self._await_agent_ready()
+                try:
+                    await self._await_agent_ready()
+                except Exception as exc:
+                    # Without this the `finally` runs but no reply is sent
+                    # and the channel request hangs indefinitely.
+                    err = f"Error: {exc}"
+                    self._append_system(err, style="red")
+                    _set_channel_response(msg.msg_id, err)
+                    return
 
                 prompt_widget = self.query_one("#prompt", ChatTextArea)
                 prompt_widget.disabled = True
@@ -1915,8 +1968,12 @@ def run_textual_interactive(
                 await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
                 if prompt_widget is not None:
-                    prompt_widget.disabled = False
-                    prompt_widget.focus()
+                    # `/new` / `/resume` from the channel handler can
+                    # have kicked off a fresh agent load — keep the
+                    # prompt disabled until that load settles.
+                    prompt_widget.disabled = self._agent_load_pending()
+                    if not prompt_widget.disabled:
+                        prompt_widget.focus()
 
         # ── Clipboard (copy on mouse select) ─────────────────
 
@@ -2256,7 +2313,11 @@ def run_textual_interactive(
             self._render_status()
 
             try:
-                agent = await self._await_agent_ready()
+                try:
+                    agent = await self._await_agent_ready()
+                except Exception as exc:
+                    self._append_system(f"Agent failed to load: {exc}", style="red")
+                    return
                 ctx = CommandContext(
                     agent=agent,
                     thread_id=self._conversation_tid,
@@ -2281,8 +2342,11 @@ def run_textual_interactive(
                 self._render_status()
             finally:
                 self._busy = False
-                prompt_widget.disabled = False
-                prompt_widget.focus()
+                # `/new` / `/resume` spin up a fresh background load;
+                # don't re-enable the prompt mid-load.
+                prompt_widget.disabled = self._agent_load_pending()
+                if not prompt_widget.disabled:
+                    prompt_widget.focus()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.

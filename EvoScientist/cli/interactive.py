@@ -335,6 +335,11 @@ def cmd_interactive(
     state: dict[str, Any] = {
         "agent": None,
         "agent_task": None,  # Background asyncio.Task loading the agent
+        # Monotonic token bumped on every `_start_agent_load`. The MCP
+        # worker thread can't be cancelled (it runs sync `_load_agent`),
+        # so progress callbacks from a superseded load filter against
+        # this to avoid polluting the current session's state.
+        "agent_load_id": 0,
         "mcp_progress": {},  # server_name -> ("pending"|"ok"|"error", detail)
         "thread_id": thread_id or generate_thread_id(),
         "workspace_dir": workspace_dir,
@@ -401,10 +406,21 @@ def cmd_interactive(
         state["agent"] = None
         # /new or /resume can arrive before the initial load finishes —
         # cancel the stale task so it doesn't keep opening MCP sessions
-        # in the background.
+        # in the background. `prev.cancel()` only stops the asyncio
+        # wrapper; the underlying thread keeps running until
+        # `_load_agent` returns and may still fire progress events, so
+        # we also bump `agent_load_id` and filter callbacks below.
         prev = state.get("agent_task")
         if prev is not None and not prev.done():
             prev.cancel()
+        state["agent_load_id"] += 1
+        load_id = state["agent_load_id"]
+
+        def _gated_progress(event: str, server: str, detail: str) -> None:
+            if load_id != state["agent_load_id"]:
+                return
+            _on_mcp_progress(event, server, detail)
+
         _prime_mcp_progress()
         state["agent_task"] = asyncio.create_task(
             asyncio.to_thread(
@@ -412,7 +428,7 @@ def cmd_interactive(
                 workspace_dir=state["workspace_dir"],
                 checkpointer=checkpointer,
                 config=config,
-                on_mcp_progress=_on_mcp_progress,
+                on_mcp_progress=_gated_progress,
             )
         )
 
@@ -936,9 +952,9 @@ def cmd_interactive(
                     """Send ask_user questions to channel user and wait for reply."""
                     return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
 
-                await _await_agent_ready()
-                meta = build_metadata(state["workspace_dir"], model)
                 try:
+                    await _await_agent_ready()
+                    meta = build_metadata(state["workspace_dir"], model)
                     await _refresh_status_snapshot(
                         msg.content, reset_streaming_text=True
                     )
