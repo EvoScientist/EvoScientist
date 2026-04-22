@@ -185,7 +185,9 @@ _SLASH_COMMANDS = [
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
+    ("/clear", "Clear the screen"),
     ("/model", "Switch model (--save to persist)"),
+    ("/help", "Show available commands"),
     ("/exit", "Quit EvoScientist"),
 ]
 
