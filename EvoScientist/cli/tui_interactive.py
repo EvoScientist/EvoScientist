@@ -1826,9 +1826,9 @@ def run_textual_interactive(
                     # Only wait for the agent if the command actually
                     # needs it — otherwise ``/mcp add`` & friends would
                     # hang behind a failing MCP load they're meant to fix.
-                    cmd = cmd_manager.resolve(msg.content)
+                    cmd, cmd_args = cmd_manager.resolve(msg.content) or (None, [])
                     agent = None
-                    if cmd is not None and cmd.requires_agent:
+                    if cmd is not None and cmd.needs_agent(cmd_args):
                         try:
                             agent = await self._await_agent_ready()
                         except Exception as exc:
@@ -2265,9 +2265,9 @@ def run_textual_interactive(
                 # Only gate on agent readiness for commands that need it —
                 # recovery commands like ``/mcp add`` must run even when
                 # ``_await_agent_ready`` would hang on a broken MCP load.
-                cmd = cmd_manager.resolve(command)
+                cmd, cmd_args = cmd_manager.resolve(command) or (None, [])
                 agent = None
-                if cmd is not None and cmd.requires_agent:
+                if cmd is not None and cmd.needs_agent(cmd_args):
                     try:
                         agent = await self._await_agent_ready()
                     except Exception:
@@ -2283,9 +2283,17 @@ def run_textual_interactive(
                 )
 
                 if await cmd_manager.execute(command, ctx):
-                    # Sync agent back if command replaced it (e.g. /model)
-                    if ctx.agent is not self._agent_loader.agent:
-                        self._agent_loader.agent = ctx.agent
+                    # Sync agent back if command replaced it (e.g. /model).
+                    # ``is not None`` guard: non-agent commands (ctx.agent
+                    # starts None) must not clobber a valid loaded agent.
+                    if (
+                        ctx.agent is not None
+                        and ctx.agent is not self._agent_loader.agent
+                    ):
+                        # ``adopt`` also cancels/supersedes any in-flight
+                        # load so a late completion can't overwrite the
+                        # replacement agent (/model on a broken provider).
+                        self._agent_loader.adopt(ctx.agent)
                         if _channels_is_running():
                             _ch_mod._cli_agent = ctx.agent
                             _ch_mod._cli_thread_id = self._conversation_tid

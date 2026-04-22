@@ -13,7 +13,14 @@ class ChannelCommand(Command):
 
     name = "/channel"
     description = "Configure messaging channels"
-    requires_agent = True
+
+    def needs_agent(self, args: list[str]) -> bool:
+        # ``status`` and ``stop`` are introspection / teardown; they
+        # must work even when the agent load is still in flight or has
+        # failed.  Only start/add flows feed ``ctx.agent`` into
+        # ``_start_channels_bus_mode``.
+        subcmd = args[0].lower() if args else ""
+        return subcmd not in {"status", "stop"}
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         import EvoScientist.cli.channel as _ch_mod

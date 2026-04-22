@@ -298,6 +298,35 @@ class TestBackgroundAgentLoaderAwaitReady:
         _run(_go())
 
 
+class TestBackgroundAgentLoaderAdopt:
+    def test_adopt_seats_external_agent(self):
+        loader = BackgroundAgentLoader(_make_loader_fn())
+        loader.adopt("EXTERNAL")
+        assert loader.agent == "EXTERNAL"
+        assert not loader.is_pending
+
+    def test_adopt_supersedes_in_flight_load(self):
+        """A late background completion must not overwrite an adopted agent."""
+        import time
+
+        def _slow(*, on_mcp_progress=None):
+            time.sleep(0.08)
+            return "FROM_BACKGROUND"
+
+        loader = BackgroundAgentLoader(_slow)
+
+        async def _go():
+            loader.start()
+            await asyncio.sleep(0.01)
+            loader.adopt("FROM_MODEL")
+            # Give the background thread time to finish and fire its
+            # done-callback; the generation token should make it a no-op.
+            await asyncio.sleep(0.1)
+            assert loader.agent == "FROM_MODEL"
+
+        _run(_go())
+
+
 class TestBackgroundAgentLoaderIsPending:
     def test_false_before_start(self):
         loader = BackgroundAgentLoader(_make_loader_fn())

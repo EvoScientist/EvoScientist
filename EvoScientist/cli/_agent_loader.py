@@ -146,6 +146,22 @@ class BackgroundAgentLoader:
         )
         self._task.add_done_callback(lambda task, lid=load_id: self._on_done(task, lid))
 
+    def adopt(self, agent: Any) -> None:
+        """Install an externally-built agent and supersede any in-flight load.
+
+        Used by ``/model`` (and any other caller that constructs a
+        replacement agent directly): bumps the generation token so a
+        late-arriving background load can't clobber ``self.agent`` via
+        the done-callback, cancels the in-flight wrapper, and seats the
+        new agent immediately.
+        """
+        prev = self._task
+        if prev is not None and not prev.done():
+            prev.cancel()
+        self._load_id += 1
+        self._task = None
+        self.agent = agent
+
     async def await_ready(self) -> Any:
         """Return the loaded agent; re-raises on load failure.
 

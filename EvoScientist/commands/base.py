@@ -79,6 +79,15 @@ class Command(ABC):
     # failing and ``_await_agent_ready`` would hang.
     requires_agent: ClassVar[bool] = False
 
+    def needs_agent(self, args: list[str]) -> bool:
+        """Whether this specific invocation needs the agent.
+
+        Default returns :attr:`requires_agent`.  Override when a command
+        has a mix of agent-using and agent-free subcommands (e.g.
+        ``/channel start`` vs ``/channel status``).
+        """
+        return self.requires_agent
+
     @abstractmethod
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         """Execute the command with given context and arguments."""

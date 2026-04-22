@@ -1173,9 +1173,11 @@ def cmd_interactive(
                             from ..EvoScientist import _ensure_config
                             from .rich_command_ui import RichCLICommandUI
 
-                            current_agent = await _await_agent_ready()
+                            # /model is ``needs_agent=False`` — it builds its
+                            # own agent — so we don't wait for the current
+                            # load; /model is the way to fix a broken one.
                             ctx = CommandContext(
-                                agent=current_agent,
+                                agent=None,
                                 thread_id=state["thread_id"],
                                 ui=RichCLICommandUI(console),
                                 workspace_dir=state["workspace_dir"],
@@ -1183,9 +1185,8 @@ def cmd_interactive(
                             )
                             await cmd_manager.execute(user_input, ctx)
 
-                            # Sync agent back if command replaced it (e.g. /model)
-                            if ctx.agent is not current_agent:
-                                agent_loader.agent = ctx.agent
+                            if ctx.agent is not None:
+                                agent_loader.adopt(ctx.agent)
                                 cfg = _ensure_config()
                                 model = cfg.model
                                 state["status_base_snapshot"] = (
