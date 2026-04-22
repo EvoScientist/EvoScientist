@@ -2255,17 +2255,17 @@ def run_textual_interactive(
             prompt_widget.disabled = True
             self._render_status()
 
-            agent = await self._await_agent_ready()
-            ctx = CommandContext(
-                agent=agent,
-                thread_id=self._conversation_tid,
-                ui=self,
-                workspace_dir=self._workspace_dir,
-                checkpointer=self._checkpointer,
-                input_tokens_hint=self._status_last_input_tokens,
-            )
-
             try:
+                agent = await self._await_agent_ready()
+                ctx = CommandContext(
+                    agent=agent,
+                    thread_id=self._conversation_tid,
+                    ui=self,
+                    workspace_dir=self._workspace_dir,
+                    checkpointer=self._checkpointer,
+                    input_tokens_hint=self._status_last_input_tokens,
+                )
+
                 if await cmd_manager.execute(command, ctx):
                     # Do NOT invalidate the usage baseline after /compact.
                     # build_session_status_snapshot() only counts raw checkpoint
