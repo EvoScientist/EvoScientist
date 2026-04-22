@@ -749,7 +749,9 @@ def run_textual_interactive(
                 return {"answers": result.get("answers", []), "status": "answered"}
             return {"status": "cancelled"}
 
-        async def _wait_for_thread_pick(self, picker_widget: ThreadPickerWidget) -> str | None:
+        async def _wait_for_thread_pick(
+            self, picker_widget: ThreadPickerWidget
+        ) -> str | None:
             """Wait for user to pick a thread from ThreadPickerWidget.
 
             Returns the selected thread_id, or ``None`` on cancel/timeout.

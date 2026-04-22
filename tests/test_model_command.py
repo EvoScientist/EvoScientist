@@ -16,8 +16,7 @@ class TestExtractModelAndProvider:
             extract_model_and_provider,
         )
 
-        name, prov = extract_model_and_provider(
-            ["claude-sonnet-4-6"]        )
+        name, prov = extract_model_and_provider(["claude-sonnet-4-6"])
         assert name == "claude-sonnet-4-6"
         assert prov == "anthropic"
 
@@ -26,8 +25,7 @@ class TestExtractModelAndProvider:
             extract_model_and_provider,
         )
 
-        name, prov = extract_model_and_provider(
-            ["claude-sonnet-4-6", "openrouter"]        )
+        name, prov = extract_model_and_provider(["claude-sonnet-4-6", "openrouter"])
         assert name == "claude-sonnet-4-6"
         assert prov == "openrouter"
 
@@ -37,8 +35,7 @@ class TestExtractModelAndProvider:
         )
 
         with pytest.raises(ValueError, match="Unknown model"):
-            extract_model_and_provider(
-                ["nonexistent-model-xyz"]            )
+            extract_model_and_provider(["nonexistent-model-xyz"])
 
     def test_unknown_model_with_provider_still_raises(self):
         from EvoScientist.commands.implementation.model import (
@@ -47,8 +44,7 @@ class TestExtractModelAndProvider:
 
         # Unknown models are always rejected, even with an explicit provider
         with pytest.raises(ValueError, match="Unknown model"):
-            extract_model_and_provider(
-                ["my-custom-model", "custom-openai"]            )
+            extract_model_and_provider(["my-custom-model", "custom-openai"])
 
     def test_provider_override_on_known_model(self):
         from EvoScientist.commands.implementation.model import (
@@ -56,8 +52,7 @@ class TestExtractModelAndProvider:
         )
 
         # Known model with explicit provider override uses the override
-        name, prov = extract_model_and_provider(
-            ["claude-sonnet-4-6", "openrouter"]        )
+        name, prov = extract_model_and_provider(["claude-sonnet-4-6", "openrouter"])
         assert name == "claude-sonnet-4-6"
         assert prov == "openrouter"
 
@@ -181,9 +176,7 @@ class TestModelCommandSwitch:
                 "EvoScientist.cli.agent._load_agent",
                 return_value=MagicMock(),
             ),
-            patch(
-                "EvoScientist.config.settings.set_config_value"
-            ) as mock_save,
+            patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
             _run(cmd.execute(ctx, ["claude-opus-4-6", "--save"]))
 
@@ -218,9 +211,7 @@ class TestModelCommandSwitch:
                 "EvoScientist.cli.agent._load_agent",
                 return_value=MagicMock(),
             ),
-            patch(
-                "EvoScientist.config.settings.set_config_value"
-            ) as mock_save,
+            patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
             _run(cmd.execute(ctx, ["claude-opus-4-6"]))
 

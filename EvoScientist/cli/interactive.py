@@ -1114,7 +1114,11 @@ def cmd_interactive(
                                 table.add_column("Name", style="bold")
                                 table.add_column("Provider", style="dim")
                                 for name, _mid, prov in entries:
-                                    marker = " *" if name == cfg.model and prov == cfg.provider else ""
+                                    marker = (
+                                        " *"
+                                        if name == cfg.model and prov == cfg.provider
+                                        else ""
+                                    )
                                     table.add_row(f"{name}{marker}", prov)
                                 console.print(table)
                                 console.print(
@@ -1122,25 +1126,37 @@ def cmd_interactive(
                                 )
                                 continue
 
+                            import copy as _copy
+
+                            # Build the agent first with a temp config to
+                            # avoid mutating global state on failure.
+                            temp_cfg = _copy.copy(cfg)
+                            temp_cfg.model = model_name
+                            temp_cfg.provider = prov
+                            try:
+                                new_agent = _load_agent(
+                                    workspace_dir=state["workspace_dir"],
+                                    checkpointer=checkpointer,
+                                    config=temp_cfg,
+                                )
+                            except Exception as e:
+                                console.print(f"[red]Failed to switch model: {e}[/red]")
+                                continue
                             try:
                                 set_chat_model(model_name, provider=prov)
                             except Exception as e:
-                                console.print(
-                                    f"[red]Failed to switch model: {e}[/red]"
-                                )
+                                console.print(f"[red]Failed to switch model: {e}[/red]")
                                 continue
+                            # Commit — agent built and model set successfully.
                             cfg.model = model_name
                             cfg.provider = prov
                             if save_flag:
                                 from ..config.settings import set_config_value
+
                                 set_config_value("model", model_name)
                                 set_config_value("provider", prov)
                             model = model_name
-                            state["agent"] = _load_agent(
-                                workspace_dir=state["workspace_dir"],
-                                checkpointer=checkpointer,
-                                config=cfg,
-                            )
+                            state["agent"] = new_agent
                             if _channels_is_running():
                                 _ch_mod._cli_agent = state["agent"]
                                 _ch_mod._cli_thread_id = state["thread_id"]
