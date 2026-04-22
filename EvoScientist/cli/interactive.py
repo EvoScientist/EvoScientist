@@ -168,6 +168,7 @@ _SLASH_COMMANDS = [
     ("/mcp", "Manage MCP servers"),
     ("/channel", "Configure messaging channels"),
     ("/compact", "Compact conversation to free context"),
+    ("/model", "Switch model (--save to persist)"),
     ("/exit", "Quit EvoScientist"),
 ]
 
@@ -741,6 +742,7 @@ def cmd_interactive(
 
     async def _async_main_loop():
         """Async main loop with prompt_async and channel queue checking."""
+        nonlocal model
         async with get_checkpointer() as checkpointer:
             # Handle --thread-id resume
             if thread_id:
@@ -1163,6 +1165,37 @@ def cmd_interactive(
                             await _refresh_status_snapshot(
                                 reset_streaming_text=True,
                             )
+                            continue
+
+                        if user_input.lower().startswith("/model"):
+                            from ..commands.base import CommandContext
+                            from ..commands.manager import manager as cmd_manager
+                            from ..EvoScientist import _ensure_config
+                            from .rich_command_ui import RichCLICommandUI
+
+                            ctx = CommandContext(
+                                agent=state["agent"],
+                                thread_id=state["thread_id"],
+                                ui=RichCLICommandUI(console),
+                                workspace_dir=state["workspace_dir"],
+                                checkpointer=checkpointer,
+                            )
+                            await cmd_manager.execute(user_input, ctx)
+
+                            # Sync agent back if command replaced it (e.g. /model)
+                            if ctx.agent is not state["agent"]:
+                                state["agent"] = ctx.agent
+                                cfg = _ensure_config()
+                                model = cfg.model
+                                state["status_base_snapshot"] = (
+                                    make_empty_status_snapshot(model)
+                                )
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True,
+                                )
+                                if _channels_is_running():
+                                    _ch_mod._cli_agent = state["agent"]
+                                    _ch_mod._cli_thread_id = state["thread_id"]
                             continue
 
                         # Resolve @file mentions — inject file contents inline
