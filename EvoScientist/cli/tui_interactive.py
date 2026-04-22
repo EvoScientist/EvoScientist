@@ -454,8 +454,8 @@ def run_textual_interactive(
                 self._mcp_loader_widget = None
 
         async def _await_agent_ready(self) -> Any:
-            """Await the agent load, kicking one off if none is in flight."""
-            if self._agent_loader.task is None and self._agent_loader.agent is None:
+            """Await the agent load, auto-retrying on cold-start or failure."""
+            if self._agent_loader.needs_restart:
                 self._start_background_agent_load(self._workspace_dir)
             return await self._agent_loader.await_ready()
 
@@ -1696,10 +1696,11 @@ def run_textual_interactive(
                 await self._refresh_status_snapshot(message_to_send)
 
                 # Block the turn on MCP tools finishing, if still in flight.
+                # ``_on_agent_load_failure`` is the sole reporter for load
+                # errors; callers just return so the send is dropped.
                 try:
                     await self._await_agent_ready()
-                except Exception as exc:
-                    self._append_system(f"Agent failed to load: {exc}", style="red")
+                except Exception:
                     return
 
                 await self._stream_with_widgets(
@@ -1740,11 +1741,9 @@ def run_textual_interactive(
                 try:
                     await self._await_agent_ready()
                 except Exception as exc:
-                    # Without this the `finally` runs but no reply is sent
-                    # and the channel request hangs indefinitely.
-                    err = f"Error: {exc}"
-                    self._append_system(err, style="red")
-                    _set_channel_response(msg.msg_id, err)
+                    # Without `_set_channel_response` the channel request
+                    # hangs; ``_on_agent_load_failure`` reports locally.
+                    _set_channel_response(msg.msg_id, f"Error: {exc}")
                     return
 
                 prompt_widget = self.query_one("#prompt", ChatTextArea)
@@ -2254,8 +2253,8 @@ def run_textual_interactive(
             try:
                 try:
                     agent = await self._await_agent_ready()
-                except Exception as exc:
-                    self._append_system(f"Agent failed to load: {exc}", style="red")
+                except Exception:
+                    # ``_on_agent_load_failure`` already surfaced the error.
                     return
                 ctx = CommandContext(
                     agent=agent,

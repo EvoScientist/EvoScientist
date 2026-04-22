@@ -256,7 +256,25 @@ class TestBackgroundAgentLoaderAwaitReady:
 
         _run(_go())
 
-    def test_resets_state_on_failure_so_retry_is_possible(self):
+    def test_reraises_real_error_on_subsequent_awaits(self):
+        """After a failure, ``await_ready`` must keep raising the real exception —
+        not the "before start()" sentinel — until ``start`` is called again."""
+
+        def _fail(*, on_mcp_progress=None):
+            raise RuntimeError("bad MCP config")
+
+        loader = BackgroundAgentLoader(_fail)
+
+        async def _go():
+            loader.start()
+            with pytest.raises(RuntimeError, match="bad MCP config"):
+                await loader.await_ready()
+            with pytest.raises(RuntimeError, match="bad MCP config"):
+                await loader.await_ready()
+
+        _run(_go())
+
+    def test_needs_restart_flags_failed_load_for_retry(self):
         calls = {"n": 0}
 
         def flaky(*, on_mcp_progress=None):
@@ -268,13 +286,14 @@ class TestBackgroundAgentLoaderAwaitReady:
         loader = BackgroundAgentLoader(flaky)
 
         async def _go():
+            assert loader.needs_restart  # never started
             loader.start()
             with pytest.raises(RuntimeError):
                 await loader.await_ready()
-            assert loader.agent is None
-            assert loader.task is None
+            assert loader.needs_restart  # failed, caller may retry
             loader.start()
             assert await loader.await_ready() == "SECOND"
+            assert not loader.needs_restart  # success → no retry
 
         _run(_go())
 

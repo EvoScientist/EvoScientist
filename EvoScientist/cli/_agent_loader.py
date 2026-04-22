@@ -107,6 +107,15 @@ class BackgroundAgentLoader:
     def is_pending(self) -> bool:
         return self.agent is None and self._task is not None and not self._task.done()
 
+    @property
+    def needs_restart(self) -> bool:
+        """True when no load is in flight and no agent is ready.
+
+        Callers that want auto-retry behavior (e.g. TUI on the next
+        user send after a failure) check this before :meth:`start`.
+        """
+        return self.agent is None and (self._task is None or self._task.done())
+
     def start(self, **loader_kwargs: Any) -> None:
         prev = self._task
         if prev is not None and not prev.done():
@@ -155,8 +164,9 @@ class BackgroundAgentLoader:
         try:
             self.agent = task.result()
         except Exception as exc:
+            # Keep ``_task`` set so a later ``await_ready`` re-raises the
+            # real exception instead of the "before start()" sentinel.
             self.agent = None
-            self._task = None
             if self._on_failure is not None:
                 self._on_failure(exc)
             return
