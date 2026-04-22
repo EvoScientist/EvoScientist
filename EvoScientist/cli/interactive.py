@@ -399,6 +399,12 @@ def cmd_interactive(
         agent is actually needed.
         """
         state["agent"] = None
+        # /new or /resume can arrive before the initial load finishes —
+        # cancel the stale task so it doesn't keep opening MCP sessions
+        # in the background.
+        prev = state.get("agent_task")
+        if prev is not None and not prev.done():
+            prev.cancel()
         _prime_mcp_progress()
         state["agent_task"] = asyncio.create_task(
             asyncio.to_thread(
@@ -507,10 +513,13 @@ def cmd_interactive(
         if task is not None and not task.done():
             # Small animated hint while MCP tools resolve.  Per-server
             # progress is printed inline above the prompt by
-            # ``_on_mcp_progress`` — ``patch_stdout`` keeps that safe.
-            progress = state["mcp_progress"]
-            total = len(progress)
-            done = sum(1 for s, _ in progress.values() if s != "pending")
+            # `_on_mcp_progress` — `patch_stdout` keeps that safe.
+            # Snapshot first: the worker thread may insert keys via
+            # `setdefault` on a `start` event, which would otherwise
+            # trip "dictionary changed size during iteration".
+            progress_snapshot = list(state["mcp_progress"].values())
+            total = len(progress_snapshot)
+            done = sum(1 for s, _ in progress_snapshot if s != "pending")
             frame = SPINNER_FRAMES[
                 int(datetime.now().timestamp() * 10) % len(SPINNER_FRAMES)
             ]
@@ -1001,7 +1010,14 @@ def cmd_interactive(
             ):
 
                 async def _deferred_auto_start_channel(cfg):
-                    agent = await _await_agent_ready()
+                    try:
+                        agent = await _await_agent_ready()
+                    except Exception as e:
+                        console.print(
+                            f"[red]Channel auto-start skipped: agent load failed:[/red] "
+                            f"{escape(str(e))}"
+                        )
+                        return
                     if not _channels_is_running():
                         _auto_start_channel(
                             agent,

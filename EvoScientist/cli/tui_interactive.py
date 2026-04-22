@@ -385,30 +385,38 @@ def run_textual_interactive(
         def _on_mcp_progress(self, event: str, server: str, detail: str) -> None:
             """Record progress from the MCP loader (worker thread).
 
-            Called from an ``asyncio.to_thread`` worker, so we hop back
-            to the Textual event loop via ``call_from_thread`` before
-            touching any widget.
+            Called from an ``asyncio.to_thread`` worker. Both the
+            progress dict and the widget belong to the Textual event
+            loop, so defer all mutations to it via ``call_from_thread``
+            instead of touching them from here.
             """
-            state: str
+            if event not in {"start", "success", "error"}:
+                return
+            try:
+                self.call_from_thread(
+                    self._apply_mcp_progress, event, server, detail
+                )
+            except Exception:
+                pass
+
+        def _apply_mcp_progress(
+            self, event: str, server: str, detail: str
+        ) -> None:
+            """Apply a progress event on the Textual thread."""
             if event == "start":
                 self._mcp_progress.setdefault(server, ("pending", ""))
                 state = "pending"
             elif event == "success":
                 self._mcp_progress[server] = ("ok", detail)
                 state = "ok"
-            elif event == "error":
+            else:  # "error"
                 self._mcp_progress[server] = ("error", detail)
                 state = "error"
-            else:
-                return
             widget = self._mcp_loader_widget
             if widget is None or widget.dismissed:
                 self._mcp_loader_widget = None
                 return
-            try:
-                self.call_from_thread(widget.update_server, server, state, detail)
-            except Exception:
-                pass
+            widget.update_server(server, state, detail)
 
         def _set_prompt_enabled(self, enabled: bool) -> None:
             """Enable or disable the chat input while MCP tools load.
@@ -484,6 +492,11 @@ def run_textual_interactive(
             try:
                 self._agent = task.result()
             except Exception as exc:
+                # Clear the failed task so a later `_await_agent_ready`
+                # (or /new, /resume) can retry instead of re-raising the
+                # same error forever.
+                self._agent = None
+                self._agent_task = None
                 self._append_system(f"Agent failed to load: {exc}", style="red")
                 self._finish_loader_widget()
                 self._set_prompt_enabled(True)
@@ -524,7 +537,13 @@ def run_textual_interactive(
                     on_mcp_progress=self._on_mcp_progress,
                 )
                 return self._agent
-            self._agent = await self._agent_task
+            try:
+                self._agent = await self._agent_task
+            except Exception:
+                # Drop the failed task so the next caller can retry.
+                self._agent = None
+                self._agent_task = None
+                raise
             return self._agent
 
         # ── CommandUI implementation ─────────────────────────
@@ -707,7 +726,14 @@ def run_textual_interactive(
 
             # Auto-start channels — needs the agent, so defer to after load
             async def _deferred_start_channels():
-                await self._await_agent_ready()
+                try:
+                    await self._await_agent_ready()
+                except Exception:
+                    _channel_logger.debug(
+                        "Skipping channel auto-start because agent load failed",
+                        exc_info=True,
+                    )
+                    return
                 self._start_channels()
 
             ch_task = asyncio.create_task(_deferred_start_channels())
