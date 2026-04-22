@@ -23,7 +23,7 @@ class TestMcpToolCaching:
             lambda: {"srv": {"transport": "stdio", "command": "demo"}},
         )
 
-        def fake_load_mcp_tools(config=None):
+        def fake_load_mcp_tools(config=None, **_kwargs):
             calls["load"] += 1
             return {"main": [tool]}
 
@@ -44,7 +44,7 @@ class TestMcpToolCaching:
         def fake_load_config():
             return state["cfg"]
 
-        def fake_load_mcp_tools(config=None):
+        def fake_load_mcp_tools(config=None, **_kwargs):
             calls["load"] += 1
             return {"main": [f"tool-v{calls['load']}"]}
 
@@ -71,7 +71,8 @@ class TestMcpToolCaching:
             "EvoScientist.mcp.client.load_mcp_config", counting_load_config
         )
         monkeypatch.setattr(
-            "EvoScientist.mcp.load_mcp_tools", lambda config=None: {"main": []}
+            "EvoScientist.mcp.load_mcp_tools",
+            lambda config=None, **_kwargs: {"main": []},
         )
 
         agent_module._load_mcp_tools_cached()
@@ -84,7 +85,7 @@ class TestMcpToolCaching:
         def fake_load_config():
             return {"srv": {"transport": "stdio", "command": "demo"}}
 
-        def fake_load_mcp_tools(config=None):
+        def fake_load_mcp_tools(config=None, **_kwargs):
             received["config"] = config
             return {"main": []}
 

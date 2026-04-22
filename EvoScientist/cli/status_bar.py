@@ -27,6 +27,10 @@ STATUS_CRITICAL = "#d86f6f"
 STATUS_HINT_IDLE = "#8b9bb0"
 STATUS_HINT_BUSY = "#f0c36a"
 
+# Braille spinner frames used by the CLI bottom toolbar and TUI status bar
+# to animate the "Loading MCP tools" indicator.
+SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+
 
 @dataclass(slots=True)
 class SessionStatusSnapshot:

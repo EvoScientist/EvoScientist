@@ -6,6 +6,7 @@ from .assistant_message import AssistantMessage
 from .compact_summary_widget import CompactSummaryWidget
 from .compacting_widget import CompactingWidget
 from .loading_widget import LoadingWidget
+from .mcp_loader_widget import MCPLoaderWidget
 from .subagent_widget import SubAgentWidget
 from .summarization_widget import SummarizationWidget
 from .system_message import SystemMessage
@@ -23,6 +24,7 @@ __all__ = [
     "CompactSummaryWidget",
     "CompactingWidget",
     "LoadingWidget",
+    "MCPLoaderWidget",
     "SubAgentWidget",
     "SummarizationWidget",
     "SystemMessage",

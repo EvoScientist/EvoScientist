@@ -58,7 +58,13 @@ def _create_session_workspace(name: str | None = None) -> str:
     return workspace_dir
 
 
-def _load_agent(workspace_dir: str | None = None, checkpointer=None, config=None):
+def _load_agent(
+    workspace_dir: str | None = None,
+    checkpointer=None,
+    config=None,
+    *,
+    on_mcp_progress=None,
+):
     """Load the CLI agent with optional persistent checkpointer.
 
     Args:
@@ -67,9 +73,14 @@ def _load_agent(workspace_dir: str | None = None, checkpointer=None, config=None
             Falls back to ``InMemorySaver`` when ``None``.
         config: Optional pre-loaded ``EvoScientistConfig``.  Forwarded to
             ``create_cli_agent`` to avoid double config loading.
+        on_mcp_progress: Optional per-server MCP progress callback.
+            Signature ``(event, server_name, detail) -> None``.
     """
     from ..EvoScientist import create_cli_agent
 
     return create_cli_agent(
-        workspace_dir=workspace_dir, checkpointer=checkpointer, config=config
+        workspace_dir=workspace_dir,
+        checkpointer=checkpointer,
+        config=config,
+        on_mcp_progress=on_mcp_progress,
     )

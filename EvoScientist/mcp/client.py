@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,11 @@ VALID_TRANSPORTS = {"stdio", "http", "streamable_http", "sse", "websocket"}
 
 # URL-based transports (share the same connection shape)
 _URL_TRANSPORTS = {"http", "streamable_http", "sse", "websocket"}
+
+# Upper bound on simultaneous ``get_tools`` attempts in :func:`_load_tools`.
+# Keeps stdio-server fleets from spawning 20+ subprocesses at once while
+# still parallelizing the common 3–7 server case to completion.
+_MAX_CONCURRENT_CONNECTIONS = 8
 
 
 def _get_mcp_config_dir() -> Path:
@@ -624,7 +630,20 @@ def _route_tools(
     return by_agent
 
 
-async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
+ProgressCallback = Callable[[str, str, str], None]
+"""Per-server progress callback: ``(event, server_name, detail)``.
+
+- ``event="start"``   — connection attempt has begun.  ``detail`` is empty.
+- ``event="success"`` — tools fetched.  ``detail`` is the count as a string.
+- ``event="error"``   — failed.  ``detail`` is the exception message.
+"""
+
+
+async def _load_tools(
+    config: dict[str, Any],
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, list]:
     """Connect to MCP servers and retrieve tools.
 
     Returns a dict of server name -> list of LangChain tools.
@@ -644,22 +663,58 @@ async def _load_tools(config: dict[str, Any]) -> dict[str, list]:
     if not connections:
         return {}
 
-    server_tools: dict[str, list] = {}
     client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
 
-    for server_name in connections:
+    def _report(event: str, name: str, detail: str = "") -> None:
+        if on_progress is None:
+            return
         try:
-            tools = await client.get_tools(server_name=server_name)
-            server_tools[server_name] = tools
-            logger.info("MCP server %r: loaded %d tool(s)", server_name, len(tools))
-        except Exception as exc:
-            logger.warning("MCP server %r: failed to load tools: %s", server_name, exc)
-            server_tools[server_name] = []
+            on_progress(event, name, detail)
+        except Exception:
+            # Progress callbacks are UI glue — never let their bugs break
+            # the actual MCP load.
+            logger.debug("MCP progress callback raised", exc_info=True)
 
-    return server_tools
+    # Cap in-flight connections so a user with many servers doesn't
+    # spawn all their stdio subprocesses at once (fd/ulimit pressure,
+    # load spikes).  The cap still parallelizes ~an order of magnitude
+    # better than the old serial loop.
+    sem = asyncio.Semaphore(_MAX_CONCURRENT_CONNECTIONS)
+
+    async def _fetch(name: str) -> tuple[str, list]:
+        async with sem:
+            _report("start", name)
+            try:
+                tools = await client.get_tools(server_name=name)
+                logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
+                _report("success", name, str(len(tools)))
+                return name, tools
+            except Exception as exc:
+                # When the caller wired up ``on_progress`` they own the
+                # user-facing display; downgrade the logger so we don't
+                # double-print.
+                if on_progress is None:
+                    logger.warning(
+                        "MCP server %r: failed to load tools: %s", name, exc
+                    )
+                else:
+                    logger.debug(
+                        "MCP server %r: failed to load tools: %s", name, exc
+                    )
+                _report("error", name, str(exc))
+                return name, []
+
+    # ``return_exceptions=False`` is fine because ``_fetch`` already
+    # swallows errors per server.
+    results = await asyncio.gather(*(_fetch(name) for name in connections))
+    return dict(results)
 
 
-async def aload_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, list]:
+async def aload_mcp_tools(
+    config: dict[str, Any] | None = None,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, list]:
     """Async version of :func:`load_mcp_tools`.
 
     Prefer this when already inside an async context (e.g. Jupyter, async CLI).
@@ -667,20 +722,26 @@ async def aload_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, lis
     Args:
         config: Optional pre-loaded MCP config dict.  When ``None``,
             loads from ``~/.config/evoscientist/mcp.yaml``.
+        on_progress: Optional callback invoked per server with
+            ``(event, server_name, detail)``.  See :data:`ProgressCallback`.
     """
     if config is None:
         config = load_mcp_config()
     if not config:
         return {}
     try:
-        server_tools = await _load_tools(config)
+        server_tools = await _load_tools(config, on_progress=on_progress)
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}
     return _route_tools(config, server_tools)
 
 
-def load_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, list]:
+def load_mcp_tools(
+    config: dict[str, Any] | None = None,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, list]:
     """Load MCP tools and return them grouped by target agent.
 
     This is the main synchronous entry point. It:
@@ -694,6 +755,8 @@ def load_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, list]:
             loads from ``~/.config/evoscientist/mcp.yaml``.  Passing a
             pre-loaded config avoids duplicate env-var interpolation
             warnings when the caller has already loaded the config.
+        on_progress: Optional callback invoked per server with
+            ``(event, server_name, detail)``.  See :data:`ProgressCallback`.
 
     Returns:
         Dict mapping agent name -> list of LangChain ``BaseTool`` objects.
@@ -717,7 +780,7 @@ def load_mcp_tools(config: dict[str, Any] | None = None) -> dict[str, list]:
             import nest_asyncio
 
             nest_asyncio.apply()
-        server_tools = asyncio.run(_load_tools(config))
+        server_tools = asyncio.run(_load_tools(config, on_progress=on_progress))
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}
