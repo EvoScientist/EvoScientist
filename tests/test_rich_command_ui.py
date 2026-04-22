@@ -9,12 +9,12 @@ from rich.table import Table
 from tests.conftest import run_async as _run
 
 
-def _make_ui():
+def _make_ui(**kwargs):
     """Build a RichCLICommandUI backed by a MagicMock console."""
     from EvoScientist.cli.rich_command_ui import RichCLICommandUI
 
     console = MagicMock(spec=Console)
-    ui = RichCLICommandUI(console)
+    ui = RichCLICommandUI(console, **kwargs)
     return ui, console
 
 
@@ -125,43 +125,132 @@ class TestUpdateStatusHook:
         console.print.assert_not_called()
 
 
-class TestUnmigratedMethodsStub:
-    """Protocol methods not yet wired for CLI must raise NotImplementedError.
+class TestPhaseAMigrated:
+    """Phase A migration: quit, clear, thread-pick fallback, and compact status.
 
-    These stubs are signposts for the A1 migration (see
-    cli-commandmanager-migration.md). Each one is replaced by a real
-    implementation when its corresponding command is migrated.
+    These replaced the original ``NotImplementedError`` stubs once the
+    corresponding commands were migrated through the shared CommandManager
+    dispatch block in ``interactive.py``.
     """
 
-    def test_wait_for_thread_pick(self):
+    def test_request_quit_fires_callback(self):
+        called = []
+        ui, _ = _make_ui(on_request_quit=lambda: called.append("q"))
+        ui.request_quit()
+        assert called == ["q"]
+
+    def test_request_quit_without_callback_is_noop(self):
+        ui, console = _make_ui()
+        ui.request_quit()
+        console.clear.assert_not_called()
+        console.print.assert_not_called()
+
+    def test_force_quit_fires_callback(self):
+        called = []
+        ui, _ = _make_ui(on_force_quit=lambda: called.append("fq"))
+        ui.force_quit()
+        assert called == ["fq"]
+
+    def test_clear_chat_fires_callback(self):
+        called = []
+        ui, console = _make_ui(on_clear_chat=lambda: called.append("cls"))
+        ui.clear_chat()
+        assert called == ["cls"]
+        # Callback owns clearing — adapter should not also clear
+        console.clear.assert_not_called()
+
+    def test_clear_chat_default_falls_back_to_console_clear(self):
+        ui, console = _make_ui()
+        ui.clear_chat()
+        console.clear.assert_called_once()
+
+    def test_update_status_after_compact_fires_callback(self):
+        received = []
+        ui, _ = _make_ui(on_status_after_compact=received.append)
+        ui.update_status_after_compact(1234)
+        assert received == [1234]
+
+    def test_update_status_after_compact_without_callback_is_noop(self):
+        ui, console = _make_ui()
+        # Does not raise; does not print.
+        ui.update_status_after_compact(500)
+        console.print.assert_not_called()
+
+    def test_wait_for_thread_pick_returns_none(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/threads"):
-            _run(ui.wait_for_thread_pick([], "tid", "title"))
+        threads = [
+            {
+                "thread_id": "abc123",
+                "preview": "hello",
+                "message_count": 3,
+                "model": "claude",
+                "updated_at": "2026-04-22T10:00:00Z",
+            },
+        ]
+        result = _run(ui.wait_for_thread_pick(threads, "abc123", "Select thread"))
+        assert result is None
+
+    def test_wait_for_thread_pick_prints_table_with_current_marker(self):
+        ui, console = _make_ui()
+        threads = [
+            {
+                "thread_id": "abc123",
+                "preview": "hello",
+                "message_count": 3,
+                "model": "claude",
+                "updated_at": None,
+            },
+            {
+                "thread_id": "def456",
+                "preview": "",
+                "message_count": 0,
+                "model": None,
+                "updated_at": None,
+            },
+        ]
+        _run(ui.wait_for_thread_pick(threads, "abc123", "Select thread"))
+        # Table + usage hint
+        assert console.print.call_count == 2
+        table_arg = console.print.call_args_list[0].args[0]
+        assert isinstance(table_arg, Table)
+        hint_arg = console.print.call_args_list[1].args[0]
+        assert "/resume" in hint_arg
+        assert "/delete" in hint_arg
+
+
+class TestCompactIndicator:
+    """start/stop_compacting_indicator duck-typed by CompactCommand."""
+
+    def test_indicator_pair_wraps_console_status(self):
+        ui, console = _make_ui()
+        # Simulate a context manager returned by console.status()
+        status_cm = MagicMock()
+        console.status.return_value = status_cm
+        ui.start_compacting_indicator()
+        console.status.assert_called_once()
+        status_cm.__enter__.assert_called_once()
+        ui.stop_compacting_indicator()
+        status_cm.__exit__.assert_called_once_with(None, None, None)
+
+    def test_stop_without_start_is_noop(self):
+        ui, console = _make_ui()
+        # Should not raise even if start was never called.
+        ui.stop_compacting_indicator()
+        console.status.assert_not_called()
+
+
+class TestUnmigratedStubs:
+    """Phase B/C stubs still raise NotImplementedError until migrated."""
 
     def test_wait_for_skill_browse(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/skills"):
+        with pytest.raises(NotImplementedError, match="/evoskills"):
             _run(ui.wait_for_skill_browse([], set(), ""))
 
     def test_wait_for_mcp_browse(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/mcp"):
+        with pytest.raises(NotImplementedError, match="/install-mcp"):
             _run(ui.wait_for_mcp_browse([], set(), ""))
-
-    def test_clear_chat(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/clear"):
-            ui.clear_chat()
-
-    def test_request_quit(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/exit"):
-            ui.request_quit()
-
-    def test_force_quit(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/exit"):
-            ui.force_quit()
 
     def test_start_new_session(self):
         ui, _ = _make_ui()

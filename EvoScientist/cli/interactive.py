@@ -26,14 +26,14 @@ from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untype
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
 
+from ..commands.base import CommandContext
+from ..commands.manager import manager as cmd_manager
 from ..sessions import (
     _format_relative_time,
-    delete_thread,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
@@ -57,10 +57,10 @@ from .channel import (
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .mcp_ui import _cmd_mcp
+from .rich_command_ui import RichCLICommandUI
 from .skills_cmd import (
     _cmd_install_skill,
     _cmd_install_skills,
-    _cmd_list_skills,
     _cmd_uninstall_skill,
 )
 from .status_bar import (
@@ -88,6 +88,23 @@ _channel_logger = logging.getLogger(__name__)
 
 # Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
 _background_tasks: set[asyncio.Task] = set()
+
+# Slash commands dispatched through ``cmd_manager.execute``. Everything
+# else still hits the inline ``if`` branches in ``_async_main_loop``
+# (Phase B/C of the CommandManager migration — see memory file
+# ``cli-commandmanager-migration.md``).
+_CMDMGR_MIGRATED: frozenset[str] = frozenset(
+    {
+        "/exit",
+        "/threads",
+        "/delete",
+        "/current",
+        "/skills",
+        "/compact",
+        "/help",
+        "/clear",
+    }
+)
 
 
 # =============================================================================
@@ -372,6 +389,25 @@ def cmd_interactive(
         on_progress=_on_mcp_progress,
     )
 
+    def _on_status_after_compact(input_tokens: int) -> None:
+        """Mirror inline /compact post-update: refresh both fields so the
+        next status render reflects the reduced context immediately.
+        ``_refresh_status_snapshot`` is invoked by the dispatch block once
+        the command finishes (since it's async)."""
+        state["status_last_input_tokens"] = input_tokens
+        state["status_base_snapshot"] = make_usage_status_snapshot(
+            input_tokens,
+            model_name=model,
+        )
+
+    rich_ui = RichCLICommandUI(
+        console,
+        on_request_quit=lambda: state.__setitem__("running", False),
+        on_force_quit=lambda: state.__setitem__("running", False),
+        on_clear_chat=lambda: console.clear(),
+        on_status_after_compact=_on_status_after_compact,
+    )
+
     def _start_agent_load(checkpointer) -> None:
         progress_tracker.prime()
         agent_loader.start(
@@ -522,39 +558,6 @@ def cmd_interactive(
             return None
         console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
         return None
-
-    async def _cmd_threads():
-        """Handle /threads command — show recent sessions."""
-        threads = await list_threads(
-            limit=0,
-            include_message_count=True,
-            include_preview=True,
-        )
-        if not threads:
-            console.print("[yellow]No saved sessions.[/yellow]")
-            return
-        table = Table(title="Sessions", show_header=True, header_style="bold cyan")
-        table.add_column("ID", style="bold")
-        table.add_column("Preview", style="dim", max_width=50, no_wrap=True)
-        table.add_column("Messages", justify="right")
-        table.add_column("Model", style="dim")
-        table.add_column("Last Used", style="dim")
-        for t in threads:
-            tid = t["thread_id"]
-            marker = " *" if tid == state["thread_id"] else ""
-            table.add_row(
-                f"{tid}{marker}",
-                t.get("preview", "") or "",
-                str(t.get("message_count", 0)),
-                t.get("model", "") or "",
-                _format_relative_time(t.get("updated_at")),
-            )
-        console.print()
-        console.print(table)
-        console.print(
-            "[dim]  /resume[/dim] to continue a session  [dim]/delete <id>[/dim] to remove  [dim]/new[/dim] to start fresh"
-        )
-        console.print()
 
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
@@ -722,23 +725,6 @@ def cmd_interactive(
             )
         console.print()
         await _render_history(resolved)
-
-    async def _cmd_delete(arg: str):
-        """Handle /delete <id> — delete a saved session."""
-        if not arg:
-            console.print("[red]Usage: /delete <thread-id>[/red]")
-            return
-        resolved = await _resolve_thread_id(arg)
-        if not resolved:
-            return
-        if resolved == state["thread_id"]:
-            console.print("[red]Cannot delete the current session.[/red]")
-            return
-        deleted = await delete_thread(resolved)
-        if deleted:
-            console.print(f"[green]Deleted session {resolved}.[/green]")
-        else:
-            console.print(f"[red]Session {resolved} not found.[/red]")
 
     async def _async_main_loop():
         """Async main loop with prompt_async and channel queue checking."""
@@ -1036,23 +1022,44 @@ def cmd_interactive(
 
                         _print_separator()
 
-                        # Special commands
-                        if user_input.lower() in ("/exit", "/quit", "/q"):
-                            state["running"] = False
-                            break
-
-                        if user_input.lower() == "/threads":
-                            await _cmd_threads()
+                        # ==== Shared CommandManager dispatch (Phase A) ====
+                        # Resolve-then-dispatch: only Phase A commands (see
+                        # ``_CMDMGR_MIGRATED``) route through the manager
+                        # for now. Everything else falls through to the
+                        # inline ``if`` branches below until Phase B/C
+                        # migrate them.
+                        _parsed = cmd_manager.resolve(user_input)
+                        if _parsed is not None and _parsed[0].name in _CMDMGR_MIGRATED:
+                            _cmd, _cmd_args = _parsed
+                            _agent_for_ctx: Any = agent_loader.agent
+                            if _cmd.needs_agent(_cmd_args):
+                                _agent_for_ctx = await _await_agent_ready()
+                            ctx = CommandContext(
+                                agent=_agent_for_ctx,
+                                thread_id=state["thread_id"],
+                                ui=rich_ui,
+                                workspace_dir=state["workspace_dir"],
+                                checkpointer=checkpointer,
+                                input_tokens_hint=state.get(
+                                    "status_last_input_tokens"
+                                ),
+                            )
+                            await cmd_manager.execute(user_input, ctx)
+                            # ExitCommand signals quit via ``force_quit`` →
+                            # callback flips ``state["running"]`` to False.
+                            if not state["running"]:
+                                break
+                            # /compact mutated status fields via callback;
+                            # async refresh must happen here (callback sync).
+                            if _cmd.name == "/compact":
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True,
+                                )
                             continue
 
                         if user_input.lower().startswith("/resume"):
                             arg = user_input[len("/resume") :].strip()
                             await _cmd_resume(arg, checkpointer)
-                            continue
-
-                        if user_input.lower().startswith("/delete"):
-                            arg = user_input[len("/delete") :].strip()
-                            await _cmd_delete(arg)
                             continue
 
                         if user_input.lower() == "/new":
@@ -1075,25 +1082,6 @@ def cmd_interactive(
                                 console.print(
                                     f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]\n"
                                 )
-                            continue
-
-                        if user_input.lower() == "/current":
-                            console.print(
-                                f"[dim]Thread:[/dim] [yellow]{state['thread_id']}[/yellow]"
-                            )
-                            if state["workspace_dir"]:
-                                console.print(
-                                    f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
-                                )
-                            if memory_dir:
-                                console.print(
-                                    f"[dim]Memory dir:[/dim] [cyan]{_shorten_path(memory_dir)}[/cyan]"
-                                )
-                            console.print()
-                            continue
-
-                        if user_input.lower() == "/skills":
-                            _cmd_list_skills()
                             continue
 
                         if user_input.lower().startswith("/install-skill"):
@@ -1130,48 +1118,8 @@ def cmd_interactive(
                                 )
                             continue
 
-                        if user_input.lower() == "/compact":
-                            from .commands import (
-                                build_compact_summary_renderable,
-                                compact_conversation,
-                                render_compact_result,
-                            )
-
-                            await _await_agent_ready()
-                            with console.status(
-                                "[cyan]Compacting conversation...[/cyan]"
-                            ):
-                                result = await compact_conversation(
-                                    agent=agent_loader.agent,
-                                    thread_id=state["thread_id"],
-                                    input_tokens_hint=state.get(
-                                        "status_last_input_tokens"
-                                    ),
-                                )
-                            console.print(render_compact_result(result))
-                            summary_renderable = build_compact_summary_renderable(
-                                result
-                            )
-                            if summary_renderable is not None:
-                                console.print(summary_renderable)
-                            if result.status == "ok" and result.tokens_after > 0:
-                                state["status_last_input_tokens"] = result.tokens_after
-                                state["status_base_snapshot"] = (
-                                    make_usage_status_snapshot(
-                                        result.tokens_after,
-                                        model_name=model,
-                                    )
-                                )
-                            await _refresh_status_snapshot(
-                                reset_streaming_text=True,
-                            )
-                            continue
-
                         if user_input.lower().startswith("/model"):
-                            from ..commands.base import CommandContext
-                            from ..commands.manager import manager as cmd_manager
                             from ..EvoScientist import _ensure_config
-                            from .rich_command_ui import RichCLICommandUI
 
                             # /model is ``needs_agent=False`` — it builds its
                             # own agent — so we don't wait for the current
@@ -1179,7 +1127,7 @@ def cmd_interactive(
                             ctx = CommandContext(
                                 agent=None,
                                 thread_id=state["thread_id"],
-                                ui=RichCLICommandUI(console),
+                                ui=rich_ui,
                                 workspace_dir=state["workspace_dir"],
                                 checkpointer=checkpointer,
                             )
