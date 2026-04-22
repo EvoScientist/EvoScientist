@@ -2267,10 +2267,10 @@ def run_textual_interactive(
 
                 if await cmd_manager.execute(command, ctx):
                     # Sync agent back if command replaced it (e.g. /model)
-                    if ctx.agent is not self._agent:
-                        self._agent = ctx.agent
+                    if ctx.agent is not self._agent_loader.agent:
+                        self._agent_loader.agent = ctx.agent
                         if _channels_is_running():
-                            _ch_mod._cli_agent = self._agent
+                            _ch_mod._cli_agent = ctx.agent
                             _ch_mod._cli_thread_id = self._conversation_tid
                     # Do NOT invalidate the usage baseline after /compact.
                     # build_session_status_snapshot() only counts raw checkpoint

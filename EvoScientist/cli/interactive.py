@@ -1173,8 +1173,9 @@ def cmd_interactive(
                             from ..EvoScientist import _ensure_config
                             from .rich_command_ui import RichCLICommandUI
 
+                            current_agent = await _await_agent_ready()
                             ctx = CommandContext(
-                                agent=state["agent"],
+                                agent=current_agent,
                                 thread_id=state["thread_id"],
                                 ui=RichCLICommandUI(console),
                                 workspace_dir=state["workspace_dir"],
@@ -1183,8 +1184,8 @@ def cmd_interactive(
                             await cmd_manager.execute(user_input, ctx)
 
                             # Sync agent back if command replaced it (e.g. /model)
-                            if ctx.agent is not state["agent"]:
-                                state["agent"] = ctx.agent
+                            if ctx.agent is not current_agent:
+                                agent_loader.agent = ctx.agent
                                 cfg = _ensure_config()
                                 model = cfg.model
                                 state["status_base_snapshot"] = (
@@ -1194,7 +1195,7 @@ def cmd_interactive(
                                     reset_streaming_text=True,
                                 )
                                 if _channels_is_running():
-                                    _ch_mod._cli_agent = state["agent"]
+                                    _ch_mod._cli_agent = ctx.agent
                                     _ch_mod._cli_thread_id = state["thread_id"]
                             continue
 
