@@ -133,8 +133,10 @@ class BackgroundAgentLoader:
     async def await_ready(self) -> Any:
         """Return the loaded agent; re-raises on load failure.
 
-        Idempotent.  On failure, clears state so a subsequent
-        :meth:`start` can retry.
+        Idempotent.  State transitions (setting ``self.agent``, calling
+        ``on_success`` / ``on_failure``) are handled exclusively by
+        :meth:`_on_done`, which fires before this ``await`` resumes
+        (asyncio guarantees done-callbacks run in registration order).
         """
         if self.agent is not None:
             return self.agent
@@ -142,16 +144,7 @@ class BackgroundAgentLoader:
             raise RuntimeError(
                 "BackgroundAgentLoader.await_ready called before start()"
             )
-        task = self._task
-        try:
-            self.agent = await task
-        except Exception:
-            # Don't clobber state if a concurrent ``start`` already
-            # replaced the task we were awaiting.
-            if self._task is task:
-                self.agent = None
-                self._task = None
-            raise
+        await self._task
         return self.agent
 
     def _on_done(self, task: asyncio.Task, load_id: int) -> None:
