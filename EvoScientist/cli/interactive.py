@@ -43,6 +43,7 @@ from ..sessions import (
     thread_exists,
 )
 from ..stream.console import console
+from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .agent import _create_session_workspace, _load_agent, _shorten_path
 from .channel import (
@@ -333,14 +334,6 @@ def cmd_interactive(
 
     # Mutable state for async loop
     state: dict[str, Any] = {
-        "agent": None,
-        "agent_task": None,  # Background asyncio.Task loading the agent
-        # Monotonic token bumped on every `_start_agent_load`. The MCP
-        # worker thread can't be cancelled (it runs sync `_load_agent`),
-        # so progress callbacks from a superseded load filter against
-        # this to avoid polluting the current session's state.
-        "agent_load_id": 0,
-        "mcp_progress": {},  # server_name -> ("pending"|"ok"|"error", detail)
         "thread_id": thread_id or generate_thread_id(),
         "workspace_dir": workspace_dir,
         "running": True,
@@ -353,113 +346,59 @@ def cmd_interactive(
         "status_last_input_tokens": None,
     }
 
-    def _prime_mcp_progress() -> None:
-        """Pre-populate the progress dict with every configured server.
-
-        Without this the denominator in the status-bar's "N / M" label
-        grows as each task's first scheduled step runs; pre-priming keeps
-        M stable at its final value from the first render.
-        """
-        try:
-            from ..mcp import load_mcp_config
-
-            cfg = load_mcp_config() or {}
-            state["mcp_progress"] = dict.fromkeys(cfg, ("pending", ""))
-        except Exception:
-            state["mcp_progress"] = {}
+    progress_tracker = MCPProgressTracker()
 
     def _on_mcp_progress(event: str, server: str, detail: str) -> None:
-        """Record + display per-server MCP load progress.
+        """Record progress + print the inline ✓/✗ line.
 
-        Called from the MCP loader's worker thread.  State mutations are
-        atomic dict writes (safe across threads); user-visible lines go
-        through ``console.print``, which — while the main loop runs
-        inside a ``patch_stdout()`` context — are routed above the
-        prompt_toolkit prompt without stomping its cursor.  That gives
-        the CLI the same "inline chat message" feel as the TUI's
-        ``MCPLoaderWidget`` without the fragility of a custom layout.
+        Runs on the MCP worker thread; ``console.print`` while the main
+        loop is inside ``patch_stdout`` lands above the prompt safely.
         """
-        progress = state["mcp_progress"]
-        if event == "start":
-            progress.setdefault(server, ("pending", ""))
-        elif event == "success":
-            progress[server] = ("ok", detail)
+        new_state = progress_tracker.record(event, server, detail)
+        if new_state == "ok":
             console.print(
                 f"[green]\u2713[/green] [dim]MCP[/dim] [bold]{server}[/bold] "
                 f"[dim]({detail} tools)[/dim]"
             )
-        elif event == "error":
-            progress[server] = ("error", detail)
+        elif new_state == "error":
             console.print(
                 f"[red]\u2717[/red] [dim]MCP[/dim] [bold]{server}[/bold] "
                 f"[red]failed:[/red] {escape(detail)}"
             )
 
+    agent_loader = BackgroundAgentLoader(
+        _load_agent,
+        on_progress=_on_mcp_progress,
+    )
+
     def _start_agent_load(checkpointer) -> None:
-        """Kick off ``_load_agent`` in a background thread.
-
-        MCP tool enumeration is the dominant cost and runs blocking HTTP
-        handshakes — do it off-thread so the banner and prompt can appear
-        immediately.  The task result is awaited lazily, only when the
-        agent is actually needed.
-        """
-        state["agent"] = None
-        # /new or /resume can arrive before the initial load finishes —
-        # cancel the stale task so it doesn't keep opening MCP sessions
-        # in the background. `prev.cancel()` only stops the asyncio
-        # wrapper; the underlying thread keeps running until
-        # `_load_agent` returns and may still fire progress events, so
-        # we also bump `agent_load_id` and filter callbacks below.
-        prev = state.get("agent_task")
-        if prev is not None and not prev.done():
-            prev.cancel()
-        state["agent_load_id"] += 1
-        load_id = state["agent_load_id"]
-
-        def _gated_progress(event: str, server: str, detail: str) -> None:
-            if load_id != state["agent_load_id"]:
-                return
-            _on_mcp_progress(event, server, detail)
-
-        _prime_mcp_progress()
-        state["agent_task"] = asyncio.create_task(
-            asyncio.to_thread(
-                _load_agent,
-                workspace_dir=state["workspace_dir"],
-                checkpointer=checkpointer,
-                config=config,
-                on_mcp_progress=_gated_progress,
-            )
+        progress_tracker.prime()
+        agent_loader.start(
+            workspace_dir=state["workspace_dir"],
+            checkpointer=checkpointer,
+            config=config,
         )
 
     async def _await_agent_ready() -> Any:
-        """Await the background agent load, returning the agent.
+        """Await the agent load and apply CLI-side post-load side effects.
 
-        Idempotent — subsequent calls return the cached agent.  The
-        user-visible progress (per-server ✓/✗ lines + bottom-toolbar
-        spinner) is driven by ``_on_mcp_progress`` and the toolbar
-        refresh, so this helper stays silent.
+        Raises when called before ``_start_agent_load``: reloading here
+        would drop the SQLite checkpointer and silently lose persistence.
         """
-        if state["agent"] is not None:
-            return state["agent"]
-        task = state.get("agent_task")
-        if task is None:
-            # Every entry path (main loop, /new, /resume) runs
-            # ``_start_agent_load`` before any ``_await_agent_ready``, so
-            # this is unreachable in normal flow.  Fail loudly rather
-            # than silently reloading without the SQLite checkpointer —
-            # that path would succeed the turn but drop persistence on
-            # the floor.
-            raise RuntimeError(
-                "_await_agent_ready called before _start_agent_load — "
-                "the checkpointer reference is not available here."
-            )
-        state["agent"] = await task
+        try:
+            agent = await agent_loader.await_ready()
+        except RuntimeError as exc:
+            if "before start()" in str(exc):
+                raise RuntimeError(
+                    "_await_agent_ready called before _start_agent_load — "
+                    "the checkpointer reference is not available here."
+                ) from exc
+            raise
         await _refresh_status_snapshot(reset_streaming_text=True)
         if _channels_is_running():
-            _ch_mod._cli_agent = state["agent"]
+            _ch_mod._cli_agent = agent
             _ch_mod._cli_thread_id = state["thread_id"]
-        return state["agent"]
+        return agent
 
     def _rebuild_status_snapshot() -> None:
         """Compose the visible snapshot from thread state + live output."""
@@ -525,17 +464,10 @@ def cmd_interactive(
             state["status_started_at"],
             width,
         )
-        task = state.get("agent_task")
-        if task is not None and not task.done():
-            # Small animated hint while MCP tools resolve.  Per-server
-            # progress is printed inline above the prompt by
-            # `_on_mcp_progress` — `patch_stdout` keeps that safe.
-            # Snapshot first: the worker thread may insert keys via
-            # `setdefault` on a `start` event, which would otherwise
-            # trip "dictionary changed size during iteration".
-            progress_snapshot = list(state["mcp_progress"].values())
-            total = len(progress_snapshot)
-            done = sum(1 for s, _ in progress_snapshot if s != "pending")
+        if agent_loader.is_pending:
+            # Per-server ✓/✗ lines are printed above the prompt by
+            # `_on_mcp_progress`; this just shows the animated summary.
+            done, total = progress_tracker.totals()
             frame = SPINNER_FRAMES[
                 int(datetime.now().timestamp() * 10) % len(SPINNER_FRAMES)
             ]
@@ -960,7 +892,7 @@ def cmd_interactive(
                     )
                     response = run_streaming(
                         ui_backend=state["ui_backend"],
-                        agent=state["agent"],
+                        agent=agent_loader.agent,
                         message=msg.content,
                         thread_id=state["thread_id"],
                         show_thinking=show_thinking,
@@ -1190,7 +1122,7 @@ def cmd_interactive(
                                 await _await_agent_ready()
                                 _cmd_channel(
                                     args,
-                                    state["agent"],
+                                    agent_loader.agent,
                                     state["thread_id"],
                                     send_thinking=channel_send_thinking,
                                 )
@@ -1208,7 +1140,7 @@ def cmd_interactive(
                                 "[cyan]Compacting conversation...[/cyan]"
                             ):
                                 result = await compact_conversation(
-                                    agent=state["agent"],
+                                    agent=agent_loader.agent,
                                     thread_id=state["thread_id"],
                                     input_tokens_hint=state.get(
                                         "status_last_input_tokens"
@@ -1251,7 +1183,7 @@ def cmd_interactive(
                         )
                         run_streaming(
                             ui_backend=state["ui_backend"],
-                            agent=state["agent"],
+                            agent=agent_loader.agent,
                             message=message_to_send,
                             thread_id=state["thread_id"],
                             show_thinking=show_thinking,

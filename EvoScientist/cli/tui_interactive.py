@@ -33,6 +33,7 @@ from ..sessions import (
 )
 from ..stream.events import stream_agent_events
 from ..stream.state import _INTERNAL_TOOLS, StreamState
+from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .channel import (
     ChannelMessage,
@@ -323,7 +324,6 @@ def run_textual_interactive(
         def __init__(
             self,
             *,
-            agent: Any,
             thread_id_value: str,
             workspace: str | None,
             checkpointer: Any,
@@ -332,12 +332,13 @@ def run_textual_interactive(
             resume_warning: str = "",
         ) -> None:
             super().__init__()
-            self._agent = agent
-            self._agent_task: asyncio.Task | None = None
-            # Bumped on every `_start_background_agent_load`; callbacks
-            # from superseded loads compare against this and bail.
-            self._agent_load_id: int = 0
-            self._mcp_progress: dict[str, tuple[str, str]] = {}
+            self._progress_tracker = MCPProgressTracker()
+            self._agent_loader = BackgroundAgentLoader(
+                load_agent,
+                on_progress=self._on_mcp_progress,
+                on_success=self._on_agent_load_success,
+                on_failure=self._on_agent_load_failure,
+            )
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value
             self._workspace_dir = workspace
@@ -374,25 +375,8 @@ def run_textual_interactive(
 
         # ── Background agent / MCP loading ───────────────────
 
-        def _prime_mcp_progress(self) -> None:
-            """Pre-populate the progress dict so the status label shows
-            the final server count immediately, not a growing total."""
-            try:
-                from ..mcp import load_mcp_config
-
-                cfg = load_mcp_config() or {}
-                self._mcp_progress = dict.fromkeys(cfg, ("pending", ""))
-            except Exception:
-                self._mcp_progress = {}
-
         def _on_mcp_progress(self, event: str, server: str, detail: str) -> None:
-            """Record progress from the MCP loader (worker thread).
-
-            Called from an ``asyncio.to_thread`` worker. Both the
-            progress dict and the widget belong to the Textual event
-            loop, so defer all mutations to it via ``call_from_thread``
-            instead of touching them from here.
-            """
+            """Bridge worker-thread progress events to the Textual loop."""
             if event not in {"start", "success", "error"}:
                 return
             try:
@@ -401,43 +385,34 @@ def run_textual_interactive(
                 pass
 
         def _apply_mcp_progress(self, event: str, server: str, detail: str) -> None:
-            """Apply a progress event on the Textual thread."""
-            if event == "start":
-                self._mcp_progress.setdefault(server, ("pending", ""))
-                state = "pending"
-            elif event == "success":
-                self._mcp_progress[server] = ("ok", detail)
-                state = "ok"
-            else:  # "error"
-                self._mcp_progress[server] = ("error", detail)
-                state = "error"
+            """Update tracker + widget on the Textual thread."""
+            state = self._progress_tracker.record(event, server, detail)
+            if state is None:
+                return
             widget = self._mcp_loader_widget
             if widget is None or widget.dismissed:
                 self._mcp_loader_widget = None
                 return
             widget.update_server(server, state, detail)
 
-        def _agent_load_pending(self) -> bool:
-            """True if a background `load_agent` task is still running.
+        def _on_agent_load_success(self, agent: Any) -> None:
+            if _channels_is_running():
+                _ch_mod._cli_agent = agent
+                _ch_mod._cli_thread_id = self._conversation_tid
+            self._finish_loader_widget()
+            self._set_prompt_enabled(True)
+            self._render_status()
 
-            Command and channel cleanup paths use this to avoid
-            re-enabling the prompt after `/new` or `/resume` kicks
-            off a fresh load — otherwise the user could type while
-            MCP tools are still resolving.
-            """
-            return (
-                self._agent is None
-                and self._agent_task is not None
-                and not self._agent_task.done()
-            )
+        def _on_agent_load_failure(self, exc: BaseException) -> None:
+            self._append_system(f"Agent failed to load: {exc}", style="red")
+            self._finish_loader_widget()
+            self._set_prompt_enabled(True)
+
+        def _agent_load_pending(self) -> bool:
+            return self._agent_loader.is_pending
 
         def _set_prompt_enabled(self, enabled: bool) -> None:
-            """Enable or disable the chat input while MCP tools load.
-
-            Disabling prevents both typing and Enter, so no system message
-            or placeholder hack is needed — the status-bar spinner
-            communicates *why* the prompt is inert.
-            """
+            """Enable/disable the chat input while MCP tools load."""
             try:
                 prompt = self.query_one("#prompt", ChatTextArea)
             except Exception:
@@ -447,61 +422,24 @@ def run_textual_interactive(
                 prompt.focus()
 
         def _start_background_agent_load(self, workspace: str | None) -> None:
-            """Kick off ``load_agent`` in a worker thread.
-
-            A per-server progress widget is mounted just above the input
-            area so the user can see which MCP servers are resolving in
-            real time; the chat input itself is disabled until the agent
-            is ready.
-            """
-            # /new or /resume can re-enter this while a prior load is still
-            # in flight. Cancel the asyncio wrapper so its done-callback
-            # doesn't overwrite the fresh session's state — but the worker
-            # thread itself keeps running, so we also need `load_id` below
-            # to filter stale progress and completion callbacks.
-            prev = self._agent_task
-            if prev is not None and not prev.done():
-                prev.cancel()
-            self._agent_load_id += 1
-            load_id = self._agent_load_id
-
-            def _gated_progress(event: str, server: str, detail: str) -> None:
-                if load_id != self._agent_load_id:
-                    return
-                self._on_mcp_progress(event, server, detail)
-
-            self._agent = None
-            self._prime_mcp_progress()
+            self._progress_tracker.prime()
             self._set_prompt_enabled(False)
             self._mount_mcp_loader_widget()
-            self._agent_task = asyncio.create_task(
-                asyncio.to_thread(
-                    load_agent,
-                    workspace_dir=workspace,
-                    checkpointer=self._checkpointer,
-                    on_mcp_progress=_gated_progress,
-                )
-            )
-            self._agent_task.add_done_callback(
-                lambda task, lid=load_id: self._on_agent_loaded(task, lid)
+            self._agent_loader.start(
+                workspace_dir=workspace,
+                checkpointer=self._checkpointer,
             )
 
         def _mount_mcp_loader_widget(self) -> None:
-            """Mount a live progress widget at the top of ``#input-shell``.
-
-            No-op if there are no configured MCP servers (there's nothing
-            to show and we don't want the empty box).
-            """
-            if not self._mcp_progress:
+            if not self._progress_tracker.progress:
                 return
-            # Discard any stale instance from a previous /new or /resume.
             if self._mcp_loader_widget is not None:
                 try:
                     self._mcp_loader_widget.remove()
                 except Exception:
                     pass
                 self._mcp_loader_widget = None
-            widget = MCPLoaderWidget(list(self._mcp_progress.keys()))
+            widget = MCPLoaderWidget(list(self._progress_tracker.progress.keys()))
             try:
                 shell = self.query_one("#input-shell", Container)
                 children = list(shell.children)
@@ -514,39 +452,6 @@ def run_textual_interactive(
                 # from ``on_mount`` once the DOM is ready.
                 return
             self._mcp_loader_widget = widget
-
-        def _on_agent_loaded(self, task: asyncio.Task, load_id: int) -> None:
-            """Runs when the background load finishes (success or error)."""
-            # Ignore completions from a superseded load (`/new` or
-            # `/resume` bumped the generation mid-flight).
-            if load_id != self._agent_load_id:
-                return
-            if task.cancelled():
-                return
-            # Either path must settle the loader widget via
-            # `_finish_loader_widget` — otherwise an exception here leaves
-            # the spinner cycling indefinitely.
-            try:
-                self._agent = task.result()
-            except Exception as exc:
-                # Clear the failed task so a later `_await_agent_ready`
-                # (or /new, /resume) can retry instead of re-raising the
-                # same error forever.
-                self._agent = None
-                self._agent_task = None
-                self._append_system(f"Agent failed to load: {exc}", style="red")
-                self._finish_loader_widget()
-                self._set_prompt_enabled(True)
-                return
-            if _channels_is_running():
-                _ch_mod._cli_agent = self._agent
-                _ch_mod._cli_thread_id = self._conversation_tid
-            # Transition the widget to its "finished" view
-            # (auto-dismiss on success, keep errors visible on failure,
-            # drop immediately on cache hit).
-            self._finish_loader_widget()
-            self._set_prompt_enabled(True)
-            self._render_status()
 
         def _finish_loader_widget(self) -> None:
             """Call ``mark_finished`` and clear the ref if self-dismissed."""
@@ -561,27 +466,10 @@ def run_textual_interactive(
                 self._mcp_loader_widget = None
 
         async def _await_agent_ready(self) -> Any:
-            """Await the background agent load; idempotent."""
-            if self._agent is not None:
-                return self._agent
-            if self._agent_task is None:
-                # No background task running — fall back to a sync load on
-                # this task (shouldn't happen in normal flow).
-                self._agent = await asyncio.to_thread(
-                    load_agent,
-                    workspace_dir=self._workspace_dir,
-                    checkpointer=self._checkpointer,
-                    on_mcp_progress=self._on_mcp_progress,
-                )
-                return self._agent
-            try:
-                self._agent = await self._agent_task
-            except Exception:
-                # Drop the failed task so the next caller can retry.
-                self._agent = None
-                self._agent_task = None
-                raise
-            return self._agent
+            """Await the agent load, kicking one off if none is in flight."""
+            if self._agent_loader.task is None and self._agent_loader.agent is None:
+                self._start_background_agent_load(self._workspace_dir)
+            return await self._agent_loader.await_ready()
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -729,7 +617,7 @@ def run_textual_interactive(
             self.set_interval(1.0, self._render_status)
             # Kick off agent construction in the background so the TUI
             # appears instantly; MCP progress shows up in the status bar.
-            if self._agent is None and self._agent_task is None:
+            if self._agent_loader.agent is None and self._agent_loader.task is None:
                 self._start_background_agent_load(self._workspace_dir)
             refresh_task = asyncio.create_task(self._refresh_status_snapshot())
             self._background_tasks.add(refresh_task)
@@ -806,7 +694,7 @@ def run_textual_interactive(
                 cfg = load_config()
                 if cfg and cfg.channel_enabled and not _channels_is_running():
                     _auto_start_channel(
-                        self._agent,
+                        self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
                         send_thinking=self._channel_send_thinking,
@@ -1222,7 +1110,7 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     async for event in stream_agent_events(
-                        self._agent,
+                        self._agent_loader.agent,
                         _stream_input,
                         self._conversation_tid,
                         metadata=metadata,
@@ -2713,7 +2601,6 @@ def run_textual_interactive(
             # background; ``on_mount`` in the app kicks off the real
             # ``load_agent`` call and awaits it before the first turn.
             app = EvoTextualInteractiveApp(
-                agent=None,
                 thread_id_value=effective_thread_id,
                 workspace=effective_workspace,
                 checkpointer=checkpointer,
