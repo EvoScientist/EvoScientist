@@ -260,3 +260,62 @@ class TestModelCommandFailure:
         call_args = ui.append_system.call_args
         assert "Failed to switch model" in call_args[0][0]
         assert call_args[1]["style"] == "red"
+
+
+class TestModelCommandLoadAgentFailure:
+    """Verify the transactional ordering: when ``_load_agent`` raises,
+    nothing downstream (``set_chat_model``, ``cfg`` mutation,
+    ``set_config_value``) should happen.
+
+    This is the core guarantee of the refactor that established
+    "build agent first, commit state only on success". Without this test
+    the ordering could silently regress (e.g. if ``_apply_model`` were
+    reordered to call ``set_chat_model`` first)."""
+
+    def test_load_agent_error_is_transactional(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        cmd = ModelCommand()
+        ui = MagicMock()
+        ui.supports_interactive = True
+        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+
+        ctx = MagicMock()
+        ctx.ui = ui
+        ctx.workspace_dir = "/tmp/test"
+        ctx.checkpointer = MagicMock()
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=RuntimeError("agent build failed"),
+            ) as mock_load,
+            patch(
+                "EvoScientist.EvoScientist.set_chat_model",
+            ) as mock_set,
+            patch(
+                "EvoScientist.config.settings.set_config_value",
+            ) as mock_save,
+        ):
+            # Pass ``--save`` to strengthen the assertion: if the ordering
+            # ever regresses, ``set_config_value`` would be called with
+            # stale data.
+            _run(cmd.execute(ctx, ["claude-opus-4-6", "--save"]))
+
+        # _load_agent was attempted (transactional first step).
+        mock_load.assert_called_once()
+        # Downstream side-effects must NOT have happened.
+        mock_set.assert_not_called()
+        mock_save.assert_not_called()
+        # Config must be untouched.
+        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.provider == "anthropic"
+        # User sees a red error message.
+        ui.append_system.assert_called_once()
+        call_args = ui.append_system.call_args
+        assert "Failed to switch model" in call_args[0][0]
+        assert call_args[1]["style"] == "red"

@@ -449,7 +449,7 @@ def run_textual_interactive(
                 current_provider=current_provider,
             )
             await container.mount(picker)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             picker.focus()
 
             return await self._wait_for_model_pick(picker)
@@ -849,7 +849,7 @@ def run_textual_interactive(
                 try:
                     picker_widget.remove()
                 except Exception:
-                    pass
+                    _channel_logger.debug("model picker cleanup failed", exc_info=True)
                 self.query_one("#prompt", ChatTextArea).focus()
 
         def on_model_picker_widget_picked(self, event) -> None:  # type: ignore[override]

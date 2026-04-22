@@ -1080,96 +1080,34 @@ def cmd_interactive(
                             continue
 
                         if user_input.lower().startswith("/model"):
-                            arg = user_input[len("/model") :].strip()
-                            from ..commands.implementation.model import (
-                                extract_model_and_provider,
-                            )
-                            from ..EvoScientist import _ensure_config, set_chat_model
-                            from ..llm.models import list_models_by_provider
+                            from ..commands.base import CommandContext
+                            from ..commands.manager import manager as cmd_manager
+                            from ..EvoScientist import _ensure_config
+                            from .rich_command_ui import RichCLICommandUI
 
-                            cfg = _ensure_config()
-                            # Parse --save flag
-                            arg_parts = arg.split()
-                            save_flag = "--save" in arg_parts
-                            arg_parts = [a for a in arg_parts if a != "--save"]
-                            if arg_parts:
-                                try:
-                                    model_name, prov = extract_model_and_provider(
-                                        arg_parts
-                                    )
-                                except ValueError:
-                                    console.print(
-                                        f"[red]Unknown model '{arg_parts[0]}'. "
-                                        f"Use /model to list available models.[/red]"
-                                    )
-                                    continue
-                            else:
-                                # List available models
-                                entries = list_models_by_provider()
-                                table = Table(
-                                    title="Available Models",
-                                    show_header=True,
-                                    header_style="bold cyan",
+                            ctx = CommandContext(
+                                agent=state["agent"],
+                                thread_id=state["thread_id"],
+                                ui=RichCLICommandUI(console),
+                                workspace_dir=state["workspace_dir"],
+                                checkpointer=checkpointer,
+                            )
+                            await cmd_manager.execute(user_input, ctx)
+
+                            # Sync agent back if command replaced it (e.g. /model)
+                            if ctx.agent is not state["agent"]:
+                                state["agent"] = ctx.agent
+                                cfg = _ensure_config()
+                                model = cfg.model
+                                state["status_base_snapshot"] = (
+                                    make_empty_status_snapshot(model)
                                 )
-                                table.add_column("Name", style="bold")
-                                table.add_column("Provider", style="dim")
-                                for name, _mid, prov in entries:
-                                    marker = (
-                                        " *"
-                                        if name == cfg.model and prov == cfg.provider
-                                        else ""
-                                    )
-                                    table.add_row(f"{name}{marker}", prov)
-                                console.print(table)
-                                console.print(
-                                    "[dim]Usage: /model <name> [provider] [--save]  — provider is optional, auto-detected from model name[/dim]"
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True,
                                 )
-                                continue
-
-                            import copy as _copy
-
-                            # Build the agent first with a temp config to
-                            # avoid mutating global state on failure.
-                            temp_cfg = _copy.copy(cfg)
-                            temp_cfg.model = model_name
-                            temp_cfg.provider = prov
-                            try:
-                                new_agent = _load_agent(
-                                    workspace_dir=state["workspace_dir"],
-                                    checkpointer=checkpointer,
-                                    config=temp_cfg,
-                                )
-                            except Exception as e:
-                                console.print(f"[red]Failed to switch model: {e}[/red]")
-                                continue
-                            try:
-                                set_chat_model(model_name, provider=prov)
-                            except Exception as e:
-                                console.print(f"[red]Failed to switch model: {e}[/red]")
-                                continue
-                            # Commit — agent built and model set successfully.
-                            cfg.model = model_name
-                            cfg.provider = prov
-                            if save_flag:
-                                from ..config.settings import set_config_value
-
-                                set_config_value("model", model_name)
-                                set_config_value("provider", prov)
-                            model = model_name
-                            state["agent"] = new_agent
-                            if _channels_is_running():
-                                _ch_mod._cli_agent = state["agent"]
-                                _ch_mod._cli_thread_id = state["thread_id"]
-                            state["status_base_snapshot"] = make_empty_status_snapshot(
-                                model_name
-                            )
-                            await _refresh_status_snapshot(
-                                reset_streaming_text=True,
-                            )
-                            saved_note = " (saved to config)" if save_flag else ""
-                            console.print(
-                                f"[green]Switched to {model_name} ({prov}){saved_note}[/green]"
-                            )
+                                if _channels_is_running():
+                                    _ch_mod._cli_agent = state["agent"]
+                                    _ch_mod._cli_thread_id = state["thread_id"]
                             continue
 
                         # Resolve @file mentions — inject file contents inline
