@@ -400,30 +400,14 @@ def run_textual_interactive(
                 _ch_mod._cli_agent = agent
                 _ch_mod._cli_thread_id = self._conversation_tid
             self._finish_loader_widget()
-            self._set_prompt_enabled(True)
             self._render_status()
 
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
             self._finish_loader_widget()
-            self._set_prompt_enabled(True)
-
-        def _agent_load_pending(self) -> bool:
-            return self._agent_loader.is_pending
-
-        def _set_prompt_enabled(self, enabled: bool) -> None:
-            """Enable/disable the chat input while MCP tools load."""
-            try:
-                prompt = self.query_one("#prompt", ChatTextArea)
-            except Exception:
-                return
-            prompt.disabled = not enabled
-            if enabled:
-                prompt.focus()
 
         def _start_background_agent_load(self, workspace: str | None) -> None:
             self._progress_tracker.prime()
-            self._set_prompt_enabled(False)
             self._mount_mcp_loader_widget()
             self._agent_loader.start(
                 workspace_dir=workspace,
@@ -1856,12 +1840,8 @@ def run_textual_interactive(
                 await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
                 if prompt_widget is not None:
-                    # `/new` / `/resume` from the channel handler can
-                    # have kicked off a fresh agent load — keep the
-                    # prompt disabled until that load settles.
-                    prompt_widget.disabled = self._agent_load_pending()
-                    if not prompt_widget.disabled:
-                        prompt_widget.focus()
+                    prompt_widget.disabled = False
+                    prompt_widget.focus()
 
         # ── Clipboard (copy on mouse select) ─────────────────
 
@@ -2230,11 +2210,8 @@ def run_textual_interactive(
                 self._render_status()
             finally:
                 self._busy = False
-                # `/new` / `/resume` spin up a fresh background load;
-                # don't re-enable the prompt mid-load.
-                prompt_widget.disabled = self._agent_load_pending()
-                if not prompt_widget.disabled:
-                    prompt_widget.focus()
+                prompt_widget.disabled = False
+                prompt_widget.focus()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
