@@ -393,15 +393,11 @@ def run_textual_interactive(
             if event not in {"start", "success", "error"}:
                 return
             try:
-                self.call_from_thread(
-                    self._apply_mcp_progress, event, server, detail
-                )
+                self.call_from_thread(self._apply_mcp_progress, event, server, detail)
             except Exception:
                 pass
 
-        def _apply_mcp_progress(
-            self, event: str, server: str, detail: str
-        ) -> None:
+        def _apply_mcp_progress(self, event: str, server: str, detail: str) -> None:
             """Apply a progress event on the Textual thread."""
             if event == "start":
                 self._mcp_progress.setdefault(server, ("pending", ""))
