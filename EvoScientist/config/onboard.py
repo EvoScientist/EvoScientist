@@ -2210,9 +2210,9 @@ def _install_ccproxy() -> bool:
         True if installation succeeded and ccproxy is available.
     """
     from ..ccproxy_manager import is_ccproxy_available
-    from ..mcp.registry import install_pip_package
+    from ..mcp.registry import install_library
 
-    ok = install_pip_package("evoscientist[oauth]")
+    ok = install_library("evoscientist[oauth]")
     if not ok:
         console.print("  [red]✗ Installation failed.[/red]")
         return False
@@ -2456,7 +2456,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         updates["imessage_enabled"] = False
         return updates
 
-    from ..mcp.registry import install_pip_package, pip_install_hint
+    from ..mcp.registry import install_library, pip_install_hint
 
     # Build a lookup for channel definitions
     _ch_lookup = {
@@ -2495,9 +2495,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 if install_now:
                     console.print(f"  [dim]Installing {_pkg_display}...[/dim]")
                     if _pip_pkgs:
-                        _ok = all(install_pip_package(p) for p in _pip_pkgs)
+                        _ok = all(install_library(p) for p in _pip_pkgs)
                     else:
-                        _ok = install_pip_package(f"evoscientist[{pip_extra}]")
+                        _ok = install_library(f"evoscientist[{pip_extra}]")
                     if _ok:
                         # Verify the import actually works now
                         try:
@@ -2603,7 +2603,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         raise KeyboardInterrupt() from None
                     if install_sdk:
                         console.print('  [dim]Installing "lark-oapi"...[/dim]')
-                        if install_pip_package("lark-oapi>=1.4.0"):
+                        if install_library("lark-oapi>=1.4.0"):
                             console.print("  [green]✓ Installed successfully.[/green]")
                         else:
                             console.print("  [red]✗ Installation failed.[/red]")

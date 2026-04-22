@@ -24,11 +24,11 @@ from ..commands import CommandContext
 from ..commands import manager as cmd_manager
 from ..paths import DATA_DIR
 from ..sessions import (
-    find_similar_threads,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
+    resolve_thread_id_prefix,
     thread_exists,
 )
 from ..stream.events import stream_agent_events
@@ -553,7 +553,7 @@ def run_textual_interactive(
                 title=title,
             )
             await container.mount(picker)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             picker.focus()
 
             return await self._wait_for_thread_pick(picker)
@@ -570,7 +570,7 @@ def run_textual_interactive(
                 pre_filter_tag=pre_filter_tag,
             )
             await container.mount(browser)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             browser.focus()
 
             return await self._wait_for_skill_browse(browser)
@@ -587,7 +587,7 @@ def run_textual_interactive(
                 pre_filter_tag=pre_filter_tag,
             )
             await container.mount(browser)
-            container.scroll_end(animate=False)
+            self._schedule_scroll_to_bottom(container, delays=())
             browser.focus()
 
             return await self._wait_for_mcp_browse(browser)
@@ -771,6 +771,32 @@ def run_textual_interactive(
             )
 
         # ── Widget helpers ─────────────────────────────────────
+
+        def _schedule_scroll_to_bottom(
+            self,
+            container: VerticalScroll,
+            *,
+            delays: tuple[float, ...] = (0.3, 0.8),
+            immediate: bool = True,
+        ) -> None:
+            """Schedule deferred scrolls so the viewport lands at the bottom.
+
+            Markdown- and list-heavy widgets lay out across multiple refresh
+            cycles, so a single ``scroll_end()`` may fire against a stale
+            ``virtual_size`` and leave the viewport mid-content. Re-schedule
+            ``scroll_end`` at each delay to follow subsequent reflows.
+            """
+            if immediate:
+                self.call_after_refresh(
+                    lambda: container.scroll_end(animate=False),
+                )
+            for delay in delays:
+                self.set_timer(
+                    delay,
+                    lambda: self.call_after_refresh(
+                        lambda: container.scroll_end(animate=False),
+                    ),
+                )
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1568,17 +1594,11 @@ def run_textual_interactive(
                                     clean or state.response_text
                                 )
                                 await container.mount(assistant_w)
-                                # Markdown rendering is async and needs multiple
-                                # layout cycles to compute final height.  Schedule
-                                # repeated deferred scrolls so long content stays
-                                # visible even when Markdown takes time to lay out.
-                                for delay in (0.15, 0.4, 0.8, 1.5):
-                                    self.set_timer(
-                                        delay,
-                                        lambda: self.call_after_refresh(
-                                            lambda: container.scroll_end(animate=False),
-                                        ),
-                                    )
+                                self._schedule_scroll_to_bottom(
+                                    container,
+                                    delays=(0.15, 0.4, 0.8, 1.5),
+                                    immediate=False,
+                                )
                             # Mount token usage stats
                             if state.total_input_tokens or state.total_output_tokens:
                                 await container.mount(
@@ -1661,18 +1681,7 @@ def run_textual_interactive(
                     ):
                         on_thinking_cb(state.thinking_text.rstrip())
                     # Final scrolls to ensure last content is visible.
-                    # Markdown layout is async — schedule multiple deferred
-                    # scrolls so long content eventually scrolls into view.
-                    self.call_after_refresh(
-                        lambda: container.scroll_end(animate=False),
-                    )
-                    for delay in (0.3, 0.8):
-                        self.set_timer(
-                            delay,
-                            lambda: self.call_after_refresh(
-                                lambda: container.scroll_end(animate=False),
-                            ),
-                        )
+                    self._schedule_scroll_to_bottom(container)
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if state.pending_interrupt is None and state.pending_ask_user is None:
@@ -2332,7 +2341,12 @@ def run_textual_interactive(
             await container.mount(
                 SystemMessage("── End of history ──", msg_style="dim")
             )
-            container.scroll_end(animate=False)
+            # History can hold dozens of Markdown-heavy AssistantMessages
+            # whose async layout keeps growing virtual_size for several
+            # seconds; schedule enough retries to catch the final reflow.
+            self._schedule_scroll_to_bottom(
+                container, delays=(0.1, 0.3, 0.6, 1.0, 1.8, 3.0)
+            )
 
         # ── Quit handling ──────────────────────────────────────
 
@@ -2585,15 +2599,11 @@ def run_textual_interactive(
     async def _amain() -> None:
         async with get_checkpointer() as checkpointer:
             effective_workspace = workspace_dir
-            effective_thread_id = thread_id
+            effective_thread_id: str | None = None
             resumed = False
             resume_warning = ""
             if thread_id:
-                if await thread_exists(thread_id):
-                    resolved = thread_id
-                else:
-                    similar = await find_similar_threads(thread_id)
-                    resolved = similar[0] if len(similar) == 1 else None
+                resolved, matches = await resolve_thread_id_prefix(thread_id)
                 if resolved:
                     meta = await get_thread_metadata(resolved)
                     ws = (meta or {}).get("workspace_dir", "")
@@ -2601,6 +2611,11 @@ def run_textual_interactive(
                         effective_workspace = ws
                     effective_thread_id = resolved
                     resumed = True
+                elif matches:
+                    resume_warning = (
+                        f"Thread prefix '{thread_id}' is ambiguous "
+                        f"({', '.join(matches)}). Starting new session."
+                    )
                 else:
                     resume_warning = (
                         f"Thread '{thread_id}' not found. Starting new session."
@@ -2620,7 +2635,29 @@ def run_textual_interactive(
                 resumed=resumed,
                 resume_warning=resume_warning,
             )
-            await app.run_async()
+            try:
+                await app.run_async()
+            finally:
+                from .resume_hint import print_resume_hint
+
+                # Best-effort resume hint — guarded so failures here (e.g.
+                # DB teardown race during abnormal shutdown) cannot shadow
+                # the original run_async traceback.
+                exit_tid = getattr(app, "_conversation_tid", None)
+                hint_tid: str | None = None
+                if exit_tid:
+                    try:
+                        if await thread_exists(exit_tid):
+                            hint_tid = exit_tid
+                    except Exception:
+                        _channel_logger.debug(
+                            "resume-hint thread_exists lookup failed",
+                            exc_info=True,
+                        )
+                try:
+                    print_resume_hint(hint_tid)
+                except Exception:
+                    _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
     import nest_asyncio  # type: ignore[import-untyped]
 

@@ -39,6 +39,26 @@ _URL_TRANSPORTS = {"http", "streamable_http", "sse", "websocket"}
 # still parallelizing the common 3–7 server case to completion.
 _MAX_CONCURRENT_CONNECTIONS = 8
 
+# Env vars forwarded to stdio MCP subprocesses on top of the MCP SDK's
+# minimal default set (HOME/PATH/USER/…). Without this, servers behind
+# a proxy or with a custom CA bundle silently fail with long timeouts.
+# User-provided ``env`` still wins via dict merge.
+_STDIO_FORWARDED_ENV_VARS = (
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+)
+
 
 def _get_mcp_config_dir() -> Path:
     """Get the MCP configuration directory, respecting XDG_CONFIG_HOME."""
@@ -533,8 +553,13 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "command": _resolve_command(server.get("command", "")),
                 "args": server.get("args", []),
             }
-            if "env" in server:
-                conn["env"] = server["env"]
+            forwarded = {
+                k: os.environ[k] for k in _STDIO_FORWARDED_ENV_VARS if k in os.environ
+            }
+            user_env = server.get("env") or {}
+            merged = {**forwarded, **user_env}
+            if merged:
+                conn["env"] = merged
             connections[name] = conn
 
         elif transport in _URL_TRANSPORTS:

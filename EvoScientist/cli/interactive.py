@@ -34,12 +34,12 @@ import EvoScientist.cli.channel as _ch_mod
 from ..sessions import (
     _format_relative_time,
     delete_thread,
-    find_similar_threads,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
     list_threads,
+    resolve_thread_id_prefix,
     thread_exists,
 )
 from ..stream.console import console
@@ -552,16 +552,14 @@ def cmd_interactive(
 
     async def _resolve_thread_id(tid: str) -> str | None:
         """Resolve a (possibly partial) thread ID. Returns full ID or None."""
-        if await thread_exists(tid):
-            return tid
-        similar = await find_similar_threads(tid)
-        if len(similar) == 1:
-            return similar[0]
-        if len(similar) > 1:
+        resolved, matches = await resolve_thread_id_prefix(tid)
+        if resolved:
+            return resolved
+        if matches:
             console.print(
                 f"[yellow]Ambiguous thread ID '{escape(tid)}'. Matches:[/yellow]"
             )
-            for s in similar:
+            for s in matches:
                 console.print(f"  [cyan]{s}[/cyan]")
             return None
         console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
@@ -799,6 +797,12 @@ def cmd_interactive(
                     state["status_last_input_tokens"] = None
                     if ws:
                         state["workspace_dir"] = ws
+                else:
+                    # Resolution failed (ambiguous/not-found); the user's raw
+                    # input is still seeded in state["thread_id"] from init.
+                    # Replace with a fresh ID so a new session isn't
+                    # checkpointed under the bad prefix.
+                    state["thread_id"] = generate_thread_id()
 
             # Kick off agent construction (MCP tool enumeration is the
             # slow part) in the background so the banner and prompt can
@@ -821,6 +825,7 @@ def cmd_interactive(
                 console.print(
                     f"[green]Resumed session [yellow]{state['thread_id']}[/yellow][/green]\n"
                 )
+                await _render_history(state["thread_id"])
             else:
                 print_banner(
                     state["thread_id"],
@@ -1067,7 +1072,6 @@ def cmd_interactive(
 
                         # Special commands
                         if user_input.lower() in ("/exit", "/quit", "/q"):
-                            console.print("[dim]Goodbye![/dim]")
                             state["running"] = False
                             break
 
@@ -1119,9 +1123,6 @@ def cmd_interactive(
                                 console.print(
                                     f"[dim]Memory dir:[/dim] [cyan]{_shorten_path(memory_dir)}[/cyan]"
                                 )
-                            console.print(
-                                f"[dim]UI:[/dim] [cyan]{state['ui_backend']}[/cyan]"
-                            )
                             console.print()
                             continue
 
@@ -1232,12 +1233,12 @@ def cmd_interactive(
                         _print_separator()
 
                     except KeyboardInterrupt:
-                        console.print("\n[dim]Goodbye![/dim]")
+                        console.print()
                         state["running"] = False
                         break
                     except EOFError:
                         # Handle Ctrl+D
-                        console.print("\n[dim]Goodbye![/dim]")
+                        console.print()
                         state["running"] = False
                         break
                     except Exception as e:
@@ -1260,12 +1261,31 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
+                # Best-effort: guard so a DB lookup failure here can't
+                # shadow the original exception exiting _async_main_loop.
+                current_tid = state.get("thread_id")
+                if current_tid:
+                    try:
+                        if await thread_exists(current_tid):
+                            state["resume_hint_thread_id"] = current_tid
+                    except Exception:
+                        _channel_logger.debug(
+                            "resume-hint thread_exists lookup failed",
+                            exc_info=True,
+                        )
 
     # Run the async main loop
+    from .resume_hint import print_resume_hint
+
     try:
         asyncio.run(_async_main_loop())
     except KeyboardInterrupt:
-        console.print("\n[dim]Goodbye![/dim]")
+        console.print()
+    finally:
+        try:
+            print_resume_hint(state.get("resume_hint_thread_id"), console=console)
+        except Exception:
+            _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
 
 def cmd_run(
