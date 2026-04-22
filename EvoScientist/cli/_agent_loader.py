@@ -7,8 +7,11 @@ rendering and thread-hopping plug in via callbacks.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 ProgressEvent = str  # "start" | "success" | "error"
 ProgressState = str  # "pending" | "ok" | "error"
@@ -127,8 +130,12 @@ class BackgroundAgentLoader:
         def _gated_progress(event: str, server: str, detail: str) -> None:
             if load_id != self._load_id:
                 return
-            if self._on_progress is not None:
+            if self._on_progress is None:
+                return
+            try:
                 self._on_progress(event, server, detail)
+            except Exception:
+                _logger.debug("MCP progress callback raised", exc_info=True)
 
         self._task = asyncio.create_task(
             asyncio.to_thread(

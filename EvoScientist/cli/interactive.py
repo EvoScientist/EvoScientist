@@ -887,14 +887,14 @@ def cmd_interactive(
                     return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
 
                 try:
-                    await _await_agent_ready()
+                    ready_agent = await _await_agent_ready()
                     meta = build_metadata(state["workspace_dir"], model)
                     await _refresh_status_snapshot(
                         msg.content, reset_streaming_text=True
                     )
                     response = run_streaming(
                         ui_backend=state["ui_backend"],
-                        agent=agent_loader.agent,
+                        agent=ready_agent,
                         message=msg.content,
                         thread_id=state["thread_id"],
                         show_thinking=show_thinking,
@@ -1210,14 +1210,14 @@ def cmd_interactive(
                         for w in file_warnings:
                             console.print(f"[yellow]⚠ {escape(w)}[/yellow]")
                         console.print()
-                        await _await_agent_ready()
+                        ready_agent = await _await_agent_ready()
                         meta = build_metadata(state["workspace_dir"], model)
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
                         run_streaming(
                             ui_backend=state["ui_backend"],
-                            agent=agent_loader.agent,
+                            agent=ready_agent,
                             message=message_to_send,
                             thread_id=state["thread_id"],
                             show_thinking=show_thinking,

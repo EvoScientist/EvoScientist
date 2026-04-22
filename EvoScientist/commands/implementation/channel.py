@@ -13,6 +13,7 @@ class ChannelCommand(Command):
 
     name = "/channel"
     description = "Configure messaging channels"
+    requires_agent = True
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         import EvoScientist.cli.channel as _ch_mod

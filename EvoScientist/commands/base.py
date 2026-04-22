@@ -73,6 +73,11 @@ class Command(ABC):
     alias: ClassVar[list[str]] = []
     description: str
     arguments: ClassVar[list[Argument]] = []
+    # When False, callers may dispatch this command without waiting for
+    # the background agent load to finish — important so recovery
+    # commands like ``/mcp add`` can run even when the MCP load is
+    # failing and ``_await_agent_ready`` would hang.
+    requires_agent: ClassVar[bool] = False
 
     @abstractmethod
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

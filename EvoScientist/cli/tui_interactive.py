@@ -1738,13 +1738,6 @@ def run_textual_interactive(
                 self._busy = True
                 await self._refresh_status_snapshot(msg.content)
                 self._render_status()
-                try:
-                    await self._await_agent_ready()
-                except Exception as exc:
-                    # Without `_set_channel_response` the channel request
-                    # hangs; ``_on_agent_load_failure`` reports locally.
-                    _set_channel_response(msg.msg_id, f"Error: {exc}")
-                    return
 
                 prompt_widget = self.query_one("#prompt", ChatTextArea)
                 prompt_widget.disabled = True
@@ -1830,7 +1823,17 @@ def run_textual_interactive(
 
                 # Handle slash commands from channel
                 if msg.content.strip().startswith("/"):
-                    agent = await self._await_agent_ready()
+                    # Only wait for the agent if the command actually
+                    # needs it — otherwise ``/mcp add`` & friends would
+                    # hang behind a failing MCP load they're meant to fix.
+                    cmd = cmd_manager.resolve(msg.content)
+                    agent = None
+                    if cmd is not None and cmd.requires_agent:
+                        try:
+                            agent = await self._await_agent_ready()
+                        except Exception as exc:
+                            _set_channel_response(msg.msg_id, f"Error: {exc}")
+                            return
                     ctx = CommandContext(
                         agent=agent,
                         thread_id=self._conversation_tid,
@@ -1864,6 +1867,14 @@ def run_textual_interactive(
                             msg.msg_id, f"Command executed: {msg.content}"
                         )
                         return  # outer finally handles _busy / widget cleanup
+
+                # Non-slash message — streams through the agent, so wait
+                # for readiness now.
+                try:
+                    await self._await_agent_ready()
+                except Exception as exc:
+                    _set_channel_response(msg.msg_id, f"Error: {exc}")
+                    return
 
                 response = ""
                 try:
@@ -2251,11 +2262,17 @@ def run_textual_interactive(
             self._render_status()
 
             try:
-                try:
-                    agent = await self._await_agent_ready()
-                except Exception:
-                    # ``_on_agent_load_failure`` already surfaced the error.
-                    return
+                # Only gate on agent readiness for commands that need it —
+                # recovery commands like ``/mcp add`` must run even when
+                # ``_await_agent_ready`` would hang on a broken MCP load.
+                cmd = cmd_manager.resolve(command)
+                agent = None
+                if cmd is not None and cmd.requires_agent:
+                    try:
+                        agent = await self._await_agent_ready()
+                    except Exception:
+                        # ``_on_agent_load_failure`` already surfaced the error.
+                        return
                 ctx = CommandContext(
                     agent=agent,
                     thread_id=self._conversation_tid,

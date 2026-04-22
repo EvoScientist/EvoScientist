@@ -14,6 +14,7 @@ class CompactCommand(Command):
 
     name = "/compact"
     description = "Compact conversation to free context"
+    requires_agent = True
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...cli.commands import (

@@ -27,6 +27,24 @@ class CommandManager:
         """Lookup a command by name."""
         return self._commands.get(name.lower())
 
+    def resolve(self, command_str: str) -> Command | None:
+        """Return the command that ``command_str`` would dispatch to.
+
+        Uses the same parsing as :meth:`execute` so callers can inspect
+        command metadata (e.g. ``requires_agent``) without re-implementing
+        ``shlex`` quirks.
+        """
+        command_str = command_str.strip()
+        if not command_str:
+            return None
+        try:
+            parts = shlex.split(command_str)
+        except ValueError:
+            parts = command_str.split()
+        if not parts:
+            return None
+        return self.get_command(parts[0])
+
     def list_commands(self) -> list[tuple[str, str]]:
         """List all registered command names and descriptions."""
         seen = set()
