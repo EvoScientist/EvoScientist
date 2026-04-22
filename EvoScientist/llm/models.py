@@ -461,6 +461,22 @@ def list_models() -> list[str]:
     return result
 
 
+def list_models_by_provider() -> list[tuple[str, str, str]]:
+    """List all unique (short_name, model_id, provider) entries.
+
+    Returns:
+        De-duplicated list of model entries preserving registry order.
+    """
+    seen: set[tuple[str, str]] = set()
+    result: list[tuple[str, str, str]] = []
+    for name, model_id, provider in _MODEL_ENTRIES:
+        key = (name, provider)
+        if key not in seen:
+            seen.add(key)
+            result.append((name, model_id, provider))
+    return result
+
+
 def get_model_info(model: str) -> tuple[str, str] | None:
     """Get the (model_id, provider) tuple for a short name.
 

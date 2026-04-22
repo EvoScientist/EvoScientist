@@ -86,6 +86,19 @@ def _ensure_chat_model():
     return _chat_model
 
 
+def set_chat_model(model: str, provider: str | None = None):
+    """Replace the cached chat model with a new one.
+
+    Called by ``/model`` to switch the LLM mid-session.
+    Returns the new chat model instance.
+    """
+    global _chat_model
+    from .llm import get_chat_model
+
+    _chat_model = get_chat_model(model=model, provider=provider)
+    return _chat_model
+
+
 # =============================================================================
 # MCP caching
 # =============================================================================
