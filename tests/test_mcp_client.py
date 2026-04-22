@@ -1313,8 +1313,7 @@ class TestLoadToolsProgressCallback:
         monkeypatch.setattr(mcp_client, "_MAX_CONCURRENT_CONNECTIONS", 3)
 
         config = {
-            f"srv{i}": {"transport": "stdio", "command": "demo"}
-            for i in range(10)
+            f"srv{i}": {"transport": "stdio", "command": "demo"} for i in range(10)
         }
         asyncio.run(mcp_client._load_tools(config))
 

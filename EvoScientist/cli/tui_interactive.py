@@ -378,13 +378,11 @@ def run_textual_interactive(
                 from ..mcp import load_mcp_config
 
                 cfg = load_mcp_config() or {}
-                self._mcp_progress = {name: ("pending", "") for name in cfg}
+                self._mcp_progress = dict.fromkeys(cfg, ("pending", ""))
             except Exception:
                 self._mcp_progress = {}
 
-        def _on_mcp_progress(
-            self, event: str, server: str, detail: str
-        ) -> None:
+        def _on_mcp_progress(self, event: str, server: str, detail: str) -> None:
             """Record progress from the MCP loader (worker thread).
 
             Called from an ``asyncio.to_thread`` worker, so we hop back
@@ -480,9 +478,9 @@ def run_textual_interactive(
 
         def _on_agent_loaded(self, task: asyncio.Task) -> None:
             """Runs when the background load finishes (success or error)."""
-            # Either path must settle the loader widget — otherwise an
-            # exception here leaves the spinner cycling indefinitely.
-            widget = self._mcp_loader_widget
+            # Either path must settle the loader widget via
+            # ``_finish_loader_widget`` — otherwise an exception here leaves
+            # the spinner cycling indefinitely.
             try:
                 self._agent = task.result()
             except Exception as exc:
@@ -706,6 +704,7 @@ def run_textual_interactive(
             self.run_worker(
                 self._check_for_updates, exclusive=True, group="update-check"
             )
+
             # Auto-start channels — needs the agent, so defer to after load
             async def _deferred_start_channels():
                 await self._await_agent_ready()

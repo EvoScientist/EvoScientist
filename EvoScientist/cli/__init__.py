@@ -14,9 +14,9 @@ from ._app import app
 __all__ = [
     "DEFAULT_UI_BACKEND",
     "SUPPORTED_UI_BACKENDS",
+    "WELCOME_SLOGANS",
     "StreamState",
     "SubAgentState",
-    "WELCOME_SLOGANS",
     "_build_todo_stats",
     "_channels_is_running",
     "_channels_stop",

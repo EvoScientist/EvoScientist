@@ -45,9 +45,9 @@ class MCPLoaderWidget(Static):
 
     def __init__(self, servers: list[str]) -> None:
         # server_name -> (state, detail); state ∈ {"pending","ok","error"}.
-        self._progress: dict[str, tuple[str, str]] = {
-            name: ("pending", "") for name in servers
-        }
+        self._progress: dict[str, tuple[str, str]] = dict.fromkeys(
+            servers, ("pending", "")
+        )
         self._frame = 0
         self._tick_handle = None
         self._finished = False
@@ -99,9 +99,7 @@ class MCPLoaderWidget(Static):
         if self._finished:
             return
         self._finished = True
-        progressed = any(
-            state != "pending" for state, _ in self._progress.values()
-        )
+        progressed = any(state != "pending" for state, _ in self._progress.values())
         if not progressed:
             self._dismiss()
             return
@@ -141,17 +139,13 @@ class MCPLoaderWidget(Static):
 
     def _build_renderable(self) -> Text:
         spinner = SPINNER_FRAMES[self._frame]
-        pending = sum(
-            1 for state, _ in self._progress.values() if state == "pending"
-        )
+        pending = sum(1 for state, _ in self._progress.values() if state == "pending")
         total = len(self._progress)
         done = total - pending
 
         header = Text()
         if self._finished:
-            errors = sum(
-                1 for state, _ in self._progress.values() if state == "error"
-            )
+            errors = sum(1 for state, _ in self._progress.values() if state == "error")
             if errors:
                 header.append("✗ MCP ", style=f"{_BAD} bold")
                 header.append(

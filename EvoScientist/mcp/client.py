@@ -694,13 +694,9 @@ async def _load_tools(
                 # user-facing display; downgrade the logger so we don't
                 # double-print.
                 if on_progress is None:
-                    logger.warning(
-                        "MCP server %r: failed to load tools: %s", name, exc
-                    )
+                    logger.warning("MCP server %r: failed to load tools: %s", name, exc)
                 else:
-                    logger.debug(
-                        "MCP server %r: failed to load tools: %s", name, exc
-                    )
+                    logger.debug("MCP server %r: failed to load tools: %s", name, exc)
                 _report("error", name, str(exc))
                 return name, []
 

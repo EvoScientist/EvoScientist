@@ -85,6 +85,9 @@ from .tui_runtime import resolve_ui_backend, run_streaming
 
 _channel_logger = logging.getLogger(__name__)
 
+# Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
 
 # =============================================================================
 # Banner
@@ -356,7 +359,7 @@ def cmd_interactive(
             from ..mcp import load_mcp_config
 
             cfg = load_mcp_config() or {}
-            state["mcp_progress"] = {name: ("pending", "") for name in cfg}
+            state["mcp_progress"] = dict.fromkeys(cfg, ("pending", ""))
         except Exception:
             state["mcp_progress"] = {}
 
@@ -1002,7 +1005,11 @@ def cmd_interactive(
                             send_thinking=channel_send_thinking,
                         )
 
-                asyncio.create_task(_deferred_auto_start_channel(_channel_cfg))
+                _auto_start_task = asyncio.create_task(
+                    _deferred_auto_start_channel(_channel_cfg)
+                )
+                _background_tasks.add(_auto_start_task)
+                _auto_start_task.add_done_callback(_background_tasks.discard)
 
             # Update check — non-blocking, runs in background thread
             import concurrent.futures

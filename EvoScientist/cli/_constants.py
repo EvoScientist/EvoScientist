@@ -10,6 +10,7 @@ def _agent_name() -> str:
 
     return AGENT_NAME
 
+
 WELCOME_SLOGANS = [
     "Ready for vibe research? What do you want cooking?",
     "Science doesn't sleep. Neither do your sub-agents.",
