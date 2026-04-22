@@ -7,8 +7,9 @@ per-server states transition smoothly from pending → ok/error.
 When the load finishes:
 - All-success runs auto-dismiss after a short grace period so the chat
   area isn't permanently crowded.
-- Any failures keep the widget mounted (with final states only) so the
-  user can read what went wrong; they can scroll past it.
+- Failures stick around longer so the user has time to read the error
+  detail, then auto-dismiss — otherwise the widget pins itself above
+  the input forever.
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ _GOOD = "#5fcf8b"
 _WARN = "#d7b45a"
 _BAD = "#d86f6f"
 
-# How long to wait after an all-success load before auto-dismissing the widget.
+# How long to wait after an all-success load before auto-dismissing.
 _AUTO_DISMISS_SECONDS = 2.5
+# Longer grace on failure so the user has time to read error detail.
+_AUTO_DISMISS_ON_ERROR_SECONDS = 12.0
 
 
 class MCPLoaderWidget(Static):
@@ -91,10 +94,9 @@ class MCPLoaderWidget(Static):
         from cache (no events emitted) — drop the widget immediately
         instead of flashing a misleading "0/N loaded" header.
 
-        If any server succeeded and none failed, schedule an auto-dismiss
-        so the chat area isn't cluttered by a permanent success box.
-        Otherwise keep the widget up so the user can see which servers
-        failed.
+        Otherwise schedule an auto-dismiss: short on full success so the
+        chat area isn't cluttered, longer on failure so the user has
+        time to read the error detail before it goes away.
         """
         if self._finished:
             return
@@ -104,8 +106,8 @@ class MCPLoaderWidget(Static):
             self._dismiss()
             return
         has_errors = any(state == "error" for state, _ in self._progress.values())
-        if not has_errors:
-            self._auto_dismiss_at = time.monotonic() + _AUTO_DISMISS_SECONDS
+        delay = _AUTO_DISMISS_ON_ERROR_SECONDS if has_errors else _AUTO_DISMISS_SECONDS
+        self._auto_dismiss_at = time.monotonic() + delay
         self._refresh_content()
 
     # ── Internal ─────────────────────────────────────────────────────
