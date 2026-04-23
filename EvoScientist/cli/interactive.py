@@ -145,25 +145,6 @@ def print_banner(
 # Slash-command completer
 # =============================================================================
 
-_SLASH_COMMANDS = [
-    ("/current", "Show current session info"),
-    ("/threads", "List recent sessions"),
-    ("/resume", "Resume a previous session (prefix match)"),
-    ("/delete", "Delete a saved session"),
-    ("/new", "Start a new session"),
-    ("/skills", "List installed skills"),
-    ("/install-skill", "Add a skill from path or GitHub"),
-    ("/uninstall-skill", "Remove an installed skill"),
-    ("/evoskills", "Browse and install EvoSkills (optional: /evoskills <tag>)"),
-    ("/mcp", "Manage MCP servers"),
-    ("/channel", "Configure messaging channels"),
-    ("/compact", "Compact conversation to free context"),
-    ("/clear", "Clear the screen"),
-    ("/model", "Switch model (--save to persist)"),
-    ("/help", "Show available commands"),
-    ("/exit", "Quit EvoScientist"),
-]
-
 _COMPLETION_STYLE = PtStyle.from_dict(
     {
         "completion-menu": "bg:default noreverse nounderline noitalic",
@@ -218,7 +199,9 @@ class SlashCommandCompleter(Completer):
         # Slash command completion
         if not text.startswith("/"):
             return
-        for cmd, desc in _SLASH_COMMANDS:
+        # ``list_commands`` is dedup'd on the Command instance so aliases
+        # (e.g. /quit, /q for /exit) don't appear as separate rows.
+        for cmd, desc in sorted(cmd_manager.list_commands()):
             if cmd.startswith(text):
                 yield Completion(
                     cmd,
@@ -1023,6 +1006,20 @@ def cmd_interactive(
                                 await _refresh_status_snapshot(
                                     reset_streaming_text=True,
                                 )
+                            continue
+
+                        # Unknown slash command (typo) — short-circuit so
+                        # it doesn't get forwarded to the agent, which
+                        # would waste tokens interpreting the nonsense.
+                        if user_input.lstrip().startswith("/"):
+                            bad_cmd = user_input.split(None, 1)[0]
+                            console.print(
+                                f"[red]Unknown command:[/red] {escape(bad_cmd)}"
+                            )
+                            console.print(
+                                "[dim]Type /help to see available commands.[/dim]"
+                            )
+                            console.print()
                             continue
 
                         # Resolve @file mentions — inject file contents inline
