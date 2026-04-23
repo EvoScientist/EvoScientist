@@ -176,46 +176,81 @@ class TestPhaseAMigrated:
         ui.update_status_after_compact(500)
         console.print.assert_not_called()
 
-    def test_wait_for_thread_pick_returns_none(self):
-        ui, _ = _make_ui()
-        threads = [
-            {
-                "thread_id": "abc123",
-                "preview": "hello",
-                "message_count": 3,
-                "model": "claude",
-                "updated_at": "2026-04-22T10:00:00Z",
-            },
-        ]
-        result = _run(ui.wait_for_thread_pick(threads, "abc123", "Select thread"))
-        assert result is None
 
-    def test_wait_for_thread_pick_prints_table_with_current_marker(self):
-        ui, console = _make_ui()
-        threads = [
+class TestWaitForThreadPick:
+    """Phase B questionary picker — ported from the pre-migration
+    ``_cmd_resume`` implementation in ``interactive.py``."""
+
+    def _fake_prompt(self, selected):
+        """Build a stub matching ``questionary.select(...)`` return."""
+        prompt = MagicMock()
+        prompt.ask.return_value = selected
+        prompt.application.layout.find_all_windows.return_value = []
+        return prompt
+
+    def _threads(self):
+        return [
             {
                 "thread_id": "abc123",
                 "preview": "hello",
                 "message_count": 3,
                 "model": "claude",
                 "updated_at": None,
+                "workspace_dir": "/w",
             },
             {
                 "thread_id": "def456",
-                "preview": "",
+                "preview": "x" * 60,  # triggers truncation path
                 "message_count": 0,
                 "model": None,
                 "updated_at": None,
+                "workspace_dir": "/w",
             },
         ]
-        _run(ui.wait_for_thread_pick(threads, "abc123", "Select thread"))
-        # Table + usage hint
-        assert console.print.call_count == 2
-        table_arg = console.print.call_args_list[0].args[0]
-        assert isinstance(table_arg, Table)
-        hint_arg = console.print.call_args_list[1].args[0]
-        assert "/resume" in hint_arg
-        assert "/delete" in hint_arg
+
+    def test_returns_selected_thread_id(self, monkeypatch):
+        import EvoScientist.cli.rich_command_ui as mod
+
+        ui, _ = _make_ui()
+        prompt = self._fake_prompt("abc123")
+        called = {}
+
+        def fake_select(title, choices, style):
+            called["title"] = title
+            called["choices"] = choices
+            return prompt
+
+        monkeypatch.setattr("questionary.select", fake_select)
+        result = _run(ui.wait_for_thread_pick(self._threads(), "abc123", "pick:"))
+        assert result == "abc123"
+        assert called["title"] == "pick:"
+        # _build_items prepends a workspace header — choices has headers +
+        # thread Choice entries.
+        assert len(called["choices"]) >= 2
+        # Table import removed; this test no longer depends on console output.
+        assert mod.RichCLICommandUI is not None  # sanity
+
+    def test_cancel_returns_none(self, monkeypatch):
+        ui, _ = _make_ui()
+        prompt = self._fake_prompt(None)
+        monkeypatch.setattr("questionary.select", lambda *a, **k: prompt)
+        result = _run(ui.wait_for_thread_pick(self._threads(), "abc123", "pick:"))
+        assert result is None
+
+    def test_current_thread_marker_in_label(self, monkeypatch):
+        ui, _ = _make_ui()
+        prompt = self._fake_prompt(None)
+        captured_choices: list = []
+
+        def fake_select(title, choices, style):
+            captured_choices.extend(choices)
+            return prompt
+
+        monkeypatch.setattr("questionary.select", fake_select)
+        _run(ui.wait_for_thread_pick(self._threads(), "abc123", "pick:"))
+        # At least one Choice title contains "abc123 *" (current marker)
+        choice_titles = [getattr(c, "title", "") for c in captured_choices]
+        assert any("abc123 *" in t for t in choice_titles)
 
 
 class TestCompactIndicator:
@@ -239,8 +274,44 @@ class TestCompactIndicator:
         console.status.assert_not_called()
 
 
+class TestPhaseBMigrated:
+    """Session lifecycle callbacks (start/resume) filled in Phase B."""
+
+    def test_start_new_session_fires_callback(self):
+        called = []
+        ui, _ = _make_ui(on_start_new_session=lambda: called.append("new"))
+        ui.start_new_session()
+        assert called == ["new"]
+
+    def test_start_new_session_without_callback_is_noop(self):
+        ui, console = _make_ui()
+        ui.start_new_session()
+        console.print.assert_not_called()
+
+    def test_handle_session_resume_awaits_callback(self):
+        from unittest.mock import AsyncMock
+
+        cb = AsyncMock()
+        ui, _ = _make_ui(on_handle_session_resume=cb)
+        _run(ui.handle_session_resume("tid-x", "/workspace"))
+        cb.assert_awaited_once_with("tid-x", "/workspace")
+
+    def test_handle_session_resume_without_callback_is_noop(self):
+        ui, _ = _make_ui()
+        # Should not raise
+        _run(ui.handle_session_resume("tid-x"))
+
+    def test_handle_session_resume_workspace_defaults_none(self):
+        from unittest.mock import AsyncMock
+
+        cb = AsyncMock()
+        ui, _ = _make_ui(on_handle_session_resume=cb)
+        _run(ui.handle_session_resume("tid-x"))
+        cb.assert_awaited_once_with("tid-x", None)
+
+
 class TestUnmigratedStubs:
-    """Phase B/C stubs still raise NotImplementedError until migrated."""
+    """Phase C stubs still raise NotImplementedError until migrated."""
 
     def test_wait_for_skill_browse(self):
         ui, _ = _make_ui()
@@ -251,13 +322,3 @@ class TestUnmigratedStubs:
         ui, _ = _make_ui()
         with pytest.raises(NotImplementedError, match="/install-mcp"):
             _run(ui.wait_for_mcp_browse([], set(), ""))
-
-    def test_start_new_session(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/new"):
-            ui.start_new_session()
-
-    def test_handle_session_resume(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/resume"):
-            _run(ui.handle_session_resume("tid"))

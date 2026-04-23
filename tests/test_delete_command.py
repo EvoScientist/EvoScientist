@@ -55,7 +55,11 @@ class TestDeleteCommand:
         # delete_thread must not have been called
         from EvoScientist.sessions import delete_thread
 
-        assert not delete_thread.await_count if hasattr(delete_thread, "await_count") else True
+        assert (
+            not delete_thread.await_count
+            if hasattr(delete_thread, "await_count")
+            else True
+        )
         # And UI should warn about the current-session guard
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Cannot delete the current session" in m for m in msgs)

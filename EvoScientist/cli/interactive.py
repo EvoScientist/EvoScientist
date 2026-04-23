@@ -33,12 +33,10 @@ import EvoScientist.cli.channel as _ch_mod
 from ..commands.base import CommandContext
 from ..commands.manager import manager as cmd_manager
 from ..sessions import (
-    _format_relative_time,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
-    list_threads,
     resolve_thread_id_prefix,
     thread_exists,
 )
@@ -103,6 +101,9 @@ _CMDMGR_MIGRATED: frozenset[str] = frozenset(
         "/compact",
         "/help",
         "/clear",
+        # Phase B
+        "/new",
+        "/resume",
     }
 )
 
@@ -402,13 +403,9 @@ def cmd_interactive(
             model_name=model,
         )
 
-    rich_ui = RichCLICommandUI(
-        console,
-        on_request_quit=lambda: state.__setitem__("running", False),
-        on_force_quit=lambda: state.__setitem__("running", False),
-        on_clear_chat=lambda: console.clear(),
-        on_status_after_compact=_on_status_after_compact,
-    )
+    # ``rich_ui`` is constructed inside ``_async_main_loop`` so the
+    # Phase B callbacks can close over ``checkpointer`` from
+    # ``get_checkpointer()``.
 
     def _start_agent_load(checkpointer) -> None:
         progress_tracker.prime()
@@ -635,103 +632,71 @@ def cmd_interactive(
         console.print("[dim]── End of history ──[/dim]")
         console.print()
 
-    async def _cmd_resume(arg: str, checkpointer):
-        """Handle /resume [id] — resume a previous session."""
-        if not arg:
-            # Show interactive session picker with conversation previews
-            threads = await list_threads(
-                limit=0,
-                include_message_count=True,
-                include_preview=True,
-            )
-            if not threads:
-                console.print("[yellow]No sessions to resume.[/yellow]")
-                return
-
-            import questionary
-
-            from .widgets.thread_selector import _build_items
-
-            choices = []
-            items = _build_items(threads)
-            for item in items:
-                if item["type"] == "header":
-                    choices.append(
-                        questionary.Separator(
-                            f"\u2500\u2500 \U0001f4c2 {item['label']}"
-                        )
-                    )
-                elif item["type"] == "subheader":
-                    choices.append(questionary.Separator(f"   {item['label']}"))
-                else:
-                    t = item["thread"]
-                    tid = t["thread_id"]
-                    preview = t.get("preview", "") or ""
-                    msgs = t.get("message_count", 0)
-                    model = t.get("model", "") or ""
-                    when = _format_relative_time(t.get("updated_at"))
-                    indent = "    " if item.get("indented") else "  "
-                    parts = [f"{indent}{tid}"]
-                    if preview:
-                        parts.append(
-                            preview[:40] + "\u2026" if len(preview) > 40 else preview
-                        )
-                    parts.append(f"({msgs} msgs)")
-                    if model:
-                        parts.append(model)
-                    if when:
-                        parts.append(when)
-                    label = "  ".join(parts)
-                    choices.append(questionary.Choice(title=label, value=tid))
-
-            from prompt_toolkit.layout.dimension import Dimension
-            from questionary.prompts.common import InquirerControl
-
-            prompt = questionary.select(
-                "Select session to resume:",
-                choices=choices,
-                style=_PICKER_STYLE,
-            )
-            # Limit visible list to 10 rows with scrolling
-            for window in prompt.application.layout.find_all_windows():
-                if isinstance(window.content, InquirerControl):
-                    window.height = Dimension(max=10)
-                    break
-            selected = prompt.ask()
-
-            if selected is None:
-                return
-            arg = selected
-
-        resolved = await _resolve_thread_id(arg)
-        if not resolved:
-            return
-
-        meta = await get_thread_metadata(resolved)
-        ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
-
-        state["thread_id"] = resolved
-        state["resumed"] = True
-        if ws:
-            state["workspace_dir"] = ws
-        state["status_started_at"] = datetime.now()
-        state["status_last_input_tokens"] = None
-        # Rebuild the agent in the background so the resumed transcript
-        # and prompt render immediately; the next message awaits the load.
-        _start_agent_load(checkpointer)
-        await _refresh_status_snapshot(reset_streaming_text=True)
-        console.print(f"[green]Resumed session:[/green] [yellow]{resolved}[/yellow]")
-        if state["workspace_dir"]:
-            console.print(
-                f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
-            )
-        console.print()
-        await _render_history(resolved)
-
     async def _async_main_loop():
         """Async main loop with prompt_async and channel queue checking."""
         nonlocal model
         async with get_checkpointer() as checkpointer:
+            # Phase B callbacks need ``checkpointer`` in scope — define
+            # the rich_ui adapter here rather than at the outer level.
+
+            def _on_start_new_session() -> None:
+                """NewCommand callback — rotate workspace (if not fixed),
+                issue a new thread id, reset session-scoped status fields,
+                and kick off background agent reload. The dispatch block
+                refreshes the status bar post-execute (symmetric with
+                /compact)."""
+                if not workspace_fixed:
+                    state["workspace_dir"] = _create_session_workspace(run_name)
+                state["thread_id"] = generate_thread_id()
+                state["resumed"] = False
+                state["status_started_at"] = datetime.now()
+                state["status_last_input_tokens"] = None
+                _start_agent_load(checkpointer)
+                console.print(
+                    f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]"
+                )
+                if state["workspace_dir"]:
+                    console.print(
+                        f"[dim]Workspace:[/dim] [cyan]"
+                        f"{_shorten_path(state['workspace_dir'])}[/cyan]\n"
+                    )
+
+            async def _on_handle_session_resume(
+                thread_id: str, workspace_dir: str | None
+            ) -> None:
+                """ResumeCommand callback — after the command resolves
+                the thread id + restores workspace from metadata, this
+                callback mutates REPL state, reloads the agent, and
+                renders conversation history."""
+                if workspace_dir:
+                    state["workspace_dir"] = workspace_dir
+                state["thread_id"] = thread_id
+                state["resumed"] = True
+                state["status_started_at"] = datetime.now()
+                state["status_last_input_tokens"] = None
+                _start_agent_load(checkpointer)
+                await _refresh_status_snapshot(reset_streaming_text=True)
+                console.print(
+                    f"[green]Resumed session:[/green] [yellow]{thread_id}[/yellow]"
+                )
+                if state["workspace_dir"]:
+                    console.print(
+                        f"[dim]Workspace:[/dim] [cyan]"
+                        f"{_shorten_path(state['workspace_dir'])}[/cyan]"
+                    )
+                console.print()
+                await _render_history(thread_id)
+
+            rich_ui = RichCLICommandUI(
+                console,
+                on_request_quit=lambda: state.__setitem__("running", False),
+                on_force_quit=lambda: state.__setitem__("running", False),
+                on_clear_chat=lambda: console.clear(),
+                on_status_after_compact=_on_status_after_compact,
+                on_start_new_session=_on_start_new_session,
+                on_handle_session_resume=_on_handle_session_resume,
+            )
+
             # Handle --thread-id resume
             if thread_id:
                 resolved = await _resolve_thread_id(thread_id)
@@ -1042,47 +1007,20 @@ def cmd_interactive(
                                 ui=rich_ui,
                                 workspace_dir=state["workspace_dir"],
                                 checkpointer=checkpointer,
-                                input_tokens_hint=state.get(
-                                    "status_last_input_tokens"
-                                ),
+                                input_tokens_hint=state.get("status_last_input_tokens"),
                             )
                             await cmd_manager.execute(user_input, ctx)
                             # ExitCommand signals quit via ``force_quit`` →
                             # callback flips ``state["running"]`` to False.
                             if not state["running"]:
                                 break
-                            # /compact mutated status fields via callback;
-                            # async refresh must happen here (callback sync).
-                            if _cmd.name == "/compact":
+                            # /compact and /new mutate status fields via
+                            # sync callbacks; async refresh must happen
+                            # here (callbacks are sync). /resume's async
+                            # callback awaits its own refresh inline.
+                            if _cmd.name in ("/compact", "/new"):
                                 await _refresh_status_snapshot(
                                     reset_streaming_text=True,
-                                )
-                            continue
-
-                        if user_input.lower().startswith("/resume"):
-                            arg = user_input[len("/resume") :].strip()
-                            await _cmd_resume(arg, checkpointer)
-                            continue
-
-                        if user_input.lower() == "/new":
-                            # New session: new thread; workspace only changes if not fixed
-                            if not workspace_fixed:
-                                state["workspace_dir"] = _create_session_workspace(
-                                    run_name
-                                )
-                            state["thread_id"] = generate_thread_id()
-                            state["resumed"] = False
-                            state["status_started_at"] = datetime.now()
-                            state["status_last_input_tokens"] = None
-                            # Background agent reload — next message awaits it.
-                            _start_agent_load(checkpointer)
-                            await _refresh_status_snapshot(reset_streaming_text=True)
-                            console.print(
-                                f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]"
-                            )
-                            if state["workspace_dir"]:
-                                console.print(
-                                    f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]\n"
                                 )
                             continue
 
