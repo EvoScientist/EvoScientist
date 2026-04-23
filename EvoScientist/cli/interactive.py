@@ -26,19 +26,17 @@ from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untype
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
 
+from ..commands.base import CommandContext
+from ..commands.manager import manager as cmd_manager
 from ..sessions import (
-    _format_relative_time,
-    delete_thread,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
-    list_threads,
     resolve_thread_id_prefix,
     thread_exists,
 )
@@ -50,19 +48,11 @@ from .channel import (
     ChannelMessage,
     _auto_start_channel,
     _channels_is_running,
-    _cmd_channel,
-    _cmd_channel_stop,
     _message_queue,
     _set_channel_response,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
-from .mcp_ui import _cmd_mcp
-from .skills_cmd import (
-    _cmd_install_skill,
-    _cmd_install_skills,
-    _cmd_list_skills,
-    _cmd_uninstall_skill,
-)
+from .rich_command_ui import RichCLICommandUI
 from .status_bar import (
     SPINNER_FRAMES,
     STATUS_BAD,
@@ -155,22 +145,11 @@ def print_banner(
 # Slash-command completer
 # =============================================================================
 
-_SLASH_COMMANDS = [
-    ("/current", "Show current session info"),
-    ("/threads", "List recent sessions"),
-    ("/resume", "Resume a previous session (prefix match)"),
-    ("/delete", "Delete a saved session"),
-    ("/new", "Start a new session"),
-    ("/skills", "List installed skills"),
-    ("/install-skill", "Add a skill from path or GitHub"),
-    ("/uninstall-skill", "Remove an installed skill"),
-    ("/evoskills", "Browse and install EvoSkills (optional: /evoskills <tag>)"),
-    ("/mcp", "Manage MCP servers"),
-    ("/channel", "Configure messaging channels"),
-    ("/compact", "Compact conversation to free context"),
-    ("/model", "Switch model (--save to persist)"),
-    ("/exit", "Quit EvoScientist"),
-]
+
+def _get_slash_commands() -> list[tuple[str, str]]:
+    """Return available slash commands from the unified command manager."""
+    return cmd_manager.list_commands()
+
 
 _COMPLETION_STYLE = PtStyle.from_dict(
     {
@@ -230,7 +209,7 @@ class SlashCommandCompleter(Completer):
         # Slash command completion
         if not text.startswith("/"):
             return
-        for cmd, desc in _SLASH_COMMANDS:
+        for cmd, desc in _get_slash_commands():
             if cmd.startswith(text):
                 yield Completion(
                     cmd,
@@ -523,39 +502,6 @@ def cmd_interactive(
         console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
         return None
 
-    async def _cmd_threads():
-        """Handle /threads command — show recent sessions."""
-        threads = await list_threads(
-            limit=0,
-            include_message_count=True,
-            include_preview=True,
-        )
-        if not threads:
-            console.print("[yellow]No saved sessions.[/yellow]")
-            return
-        table = Table(title="Sessions", show_header=True, header_style="bold cyan")
-        table.add_column("ID", style="bold")
-        table.add_column("Preview", style="dim", max_width=50, no_wrap=True)
-        table.add_column("Messages", justify="right")
-        table.add_column("Model", style="dim")
-        table.add_column("Last Used", style="dim")
-        for t in threads:
-            tid = t["thread_id"]
-            marker = " *" if tid == state["thread_id"] else ""
-            table.add_row(
-                f"{tid}{marker}",
-                t.get("preview", "") or "",
-                str(t.get("message_count", 0)),
-                t.get("model", "") or "",
-                _format_relative_time(t.get("updated_at")),
-            )
-        console.print()
-        console.print(table)
-        console.print(
-            "[dim]  /resume[/dim] to continue a session  [dim]/delete <id>[/dim] to remove  [dim]/new[/dim] to start fresh"
-        )
-        console.print()
-
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
         messages = await get_thread_messages(thread_id)
@@ -629,116 +575,6 @@ def cmd_interactive(
 
         console.print("[dim]── End of history ──[/dim]")
         console.print()
-
-    async def _cmd_resume(arg: str, checkpointer):
-        """Handle /resume [id] — resume a previous session."""
-        if not arg:
-            # Show interactive session picker with conversation previews
-            threads = await list_threads(
-                limit=0,
-                include_message_count=True,
-                include_preview=True,
-            )
-            if not threads:
-                console.print("[yellow]No sessions to resume.[/yellow]")
-                return
-
-            import questionary
-
-            from .widgets.thread_selector import _build_items
-
-            choices = []
-            items = _build_items(threads)
-            for item in items:
-                if item["type"] == "header":
-                    choices.append(
-                        questionary.Separator(
-                            f"\u2500\u2500 \U0001f4c2 {item['label']}"
-                        )
-                    )
-                elif item["type"] == "subheader":
-                    choices.append(questionary.Separator(f"   {item['label']}"))
-                else:
-                    t = item["thread"]
-                    tid = t["thread_id"]
-                    preview = t.get("preview", "") or ""
-                    msgs = t.get("message_count", 0)
-                    model = t.get("model", "") or ""
-                    when = _format_relative_time(t.get("updated_at"))
-                    indent = "    " if item.get("indented") else "  "
-                    parts = [f"{indent}{tid}"]
-                    if preview:
-                        parts.append(
-                            preview[:40] + "\u2026" if len(preview) > 40 else preview
-                        )
-                    parts.append(f"({msgs} msgs)")
-                    if model:
-                        parts.append(model)
-                    if when:
-                        parts.append(when)
-                    label = "  ".join(parts)
-                    choices.append(questionary.Choice(title=label, value=tid))
-
-            from prompt_toolkit.layout.dimension import Dimension
-            from questionary.prompts.common import InquirerControl
-
-            prompt = questionary.select(
-                "Select session to resume:",
-                choices=choices,
-                style=_PICKER_STYLE,
-            )
-            # Limit visible list to 10 rows with scrolling
-            for window in prompt.application.layout.find_all_windows():
-                if isinstance(window.content, InquirerControl):
-                    window.height = Dimension(max=10)
-                    break
-            selected = prompt.ask()
-
-            if selected is None:
-                return
-            arg = selected
-
-        resolved = await _resolve_thread_id(arg)
-        if not resolved:
-            return
-
-        meta = await get_thread_metadata(resolved)
-        ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
-
-        state["thread_id"] = resolved
-        state["resumed"] = True
-        if ws:
-            state["workspace_dir"] = ws
-        state["status_started_at"] = datetime.now()
-        state["status_last_input_tokens"] = None
-        # Rebuild the agent in the background so the resumed transcript
-        # and prompt render immediately; the next message awaits the load.
-        _start_agent_load(checkpointer)
-        await _refresh_status_snapshot(reset_streaming_text=True)
-        console.print(f"[green]Resumed session:[/green] [yellow]{resolved}[/yellow]")
-        if state["workspace_dir"]:
-            console.print(
-                f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
-            )
-        console.print()
-        await _render_history(resolved)
-
-    async def _cmd_delete(arg: str):
-        """Handle /delete <id> — delete a saved session."""
-        if not arg:
-            console.print("[red]Usage: /delete <thread-id>[/red]")
-            return
-        resolved = await _resolve_thread_id(arg)
-        if not resolved:
-            return
-        if resolved == state["thread_id"]:
-            console.print("[red]Cannot delete the current session.[/red]")
-            return
-        deleted = await delete_thread(resolved)
-        if deleted:
-            console.print(f"[green]Deleted session {resolved}.[/green]")
-        else:
-            console.print(f"[red]Session {resolved} not found.[/red]")
 
     async def _async_main_loop():
         """Async main loop with prompt_async and channel queue checking."""
@@ -1036,157 +872,83 @@ def cmd_interactive(
 
                         _print_separator()
 
-                        # Special commands
-                        if user_input.lower() in ("/exit", "/quit", "/q"):
-                            state["running"] = False
-                            break
+                        resolved_cmd = cmd_manager.resolve(user_input)
+                        if resolved_cmd is not None:
+                            cmd, cmd_args = resolved_cmd
+                            agent = None
+                            if cmd.needs_agent(cmd_args):
+                                agent = await _await_agent_ready()
 
-                        if user_input.lower() == "/threads":
-                            await _cmd_threads()
-                            continue
-
-                        if user_input.lower().startswith("/resume"):
-                            arg = user_input[len("/resume") :].strip()
-                            await _cmd_resume(arg, checkpointer)
-                            continue
-
-                        if user_input.lower().startswith("/delete"):
-                            arg = user_input[len("/delete") :].strip()
-                            await _cmd_delete(arg)
-                            continue
-
-                        if user_input.lower() == "/new":
-                            # New session: new thread; workspace only changes if not fixed
-                            if not workspace_fixed:
-                                state["workspace_dir"] = _create_session_workspace(
-                                    run_name
-                                )
-                            state["thread_id"] = generate_thread_id()
-                            state["resumed"] = False
-                            state["status_started_at"] = datetime.now()
-                            state["status_last_input_tokens"] = None
-                            # Background agent reload — next message awaits it.
-                            _start_agent_load(checkpointer)
-                            await _refresh_status_snapshot(reset_streaming_text=True)
-                            console.print(
-                                f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]"
-                            )
-                            if state["workspace_dir"]:
-                                console.print(
-                                    f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]\n"
-                                )
-                            continue
-
-                        if user_input.lower() == "/current":
-                            console.print(
-                                f"[dim]Thread:[/dim] [yellow]{state['thread_id']}[/yellow]"
-                            )
-                            if state["workspace_dir"]:
-                                console.print(
-                                    f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
-                                )
-                            if memory_dir:
-                                console.print(
-                                    f"[dim]Memory dir:[/dim] [cyan]{_shorten_path(memory_dir)}[/cyan]"
-                                )
-                            console.print()
-                            continue
-
-                        if user_input.lower() == "/skills":
-                            _cmd_list_skills()
-                            continue
-
-                        if user_input.lower().startswith("/install-skill"):
-                            source = user_input[len("/install-skill") :].strip()
-                            _cmd_install_skill(source)
-                            continue
-
-                        if user_input.lower().startswith("/uninstall-skill"):
-                            name = user_input[len("/uninstall-skill") :].strip()
-                            _cmd_uninstall_skill(name)
-                            continue
-
-                        if user_input.lower().startswith("/evoskills"):
-                            browse_args = user_input[len("/evoskills") :].strip()
-                            _cmd_install_skills(browse_args)
-                            continue
-
-                        if user_input.lower().startswith("/mcp"):
-                            _cmd_mcp(user_input[len("/mcp") :])
-                            continue
-
-                        if user_input.lower().startswith("/channel"):
-                            args = user_input[len("/channel") :].strip()
-                            if args.lower().startswith("stop"):
-                                stop_arg = args[len("stop") :].strip()
-                                _cmd_channel_stop(stop_arg or None)
-                            else:
-                                await _await_agent_ready()
-                                _cmd_channel(
-                                    args,
-                                    agent_loader.agent,
-                                    state["thread_id"],
-                                    send_thinking=channel_send_thinking,
-                                )
-                            continue
-
-                        if user_input.lower() == "/compact":
-                            from .commands import (
-                                build_compact_summary_renderable,
-                                compact_conversation,
-                                render_compact_result,
-                            )
-
-                            await _await_agent_ready()
-                            with console.status(
-                                "[cyan]Compacting conversation...[/cyan]"
-                            ):
-                                result = await compact_conversation(
-                                    agent=agent_loader.agent,
-                                    thread_id=state["thread_id"],
-                                    input_tokens_hint=state.get(
-                                        "status_last_input_tokens"
-                                    ),
-                                )
-                            console.print(render_compact_result(result))
-                            summary_renderable = build_compact_summary_renderable(
-                                result
-                            )
-                            if summary_renderable is not None:
-                                console.print(summary_renderable)
-                            if result.status == "ok" and result.tokens_after > 0:
-                                state["status_last_input_tokens"] = result.tokens_after
-                                state["status_base_snapshot"] = (
-                                    make_usage_status_snapshot(
-                                        result.tokens_after,
-                                        model_name=model,
-                                    )
-                                )
-                            await _refresh_status_snapshot(
-                                reset_streaming_text=True,
-                            )
-                            continue
-
-                        if user_input.lower().startswith("/model"):
-                            from ..commands.base import CommandContext
-                            from ..commands.manager import manager as cmd_manager
-                            from ..EvoScientist import _ensure_config
-                            from .rich_command_ui import RichCLICommandUI
-
-                            # /model is ``needs_agent=False`` — it builds its
-                            # own agent — so we don't wait for the current
-                            # load; /model is the way to fix a broken one.
+                            ui = RichCLICommandUI(console)
                             ctx = CommandContext(
-                                agent=None,
+                                agent=agent,
                                 thread_id=state["thread_id"],
-                                ui=RichCLICommandUI(console),
+                                ui=ui,
                                 workspace_dir=state["workspace_dir"],
                                 checkpointer=checkpointer,
+                                input_tokens_hint=state.get("status_last_input_tokens"),
                             )
                             await cmd_manager.execute(user_input, ctx)
 
-                            if ctx.agent is not None:
+                            if ui._quit_requested:
+                                state["running"] = False
+                                break
+
+                            if ui._new_session_requested:
+                                if not workspace_fixed:
+                                    state["workspace_dir"] = _create_session_workspace(
+                                        run_name
+                                    )
+                                state["thread_id"] = generate_thread_id()
+                                state["resumed"] = False
+                                state["status_started_at"] = datetime.now()
+                                state["status_last_input_tokens"] = None
+                                _start_agent_load(checkpointer)
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True
+                                )
+                                console.print(
+                                    f"[green]New session:[/green] "
+                                    f"[yellow]{state['thread_id']}[/yellow]"
+                                )
+                                if state["workspace_dir"]:
+                                    console.print(
+                                        f"[dim]Workspace:[/dim] "
+                                        f"[cyan]{_shorten_path(state['workspace_dir'])}[/cyan]\n"
+                                    )
+
+                            if ui._resume_request:
+                                tid_resumed, ws = ui._resume_request
+                                state["thread_id"] = tid_resumed
+                                state["resumed"] = True
+                                if ws:
+                                    state["workspace_dir"] = ws
+                                state["status_started_at"] = datetime.now()
+                                state["status_last_input_tokens"] = None
+                                _start_agent_load(checkpointer)
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True
+                                )
+                                console.print(
+                                    f"[green]Resumed session:[/green] "
+                                    f"[yellow]{tid_resumed}[/yellow]"
+                                )
+                                if state["workspace_dir"]:
+                                    console.print(
+                                        f"[dim]Workspace:[/dim] "
+                                        f"[cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
+                                    )
+                                console.print()
+                                await _render_history(tid_resumed)
+
+                            # Sync agent if command replaced it (e.g. /model)
+                            if (
+                                ctx.agent is not None
+                                and ctx.agent is not agent_loader.agent
+                            ):
                                 agent_loader.adopt(ctx.agent)
+                                from ..EvoScientist import _ensure_config
+
                                 cfg = _ensure_config()
                                 model = cfg.model
                                 state["status_base_snapshot"] = (
@@ -1198,6 +960,27 @@ def cmd_interactive(
                                 if _channels_is_running():
                                     _ch_mod._cli_agent = ctx.agent
                                     _ch_mod._cli_thread_id = state["thread_id"]
+
+                            # Sync token count after /compact
+                            if ui._compact_tokens is not None:
+                                state["status_last_input_tokens"] = ui._compact_tokens
+                                state["status_base_snapshot"] = (
+                                    make_usage_status_snapshot(
+                                        ui._compact_tokens,
+                                        model_name=model,
+                                    )
+                                )
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True,
+                                )
+
+                            continue
+
+                        if user_input.startswith("/"):
+                            console.print(
+                                f"[yellow]Unknown command: {escape(user_input.split()[0])}. "
+                                f"Type /help for available commands.[/yellow]"
+                            )
                             continue
 
                         # Resolve @file mentions — inject file contents inline

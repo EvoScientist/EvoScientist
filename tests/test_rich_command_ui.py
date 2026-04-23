@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
 from rich.console import Console
 from rich.table import Table
 
@@ -125,50 +124,78 @@ class TestUpdateStatusHook:
         console.print.assert_not_called()
 
 
-class TestUnmigratedMethodsStub:
-    """Protocol methods not yet wired for CLI must raise NotImplementedError.
+class TestLifecycleSignals:
+    """Lifecycle commands set signal flags instead of directly mutating state."""
 
-    These stubs are signposts for the A1 migration (see
-    cli-commandmanager-migration.md). Each one is replaced by a real
-    implementation when its corresponding command is migrated.
-    """
-
-    def test_wait_for_thread_pick(self):
+    def test_request_quit_sets_flag(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/threads"):
-            _run(ui.wait_for_thread_pick([], "tid", "title"))
+        assert ui._quit_requested is False
+        ui.request_quit()
+        assert ui._quit_requested is True
 
-    def test_wait_for_skill_browse(self):
+    def test_force_quit_sets_flag(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/skills"):
-            _run(ui.wait_for_skill_browse([], set(), ""))
+        ui.force_quit()
+        assert ui._quit_requested is True
 
-    def test_wait_for_mcp_browse(self):
+    def test_start_new_session_sets_flag(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/mcp"):
-            _run(ui.wait_for_mcp_browse([], set(), ""))
+        assert ui._new_session_requested is False
+        ui.start_new_session()
+        assert ui._new_session_requested is True
 
-    def test_clear_chat(self):
+    def test_handle_session_resume_stores_request(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/clear"):
-            ui.clear_chat()
+        assert ui._resume_request is None
+        _run(ui.handle_session_resume("thread-123", "/some/workspace"))
+        assert ui._resume_request == ("thread-123", "/some/workspace")
 
-    def test_request_quit(self):
+    def test_handle_session_resume_no_workspace(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/exit"):
-            ui.request_quit()
+        _run(ui.handle_session_resume("thread-456"))
+        assert ui._resume_request == ("thread-456", None)
 
-    def test_force_quit(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/exit"):
-            ui.force_quit()
+    def test_clear_chat_calls_console_clear(self):
+        ui, console = _make_ui()
+        ui.clear_chat()
+        console.clear.assert_called_once()
 
-    def test_start_new_session(self):
+    def test_reset_signals_clears_all(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/new"):
-            ui.start_new_session()
+        ui._quit_requested = True
+        ui._new_session_requested = True
+        ui._resume_request = ("tid", "/ws")
+        ui._compact_tokens = 42
+        ui.reset_signals()
+        assert ui._quit_requested is False
+        assert ui._new_session_requested is False
+        assert ui._resume_request is None
+        assert ui._compact_tokens is None
 
-    def test_handle_session_resume(self):
+
+class TestCompactIndicator:
+    """Compacting indicator uses Rich status spinner."""
+
+    def test_update_status_after_compact_stores_tokens(self):
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/resume"):
-            _run(ui.handle_session_resume("tid"))
+        assert ui._compact_tokens is None
+        ui.update_status_after_compact(12345)
+        assert ui._compact_tokens == 12345
+
+    def test_start_stop_compacting_indicator(self):
+        ui, console = _make_ui()
+        # Mock the status context manager
+        status_ctx = MagicMock()
+        console.status.return_value = status_ctx
+        ui.start_compacting_indicator()
+        console.status.assert_called_once()
+        status_ctx.__enter__.assert_called_once()
+
+        ui.stop_compacting_indicator()
+        status_ctx.__exit__.assert_called_once_with(None, None, None)
+        assert ui._status_ctx is None
+
+    def test_stop_compacting_indicator_noop_when_not_started(self):
+        ui, _ = _make_ui()
+        # Should not raise
+        ui.stop_compacting_indicator()
