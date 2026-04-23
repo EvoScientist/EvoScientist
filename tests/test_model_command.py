@@ -262,6 +262,34 @@ class TestModelCommandFailure:
         assert call_args[1]["style"] == "red"
 
 
+@pytest.fixture
+def evo_module_state():
+    """Snapshot and restore ``EvoScientist.EvoScientist`` module globals.
+
+    The chat-model cache tests mutate ``_chat_model`` / ``_chat_model_key``
+    / ``_config`` / ``_EvoScientist_agent`` directly.  This fixture
+    guarantees all four are restored — even if a test body grows an early
+    return — so later tests in the suite see a clean module state.
+    """
+    import EvoScientist.EvoScientist as mod
+
+    snapshot = (
+        mod._chat_model,
+        mod._chat_model_key,
+        mod._config,
+        mod._EvoScientist_agent,
+    )
+    try:
+        yield mod
+    finally:
+        (
+            mod._chat_model,
+            mod._chat_model_key,
+            mod._config,
+            mod._EvoScientist_agent,
+        ) = snapshot
+
+
 class TestEnsureChatModelCacheInvalidation:
     """Regression tests for issue #179: /model switch lagged by one step.
 
@@ -275,126 +303,109 @@ class TestEnsureChatModelCacheInvalidation:
     rebuild on mismatch.
     """
 
-    def test_cache_rebuilds_when_config_model_changes(self):
+    def test_cache_rebuilds_when_config_model_changes(self, evo_module_state):
         """After cfg.model changes, _ensure_chat_model must return a new instance."""
-        import EvoScientist.EvoScientist as mod
+        mod = evo_module_state
 
         cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
         m1 = MagicMock(name="model-1")
         m2 = MagicMock(name="model-2")
 
-        # Snapshot module state and restore after the test.
-        saved = (
-            mod._chat_model,
-            mod._chat_model_key,
-            mod._config,
-            mod._EvoScientist_agent,
-        )
-        try:
-            mod._chat_model = None
-            mod._chat_model_key = None
-            mod._config = cfg
-            mod._EvoScientist_agent = None
+        mod._chat_model = None
+        mod._chat_model_key = None
+        mod._config = cfg
+        mod._EvoScientist_agent = None
 
-            with patch("EvoScientist.llm.get_chat_model", side_effect=[m1, m2]) as gm:
-                first = mod._ensure_chat_model()
-                assert first is m1
-                # Same config → cache hit, no rebuild.
-                again = mod._ensure_chat_model()
-                assert again is m1
-                assert gm.call_count == 1
+        with patch("EvoScientist.llm.get_chat_model", side_effect=[m1, m2]) as gm:
+            first = mod._ensure_chat_model()
+            assert first is m1
+            # Same config → cache hit, no rebuild.
+            again = mod._ensure_chat_model()
+            assert again is m1
+            assert gm.call_count == 1
 
-                # Simulate /model switch writing the new choice into cfg.
-                cfg.model = "minimax-m2.7"
-                cfg.provider = "openrouter"
+            # Simulate /model switch writing the new choice into cfg.
+            cfg.model = "minimax-m2.7"
+            cfg.provider = "openrouter"
 
-                second = mod._ensure_chat_model()
-                # Must be the NEW model instance, not the cached one.
-                assert second is m2
-                assert second is not first
-                assert gm.call_count == 2
-                # Second call used the new model name + provider.
-                _, kwargs = gm.call_args
-                assert kwargs == {"model": "minimax-m2.7", "provider": "openrouter"}
-        finally:
-            (
-                mod._chat_model,
-                mod._chat_model_key,
-                mod._config,
-                mod._EvoScientist_agent,
-            ) = saved
+            second = mod._ensure_chat_model()
+            # Must be the NEW model instance, not the cached one.
+            assert second is m2
+            assert second is not first
+            assert gm.call_count == 2
+            # Second call used the new model name + provider.
+            _, kwargs = gm.call_args
+            assert kwargs == {"model": "minimax-m2.7", "provider": "openrouter"}
 
-    def test_cache_rebuilds_when_only_provider_changes(self):
+    def test_cache_rebuilds_when_only_provider_changes(self, evo_module_state):
         """Same model name, different provider (openrouter vs anthropic) must rebuild."""
-        import EvoScientist.EvoScientist as mod
+        mod = evo_module_state
 
         cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
         m1 = MagicMock(name="anthropic-model")
         m2 = MagicMock(name="openrouter-model")
 
-        saved = (
-            mod._chat_model,
-            mod._chat_model_key,
-            mod._config,
-            mod._EvoScientist_agent,
-        )
-        try:
-            mod._chat_model = None
-            mod._chat_model_key = None
-            mod._config = cfg
-            mod._EvoScientist_agent = None
+        mod._chat_model = None
+        mod._chat_model_key = None
+        mod._config = cfg
+        mod._EvoScientist_agent = None
 
-            with patch("EvoScientist.llm.get_chat_model", side_effect=[m1, m2]) as gm:
-                assert mod._ensure_chat_model() is m1
-                cfg.provider = "openrouter"
-                assert mod._ensure_chat_model() is m2
-                assert gm.call_count == 2
-        finally:
-            (
-                mod._chat_model,
-                mod._chat_model_key,
-                mod._config,
-                mod._EvoScientist_agent,
-            ) = saved
+        with patch("EvoScientist.llm.get_chat_model", side_effect=[m1, m2]) as gm:
+            assert mod._ensure_chat_model() is m1
+            cfg.provider = "openrouter"
+            assert mod._ensure_chat_model() is m2
+            assert gm.call_count == 2
 
-    def test_set_chat_model_updates_key(self):
+    def test_set_chat_model_updates_key(self, evo_module_state):
         """set_chat_model must keep _chat_model_key in sync to avoid
         an extra rebuild on the very next _ensure_chat_model() call."""
-        import EvoScientist.EvoScientist as mod
+        mod = evo_module_state
 
         cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
         m_set = MagicMock(name="explicit-set-model")
 
-        saved = (
-            mod._chat_model,
-            mod._chat_model_key,
-            mod._config,
-            mod._EvoScientist_agent,
-        )
-        try:
-            mod._chat_model = None
-            mod._chat_model_key = None
-            mod._config = cfg
-            mod._EvoScientist_agent = None
+        mod._chat_model = None
+        mod._chat_model_key = None
+        mod._config = cfg
+        mod._EvoScientist_agent = None
 
-            with patch("EvoScientist.llm.get_chat_model", return_value=m_set) as gm:
-                mod.set_chat_model("minimax-m2.7", provider="openrouter")
-                assert mod._chat_model is m_set
-                assert mod._chat_model_key == ("minimax-m2.7", "openrouter")
+        with patch("EvoScientist.llm.get_chat_model", return_value=m_set) as gm:
+            mod.set_chat_model("minimax-m2.7", provider="openrouter")
+            assert mod._chat_model is m_set
+            assert mod._chat_model_key == ("minimax-m2.7", "openrouter")
 
-                # Align cfg to what set_chat_model was called with.
-                cfg.model = "minimax-m2.7"
-                cfg.provider = "openrouter"
-                # Now _ensure_chat_model should NOT rebuild (key matches cfg).
-                assert mod._ensure_chat_model() is m_set
-                assert gm.call_count == 1
-        finally:
-            (
-                mod._chat_model,
-                mod._chat_model_key,
-                mod._config,
-                mod._EvoScientist_agent,
-            ) = saved
+            # Align cfg to what set_chat_model was called with.
+            cfg.model = "minimax-m2.7"
+            cfg.provider = "openrouter"
+            # Now _ensure_chat_model should NOT rebuild (key matches cfg).
+            assert mod._ensure_chat_model() is m_set
+            assert gm.call_count == 1
+
+    def test_set_chat_model_is_no_op_when_key_already_matches(self, evo_module_state):
+        """set_chat_model must NOT rebuild when the cache already holds the
+        requested (model, provider).
+
+        Under the /model flow, ``_load_agent`` already rebuilt ``_chat_model``
+        via ``_ensure_chat_model`` before ``set_chat_model`` is reached, so
+        the subsequent set should be idempotent — reusing the same Python
+        instance (and thus the same underlying HTTP client) that ``ctx.agent``
+        is already bound to.
+        """
+        mod = evo_module_state
+
+        existing = MagicMock(name="existing-model")
+        mod._chat_model = existing
+        mod._chat_model_key = ("minimax-m2.7", "openrouter")
+        mod._config = SimpleNamespace(model="minimax-m2.7", provider="openrouter")
+        mod._EvoScientist_agent = None
+
+        with patch("EvoScientist.llm.get_chat_model") as gm:
+            returned = mod.set_chat_model("minimax-m2.7", provider="openrouter")
+
+        # Fast path: returned the EXISTING instance, no rebuild.
+        assert returned is existing
+        assert mod._chat_model is existing
+        gm.assert_not_called()
 
 
 class TestApplyModelIntegration:
@@ -412,9 +423,10 @@ class TestApplyModelIntegration:
     ``(model, provider)`` pair so we can assert on identity.
     """
 
-    def test_new_agent_is_bound_to_newly_selected_model(self):
-        import EvoScientist.EvoScientist as mod
+    def test_new_agent_is_bound_to_newly_selected_model(self, evo_module_state):
         from EvoScientist.commands.implementation.model import ModelCommand
+
+        mod = evo_module_state
 
         sentinels: dict[tuple[str, str | None], MagicMock] = {}
 
@@ -444,62 +456,48 @@ class TestApplyModelIntegration:
         ctx.workspace_dir = "/tmp/test_integration"
         ctx.checkpointer = None
 
-        saved = (
-            mod._chat_model,
-            mod._chat_model_key,
-            mod._config,
-            mod._EvoScientist_agent,
-        )
-        try:
-            # Prime: _chat_model already holds the OLD (default) model —
-            # this is the state that caused the off-by-one in production.
-            mod._config = cfg
-            mod._chat_model = _fake_get_chat_model("claude-sonnet-4-6", "anthropic")
-            mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
-            mod._EvoScientist_agent = None
-            old_model = mod._chat_model
+        # Prime: _chat_model already holds the OLD (default) model —
+        # this is the state that caused the off-by-one in production.
+        mod._config = cfg
+        mod._chat_model = _fake_get_chat_model("claude-sonnet-4-6", "anthropic")
+        mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
+        mod._EvoScientist_agent = None
+        old_model = mod._chat_model
 
-            with (
-                patch(
-                    "EvoScientist.llm.get_chat_model",
-                    side_effect=_fake_get_chat_model,
-                ),
-                patch(
-                    "EvoScientist.cli.agent._load_agent",
-                    side_effect=_fake_load_agent,
-                ),
-                # ``_ensure_config`` calls ``apply_config_to_env`` which reads
-                # a dozen attributes off the config.  The SimpleNamespace we
-                # use as cfg only has ``model`` / ``provider``, so stub the
-                # env propagation out — it's orthogonal to this test.
-                patch("EvoScientist.EvoScientist.apply_config_to_env"),
-            ):
-                cmd = ModelCommand()
-                _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
+        with (
+            patch(
+                "EvoScientist.llm.get_chat_model",
+                side_effect=_fake_get_chat_model,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=_fake_load_agent,
+            ),
+            # ``_ensure_config`` calls ``apply_config_to_env`` which reads
+            # a dozen attributes off the config.  The SimpleNamespace we
+            # use as cfg only has ``model`` / ``provider``, so stub the
+            # env propagation out — it's orthogonal to this test.
+            patch("EvoScientist.EvoScientist.apply_config_to_env"),
+        ):
+            cmd = ModelCommand()
+            _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
 
-            # The agent produced by _apply_model must be bound to the
-            # NEWLY requested model, not the previously cached one.
-            assert ctx.agent._bound_model is not old_model
-            assert ctx.agent._bound_model._bound_model == "minimax-m2.7"
-            assert ctx.agent._bound_model._bound_provider == "openrouter"
+        # The agent produced by _apply_model must be bound to the
+        # NEWLY requested model, not the previously cached one.
+        assert ctx.agent._bound_model is not old_model
+        assert ctx.agent._bound_model._bound_model == "minimax-m2.7"
+        assert ctx.agent._bound_model._bound_provider == "openrouter"
 
-            # Global state reflects the switch end-to-end.
-            assert mod._chat_model_key == ("minimax-m2.7", "openrouter")
-            assert mod._chat_model is sentinels[("minimax-m2.7", "openrouter")]
-            assert cfg.model == "minimax-m2.7"
-            assert cfg.provider == "openrouter"
+        # Global state reflects the switch end-to-end.
+        assert mod._chat_model_key == ("minimax-m2.7", "openrouter")
+        assert mod._chat_model is sentinels[("minimax-m2.7", "openrouter")]
+        assert cfg.model == "minimax-m2.7"
+        assert cfg.provider == "openrouter"
 
-            # User-visible success message.
-            msg = ctx.ui.append_system.call_args[0][0]
-            assert "minimax-m2.7" in msg
-            assert "openrouter" in msg
-        finally:
-            (
-                mod._chat_model,
-                mod._chat_model_key,
-                mod._config,
-                mod._EvoScientist_agent,
-            ) = saved
+        # User-visible success message.
+        msg = ctx.ui.append_system.call_args[0][0]
+        assert "minimax-m2.7" in msg
+        assert "openrouter" in msg
 
 
 class TestModelCommandLoadAgentFailure:

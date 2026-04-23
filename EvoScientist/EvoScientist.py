@@ -121,14 +121,18 @@ def _ensure_chat_model():
 def set_chat_model(model: str, provider: str | None = None):
     """Replace the cached chat model with a new one.
 
-    Called by ``/model`` to switch the LLM mid-session.
-    Returns the new chat model instance.
+    Called by ``/model`` to switch the LLM mid-session.  No-op when the
+    cache already holds the requested ``(model, provider)`` — avoids
+    spawning a second ``get_chat_model`` instance (and its HTTP client)
+    under the ``/model`` flow where ``_ensure_chat_model`` has already
+    rebuilt ``_chat_model`` during the preceding ``_load_agent`` call.
+    Returns the current chat model instance.
     """
     from .llm import get_chat_model
 
-    _replace_chat_model(
-        get_chat_model(model=model, provider=provider), (model, provider)
-    )
+    key = (model, provider)
+    if _chat_model is None or _chat_model_key != key:
+        _replace_chat_model(get_chat_model(model=model, provider=provider), key)
     return _chat_model
 
 
@@ -357,7 +361,7 @@ def _get_default_middleware():
         create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(),
+        *create_tool_selector_middleware(model=model),
         create_memory_middleware(memory_dir, extraction_model=model),
     ]
 

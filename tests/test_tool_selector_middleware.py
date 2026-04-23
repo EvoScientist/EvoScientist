@@ -152,7 +152,7 @@ def test_tracker_captures_tools():
 
 @patch(
     "EvoScientist.middleware.create_tool_selector_middleware",
-    side_effect=lambda: _patched_create(),
+    side_effect=lambda *a, **kw: _patched_create(),
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
@@ -186,7 +186,7 @@ def test_subagent_no_tool_selector(mock_model):
 
 @patch(
     "EvoScientist.middleware.create_tool_selector_middleware",
-    side_effect=lambda: _patched_create(),
+    side_effect=lambda *a, **kw: _patched_create(),
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
