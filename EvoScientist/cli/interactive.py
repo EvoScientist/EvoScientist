@@ -5,6 +5,7 @@ import logging
 import queue
 import random
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -184,17 +185,26 @@ _COMPLETION_STYLE = PtStyle.from_dict(
 
 
 class SlashCommandCompleter(Completer):
-    """Autocomplete for slash commands and ``@file`` mentions."""
+    """Autocomplete for slash commands and ``@file`` mentions.
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
-        self._workspace_dir = workspace_dir
+    ``workspace_getter`` is invoked on every keystroke so ``@file``
+    suggestions automatically follow ``/new`` / ``/resume`` workspace
+    changes without having to poke the completer from the callbacks.
+    """
+
+    def __init__(
+        self,
+        workspace_getter: Callable[[], str | None] | None = None,
+    ) -> None:
+        self._workspace_getter = workspace_getter or (lambda: None)
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+        workspace_dir = self._workspace_getter()
 
         # @file mention completion
         if "@" in text:
-            candidates = complete_file_mention(text, self._workspace_dir)
+            candidates = complete_file_mention(text, workspace_dir)
             if candidates:
                 # Replace from the last '@' token
                 import re as _re
@@ -298,7 +308,9 @@ def cmd_interactive(
     session = PromptSession(
         history=FileHistory(history_file),
         auto_suggest=AutoSuggestFromHistory(),
-        completer=SlashCommandCompleter(workspace_dir=workspace_dir),
+        completer=SlashCommandCompleter(
+            workspace_getter=lambda: state["workspace_dir"],
+        ),
         complete_style=CompleteStyle.COLUMN,
         complete_while_typing=True,
         style=_COMPLETION_STYLE,
@@ -964,6 +976,7 @@ def cmd_interactive(
                                 ui=rich_ui,
                                 workspace_dir=state["workspace_dir"],
                                 checkpointer=checkpointer,
+                                config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                             )
                             await cmd_manager.execute(user_input, ctx)
