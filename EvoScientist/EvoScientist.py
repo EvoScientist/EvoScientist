@@ -126,7 +126,9 @@ def set_chat_model(model: str, provider: str | None = None):
     """
     from .llm import get_chat_model
 
-    _replace_chat_model(get_chat_model(model=model, provider=provider), (model, provider))
+    _replace_chat_model(
+        get_chat_model(model=model, provider=provider), (model, provider)
+    )
     return _chat_model
 
 
