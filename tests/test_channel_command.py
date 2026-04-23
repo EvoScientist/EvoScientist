@@ -49,7 +49,7 @@ class TestNeedsAgent:
 class TestStartPath:
     """Start flow must propagate agent/thread_id globals."""
 
-    def test_start_sets_cli_agent_globals(self):
+    def test_start_sets_cli_agent_globals(self, monkeypatch):
         import EvoScientist.cli.channel as _ch_mod
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
@@ -59,6 +59,10 @@ class TestStartPath:
             channel_send_thinking=True,
         )
 
+        # ``monkeypatch`` auto-restores on teardown so a raised assertion
+        # can't leak ``None`` globals into subsequent tests.
+        monkeypatch.setattr(_ch_mod, "_cli_agent", None)
+        monkeypatch.setattr(_ch_mod, "_cli_thread_id", None)
         with (
             patch(
                 "EvoScientist.cli.channel._channels_is_running",
@@ -72,11 +76,9 @@ class TestStartPath:
                 return_value=config,
             ),
         ):
-            _ch_mod._cli_agent = None
-            _ch_mod._cli_thread_id = None
             _run(ChannelCommand().execute(ctx, ["telegram"]))
-            assert _ch_mod._cli_agent is ctx.agent
-            assert _ch_mod._cli_thread_id == "tid-42"
+        assert _ch_mod._cli_agent is ctx.agent
+        assert _ch_mod._cli_thread_id == "tid-42"
 
     def test_start_propagates_send_thinking(self):
         """send_thinking flag must reach _start_channels_bus_mode."""
@@ -115,7 +117,7 @@ class TestStartPath:
 
 
 class TestAddToRunningPath:
-    def test_add_to_running_sets_cli_agent_globals(self):
+    def test_add_to_running_sets_cli_agent_globals(self, monkeypatch):
         import EvoScientist.cli.channel as _ch_mod
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
@@ -125,6 +127,8 @@ class TestAddToRunningPath:
             channel_send_thinking=False,
         )
 
+        monkeypatch.setattr(_ch_mod, "_cli_agent", None)
+        monkeypatch.setattr(_ch_mod, "_cli_thread_id", None)
         with (
             patch(
                 "EvoScientist.cli.channel._channels_is_running",
@@ -138,11 +142,9 @@ class TestAddToRunningPath:
                 return_value=config,
             ),
         ):
-            _ch_mod._cli_agent = None
-            _ch_mod._cli_thread_id = None
             _run(ChannelCommand().execute(ctx, ["discord"]))
-            assert _ch_mod._cli_agent is ctx.agent
-            assert _ch_mod._cli_thread_id == "tid-42"
+        assert _ch_mod._cli_agent is ctx.agent
+        assert _ch_mod._cli_thread_id == "tid-42"
 
     def test_add_to_running_propagates_send_thinking(self):
         """Adding to a running bus must honor config.channel_send_thinking."""

@@ -50,17 +50,29 @@ class TestDeleteCommand:
         from EvoScientist.commands.implementation.session import DeleteCommand
 
         ctx, ui = _ctx(thread_id="current")
-        with _patches(thread_exists=True):
+        # Inline the patches here (rather than using ``_patches``) so we
+        # can keep a direct handle on the ``delete_thread`` mock and
+        # assert on it *inside* the context.  Asserting after the
+        # context exits hits the real function (no ``await_count``
+        # attr), which silently degrades into ``assert True``.
+        mock_delete = AsyncMock(return_value=True)
+        with (
+            patch(
+                "EvoScientist.sessions.thread_exists",
+                new=AsyncMock(return_value=True),
+            ),
+            patch("EvoScientist.sessions.delete_thread", new=mock_delete),
+            patch(
+                "EvoScientist.sessions.find_similar_threads",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "EvoScientist.sessions.list_threads",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
             _run(DeleteCommand().execute(ctx, ["current"]))
-        # delete_thread must not have been called
-        from EvoScientist.sessions import delete_thread
-
-        assert (
-            not delete_thread.await_count
-            if hasattr(delete_thread, "await_count")
-            else True
-        )
-        # And UI should warn about the current-session guard
+            assert mock_delete.await_count == 0
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Cannot delete the current session" in m for m in msgs)
 

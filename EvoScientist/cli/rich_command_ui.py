@@ -149,11 +149,17 @@ class RichCLICommandUI(CommandUI):
                 choices.append(questionary.Choice(title=label, value=tid))
 
         prompt = questionary.select(title, choices=choices, style=PICKER_STYLE)
-        # Limit visible list to 10 rows with scrolling.
-        for window in prompt.application.layout.find_all_windows():
-            if isinstance(window.content, InquirerControl):
-                window.height = Dimension(max=10)
-                break
+        # Limit visible list to 10 rows with scrolling. Touches
+        # questionary/prompt-toolkit private internals so guard against
+        # library-shape changes — picker stays functional at default
+        # height even if the cap fails.
+        try:
+            for window in prompt.application.layout.find_all_windows():
+                if isinstance(window.content, InquirerControl):
+                    window.height = Dimension(max=10)
+                    break
+        except Exception:
+            pass
         return prompt.ask()
 
     # ── Phase A/B callback-backed methods ─────────────────
@@ -185,14 +191,27 @@ class RichCLICommandUI(CommandUI):
     # /compact indicator pair — duck-typed by ``CompactCommand`` via
     # ``getattr``, not declared on the ``CommandUI`` Protocol.
     def start_compacting_indicator(self) -> None:
+        # Idempotent: close any lingering context before starting a new
+        # one so a double-call (e.g. two overlapping /compact attempts
+        # via the message queue) can't leak a Rich Live handle.
+        if self._compact_status_ctx is not None:
+            try:
+                self._compact_status_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._compact_status_ctx = None
         status = self.console.status("[cyan]Compacting conversation...[/cyan]")
         status.__enter__()
         self._compact_status_ctx = status
 
     def stop_compacting_indicator(self) -> None:
-        if self._compact_status_ctx is not None:
-            self._compact_status_ctx.__exit__(None, None, None)
-            self._compact_status_ctx = None
+        ctx = self._compact_status_ctx
+        self._compact_status_ctx = None
+        if ctx is not None:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                pass
 
     def update_status_after_compact(self, input_tokens: int) -> None:
         if self._on_status_after_compact is not None:
