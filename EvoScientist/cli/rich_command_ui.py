@@ -40,6 +40,10 @@ _INSTALLED_INDICATOR = ("fg:#4caf50", "\u2713 ")
 def _checkbox_ask(choices: list, message: str, **kwargs):
     """Wrap ``questionary.checkbox`` so disabled items render with a checkmark.
 
+    Temporarily patches ``InquirerControl._get_choice_tokens`` to replace
+    the default ``- `` disabled prefix with ``✓ ``.  Falls back to the
+    unpatched checkbox if the private API is missing (forward-compat guard).
+
     Args:
         choices: List of questionary Choice objects.
         message: Prompt message shown above the checkbox list.
@@ -50,18 +54,21 @@ def _checkbox_ask(choices: list, message: str, **kwargs):
     """
     from questionary.prompts.common import InquirerControl
 
-    original = InquirerControl._get_choice_tokens
+    can_patch = hasattr(InquirerControl, "_get_choice_tokens")
+    if can_patch:
+        original = InquirerControl._get_choice_tokens
 
-    def _patched(self):
-        tokens = original(self)
-        return [
-            _INSTALLED_INDICATOR
-            if cls == "class:disabled" and text == "- "
-            else (cls, text)
-            for cls, text in tokens
-        ]
+        def _patched(self):
+            tokens = original(self)
+            return [
+                _INSTALLED_INDICATOR
+                if cls == "class:disabled" and text == "- "
+                else (cls, text)
+                for cls, text in tokens
+            ]
 
-    InquirerControl._get_choice_tokens = _patched
+        InquirerControl._get_choice_tokens = _patched
+
     try:
         return questionary.checkbox(
             message,
@@ -71,7 +78,8 @@ def _checkbox_ask(choices: list, message: str, **kwargs):
             **kwargs,
         ).ask()
     finally:
-        InquirerControl._get_choice_tokens = original
+        if can_patch:
+            InquirerControl._get_choice_tokens = original
 
 
 class RichCLICommandUI(CommandUI):
