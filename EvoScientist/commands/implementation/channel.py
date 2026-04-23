@@ -101,6 +101,12 @@ class ChannelCommand(Command):
             try:
                 for ct in requested:
                     _add_channel_to_running_bus(ct, config, send_thinking=send_thinking)
+                # Sync CLI-side globals so _auto_start_channel observes the
+                # latest agent/thread refs (see cli/channel.py _cli_agent /
+                # _cli_thread_id). The pre-migration inline helper set these
+                # in the same branch.
+                _ch_mod._cli_agent = ctx.agent
+                _ch_mod._cli_thread_id = ctx.thread_id
                 ctx.ui.append_system("Channel(s) added successfully.", style="green")
             except Exception as e:
                 ctx.ui.append_system(f"Failed to add channels: {e}", style="red")
@@ -131,6 +137,12 @@ class ChannelCommand(Command):
                 ctx.thread_id,
                 send_thinking=send_thinking,
             )
+            # Sync CLI-side globals so _auto_start_channel observes the
+            # latest agent/thread refs (see cli/channel.py _cli_agent /
+            # _cli_thread_id). The pre-migration inline helper set these
+            # in the same branch.
+            _ch_mod._cli_agent = ctx.agent
+            _ch_mod._cli_thread_id = ctx.thread_id
 
             # Show status panel
             if _ch_mod._manager:

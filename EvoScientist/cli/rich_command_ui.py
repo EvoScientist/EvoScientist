@@ -198,20 +198,30 @@ class RichCLICommandUI(CommandUI):
         if self._on_status_after_compact is not None:
             self._on_status_after_compact(input_tokens)
 
-    # ── Not yet migrated (Phase C) ────────────────────────
+    # ── Phase C: skill / MCP browse pickers ──────────────
 
     async def wait_for_skill_browse(
         self, index: list[dict], installed_names: set[str], pre_filter_tag: str
     ) -> list[str] | None:
-        raise NotImplementedError(
-            "RichCLICommandUI.wait_for_skill_browse — implement when "
-            "migrating /evoskills"
+        """Delegate to the extracted questionary picker on a worker
+        thread — questionary blocks the event loop so the call must
+        not happen on the main asyncio thread."""
+        import asyncio
+
+        from .skills_cmd import _pick_skills_interactive
+
+        return await asyncio.to_thread(
+            _pick_skills_interactive, index, installed_names, pre_filter_tag
         )
 
     async def wait_for_mcp_browse(
         self, servers: list, installed_names: set[str], pre_filter_tag: str
     ) -> list | None:
-        raise NotImplementedError(
-            "RichCLICommandUI.wait_for_mcp_browse — implement when "
-            "migrating /install-mcp"
+        """Delegate to the MCP browse picker on a worker thread."""
+        import asyncio
+
+        from .mcp_install_cmd import _browse_and_select
+
+        return await asyncio.to_thread(
+            _browse_and_select, servers, installed_names, pre_filter_tag
         )

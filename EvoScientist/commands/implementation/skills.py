@@ -213,9 +213,16 @@ class InstallSkills(Command):
                 pre_filter_tag=tag,
             )
 
-        if not selected_sources:
+        # ``None`` means user cancelled (Esc / Ctrl-C). An empty list means
+        # the picker handled a "nothing to do" state (all-installed / no
+        # tag matches) and already printed its own specific message; the
+        # outer layer should stay silent rather than claim a cancel.
+        if selected_sources is None:
             if not is_channel:
                 ctx.ui.append_system("Browse cancelled.", style="dim")
+            return
+
+        if not selected_sources:
             return
 
         # Install selected skills

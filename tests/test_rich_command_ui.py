@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
 from rich.console import Console
 from rich.table import Table
 
@@ -310,15 +309,55 @@ class TestPhaseBMigrated:
         cb.assert_awaited_once_with("tid-x", None)
 
 
-class TestUnmigratedStubs:
-    """Phase C stubs still raise NotImplementedError until migrated."""
+class TestPhaseCMigrated:
+    """Skill/MCP browse pickers delegate to questionary helpers via
+    ``asyncio.to_thread`` since questionary blocks the event loop."""
 
-    def test_wait_for_skill_browse(self):
-        ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/evoskills"):
-            _run(ui.wait_for_skill_browse([], set(), ""))
+    def test_skill_browse_delegates_to_picker(self, monkeypatch):
+        from unittest.mock import MagicMock
 
-    def test_wait_for_mcp_browse(self):
+        picker = MagicMock(return_value=["skill-a", "skill-b"])
+        monkeypatch.setattr(
+            "EvoScientist.cli.skills_cmd._pick_skills_interactive",
+            picker,
+        )
         ui, _ = _make_ui()
-        with pytest.raises(NotImplementedError, match="/install-mcp"):
-            _run(ui.wait_for_mcp_browse([], set(), ""))
+        result = _run(ui.wait_for_skill_browse([{"name": "a"}], {"installed"}, "core"))
+        assert result == ["skill-a", "skill-b"]
+        picker.assert_called_once_with([{"name": "a"}], {"installed"}, "core")
+
+    def test_skill_browse_cancel_returns_none(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "EvoScientist.cli.skills_cmd._pick_skills_interactive",
+            MagicMock(return_value=None),
+        )
+        ui, _ = _make_ui()
+        result = _run(ui.wait_for_skill_browse([], set(), ""))
+        assert result is None
+
+    def test_mcp_browse_delegates_to_picker(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        sentinel_entries = [MagicMock(name="entry1"), MagicMock(name="entry2")]
+        picker = MagicMock(return_value=sentinel_entries)
+        monkeypatch.setattr(
+            "EvoScientist.cli.mcp_install_cmd._browse_and_select",
+            picker,
+        )
+        ui, _ = _make_ui()
+        result = _run(ui.wait_for_mcp_browse([MagicMock()], {"configured"}, ""))
+        assert result is sentinel_entries
+        picker.assert_called_once()
+
+    def test_mcp_browse_cancel_returns_none(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "EvoScientist.cli.mcp_install_cmd._browse_and_select",
+            MagicMock(return_value=None),
+        )
+        ui, _ = _make_ui()
+        result = _run(ui.wait_for_mcp_browse([], set(), ""))
+        assert result is None

@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 from ..stream.console import console
@@ -680,125 +679,6 @@ def _print_channel_panel(channels: list[tuple[str, bool, str]]) -> None:
         Panel(body, title="[bold]Channels[/bold]", border_style=border, expand=False)
     )
     console.print()
-
-
-def _cmd_channel(
-    args: str,
-    agent: Any,
-    thread_id: str,
-    *,
-    send_thinking: bool | None = None,
-) -> None:
-    """Start a channel in background using bus mode.
-
-    Usage:
-        /channel [telegram|discord|imessage]  -- start channel (default from config)
-        /channel status                       -- show current channel status
-        /channel stop                         -- stop running channel
-    """
-    global _cli_agent, _cli_thread_id
-
-    from ..config import load_config
-
-    app_config = load_config()
-
-    channel_type = args.strip().lower() if args and args.strip() else ""
-    if channel_type == "status":
-        running = _channels_running_list()
-        if running and _manager:
-            detailed = _manager.get_detailed_status()
-            table = Table(title="Channel Status", show_header=True, expand=False)
-            table.add_column("Channel", style="cyan")
-            table.add_column("Status")
-            table.add_column("Uptime", style="dim")
-            table.add_column("Rx", justify="right")
-            table.add_column("Tx", justify="right")
-            for ch_name in running:
-                info = detailed.get(ch_name, {})
-                secs = info.get("uptime_seconds", 0)
-                mins, s = divmod(int(secs), 60)
-                hours, mins = divmod(mins, 60)
-                uptime = f"{hours}h{mins:02d}m" if hours else f"{mins}m{s:02d}s"
-                rx = str(info.get("received", 0))
-                tx = str(info.get("sent", 0))
-                table.add_row(ch_name, "[green]running[/green]", uptime, rx, tx)
-            console.print(table)
-            console.print()
-        else:
-            console.print("[dim]No channel running[/dim]\n")
-        return
-
-    if not channel_type:
-        channel_type = app_config.channel_enabled
-    if not channel_type:
-        console.print("[yellow]No channel configured.[/yellow]")
-        console.print(
-            "[dim]Run[/dim] evosci onboard [dim]or specify:[/dim] /channel telegram\n"
-        )
-        return
-
-    requested = [t.strip() for t in channel_type.split(",") if t.strip()]
-
-    if _channels_is_running():
-        running = _channels_running_list()
-        results: list[tuple[str, bool, str]] = []
-        for ct in requested:
-            if ct in running:
-                results.append((ct, True, "already running"))
-            else:
-                try:
-                    _add_channel_to_running_bus(
-                        ct,
-                        app_config,
-                        send_thinking=send_thinking,
-                    )
-                    results.append((ct, True, "connected (bus)"))
-                except Exception as e:
-                    results.append((ct, False, str(e)))
-        _print_channel_panel(results)
-        return
-
-    _cli_agent = agent
-    _cli_thread_id = thread_id
-
-    # Override channel_enabled for this invocation
-    original = app_config.channel_enabled
-    app_config.channel_enabled = channel_type
-    try:
-        _start_channels_bus_mode(
-            app_config,
-            agent,
-            thread_id,
-            send_thinking=send_thinking,
-        )
-        results = [(ct, True, "connected (bus)") for ct in requested]
-    except Exception as e:
-        results = [(ct, False, str(e)) for ct in requested]
-    finally:
-        app_config.channel_enabled = original
-
-    _print_channel_panel(results)
-
-
-def _cmd_channel_stop(channel_type: str | None = None) -> None:
-    """Stop background channel(s).
-
-    Args:
-        channel_type: Specific channel to stop, or None to stop all.
-    """
-    if not _channels_is_running():
-        console.print("[dim]No channel running[/dim]\n")
-        return
-    if channel_type:
-        if not _channels_is_running(channel_type):
-            console.print(f"[dim]{channel_type} is not running[/dim]\n")
-            return
-        _channels_stop(channel_type)
-        console.print(f"[dim]{channel_type} stopped[/dim]\n")
-    else:
-        running = _channels_running_list()
-        _channels_stop()
-        console.print(f"[dim]{', '.join(running)} stopped[/dim]\n")
 
 
 def _auto_start_channel(

@@ -48,19 +48,11 @@ from .channel import (
     ChannelMessage,
     _auto_start_channel,
     _channels_is_running,
-    _cmd_channel,
-    _cmd_channel_stop,
     _message_queue,
     _set_channel_response,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
-from .mcp_ui import _cmd_mcp
 from .rich_command_ui import RichCLICommandUI
-from .skills_cmd import (
-    _cmd_install_skill,
-    _cmd_install_skills,
-    _cmd_uninstall_skill,
-)
 from .status_bar import (
     SPINNER_FRAMES,
     STATUS_BAD,
@@ -104,6 +96,12 @@ _CMDMGR_MIGRATED: frozenset[str] = frozenset(
         # Phase B
         "/new",
         "/resume",
+        # Phase C
+        "/install-skill",
+        "/uninstall-skill",
+        "/evoskills",
+        "/mcp",
+        "/channel",
     }
 )
 
@@ -208,19 +206,6 @@ _COMPLETION_STYLE = PtStyle.from_dict(
         "status-bar-warn": f"bg:{STATUS_BAR_BG} {STATUS_WARN} bold",
         "status-bar-bad": f"bg:{STATUS_BAR_BG} {STATUS_BAD} bold",
         "status-bar-critical": f"bg:{STATUS_BAR_BG} {STATUS_CRITICAL} bold",
-    }
-)
-
-# Style for questionary pickers — matches _COMPLETION_STYLE visual language:
-# gray (#888888) for non-selected, bold for selected, no background changes.
-_PICKER_STYLE = PtStyle.from_dict(
-    {
-        "questionmark": "#888888",
-        "question": "",
-        "pointer": "bold",
-        "highlighted": "bold",
-        "text": "#888888",
-        "answer": "bold",
     }
 )
 
@@ -1021,40 +1006,6 @@ def cmd_interactive(
                             if _cmd.name in ("/compact", "/new"):
                                 await _refresh_status_snapshot(
                                     reset_streaming_text=True,
-                                )
-                            continue
-
-                        if user_input.lower().startswith("/install-skill"):
-                            source = user_input[len("/install-skill") :].strip()
-                            _cmd_install_skill(source)
-                            continue
-
-                        if user_input.lower().startswith("/uninstall-skill"):
-                            name = user_input[len("/uninstall-skill") :].strip()
-                            _cmd_uninstall_skill(name)
-                            continue
-
-                        if user_input.lower().startswith("/evoskills"):
-                            browse_args = user_input[len("/evoskills") :].strip()
-                            _cmd_install_skills(browse_args)
-                            continue
-
-                        if user_input.lower().startswith("/mcp"):
-                            _cmd_mcp(user_input[len("/mcp") :])
-                            continue
-
-                        if user_input.lower().startswith("/channel"):
-                            args = user_input[len("/channel") :].strip()
-                            if args.lower().startswith("stop"):
-                                stop_arg = args[len("stop") :].strip()
-                                _cmd_channel_stop(stop_arg or None)
-                            else:
-                                await _await_agent_ready()
-                                _cmd_channel(
-                                    args,
-                                    agent_loader.agent,
-                                    state["thread_id"],
-                                    send_thinking=channel_send_thinking,
                                 )
                             continue
 
