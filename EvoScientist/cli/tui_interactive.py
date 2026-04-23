@@ -1020,7 +1020,7 @@ def run_textual_interactive(
 
             # Transient indicator widgets (auto-removed on state transitions)
             narration_w: Static | None = None  # dim italic intermediate text
-            processing_w: Static | None = None  # "Analyzing results..."
+            processing_w: Static | None = None  # "Writing report..."
 
             # Tool collapsing (matches CLI MAX_VISIBLE_TOOLS)
             _MAX_VISIBLE_TOOLS = 4
@@ -1390,14 +1390,18 @@ def run_textual_interactive(
                                     await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
-                            # Show "Analyzing results..." if all tools done, no text yet
+                            # Show "Writing report..." once all tool/subagent activity has
+                            # finished and the model is generating the final response. The
+                            # gap between the last tool event and the first response token
+                            # used to look like a stall (#173); the explicit phase label
+                            # tells the user the agent is still working.
                             if (
                                 _is_final_response(state)
                                 and not state.response_text
                                 and processing_w is None
                             ):
                                 processing_w = Static(
-                                    Text("\u25cf Analyzing results...", style="cyan"),
+                                    Text("\u25cf Writing report...", style="cyan"),
                                 )
                                 await container.mount(processing_w)
 

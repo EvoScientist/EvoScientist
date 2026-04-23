@@ -668,8 +668,10 @@ def create_streaming_display(
             # Check if any sub-agent is active
             any_active = any(sa.is_active for sa in subagents)
             if not any_active:
+                # "Writing report..." matches the TUI label and tells the user
+                # the agent is composing its final response, not stalled (#173).
                 elements.append(
-                    Spinner("dots", text=" Analyzing results...", style="cyan")
+                    Spinner("dots", text=" Writing report...", style="cyan")
                 )
 
         # Stream response in real-time as tokens arrive (all tools done)
