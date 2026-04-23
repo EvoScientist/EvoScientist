@@ -46,6 +46,12 @@ SKILLS_DIR = str(Path(__file__).parent / "skills")
 
 _config = None
 _chat_model = None
+# Track the (model, provider) binding of _chat_model so cache invalidates
+# when config.model/provider change (e.g. via /model). Without this,
+# _ensure_chat_model() returns the stale cached instance even after
+# _ensure_config(new_cfg) has overwritten the active config — causing
+# /model switch to lag one step (see issue #179).
+_chat_model_key: tuple[str | None, str | None] | None = None
 
 # Cache MCP tools by the effective config signature to avoid reconnecting
 # to MCP servers on every `/new` when config is unchanged.
@@ -75,14 +81,40 @@ def _ensure_config(config=None):
     return _config
 
 
-def _ensure_chat_model():
-    """Return cached chat model, creating it on first call."""
-    global _chat_model
-    if _chat_model is None:
-        from .llm import get_chat_model
+def _replace_chat_model(instance, key: tuple[str | None, str | None]) -> None:
+    """Install a new chat model and propagate the related invariants.
 
-        cfg = _ensure_config()
-        _chat_model = get_chat_model(model=cfg.model, provider=cfg.provider)
+    Single write point for ``_chat_model`` / ``_chat_model_key`` /
+    ``_EvoScientist_agent``: both ``_ensure_chat_model`` (cache-miss
+    rebuild) and ``set_chat_model`` (explicit switch via ``/model``)
+    funnel through here so the three globals can never drift.
+    """
+    global _chat_model, _chat_model_key, _EvoScientist_agent
+    _chat_model = instance
+    _chat_model_key = key
+    # The lazy default agent captured a reference to the previous
+    # ``_chat_model`` at build time, so it must be rebuilt on next access.
+    _EvoScientist_agent = None
+
+
+def _ensure_chat_model():
+    """Return cached chat model, rebuilding if cfg.model/provider changed.
+
+    The cache key is the current config's ``(model, provider)``. If it
+    differs from the key that built ``_chat_model``, rebuild — this makes
+    ``create_cli_agent(config=temp_cfg)`` bind the freshly requested model
+    into the new agent without requiring callers to interleave
+    ``set_chat_model()`` calls in any particular order.
+    """
+    from .llm import get_chat_model
+
+    cfg = _ensure_config()
+    key = (cfg.model, cfg.provider)
+    if _chat_model is None or _chat_model_key != key:
+        _replace_chat_model(
+            get_chat_model(model=cfg.model, provider=cfg.provider),
+            key,
+        )
     return _chat_model
 
 
@@ -92,12 +124,9 @@ def set_chat_model(model: str, provider: str | None = None):
     Called by ``/model`` to switch the LLM mid-session.
     Returns the new chat model instance.
     """
-    global _chat_model, _EvoScientist_agent
     from .llm import get_chat_model
 
-    _chat_model = get_chat_model(model=model, provider=provider)
-    # Invalidate the cached default agent so it gets rebuilt with the new model.
-    _EvoScientist_agent = None
+    _replace_chat_model(get_chat_model(model=model, provider=provider), (model, provider))
     return _chat_model
 
 
@@ -168,8 +197,8 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
     for sa in subs:
         sa.setdefault("middleware", []).extend(
             [
-                # Uses main agent's model for trigger — subagents currently
-                # share the same model, so context window matches.
+                # No ``model=`` — subagents share the main agent's model,
+                # so defer to the factory's ``_ensure_chat_model()`` fallback.
                 create_context_editing_middleware(),
                 ToolErrorHandlerMiddleware(),
                 ContextOverflowMapperMiddleware(),
@@ -460,7 +489,7 @@ def create_cli_agent(
         create_context_editing_middleware(model),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(),
+        *create_tool_selector_middleware(model=model),
         create_memory_middleware(_mem_dir, extraction_model=model),
     ]
     if cfg.enable_ask_user and not cfg.auto_mode:
