@@ -109,10 +109,13 @@ class WebhookMixin:
 
         app = web.Application()
         for method, path, handler in self._webhook_routes():
-            if method.upper() == "GET":
+            method = method.upper()
+            if method == "GET":
                 app.router.add_get(path, handler)
-            else:
+            elif method == "POST":
                 app.router.add_post(path, handler)
+            else:
+                app.router.add_route(method, path, handler)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()

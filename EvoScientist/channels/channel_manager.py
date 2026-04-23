@@ -535,11 +535,24 @@ class SharedWebhookServer:
         from aiohttp import web
 
         self._app = web.Application()
+        seen_routes: set[tuple[str, str]] = set()
         for method, path, handler in routes:
-            if method.upper() == "GET":
+            method = method.upper()
+            route_key = (method, path)
+            if route_key in seen_routes:
+                logger.warning(
+                    "Skipping duplicate shared-webhook route %s %s",
+                    method,
+                    path,
+                )
+                continue
+            seen_routes.add(route_key)
+            if method == "GET":
                 self._app.router.add_get(path, handler)
-            else:
+            elif method == "POST":
                 self._app.router.add_post(path, handler)
+            else:
+                self._app.router.add_route(method, path, handler)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -809,6 +822,12 @@ class ChannelManager:
 
         all_routes: list[tuple[str, str, Any]] = []
         for name, channel in self._channels.items():
+            if getattr(channel, "_disable_shared_webhook", False):
+                logger.debug(
+                    "Shared webhook: skipping '%s' (dedicated webhook requested)",
+                    name,
+                )
+                continue
             routes_fn = getattr(channel, "_webhook_routes", None)
             if routes_fn is None:
                 continue

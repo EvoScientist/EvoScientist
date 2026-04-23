@@ -218,3 +218,11 @@ IMESSAGE = ChannelCapabilities(
     reactions=False,  # imsg CLI cannot send tapback reactions
     chat_types=("direct", "group"),
 )
+
+WEBUI = ChannelCapabilities(
+    format_type="plain",
+    max_text_length=999_999,
+    streaming=True,
+    threading=True,
+    chat_types=("direct", "thread"),
+)
