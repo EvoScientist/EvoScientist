@@ -98,7 +98,7 @@ class EvoScientistConfig:
     reasoning_effort: str = "high"
 
     # Channel Settings
-    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
+    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "webui" | "" (comma-separated for multiple)
     channel_send_thinking: bool = True  # forward thinking to any channel
     channel_debug_tracing: bool = False  # emit extra inbound diagnostics at DEBUG
     require_mention: str = "group"  # "always" | "group" | "off"
@@ -189,6 +189,11 @@ class EvoScientistConfig:
     signal_config_dir: str = ""
     signal_allowed_senders: str = ""
     signal_rpc_port: int = 7583
+
+    # Web UI Settings
+    webui_port: int = 8010
+    webui_api_key: str = ""
+    webui_base_path: str = "/webui"
 
     # Shared webhook port (0 = disabled)
     shared_webhook_port: int = 9000

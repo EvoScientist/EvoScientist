@@ -721,6 +721,38 @@ class TestStepChannels:
         assert result["channel_enabled"] == "discord"
         assert result["discord_bot_token"] == "discord-token"
 
+    def test_webui_channel_selected(self):
+        """Test channels step handles Web UI selection."""
+        from EvoScientist.config.onboard import _step_channels
+
+        config = EvoScientistConfig()
+
+        _real_import = (
+            __builtins__.__import__
+            if hasattr(__builtins__, "__import__")
+            else __import__
+        )
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "aiohttp":
+                return  # pretend installed
+            return _real_import(name, *args, **kwargs)
+
+        with (
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch("EvoScientist.config.onboard._probe_channel"),
+            patch("builtins.__import__", side_effect=_fake_import),
+        ):
+            mock_q.checkbox.return_value.ask.return_value = ["webui"]
+            mock_q.text.return_value.ask.side_effect = ["8010", "/webui", "secret-key"]
+            mock_q.select.return_value.ask.return_value = False
+            result = _step_channels(config)
+
+        assert result["channel_enabled"] == "webui"
+        assert result["webui_port"] == 8010
+        assert result["webui_base_path"] == "/webui"
+        assert result["webui_api_key"] == "secret-key"
+
 
 class TestStepMcpServersNpxFailure:
     def _make_test_servers(self):

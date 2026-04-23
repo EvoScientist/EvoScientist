@@ -940,6 +940,9 @@ stt = [
 telegram = [
     { name = "python-telegram-bot" },
 ]
+webui = [
+    { name = "aiohttp" },
+]
 wechat = [
     { name = "pycryptodome" },
 ]
@@ -958,6 +961,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'all-channels'", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9" },
+    { name = "aiohttp", marker = "extra == 'webui'", specifier = ">=3.9" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.7" },
     { name = "deepagents", specifier = ">=0.5.3" },
@@ -1001,7 +1005,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.80" },
     { name = "typer", specifier = ">=0.12" },
 ]
-provides-extras = ["dev", "telegram", "discord", "slack", "wechat", "feishu", "qq", "stt", "oauth", "all-channels"]
+provides-extras = ["dev", "telegram", "discord", "slack", "wechat", "feishu", "qq", "webui", "stt", "oauth", "all-channels"]
 
 [package.metadata.requires-dev]
 dev = [

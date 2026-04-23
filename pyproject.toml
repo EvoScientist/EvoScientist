@@ -65,6 +65,7 @@ slack = ["slack-sdk>=3.27", "aiohttp>=3.9"]
 wechat = ["pycryptodome>=3.20"]
 feishu = ["lark-oapi>=1.4.0"]
 qq = ["qq-botpy>=1.0"]
+webui = ["aiohttp>=3.9"]
 stt = ["faster-whisper>=1.0"]
 oauth = ["ccproxy-api>=0.2.7"]
 all-channels = [

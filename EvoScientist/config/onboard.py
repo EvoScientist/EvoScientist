@@ -2341,6 +2341,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         "dingtalk": ["aiohttp>=3.9"],
         "wechat": ["pycryptodome>=3.20", "aiohttp>=3.9"],
         "qq": ["qq-botpy>=1.0"],
+        "webui": ["aiohttp>=3.9"],
     }
 
     # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
@@ -2426,6 +2427,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             [("signal_phone_number", "Phone number (E.164)")],
             None,
             None,
+        ),
+        (
+            "webui",
+            "Web UI",
+            [],
+            "aiohttp",
+            "webui",
         ),
         ("imessage", "iMessage", [], None, None),  # handled via _setup_imessage()
     ]
@@ -2546,6 +2554,44 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             updates["imessage_enabled"] = True
             updates["imessage_allowed_senders"] = senders.strip()
             enabled_channels.append("imessage")
+            continue
+
+        if ch_name == "webui":
+            console.print(
+                "  [dim]Configure the browser-facing channel used by the Next.js UI.[/dim]"
+            )
+            webui_port = questionary.text(
+                "Web UI port:",
+                default=str(getattr(config, "webui_port", 8010)),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if webui_port is None:
+                raise KeyboardInterrupt()
+            updates["webui_port"] = int((webui_port or "8010").strip())
+
+            webui_base_path = questionary.text(
+                "Web UI base path:",
+                default=str(getattr(config, "webui_base_path", "/webui")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if webui_base_path is None:
+                raise KeyboardInterrupt()
+            updates["webui_base_path"] = (webui_base_path or "/webui").strip()
+
+            webui_api_key = questionary.text(
+                "Web UI API key (optional):",
+                default=str(getattr(config, "webui_api_key", "")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if webui_api_key is None:
+                raise KeyboardInterrupt()
+            updates["webui_api_key"] = webui_api_key.strip()
+
+            _probe_channel(ch_name, config, updates)
+            enabled_channels.append(ch_name)
             continue
 
         # Prompt for required fields
