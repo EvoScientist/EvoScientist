@@ -658,10 +658,18 @@ def cmd_interactive(
                 console.print()
                 await _render_history(thread_id)
 
+            # Rich CLI collapses ``request_quit`` / ``force_quit`` into the
+            # same "break the prompt loop" effect — there's no equivalent
+            # of the TUI's double-press-to-confirm quit distinction.  A
+            # shared ``_stop`` helper makes the intentional symmetry
+            # explicit instead of silently duplicating a lambda.
+            def _stop() -> None:
+                state["running"] = False
+
             rich_ui = RichCLICommandUI(
                 console,
-                on_request_quit=lambda: state.__setitem__("running", False),
-                on_force_quit=lambda: state.__setitem__("running", False),
+                on_request_quit=_stop,
+                on_force_quit=_stop,
                 on_clear_chat=lambda: console.clear(),
                 on_status_after_compact=_on_status_after_compact,
                 on_start_new_session=_on_start_new_session,
