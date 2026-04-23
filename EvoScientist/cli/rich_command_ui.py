@@ -1,8 +1,16 @@
 """CommandUI Protocol adapter for the Rich CLI surface.
 
-Methods not exercised by the currently-migrated commands raise
-``NotImplementedError`` rather than silently returning ``None``, so
-future callers fail loudly instead of pretending the command ran.
+Lifecycle methods (``request_quit``, ``force_quit``, ``clear_chat``,
+``start_new_session``, ``handle_session_resume``, ``update_status_after_compact``)
+are callback-driven: when their corresponding ``on_*`` constructor kwarg
+is ``None``, the method is a silent no-op, mirroring
+``ChannelCommandUI``'s fallback pattern.  Callers that need a specific
+side-effect (REPL quit flag flip, status-bar refresh, …) wire the
+callback at construction time; non-interactive surfaces (tests,
+alternate REPLs) can leave callbacks unset without crashing.
+
+``wait_for_*`` methods return ``None`` on cancel / fallback and are
+always safe to ``await``.
 """
 
 from __future__ import annotations
@@ -99,7 +107,7 @@ class RichCLICommandUI(CommandUI):
         ``ctx.agent`` change post-``cmd_manager.execute``."""
         return
 
-    # ── Phase B: workspace-grouped questionary picker ──
+    # ── Interactive pickers ────────────────────────────────
 
     async def wait_for_thread_pick(
         self, threads: list[dict], current_thread: str, title: str
@@ -160,9 +168,11 @@ class RichCLICommandUI(CommandUI):
                     break
         except Exception:
             pass
-        return prompt.ask()
+        # ``ask_async`` (questionary >= 2.0.1) avoids blocking the
+        # asyncio event loop while the user interacts with the picker.
+        return await prompt.ask_async()
 
-    # ── Phase A/B callback-backed methods ─────────────────
+    # ── Lifecycle callbacks ───────────────────────────────
 
     def clear_chat(self) -> None:
         if self._on_clear_chat is not None:
@@ -217,7 +227,7 @@ class RichCLICommandUI(CommandUI):
         if self._on_status_after_compact is not None:
             self._on_status_after_compact(input_tokens)
 
-    # ── Phase C: skill / MCP browse pickers ──────────────
+    # ── Skill / MCP browse (delegated to worker threads) ──
 
     async def wait_for_skill_browse(
         self, index: list[dict], installed_names: set[str], pre_filter_tag: str

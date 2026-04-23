@@ -182,7 +182,13 @@ class TestWaitForThreadPick:
 
     def _fake_prompt(self, selected):
         """Build a stub matching ``questionary.select(...)`` return."""
+        from unittest.mock import AsyncMock
+
         prompt = MagicMock()
+        # The adapter uses ``ask_async`` (questionary >= 2.0.1) so we
+        # must stub the async variant.  Keep ``ask`` around in case
+        # other code paths still call it.
+        prompt.ask_async = AsyncMock(return_value=selected)
         prompt.ask.return_value = selected
         prompt.application.layout.find_all_windows.return_value = []
         return prompt

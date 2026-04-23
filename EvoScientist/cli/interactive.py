@@ -362,7 +362,7 @@ def cmd_interactive(
         )
 
     # ``rich_ui`` is constructed inside ``_async_main_loop`` so the
-    # Phase B callbacks can close over ``checkpointer`` from
+    # lifecycle callbacks can close over ``checkpointer`` from
     # ``get_checkpointer()``.
 
     def _start_agent_load(checkpointer) -> None:
@@ -594,8 +594,9 @@ def cmd_interactive(
         """Async main loop with prompt_async and channel queue checking."""
         nonlocal model
         async with get_checkpointer() as checkpointer:
-            # Phase B callbacks need ``checkpointer`` in scope — define
-            # the rich_ui adapter here rather than at the outer level.
+            # Lifecycle callbacks (new / resume) need ``checkpointer``
+            # in scope — define the ``rich_ui`` adapter here rather than
+            # at the outer function level.
 
             def _on_start_new_session() -> None:
                 """NewCommand callback — rotate workspace (if not fixed),
