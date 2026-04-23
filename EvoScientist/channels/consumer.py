@@ -318,6 +318,18 @@ class InboundConsumer:
         """Look up the channel by name from the manager."""
         return self.manager.get_channel(channel_name)
 
+    def _resolve_thread_id(self, msg: InboundMessage) -> str:
+        """Resolve the thread ID for a message.
+
+        Channels may provide an explicit ``metadata["thread_id"]`` when the
+        frontend owns the thread identity (for example a web UI runtime).
+        Otherwise we fall back to the legacy sender-based session mapping.
+        """
+        meta_thread_id = msg.metadata.get("thread_id")
+        if isinstance(meta_thread_id, str) and meta_thread_id.strip():
+            return meta_thread_id.strip()
+        return self._get_thread_id(msg.sender_id)
+
     # ── lifecycle ──
 
     async def run(self) -> None:
@@ -405,7 +417,7 @@ class InboundConsumer:
                 pass
 
         channel = self._get_channel(msg.channel)
-        thread_id = self._get_thread_id(msg.sender_id)
+        thread_id = self._resolve_thread_id(msg)
         session_key = msg.session_key  # "channel:chat_id"
 
         # Lazily create per-chat lock; evict stale locks when too many
@@ -448,7 +460,7 @@ class InboundConsumer:
         session_key: str,
     ) -> None:
         """Stream agent events with HITL interrupt handling."""
-        from ..stream.events import stream_agent_events
+        from ..stream.events import RunCancelledError, stream_agent_events
 
         stream_input: Any = msg.content
 
@@ -535,6 +547,27 @@ class InboundConsumer:
                         subagent_text_buffers[instance_id][1].append(
                             event.get("content", "")
                         )
+                        if channel and hasattr(channel, "send_subagent_event"):
+                            await channel.send_subagent_event(
+                                msg.sender_id,
+                                event_type,
+                                event,
+                                msg.metadata,
+                            )
+
+                    elif event_type in (
+                        "subagent_start",
+                        "subagent_tool_call",
+                        "subagent_tool_result",
+                        "subagent_end",
+                    ):
+                        if channel and hasattr(channel, "send_subagent_event"):
+                            await channel.send_subagent_event(
+                                msg.sender_id,
+                                event_type,
+                                event,
+                                msg.metadata,
+                            )
 
                     elif event_type == "done":
                         final_content = event.get("content", "") or final_content
@@ -656,6 +689,16 @@ class InboundConsumer:
                     resume={"decisions": [{"type": "approve"} for _ in range(n)]}
                 )
                 # continue to next HITL round
+
+        except RunCancelledError:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Run cancelled.",
+                    metadata=msg.metadata,
+                )
+            )
 
         except TimeoutError:
             self._metrics.total_timeouts += 1

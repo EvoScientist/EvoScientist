@@ -17,6 +17,7 @@ from langchain_core.messages import (  # type: ignore[import-untyped]
     AIMessageChunk,
 )
 
+from ..runtime.thread_registry import get_thread_runtime_registry
 from .emitter import StreamEventEmitter
 from .tracker import ToolCallTracker
 from .utils import DisplayLimits, is_success
@@ -27,6 +28,11 @@ _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
 _SUMMARY_TAG_RE = re.compile(
     r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE
 )
+_CANCEL_POLL_INTERVAL = 0.2
+
+
+class RunCancelledError(Exception):
+    """Raised when a thread run is explicitly stopped by the user."""
 
 
 def _strip_legacy_thinking_tags(content: str) -> str:
@@ -453,13 +459,43 @@ async def stream_agent_events(
         except Exception:
             pass
 
+    runtime_registry = get_thread_runtime_registry()
+    stream_iter = agent.astream(
+        astream_input,
+        config=config,
+        stream_mode=["messages", "updates"],
+        subgraphs=True,
+    ).__aiter__()
+
     try:
-        async for chunk in agent.astream(
-            astream_input,
-            config=config,
-            stream_mode=["messages", "updates"],
-            subgraphs=True,
-        ):
+        while True:
+            if runtime_registry.is_cancel_requested(thread_id):
+                runtime_registry.clear_cancel_request(thread_id)
+                raise RunCancelledError("run cancelled")
+
+            next_chunk_task = asyncio.create_task(stream_iter.__anext__())
+            while True:
+                done, _ = await asyncio.wait(
+                    {next_chunk_task},
+                    timeout=_CANCEL_POLL_INTERVAL,
+                )
+                if done:
+                    break
+
+                if runtime_registry.is_cancel_requested(thread_id):
+                    runtime_registry.clear_cancel_request(thread_id)
+                    next_chunk_task.cancel()
+                    try:
+                        await next_chunk_task
+                    except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                        pass
+                    raise RunCancelledError("run cancelled")
+
+            try:
+                chunk = next_chunk_task.result()
+            except StopAsyncIteration:
+                break
+
             # Multi-mode + subgraphs: 3-tuple (namespace, mode, data)
             # Single-mode + subgraphs: 2-tuple (namespace, data) — fallback
             if not isinstance(chunk, tuple):
@@ -827,9 +863,17 @@ async def stream_agent_events(
                         sa_name = _task_id_to_name.get(tool_call_id, "sub-agent")
                         yield emitter.subagent_end(sa_name).data
 
+    except RunCancelledError:
+        raise
     except Exception as e:
         yield emitter.error(str(e)).data
         raise
+    finally:
+        if hasattr(stream_iter, "aclose"):
+            try:
+                await stream_iter.aclose()
+            except Exception:
+                pass
 
     yield emitter.done(full_response).data
 

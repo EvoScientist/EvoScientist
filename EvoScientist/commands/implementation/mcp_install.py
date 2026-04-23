@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ..base import Argument, Command, CommandContext
+from ..manager import manager
 
 
 class InstallMCPCommand(Command):
@@ -98,3 +99,7 @@ class InstallMCPCommand(Command):
                 f"{count} server(s) configured. Reload with /new to apply.",
                 style="green",
             )
+
+
+# Register MCP install command
+manager.register(InstallMCPCommand())

@@ -22,7 +22,7 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..paths import resolve_virtual_path
 from .diff_format import build_edit_diff
-from .events import stream_agent_events
+from .events import RunCancelledError, stream_agent_events
 from .formatter import ToolResultFormatter
 from .state import (
     _INTERNAL_TOOLS,
@@ -1093,6 +1093,7 @@ def _run_streaming(
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
     on_stream_event: Callable[[str, Any], Any] | None = None,
+    on_raw_stream_event: Callable[[dict], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
@@ -1139,6 +1140,10 @@ def _run_streaming(
         async for event in stream_agent_events(
             agent, message, thread_id, metadata=metadata
         ):
+            if on_raw_stream_event is not None:
+                raw_callback_result = on_raw_stream_event(event)
+                if inspect.isawaitable(raw_callback_result):
+                    await raw_callback_result
             event_type = state.handle_event(event)
 
             # Relay thinking to channel when transitioning away from
@@ -1230,6 +1235,8 @@ def _run_streaming(
                     ),
                 )
             )
+
+    was_cancelled = False
 
     with Live(
         console=console,
@@ -1331,7 +1338,10 @@ def _run_streaming(
                 live.update(final_display)
                 live.refresh()
 
-        loop.run_until_complete(_run_with_refresh())
+        try:
+            loop.run_until_complete(_run_with_refresh())
+        except RunCancelledError:
+            was_cancelled = True
 
     # Flush any remaining thinking that wasn't sent during streaming.
     if on_thinking and state.thinking_text:
@@ -1339,6 +1349,10 @@ def _run_streaming(
         if len(current) >= _MIN_THINKING_LEN and current != _sent_thinking_text:
             on_thinking(current)
             _sent_thinking_text = current
+
+    if was_cancelled:
+        partial = (state.response_text or "").strip()
+        return partial or "Run cancelled."
 
     # ask_user: check before HITL (ask_user uses the same resume loop)
     if state.pending_ask_user is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
@@ -1360,6 +1374,7 @@ def _run_streaming(
             on_todo=on_todo,
             on_file_write=on_file_write,
             on_stream_event=on_stream_event,
+            on_raw_stream_event=on_raw_stream_event,
             status_footer_builder=status_footer_builder,
             metadata=metadata,
             hitl_prompt_fn=hitl_prompt_fn,
@@ -1391,6 +1406,7 @@ def _run_streaming(
                 on_todo=on_todo,
                 on_file_write=on_file_write,
                 on_stream_event=on_stream_event,
+                on_raw_stream_event=on_raw_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
                 hitl_prompt_fn=hitl_prompt_fn,
@@ -1441,24 +1457,27 @@ async def _astream_to_console(
     """
     state = StreamState()
 
-    async for event in stream_agent_events(agent, message, thread_id):
-        etype = state.handle_event(event)
+    try:
+        async for event in stream_agent_events(agent, message, thread_id):
+            etype = state.handle_event(event)
 
-        # Only show subagent starts as real-time progress.
-        # Full results rendered by display_final_results() after streaming.
-        if etype == "subagent_start":
-            name = event.get("name", "sub-agent")
-            # Skip generic "sub-agent" — real name arrives later;
-            # static prints can't be overwritten like Live display.
-            if name and name != "sub-agent":
-                desc = event.get("description", "")
-                line = Text()
-                line.append("\u25b6 ", style="cyan bold")
-                line.append(f"Cooking with {name}", style="cyan bold")
-                if desc:
-                    short = desc[:50] + "\u2026" if len(desc) > 50 else desc
-                    line.append(f" \u2014 {short}", style="dim")
-                console.print(line)
+            # Only show subagent starts as real-time progress.
+            # Full results rendered by display_final_results() after streaming.
+            if etype == "subagent_start":
+                name = event.get("name", "sub-agent")
+                # Skip generic "sub-agent" — real name arrives later;
+                # static prints can't be overwritten like Live display.
+                if name and name != "sub-agent":
+                    desc = event.get("description", "")
+                    line = Text()
+                    line.append("\u25b6 ", style="cyan bold")
+                    line.append(f"Cooking with {name}", style="cyan bold")
+                    if desc:
+                        short = desc[:50] + "\u2026" if len(desc) > 50 else desc
+                        line.append(f" \u2014 {short}", style="dim")
+                    console.print(line)
+    except RunCancelledError:
+        return (state.response_text or "").strip() or "Run cancelled."
 
     # Final output (streaming layout: tools → Task List → subagents → response)
 
