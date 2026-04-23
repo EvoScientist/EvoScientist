@@ -591,9 +591,9 @@ Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu 
   <img src="https://contrib.rocks/image?repo=EvoScientist/EvoScientist" />
 </a>
 
-### 📈 Star 趋势
+<!-- ### 📈 Star 趋势
 
-[![Star History Chart](https://api.star-history.com/svg?repos=EvoScientist/EvoScientist&type=date&legend=bottom-right)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=bottom-right)
+[![Star History Chart](https://api.star-history.com/svg?repos=EvoScientist/EvoScientist&type=date&legend=bottom-right)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=bottom-right) -->
 
 <p align="right"><a href="#top">🔝回到顶部</a></p>
 
