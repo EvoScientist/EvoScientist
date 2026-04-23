@@ -79,33 +79,6 @@ _channel_logger = logging.getLogger(__name__)
 # Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
 _background_tasks: set[asyncio.Task] = set()
 
-# Slash commands dispatched through ``cmd_manager.execute``. Everything
-# else still hits the inline ``if`` branches in ``_async_main_loop``
-# (Phase B/C of the CommandManager migration — see memory file
-# ``cli-commandmanager-migration.md``).
-_CMDMGR_MIGRATED: frozenset[str] = frozenset(
-    {
-        "/exit",
-        "/threads",
-        "/delete",
-        "/current",
-        "/skills",
-        "/compact",
-        "/help",
-        "/clear",
-        # Phase B
-        "/new",
-        "/resume",
-        # Phase C
-        "/install-skill",
-        "/uninstall-skill",
-        "/evoskills",
-        "/mcp",
-        "/channel",
-    }
-)
-
-
 # =============================================================================
 # Banner
 # =============================================================================
@@ -974,14 +947,12 @@ def cmd_interactive(
 
                         _print_separator()
 
-                        # ==== Shared CommandManager dispatch (Phase A) ====
-                        # Resolve-then-dispatch: only Phase A commands (see
-                        # ``_CMDMGR_MIGRATED``) route through the manager
-                        # for now. Everything else falls through to the
-                        # inline ``if`` branches below until Phase B/C
-                        # migrate them.
+                        # ==== Shared CommandManager dispatch ====
+                        # Every registered slash command routes through the
+                        # manager.  Unresolved input (non-slash, typo) falls
+                        # through to the agent message path below.
                         _parsed = cmd_manager.resolve(user_input)
-                        if _parsed is not None and _parsed[0].name in _CMDMGR_MIGRATED:
+                        if _parsed is not None:
                             _cmd, _cmd_args = _parsed
                             _agent_for_ctx: Any = agent_loader.agent
                             if _cmd.needs_agent(_cmd_args):
@@ -995,48 +966,41 @@ def cmd_interactive(
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                             )
                             await cmd_manager.execute(user_input, ctx)
+
                             # ExitCommand signals quit via ``force_quit`` →
                             # callback flips ``state["running"]`` to False.
                             if not state["running"]:
                                 break
-                            # /compact and /new mutate status fields via
-                            # sync callbacks; async refresh must happen
-                            # here (callbacks are sync). /resume's async
-                            # callback awaits its own refresh inline.
-                            if _cmd.name in ("/compact", "/new"):
-                                await _refresh_status_snapshot(
-                                    reset_streaming_text=True,
-                                )
-                            continue
 
-                        if user_input.lower().startswith("/model"):
-                            from ..EvoScientist import _ensure_config
-
-                            # /model is ``needs_agent=False`` — it builds its
-                            # own agent — so we don't wait for the current
-                            # load; /model is the way to fix a broken one.
-                            ctx = CommandContext(
-                                agent=None,
-                                thread_id=state["thread_id"],
-                                ui=rich_ui,
-                                workspace_dir=state["workspace_dir"],
-                                checkpointer=checkpointer,
+                            # Agent swap (e.g. /model successfully built a
+                            # new agent): adopt into loader + reset status
+                            # snapshot + sync channel globals.
+                            agent_swapped = (
+                                ctx.agent is not None
+                                and ctx.agent is not _agent_for_ctx
                             )
-                            await cmd_manager.execute(user_input, ctx)
+                            if agent_swapped:
+                                from ..EvoScientist import _ensure_config
 
-                            if ctx.agent is not None:
                                 agent_loader.adopt(ctx.agent)
                                 cfg = _ensure_config()
                                 model = cfg.model
                                 state["status_base_snapshot"] = (
                                     make_empty_status_snapshot(model)
                                 )
-                                await _refresh_status_snapshot(
-                                    reset_streaming_text=True,
-                                )
                                 if _channels_is_running():
                                     _ch_mod._cli_agent = ctx.agent
                                     _ch_mod._cli_thread_id = state["thread_id"]
+
+                            # Commands that mutate status fields need an
+                            # async refresh here (/compact + /new use sync
+                            # callbacks; /model swaps the agent).  /resume
+                            # awaits its own refresh inline inside the
+                            # async callback.
+                            if agent_swapped or _cmd.name in ("/compact", "/new"):
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True,
+                                )
                             continue
 
                         # Resolve @file mentions — inject file contents inline
