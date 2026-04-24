@@ -2053,13 +2053,32 @@ def run_textual_interactive(
                 if isinstance(focused, MCPBrowserWidget):
                     focused.action_cancel()
                     return
+                # ModelPickerWidget: when in "Custom Ollama" input mode, its
+                # child Input widget owns focus, so ``focused`` isn't the
+                # picker itself. Walk the parent chain to find it, then let
+                # the widget's own action_cancel decide whether to close the
+                # picker (list mode) or just exit input mode.
+                picker: ModelPickerWidget | None = None
                 if isinstance(focused, ModelPickerWidget):
-                    focused.action_cancel()
-                    if (
-                        self._model_picker_future
-                        and not self._model_picker_future.done()
-                    ):
-                        self._model_picker_future.set_result(None)
+                    picker = focused
+                else:
+                    node = focused.parent
+                    while node is not None and not isinstance(node, ModelPickerWidget):
+                        node = node.parent
+                    picker = node
+                if picker is not None:
+                    prev_mode = getattr(picker, "_mode", "list")
+                    picker.action_cancel()
+                    # In list mode action_cancel posted Cancelled; resolve the
+                    # future immediately to avoid a frame of lag. In input
+                    # mode action_cancel flipped back to list — keep picker
+                    # open, do NOT close the future.
+                    if prev_mode == "list":
+                        if (
+                            self._model_picker_future
+                            and not self._model_picker_future.done()
+                        ):
+                            self._model_picker_future.set_result(None)
                     return
             if self._queued_messages:
                 self._queued_messages.pop()
@@ -2099,8 +2118,19 @@ def run_textual_interactive(
                 if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_up()
                     return
+                # ModelPickerWidget: Up from the Custom Ollama Input child
+                # must reach the picker (to exit input mode). See the Esc
+                # handler above for the parent-walk rationale.
+                picker_up: ModelPickerWidget | None = None
                 if isinstance(focused, ModelPickerWidget):
-                    focused.action_move_up()
+                    picker_up = focused
+                else:
+                    node = focused.parent
+                    while node is not None and not isinstance(node, ModelPickerWidget):
+                        node = node.parent
+                    picker_up = node
+                if picker_up is not None:
+                    picker_up.action_move_up()
                     return
             if self._queued_messages:
                 last = self._queued_messages.pop()
@@ -2156,8 +2186,17 @@ def run_textual_interactive(
                 if isinstance(focused, MCPBrowserWidget):
                     focused.action_move_down()
                     return
+                # Same parent-walk rationale as action_edit_queued / cancel.
+                picker_down: ModelPickerWidget | None = None
                 if isinstance(focused, ModelPickerWidget):
-                    focused.action_move_down()
+                    picker_down = focused
+                else:
+                    node = focused.parent
+                    while node is not None and not isinstance(node, ModelPickerWidget):
+                        node = node.parent
+                    picker_down = node
+                if picker_down is not None:
+                    picker_down.action_move_down()
                     return
 
             # History browsing (down key)
