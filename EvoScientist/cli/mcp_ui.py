@@ -181,4 +181,3 @@ def _show_mcp_config(name: str = "", *, show_blank_line: bool = True) -> str:
     if show_blank_line:
         console.print()
     return "ok"
-
