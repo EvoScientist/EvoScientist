@@ -3,7 +3,27 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.conftest import run_async as _run
+
+
+@pytest.fixture(autouse=True)
+def _reset_channel_globals():
+    """Reset module-level ``_cli_agent``/``_cli_thread_id`` around every test.
+
+    These globals are written by the start / add-to-running paths and would
+    otherwise leak between tests (and into unrelated suites).
+    """
+    import EvoScientist.cli.channel as _ch
+
+    _ch._cli_agent = None
+    _ch._cli_thread_id = None
+    try:
+        yield
+    finally:
+        _ch._cli_agent = None
+        _ch._cli_thread_id = None
 
 
 def _ctx():
@@ -49,7 +69,7 @@ class TestNeedsAgent:
 class TestStartPath:
     """Start flow must propagate agent/thread_id globals."""
 
-    def test_start_sets_cli_agent_globals(self, monkeypatch):
+    def test_start_sets_cli_agent_globals(self):
         import EvoScientist.cli.channel as _ch_mod
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
@@ -59,10 +79,6 @@ class TestStartPath:
             channel_send_thinking=True,
         )
 
-        # ``monkeypatch`` auto-restores on teardown so a raised assertion
-        # can't leak ``None`` globals into subsequent tests.
-        monkeypatch.setattr(_ch_mod, "_cli_agent", None)
-        monkeypatch.setattr(_ch_mod, "_cli_thread_id", None)
         with (
             patch(
                 "EvoScientist.cli.channel._channels_is_running",
@@ -117,7 +133,7 @@ class TestStartPath:
 
 
 class TestAddToRunningPath:
-    def test_add_to_running_sets_cli_agent_globals(self, monkeypatch):
+    def test_add_to_running_sets_cli_agent_globals(self):
         import EvoScientist.cli.channel as _ch_mod
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
@@ -127,8 +143,6 @@ class TestAddToRunningPath:
             channel_send_thinking=False,
         )
 
-        monkeypatch.setattr(_ch_mod, "_cli_agent", None)
-        monkeypatch.setattr(_ch_mod, "_cli_thread_id", None)
         with (
             patch(
                 "EvoScientist.cli.channel._channels_is_running",
