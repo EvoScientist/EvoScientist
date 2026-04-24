@@ -9,6 +9,8 @@ from .base import CommandUI
 class ChannelCommandUI(CommandUI):
     """CommandUI implementation for messaging channels with output buffering."""
 
+    _TEXT_CHUNK_LIMIT = 3500
+
     @property
     def supports_interactive(self) -> bool:
         return False
@@ -33,6 +35,38 @@ class ChannelCommandUI(CommandUI):
         # Buffer the text for grouped delivery to the channel
         # We ignore style for grouping but keep it for individual lines if needed
         self._system_buffer.append(text)
+
+    @staticmethod
+    def _extract_message_text(message: Any) -> str:
+        content = getattr(message, "content", "") or ""
+        if isinstance(content, list):
+            parts = [
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            content = " ".join(parts) if parts else ""
+        return str(content).strip()
+
+    async def _send_text_chunks(self, text: str) -> None:
+        """Flush long plain-text payloads in channel-safe chunks."""
+        text = (text or "").strip()
+        if not text:
+            return
+
+        pending = text
+        while pending:
+            chunk = pending[: self._TEXT_CHUNK_LIMIT]
+            if len(pending) > self._TEXT_CHUNK_LIMIT:
+                split_at = chunk.rfind("\n")
+                if split_at > 0:
+                    chunk = chunk[:split_at]
+            chunk = chunk.rstrip()
+            if not chunk:
+                chunk = pending[: self._TEXT_CHUNK_LIMIT]
+            self.append_system(chunk)
+            await self.flush()
+            pending = pending[len(chunk) :].lstrip("\n")
 
     async def flush(self) -> None:
         """Send all buffered system messages as a single grouped message."""
@@ -107,8 +141,31 @@ class ChannelCommandUI(CommandUI):
     async def wait_for_thread_pick(
         self, threads: list[dict], current_thread: str, title: str
     ) -> str | None:
-        self.append_system(f"{title}\nUse /resume <id> to continue.")
-        await self.flush()
+        from ..sessions import _format_relative_time
+
+        lines = [title, "Available sessions:"]
+        for idx, thread in enumerate(threads, start=1):
+            thread_id = thread.get("thread_id", "") or ""
+            marker = " *" if thread_id == current_thread else ""
+            message_count = int(thread.get("message_count", 0) or 0)
+            preview = (thread.get("preview", "") or "").strip()
+            if len(preview) > 90:
+                preview = preview[:87] + "..."
+            metadata_bits = []
+            if message_count:
+                label = "msg" if message_count == 1 else "msgs"
+                metadata_bits.append(f"{message_count} {label}")
+            relative = _format_relative_time(thread.get("updated_at"))
+            if relative:
+                metadata_bits.append(relative)
+            metadata = f" ({' | '.join(metadata_bits)})" if metadata_bits else ""
+            lines.append(f"{idx}. {thread_id}{marker}{metadata}")
+            if preview:
+                lines.append(f"   {preview}")
+        lines.append("")
+        lines.append("Reply with `/resume <id>` to continue one of these sessions.")
+
+        await self._send_text_chunks("\n".join(lines))
         return None
 
     async def wait_for_skill_browse(
@@ -142,3 +199,35 @@ class ChannelCommandUI(CommandUI):
     ) -> None:
         if self.handle_session_resume_callback:
             await self.handle_session_resume_callback(thread_id, workspace_dir)
+        from ..sessions import get_thread_messages
+
+        lines = [f"Resumed session: {thread_id}"]
+        if workspace_dir:
+            lines.append(f"Workspace: {workspace_dir}")
+
+        messages = await get_thread_messages(thread_id)
+        display = [m for m in messages if getattr(m, "type", None) in ("human", "ai")]
+
+        if not display:
+            lines.append("No saved messages in this session.")
+            await self._send_text_chunks("\n".join(lines))
+            return
+
+        HISTORY_WINDOW = 20
+        if len(display) > HISTORY_WINDOW:
+            skipped = len(display) - HISTORY_WINDOW
+            display = display[-HISTORY_WINDOW:]
+            lines.append(f"Conversation history (showing last {HISTORY_WINDOW}, skipped {skipped}):")
+        else:
+            lines.append("Conversation history:")
+
+        for message in display:
+            text = self._extract_message_text(message)
+            if not text:
+                continue
+            if getattr(message, "type", None) == "human":
+                lines.append(f"User: {text}")
+            else:
+                lines.append(f"EvoScientist: {text}")
+
+        await self._send_text_chunks("\n".join(lines))

@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import logging
 import os
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -47,6 +48,66 @@ from .utils import (
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
 
 formatter = ToolResultFormatter()
+
+
+# Stream-cancel events keyed by logical stream scope. Channel messages pass a
+# per-message scope so `/stop` only affects that message's run; scope-less
+# callers retain the legacy process-wide default event.
+_DEFAULT_STREAM_CANCEL_SCOPE = "__default__"
+_stream_cancel_lock = threading.Lock()
+_stream_cancel_events: dict[str, threading.Event] = {
+    _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
+}
+# Backward-compat alias used by older tests and direct imports.
+_stream_cancel_event = _stream_cancel_events[_DEFAULT_STREAM_CANCEL_SCOPE]
+
+
+def _stream_cancel_scope_key(cancel_scope: str | None) -> str:
+    return cancel_scope or _DEFAULT_STREAM_CANCEL_SCOPE
+
+
+def _get_stream_cancel_event(
+    cancel_scope: str | None,
+    *,
+    create: bool = False,
+) -> threading.Event | None:
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        event = _stream_cancel_events.get(scope_key)
+        if event is None and create:
+            event = threading.Event()
+            _stream_cancel_events[scope_key] = event
+        return event
+
+
+def request_stream_cancel(cancel_scope: str | None = None) -> bool:
+    """Signal a specific in-flight stream to terminate."""
+    event = _get_stream_cancel_event(cancel_scope, create=True)
+    already_requested = event.is_set()
+    event.set()
+    return not already_requested
+
+
+def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
+    event = _get_stream_cancel_event(cancel_scope)
+    return event.is_set() if event is not None else False
+
+
+def clear_stream_cancel(cancel_scope: str | None = None) -> None:
+    """Clear a scope's stop signal without dropping the scope entry."""
+    event = _get_stream_cancel_event(cancel_scope)
+    if event is not None:
+        event.clear()
+
+
+def discard_stream_cancel(cancel_scope: str | None = None) -> None:
+    """Drop a scope's stop signal after the owning request is fully done."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        if scope_key == _DEFAULT_STREAM_CANCEL_SCOPE:
+            _stream_cancel_events[scope_key].clear()
+        else:
+            _stream_cancel_events.pop(scope_key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1092,6 +1153,7 @@ def _run_streaming(
     metadata: dict | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+    cancel_scope: str | None = None,
     *,
     _state: StreamState | None = None,
     _hitl_depth: int = 0,
@@ -1123,17 +1185,29 @@ def _run_streaming(
     Returns:
         The final response text.
     """
+    # Scope-less callers keep the legacy single-event semantics. Scoped
+    # callers use unique per-request scopes, so pre-start `/stop` must
+    # remain armed until this run consumes it.
+    if _state is None and cancel_scope is None:
+        clear_stream_cancel()
+
     state = _state if _state is not None else StreamState()
     _todo_sent = False
     if _media_sent is None:
         _media_sent = set()
     _MIN_THINKING_LEN = 200
 
+    if is_stream_cancel_requested(cancel_scope):
+        return state.response_text or "[Stopped.]"
+
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
         async for event in stream_agent_events(
             agent, message, thread_id, metadata=metadata
         ):
+            if is_stream_cancel_requested(cancel_scope):
+                state.response_text = (state.response_text or "") + "\n[Stopped.]"
+                return
             event_type = state.handle_event(event)
 
             # Relay thinking to channel when transitioning away from
@@ -1226,159 +1300,133 @@ def _run_streaming(
                 )
             )
 
-    with Live(
-        console=console,
-        auto_refresh=False,
-        transient=False,
-        vertical_overflow="visible",
-    ) as live:
-        live.update(
-            create_streaming_display(
-                is_waiting=True,
-                status_footer=(
-                    status_footer_builder() if status_footer_builder else None
-                ),
+    try:
+        with Live(
+            console=console,
+            auto_refresh=False,
+            transient=False,
+            vertical_overflow="visible",
+        ) as live:
+            live.update(
+                create_streaming_display(
+                    is_waiting=True,
+                    status_footer=(
+                        status_footer_builder() if status_footer_builder else None
+                    ),
+                )
             )
-        )
-        # Determine how to run the async streaming coroutine.
-        # - In TUI mode (Textual), there's already a running event loop;
-        #   nest_asyncio is needed to allow run_until_complete inside it.
-        # - In serve/CLI mode, the main thread has no running loop;
-        #   use a fresh event loop directly (no nest_asyncio needed or wanted,
-        #   since nest_asyncio.apply() patches globally and breaks the bus
-        #   thread's event loop Task-context detection).
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-
-        if running_loop is not None:
-            # Already inside a running loop (TUI) — must use nest_asyncio.
-            # NOTE: nest_asyncio.apply() is global and irreversible within
-            # the process; avoid mixing TUI and serve modes in one process.
-            import nest_asyncio  # type: ignore[import-untyped]
-
-            nest_asyncio.apply()
-            loop = running_loop
-        else:
-            # No running loop (serve/CLI) — create a fresh one
+            # Determine how to run the async streaming coroutine.
+            # - In TUI mode (Textual), there's already a running event loop;
+            #   nest_asyncio is needed to allow run_until_complete inside it.
+            # - In serve/CLI mode, the main thread has no running loop;
+            #   use a fresh event loop directly (no nest_asyncio needed or wanted,
+            #   since nest_asyncio.apply() patches globally and breaks the bus
+            #   thread's event loop Task-context detection).
             try:
-                loop = _get_event_loop()
+                running_loop = asyncio.get_running_loop()
             except RuntimeError:
-                loop = _create_event_loop()
+                running_loop = None
 
-        async def _run_with_refresh() -> None:
-            async def _periodic_refresh() -> None:
+            if running_loop is not None:
+                # Already inside a running loop (TUI) — must use nest_asyncio.
+                # NOTE: nest_asyncio.apply() is global and irreversible within
+                # the process; avoid mixing TUI and serve modes in one process.
+                import nest_asyncio  # type: ignore[import-untyped]
+
+                nest_asyncio.apply()
+                loop = running_loop
+            else:
+                # No running loop (serve/CLI) — create a fresh one
                 try:
-                    while True:
-                        await asyncio.sleep(0.05)
-                        live.refresh()
-                except asyncio.CancelledError:
-                    pass
+                    loop = _get_event_loop()
+                except RuntimeError:
+                    loop = _create_event_loop()
 
-            refresh_task = asyncio.ensure_future(_periodic_refresh())
-            try:
-                await _consume()
-            finally:
-                refresh_task.cancel()
+            async def _run_with_refresh() -> None:
+                async def _periodic_refresh() -> None:
+                    try:
+                        while True:
+                            await asyncio.sleep(0.05)
+                            live.refresh()
+                    except asyncio.CancelledError:
+                        pass
+
+                refresh_task = asyncio.ensure_future(_periodic_refresh())
                 try:
-                    await refresh_task
-                except asyncio.CancelledError:
-                    pass
-                # Render clean final frame before Live exits (no spinners, expanded tools)
-                if (
-                    state.pending_interrupt is not None
-                    or state.pending_ask_user is not None
-                ):
-                    # Interrupted: render current state (not final) so it
-                    # looks continuous when prompt appears.
-                    final_display = create_streaming_display(
-                        **state.get_display_args(),
-                        show_thinking=show_thinking,
-                        response_markdown=state.get_response_markdown(),
-                        status_footer=resolve_final_status_footer(
-                            interactive, status_footer_builder
-                        ),
-                    )
-                elif interactive:
-                    final_display = create_streaming_display(
-                        **state.get_display_args(),
-                        show_thinking=show_thinking,
-                        is_final=True,
-                        final_show_thinking=False,
-                        response_markdown=state.get_response_markdown(),
-                        status_footer=resolve_final_status_footer(
-                            interactive, status_footer_builder
-                        ),
-                    )
-                else:
-                    final_display = create_streaming_display(
-                        **state.get_display_args(),
-                        show_thinking=show_thinking,
-                        is_final=True,
-                        final_show_thinking=True,
-                        final_thinking_max_length=DisplayLimits.THINKING_FINAL,
-                        response_markdown=state.get_response_markdown(),
-                        status_footer=resolve_final_status_footer(
-                            interactive, status_footer_builder
-                        ),
-                    )
-                live.update(final_display)
-                live.refresh()
+                    await _consume()
+                finally:
+                    refresh_task.cancel()
+                    try:
+                        await refresh_task
+                    except asyncio.CancelledError:
+                        pass
+                    # Render clean final frame before Live exits (no spinners, expanded tools)
+                    if (
+                        state.pending_interrupt is not None
+                        or state.pending_ask_user is not None
+                    ):
+                        # Interrupted: render current state (not final) so it
+                        # looks continuous when prompt appears.
+                        final_display = create_streaming_display(
+                            **state.get_display_args(),
+                            show_thinking=show_thinking,
+                            response_markdown=state.get_response_markdown(),
+                            status_footer=resolve_final_status_footer(
+                                interactive, status_footer_builder
+                            ),
+                        )
+                    elif interactive:
+                        final_display = create_streaming_display(
+                            **state.get_display_args(),
+                            show_thinking=show_thinking,
+                            is_final=True,
+                            final_show_thinking=False,
+                            response_markdown=state.get_response_markdown(),
+                            status_footer=resolve_final_status_footer(
+                                interactive, status_footer_builder
+                            ),
+                        )
+                    else:
+                        final_display = create_streaming_display(
+                            **state.get_display_args(),
+                            show_thinking=show_thinking,
+                            is_final=True,
+                            final_show_thinking=True,
+                            final_thinking_max_length=DisplayLimits.THINKING_FINAL,
+                            response_markdown=state.get_response_markdown(),
+                            status_footer=resolve_final_status_footer(
+                                interactive, status_footer_builder
+                            ),
+                        )
+                    live.update(final_display)
+                    live.refresh()
 
-        loop.run_until_complete(_run_with_refresh())
+            loop.run_until_complete(_run_with_refresh())
 
-    # Flush any remaining thinking that wasn't sent during streaming.
-    if on_thinking and state.thinking_text:
-        current = state.thinking_text.rstrip()
-        if len(current) >= _MIN_THINKING_LEN and current != _sent_thinking_text:
-            on_thinking(current)
-            _sent_thinking_text = current
+        # Flush any remaining thinking that wasn't sent during streaming.
+        if on_thinking and state.thinking_text:
+            current = state.thinking_text.rstrip()
+            if len(current) >= _MIN_THINKING_LEN and current != _sent_thinking_text:
+                on_thinking(current)
+                _sent_thinking_text = current
 
-    # ask_user: check before HITL (ask_user uses the same resume loop)
-    if state.pending_ask_user is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
-        if ask_user_prompt_fn is not None:
-            result = ask_user_prompt_fn(state.pending_ask_user)
-        else:
-            result = _resolve_ask_user_prompt(state.pending_ask_user)
-        from langgraph.types import Command  # type: ignore[import-untyped]
-
-        state.pending_ask_user = None
-        state.thinking_text = ""  # reset accumulation for fresh round
-        return _run_streaming(
-            agent=agent,
-            message=Command(resume=result),
-            thread_id=thread_id,
-            show_thinking=show_thinking,
-            interactive=interactive,
-            on_thinking=on_thinking,
-            on_todo=on_todo,
-            on_file_write=on_file_write,
-            on_stream_event=on_stream_event,
-            status_footer_builder=status_footer_builder,
-            metadata=metadata,
-            hitl_prompt_fn=hitl_prompt_fn,
-            ask_user_prompt_fn=ask_user_prompt_fn,
-            _state=state,
-            _hitl_depth=_hitl_depth + 1,
-            _media_sent=_media_sent,
-            _sent_thinking_text=_sent_thinking_text,
-        )
-
-    # HITL: check for pending interrupt and handle approval
-    if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
-        decisions = _resolve_hitl_approval(
-            state.pending_interrupt,
-            prompt_fn=hitl_prompt_fn,
-        )
-        if decisions is not None:
+        # ask_user: check before HITL (ask_user uses the same resume loop)
+        if state.pending_ask_user is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
+            if is_stream_cancel_requested(cancel_scope):
+                return state.response_text or "[Stopped.]"
+            if ask_user_prompt_fn is not None:
+                result = ask_user_prompt_fn(state.pending_ask_user)
+            else:
+                result = _resolve_ask_user_prompt(state.pending_ask_user)
             from langgraph.types import Command  # type: ignore[import-untyped]
 
-            state.pending_interrupt = None
+            state.pending_ask_user = None
             state.thinking_text = ""  # reset accumulation for fresh round
+            if is_stream_cancel_requested(cancel_scope):
+                return state.response_text or "[Stopped.]"
             return _run_streaming(
                 agent=agent,
-                message=Command(resume={"decisions": decisions}),
+                message=Command(resume=result),
                 thread_id=thread_id,
                 show_thinking=show_thinking,
                 interactive=interactive,
@@ -1390,21 +1438,62 @@ def _run_streaming(
                 metadata=metadata,
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,
+                cancel_scope=cancel_scope,
                 _state=state,
                 _hitl_depth=_hitl_depth + 1,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
             )
-    elif state.pending_interrupt is not None:
-        _logger.warning(
-            "HITL loop reached max iterations (%d), stopping",
-            _MAX_HITL_ITERATIONS,
-        )
 
-    # Everything (tools, thinking, todos, response) is already on screen
-    # from Live's final frame (transient=False). No need to re-print.
+        # HITL: check for pending interrupt and handle approval
+        if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
+            if is_stream_cancel_requested(cancel_scope):
+                return state.response_text or "[Stopped.]"
+            decisions = _resolve_hitl_approval(
+                state.pending_interrupt,
+                prompt_fn=hitl_prompt_fn,
+            )
+            if is_stream_cancel_requested(cancel_scope):
+                return state.response_text or "[Stopped.]"
+            if decisions is not None:
+                from langgraph.types import Command  # type: ignore[import-untyped]
 
-    return (state.response_text or "").strip()
+                state.pending_interrupt = None
+                state.thinking_text = ""  # reset accumulation for fresh round
+                if is_stream_cancel_requested(cancel_scope):
+                    return state.response_text or "[Stopped.]"
+                return _run_streaming(
+                    agent=agent,
+                    message=Command(resume={"decisions": decisions}),
+                    thread_id=thread_id,
+                    show_thinking=show_thinking,
+                    interactive=interactive,
+                    on_thinking=on_thinking,
+                    on_todo=on_todo,
+                    on_file_write=on_file_write,
+                    on_stream_event=on_stream_event,
+                    status_footer_builder=status_footer_builder,
+                    metadata=metadata,
+                    hitl_prompt_fn=hitl_prompt_fn,
+                    ask_user_prompt_fn=ask_user_prompt_fn,
+                    cancel_scope=cancel_scope,
+                    _state=state,
+                    _hitl_depth=_hitl_depth + 1,
+                    _media_sent=_media_sent,
+                    _sent_thinking_text=_sent_thinking_text,
+                )
+        elif state.pending_interrupt is not None:
+            _logger.warning(
+                "HITL loop reached max iterations (%d), stopping",
+                _MAX_HITL_ITERATIONS,
+            )
+
+        # Everything (tools, thinking, todos, response) is already on screen
+        # from Live's final frame (transient=False). No need to re-print.
+
+        return (state.response_text or "").strip()
+    finally:
+        discard_stream_cancel(cancel_scope)
 
 
 # ---------------------------------------------------------------------------

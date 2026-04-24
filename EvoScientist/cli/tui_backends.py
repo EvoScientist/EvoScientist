@@ -30,6 +30,7 @@ class StreamingTUIBackend(Protocol):
         metadata: dict | None = None,
         hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
         ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+        cancel_scope: str | None = None,
     ) -> str:
         """Run streaming and return final response text."""
 
@@ -56,6 +57,7 @@ class RichStreamingBackend:
         metadata: dict | None = None,
         hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
         ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+        cancel_scope: str | None = None,
     ) -> str:
         return _run_streaming(
             agent=agent,
@@ -71,4 +73,5 @@ class RichStreamingBackend:
             metadata=metadata,
             hitl_prompt_fn=hitl_prompt_fn,
             ask_user_prompt_fn=ask_user_prompt_fn,
+            cancel_scope=cancel_scope,
         )

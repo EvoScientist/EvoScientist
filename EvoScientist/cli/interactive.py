@@ -729,175 +729,182 @@ def cmd_interactive(
                   [channel: Replied to sender]
                   ─────────────────
                 """
-                # Clear the waiting ❯ prompt line
-                sys.stdout.write("\r\033[2K")
-                sys.stdout.flush()
-
-                # Reprint as if user typed it after ❯
-                prompt_line = Text()
-                prompt_line.append("\u276f ", style="bold blue")
-                prompt_line.append(msg.content)
-                console.print(prompt_line)
-                rx = Text()
-                rx.append(f"[{msg.channel_type}: Received from ", style="dim")
-                rx.append(msg.sender, style="cyan")
-                rx.append("]", style="dim")
-                console.print(rx)
-                _print_separator()
-
-                def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-                    """Schedule an async channel send on the bus loop."""
-                    loop = _ch_mod._bus_loop
-                    if not loop:
-                        return
-                    try:
-                        asyncio.run_coroutine_threadsafe(coro, loop).result(
-                            timeout=timeout
-                        )
-                    except Exception as e:
-                        _channel_logger.debug(f"{label} send failed: {e}")
-
-                def _send_thinking_to_channel(thinking: str) -> None:
-                    ch = msg.channel_ref
-                    if ch and ch.send_thinking:
-                        _send_to_channel(
-                            ch.send_thinking_message(
-                                sender=msg.chat_id,
-                                thinking=thinking,
-                                metadata=msg.metadata,
-                            ),
-                            "Thinking",
-                        )
-
-                def _send_todo_to_channel(items: list[dict]) -> None:
-                    from ..channels.consumer import _format_todo_list
-
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_todo_message(
-                                sender=msg.chat_id,
-                                content=_format_todo_list(items),
-                                metadata=msg.metadata,
-                            ),
-                            "Todo",
-                        )
-
-                def _send_media_to_channel(file_path: str) -> None:
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_media(
-                                recipient=msg.chat_id,
-                                file_path=file_path,
-                                metadata=msg.metadata,
-                            ),
-                            "Media",
-                            timeout=30,
-                        )
-
-                def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
-                    """Send HITL approval prompt to channel user and wait for reply."""
-                    return _ch_mod.channel_hitl_prompt(action_requests, msg)
-
-                def _channel_ask_user(ask_user_data: dict) -> dict:
-                    """Send ask_user questions to channel user and wait for reply."""
-                    return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
-
-                # ---- Slash command dispatch (cmd_manager, not the agent) ----
-                # Mirrors the TUI's behavior so ``/evoskills``, ``/mcp list``
-                # etc. sent via iMessage actually execute instead of being
-                # fed to the LLM as a plain prompt.
-                async def _on_channel_cmd_completed(
-                    ctx: Any, original_agent: Any, cmd: Any
-                ) -> None:
-                    """Mirror the REPL adoption block at
-                    ``interactive.py:1005-1030`` so ``/model`` and similar
-                    state-mutating commands invoked via a channel actually
-                    rebind the running session and keep the status bar
-                    in sync."""
-                    nonlocal model
-                    agent_swapped = (
-                        ctx.agent is not None and ctx.agent is not original_agent
-                    )
-                    if agent_swapped:
-                        from ..EvoScientist import _ensure_config
-
-                        agent_loader.adopt(ctx.agent)
-                        cfg = _ensure_config()
-                        model = cfg.model
-                        state["status_base_snapshot"] = make_empty_status_snapshot(
-                            model
-                        )
-                        if _channels_is_running():
-                            _ch_mod._cli_agent = ctx.agent
-                            _ch_mod._cli_thread_id = state["thread_id"]
-                    # ``/new`` rotates ``state["thread_id"]`` / workspace,
-                    # ``/compact`` reduces token usage — both need the
-                    # status snapshot re-rendered even when the agent
-                    # didn't swap.  ``/resume`` refreshes inline in its
-                    # own async callback.
-                    if agent_swapped or getattr(cmd, "name", None) in (
-                        "/compact",
-                        "/new",
-                    ):
-                        await _refresh_status_snapshot(reset_streaming_text=True)
-
-                _slash_handled = await dispatch_channel_slash_command(
-                    msg,
-                    agent=agent_loader.agent,
-                    thread_id=state["thread_id"],
-                    workspace_dir=state["workspace_dir"],
-                    checkpointer=checkpointer,
-                    append_system=lambda t, s="dim": console.print(t, style=s),
-                    start_new_session_cb=_on_start_new_session,
-                    handle_session_resume_cb=_on_handle_session_resume,
-                    await_agent_ready=_await_agent_ready,
-                    on_cmd_completed=_on_channel_cmd_completed,
-                )
-                if _slash_handled:
-                    _print_separator()
-                    sys.stdout.write("\033[34;1m❯\033[0m ")
-                    sys.stdout.flush()
+                if not _ch_mod._claim_channel_request(msg):
                     return
 
                 try:
-                    ready_agent = await _await_agent_ready()
-                    meta = build_metadata(state["workspace_dir"], model)
-                    await _refresh_status_snapshot(
-                        msg.content, reset_streaming_text=True
-                    )
-                    response = run_streaming(
-                        ui_backend=state["ui_backend"],
-                        agent=ready_agent,
-                        message=msg.content,
+                    # Clear the waiting ❯ prompt line
+                    sys.stdout.write("\r\033[2K")
+                    sys.stdout.flush()
+
+                    # Reprint as if user typed it after ❯
+                    prompt_line = Text()
+                    prompt_line.append("\u276f ", style="bold blue")
+                    prompt_line.append(msg.content)
+                    console.print(prompt_line)
+                    rx = Text()
+                    rx.append(f"[{msg.channel_type}: Received from ", style="dim")
+                    rx.append(msg.sender, style="cyan")
+                    rx.append("]", style="dim")
+                    console.print(rx)
+                    _print_separator()
+
+                    def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
+                        """Schedule an async channel send on the bus loop."""
+                        loop = _ch_mod._bus_loop
+                        if not loop:
+                            return
+                        try:
+                            asyncio.run_coroutine_threadsafe(coro, loop).result(
+                                timeout=timeout
+                            )
+                        except Exception as e:
+                            _channel_logger.debug(f"{label} send failed: {e}")
+
+                    def _send_thinking_to_channel(thinking: str) -> None:
+                        ch = msg.channel_ref
+                        if ch and ch.send_thinking:
+                            _send_to_channel(
+                                ch.send_thinking_message(
+                                    sender=msg.chat_id,
+                                    thinking=thinking,
+                                    metadata=msg.metadata,
+                                ),
+                                "Thinking",
+                            )
+
+                    def _send_todo_to_channel(items: list[dict]) -> None:
+                        from ..channels.consumer import _format_todo_list
+
+                        if msg.channel_ref:
+                            _send_to_channel(
+                                msg.channel_ref.send_todo_message(
+                                    sender=msg.chat_id,
+                                    content=_format_todo_list(items),
+                                    metadata=msg.metadata,
+                                ),
+                                "Todo",
+                            )
+
+                    def _send_media_to_channel(file_path: str) -> None:
+                        if msg.channel_ref:
+                            _send_to_channel(
+                                msg.channel_ref.send_media(
+                                    recipient=msg.chat_id,
+                                    file_path=file_path,
+                                    metadata=msg.metadata,
+                                ),
+                                "Media",
+                                timeout=30,
+                            )
+
+                    def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
+                        """Send HITL approval prompt to channel user and wait for reply."""
+                        return _ch_mod.channel_hitl_prompt(action_requests, msg)
+
+                    def _channel_ask_user(ask_user_data: dict) -> dict:
+                        """Send ask_user questions to channel user and wait for reply."""
+                        return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+
+                    # ---- Slash command dispatch (cmd_manager, not the agent) ----
+                    # Mirrors the TUI's behavior so ``/evoskills``, ``/mcp list``
+                    # etc. sent via iMessage actually execute instead of being
+                    # fed to the LLM as a plain prompt.
+                    async def _on_channel_cmd_completed(
+                        ctx: Any, original_agent: Any, cmd: Any
+                    ) -> None:
+                        """Mirror the REPL adoption block at
+                        ``interactive.py:1005-1030`` so ``/model`` and similar
+                        state-mutating commands invoked via a channel actually
+                        rebind the running session and keep the status bar
+                        in sync."""
+                        nonlocal model
+                        agent_swapped = (
+                            ctx.agent is not None and ctx.agent is not original_agent
+                        )
+                        if agent_swapped:
+                            from ..EvoScientist import _ensure_config
+
+                            agent_loader.adopt(ctx.agent)
+                            cfg = _ensure_config()
+                            model = cfg.model
+                            state["status_base_snapshot"] = make_empty_status_snapshot(
+                                model
+                            )
+                            if _channels_is_running():
+                                _ch_mod._cli_agent = ctx.agent
+                                _ch_mod._cli_thread_id = state["thread_id"]
+                        # ``/new`` rotates ``state["thread_id"]`` / workspace,
+                        # ``/compact`` reduces token usage — both need the
+                        # status snapshot re-rendered even when the agent
+                        # didn't swap.  ``/resume`` refreshes inline in its
+                        # own async callback.
+                        if agent_swapped or getattr(cmd, "name", None) in (
+                            "/compact",
+                            "/new",
+                        ):
+                            await _refresh_status_snapshot(reset_streaming_text=True)
+
+                    _slash_handled = await dispatch_channel_slash_command(
+                        msg,
+                        agent=agent_loader.agent,
                         thread_id=state["thread_id"],
-                        show_thinking=show_thinking,
-                        interactive=True,
-                        metadata=meta,
-                        on_thinking=_send_thinking_to_channel,
-                        on_todo=_send_todo_to_channel,
-                        on_file_write=_send_media_to_channel,
-                        hitl_prompt_fn=_channel_hitl_prompt,
-                        ask_user_prompt_fn=_channel_ask_user,
-                        on_stream_event=_handle_stream_status_event,
-                        status_footer_builder=_stream_status_footer,
+                        workspace_dir=state["workspace_dir"],
+                        checkpointer=checkpointer,
+                        append_system=lambda t, s="dim": console.print(t, style=s),
+                        start_new_session_cb=_on_start_new_session,
+                        handle_session_resume_cb=_on_handle_session_resume,
+                        await_agent_ready=_await_agent_ready,
+                        on_cmd_completed=_on_channel_cmd_completed,
                     )
-                except Exception as e:
-                    response = f"Error: {e}"
-                    console.print(f"[red]Channel error: {e}[/red]")
+                    if _slash_handled:
+                        _print_separator()
+                        sys.stdout.write("\033[34;1m❯\033[0m ")
+                        sys.stdout.flush()
+                        return
 
-                _set_channel_response(msg.msg_id, response)
-                await _refresh_status_snapshot(reset_streaming_text=True)
+                    try:
+                        ready_agent = await _await_agent_ready()
+                        meta = build_metadata(state["workspace_dir"], model)
+                        await _refresh_status_snapshot(
+                            msg.content, reset_streaming_text=True
+                        )
+                        response = run_streaming(
+                            ui_backend=state["ui_backend"],
+                            agent=ready_agent,
+                            message=msg.content,
+                            thread_id=state["thread_id"],
+                            show_thinking=show_thinking,
+                            interactive=True,
+                            metadata=meta,
+                            on_thinking=_send_thinking_to_channel,
+                            on_todo=_send_todo_to_channel,
+                            on_file_write=_send_media_to_channel,
+                            hitl_prompt_fn=_channel_hitl_prompt,
+                            ask_user_prompt_fn=_channel_ask_user,
+                            on_stream_event=_handle_stream_status_event,
+                            status_footer_builder=_stream_status_footer,
+                            cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
+                        )
+                    except Exception as e:
+                        response = f"Error: {e}"
+                        console.print(f"[red]Channel error: {e}[/red]")
 
-                tx = Text()
-                tx.append(f"[{msg.channel_type}: Replied to ", style="dim")
-                tx.append(msg.sender, style="cyan")
-                tx.append("]", style="dim")
-                console.print(tx)
-                _print_separator()
+                    _set_channel_response(msg.msg_id, response)
+                    await _refresh_status_snapshot(reset_streaming_text=True)
 
-                # Redraw the ❯ prompt on a new line after separator
-                sys.stdout.write("\033[34;1m\u276f\033[0m ")
-                sys.stdout.flush()
+                    tx = Text()
+                    tx.append(f"[{msg.channel_type}: Replied to ", style="dim")
+                    tx.append(msg.sender, style="cyan")
+                    tx.append("]", style="dim")
+                    console.print(tx)
+                    _print_separator()
+
+                    # Redraw the ❯ prompt on a new line after separator
+                    sys.stdout.write("\033[34;1m\u276f\033[0m ")
+                    sys.stdout.flush()
+                finally:
+                    _ch_mod._complete_channel_request(msg.msg_id)
 
             async def _check_channel_queue() -> None:
                 """Poll the channel message queue and dispatch to the agent."""

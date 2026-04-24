@@ -975,6 +975,7 @@ def run_textual_interactive(
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
             channel_ask_user_fn: Callable[[dict], dict] | None = None,
+            cancel_scope: str | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -996,6 +997,8 @@ def run_textual_interactive(
                     When provided (channel messages), this is called instead
                     of mounting the AskUserWidget.
             """
+            from ..stream.display import is_stream_cancel_requested
+
             container = self.query_one("#chat", VerticalScroll)
 
             # 1. Mount user message + loading spinner
@@ -1140,6 +1143,9 @@ def run_textual_interactive(
             _stream_input: Any = user_text  # str or Command for HITL resume
 
             for _hitl_round in range(_MAX_HITL_ROUNDS):
+                if is_stream_cancel_requested(cancel_scope):
+                    response = state.response_text or "[Stopped.]"
+                    break
                 state.pending_interrupt = None
                 state.pending_ask_user = None
                 _hitl_resuming = False
@@ -1154,6 +1160,11 @@ def run_textual_interactive(
                         self._conversation_tid,
                         metadata=metadata,
                     ):
+                        if is_stream_cancel_requested(cancel_scope):
+                            state.response_text = (
+                                (state.response_text or "") + "\n[Stopped.]"
+                            )
+                            break
                         event_type = state.handle_event(event)
 
                         if event_type == "usage_stats":
@@ -1457,6 +1468,10 @@ def run_textual_interactive(
                                     result = await asyncio.to_thread(
                                         lambda f=_ask_fn, e=event: f(e),
                                     )
+                                    if is_stream_cancel_requested(cancel_scope):
+                                        state.pending_ask_user = None
+                                        response = state.response_text or "[Stopped.]"
+                                        break
                                 else:
                                     # Interactive TUI: display widget, collect via arrow keys
                                     from .widgets.ask_user_widget import AskUserWidget
@@ -1511,6 +1526,10 @@ def run_textual_interactive(
                                     channel_hitl_fn,
                                     action_reqs,
                                 )
+                                if is_stream_cancel_requested(cancel_scope):
+                                    state.pending_interrupt = None
+                                    response = state.response_text or "[Stopped.]"
+                                    break
                                 if decisions is not None:
                                     from langgraph.types import (
                                         Command,  # type: ignore[import-untyped]
@@ -1674,6 +1693,8 @@ def run_textual_interactive(
                     self._schedule_scroll_to_bottom(container)
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
+                if is_stream_cancel_requested(cancel_scope):
+                    break
                 if state.pending_interrupt is None and state.pending_ask_user is None:
                     break  # normal completion or rejection — exit HITL loop
                 # Otherwise _stream_input was set to Command(resume=...)
@@ -1735,6 +1756,8 @@ def run_textual_interactive(
               [channel: Replied to sender]
             """
             prompt_widget = None
+            if not _ch_mod._claim_channel_request(msg):
+                return
             try:
                 self._busy = True
                 await self._refresh_status_snapshot(msg.content)
@@ -1858,6 +1881,7 @@ def run_textual_interactive(
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
+                        cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
                     )
                 except Exception as exc:
                     response = f"Error: {exc}"
@@ -1876,6 +1900,7 @@ def run_textual_interactive(
                 if prompt_widget is not None:
                     prompt_widget.disabled = False
                     prompt_widget.focus()
+                _ch_mod._complete_channel_request(msg.msg_id)
 
         # ── Clipboard (copy on mouse select) ─────────────────
 

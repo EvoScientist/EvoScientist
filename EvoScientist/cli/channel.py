@@ -59,6 +59,10 @@ _response_lock = threading.Lock()
 _RESPONSE_TIMEOUT = 600.0
 _LATE_RESPONSE_TIMEOUT = 86400.0
 _LATE_RESPONSE_NOTICE = "Still working on it. I'll send the result when it's ready."
+_channel_request_lock = threading.Lock()
+_channel_requests: dict[str, dict[str, str]] = {}
+_session_requests: dict[str, list[str]] = {}
+_cancelled_channel_messages: set[str] = set()
 
 
 def _enqueue_channel_message(msg: ChannelMessage) -> asyncio.Future[str]:
@@ -71,6 +75,7 @@ def _enqueue_channel_message(msg: ChannelMessage) -> asyncio.Future[str]:
             "loop": loop,
             "response": None,
         }
+    _register_channel_request(msg)
     _message_queue.put(msg)
     return future
 
@@ -104,6 +109,97 @@ def _pop_channel_response(msg_id: str, *, cancel_pending: bool = False) -> str |
     if cancel_pending and not future.done():
         future.cancel()
     return slot["response"]
+
+
+def _channel_session_key(channel_type: str, chat_id: str) -> str:
+    return f"{channel_type}:{chat_id}"
+
+
+def _channel_message_session_key(msg: ChannelMessage) -> str:
+    return _channel_session_key(msg.channel_type, msg.chat_id)
+
+
+def _channel_message_cancel_scope(msg: ChannelMessage) -> str:
+    return f"channel:{msg.channel_type}:{msg.chat_id}:{msg.msg_id}"
+
+
+def _register_channel_request(msg: ChannelMessage) -> None:
+    """Track a queued channel request so `/stop` can find it later."""
+    session_key = _channel_message_session_key(msg)
+    with _channel_request_lock:
+        _channel_requests[msg.msg_id] = {
+            "session_key": session_key,
+            "cancel_scope": _channel_message_cancel_scope(msg),
+            "state": "queued",
+        }
+        _session_requests.setdefault(session_key, []).append(msg.msg_id)
+
+
+def _claim_channel_request(msg: ChannelMessage) -> bool:
+    """Mark a queued request active. Returns False if it was cancelled first."""
+    with _channel_request_lock:
+        slot = _channel_requests.get(msg.msg_id)
+        if slot is None or msg.msg_id in _cancelled_channel_messages:
+            return False
+        slot["state"] = "active"
+        return True
+
+
+def _channel_request_state(msg_id: str) -> str | None:
+    with _channel_request_lock:
+        slot = _channel_requests.get(msg_id)
+        return slot.get("state") if slot is not None else None
+
+
+def _complete_channel_request(
+    msg_id: str,
+    *,
+    discard_cancel_scope: bool = True,
+) -> None:
+    """Forget a request once its waiter is resolved or cancelled."""
+    slot = None
+    with _channel_request_lock:
+        slot = _channel_requests.pop(msg_id, None)
+        _cancelled_channel_messages.discard(msg_id)
+        if slot is not None:
+            request_ids = _session_requests.get(slot["session_key"])
+            if request_ids:
+                try:
+                    request_ids.remove(msg_id)
+                except ValueError:
+                    pass
+                if not request_ids:
+                    _session_requests.pop(slot["session_key"], None)
+
+    if slot is not None and discard_cancel_scope:
+        from ..stream.display import discard_stream_cancel
+
+        discard_stream_cancel(slot["cancel_scope"])
+
+
+def _cancel_channel_session(channel_type: str, chat_id: str) -> tuple[int, int]:
+    """Cancel queued and active work for one channel chat session."""
+    session_key = _channel_session_key(channel_type, chat_id)
+    with _channel_request_lock:
+        request_ids = tuple(_session_requests.get(session_key, ()))
+        active_scopes = tuple(
+            slot["cancel_scope"]
+            for msg_id in request_ids
+            if (slot := _channel_requests.get(msg_id)) is not None
+            and slot.get("state") == "active"
+        )
+        _cancelled_channel_messages.update(request_ids)
+
+    for msg_id in request_ids:
+        _pop_channel_response(msg_id, cancel_pending=True)
+
+    if active_scopes:
+        from ..stream.display import request_stream_cancel
+
+        for cancel_scope in active_scopes:
+            request_stream_cancel(cancel_scope)
+
+    return len(request_ids), len(active_scopes)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +408,12 @@ _HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for HITL approval reply
 _ASK_USER_TIMEOUT = (
     300.0  # seconds to wait for ask_user reply (longer for thinking time)
 )
+_STOP_COMMANDS = frozenset(("/stop", "/cancel"))
+
+
+def _is_stop_command(content: str | None) -> bool:
+    """Whether incoming content is a stop/cancel slash command."""
+    return (content or "").strip().lower() in _STOP_COMMANDS
 
 
 def _register_hitl_wait(channel_type: str, chat_id: str) -> threading.Event:
@@ -434,6 +536,8 @@ def channel_ask_user_prompt(
             return {"status": "cancelled"}
 
         raw = reply_text.strip()
+        if _is_stop_command(raw):
+            return {"status": "cancelled"}
         if raw.lower() == "cancel":
             return {"status": "cancelled"}
 
@@ -450,6 +554,8 @@ def channel_ask_user_prompt(
                 other_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
                 if not replied or not other_text:
                     _send("\u23f0 Response timed out.")
+                    return {"status": "cancelled"}
+                if _is_stop_command(other_text):
                     return {"status": "cancelled"}
                 if other_text.strip().lower() == "cancel":
                     return {"status": "cancelled"}
@@ -526,6 +632,12 @@ def channel_hitl_prompt(
 
     if not replied or not reply_text:
         _send("\u23f0 Approval timed out. Action rejected.")
+        return None
+
+    if _is_stop_command(reply_text):
+        # `/stop` already got its own immediate ack from the bus fast-path.
+        # Treat it as a pure cancel signal here so we don't send a second,
+        # contradictory "Unrecognized reply" message.
         return None
 
     # 3. Parse decision
@@ -724,6 +836,20 @@ async def _bus_inbound_consumer(bus, manager) -> None:
             except asyncio.CancelledError:
                 break
 
+            # /stop should preempt HITL interception so cancel works while
+            # waiting for approvals/questions.  If a HITL wait is pending,
+            # still release it so the blocking prompt can unwind immediately.
+            if _is_stop_command(msg.content):
+                if _try_set_hitl_reply(msg.channel, msg.chat_id, msg.content):
+                    _channel_logger.info(
+                        f"[bus] stop request released HITL wait for "
+                        f"{msg.channel}:{msg.chat_id}"
+                    )
+                _task = asyncio.create_task(_handle_bus_message(bus, manager, msg))
+                _tasks.add(_task)
+                _task.add_done_callback(_tasks.discard)
+                continue
+
             # Check if this message is a HITL approval reply
             if _try_set_hitl_reply(msg.channel, msg.chat_id, msg.content):
                 _channel_logger.info(
@@ -751,6 +877,35 @@ async def _handle_bus_message(bus, manager, msg) -> None:
         f"[bus] Received from {msg.channel}:{msg.sender_id}: {msg.content[:60]}..."
     )
     manager.record_message(msg.channel, "received")
+
+    # Fast-path: /stop intercept. Handle on the bus task itself so we
+    # don't deadlock behind the main-thread stream we're trying to
+    # interrupt. No typing indicator, no queue entry.
+    if _is_stop_command(msg.content):
+        cancelled_count, active_count = _cancel_channel_session(msg.channel, msg.chat_id)
+        try:
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Stopped.",
+                    reply_to=msg.message_id or None,
+                    metadata=msg.metadata,
+                )
+            )
+            manager.record_message(msg.channel, "sent")
+        except Exception as e:
+            _channel_logger.error(f"[bus] /stop ack send error: {e}")
+        else:
+            if cancelled_count or active_count:
+                _channel_logger.info(
+                    "[bus] /stop cancelled %d request(s) (%d active) for %s:%s",
+                    cancelled_count,
+                    active_count,
+                    msg.channel,
+                    msg.chat_id,
+                )
+        return
 
     channel = manager.get_channel(msg.channel)
     typing_active = False
@@ -821,6 +976,7 @@ async def _handle_bus_message(bus, manager, msg) -> None:
                     f"for {cm.msg_id}"
                 )
                 _pop_channel_response(cm.msg_id, cancel_pending=True)
+                _complete_channel_request(cm.msg_id)
                 return
 
         response = _pop_channel_response(cm.msg_id) or "No response"
@@ -836,6 +992,8 @@ async def _handle_bus_message(bus, manager, msg) -> None:
         manager.record_message(msg.channel, "sent")
     except asyncio.CancelledError:
         _pop_channel_response(cm.msg_id, cancel_pending=True)
+        if _channel_request_state(cm.msg_id) != "active":
+            _complete_channel_request(cm.msg_id)
         raise
     except Exception as e:
         _channel_logger.error(f"[bus] Outbound error: {e}")

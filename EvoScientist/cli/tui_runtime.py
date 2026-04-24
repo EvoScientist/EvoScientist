@@ -74,6 +74,7 @@ def run_streaming(
     metadata: dict | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+    cancel_scope: str | None = None,
 ) -> str:
     """Run streaming with the selected backend."""
     backend = get_backend(ui_backend, warn_fallback=True)
@@ -92,6 +93,7 @@ def run_streaming(
             metadata=metadata,
             hitl_prompt_fn=hitl_prompt_fn,
             ask_user_prompt_fn=ask_user_prompt_fn,
+            cancel_scope=cancel_scope,
         )
     except RuntimeError:
         requested = normalize_ui_backend(ui_backend)
@@ -113,5 +115,6 @@ def run_streaming(
                 metadata=metadata,
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,
+                cancel_scope=cancel_scope,
             )
         raise
