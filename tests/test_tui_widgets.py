@@ -1016,14 +1016,9 @@ class TestModelPickerWidgetOllama(unittest.TestCase):
         from EvoScientist.cli.widgets.model_picker import _CUSTOM_OLLAMA_ID
 
         for i, item in enumerate(widget._items):
-            if (
-                item["type"] == "model"
-                and item.get("model_id") == _CUSTOM_OLLAMA_ID
-            ):
+            if item["type"] == "model" and item.get("model_id") == _CUSTOM_OLLAMA_ID:
                 return i
-        raise AssertionError(
-            f"sentinel not found in items: {widget._items}"
-        )
+        raise AssertionError(f"sentinel not found in items: {widget._items}")
 
     def test_sentinel_rendered_under_ollama_group(self):
         w = self._make_widget()
@@ -1196,7 +1191,8 @@ class TestModelPickerWidgetOllama(unittest.TestCase):
         ]
         items = _build_items(entries)
         sentinel_rows = [
-            i for i in items
+            i
+            for i in items
             if i["type"] == "model" and i.get("model_id") == _CUSTOM_OLLAMA_ID
         ]
         assert len(sentinel_rows) == 1, f"duplicate sentinels rendered: {items}"
@@ -1217,7 +1213,8 @@ class TestModelPickerWidgetOllama(unittest.TestCase):
         # A filter that matches NOTHING in the normal entries.
         items = _build_items(entries, filter_text="zzzzzz")
         sentinel_rows = [
-            i for i in items
+            i
+            for i in items
             if i["type"] == "model" and i.get("model_id") == _CUSTOM_OLLAMA_ID
         ]
         assert len(sentinel_rows) == 1, f"sentinel hidden by filter: {items}"

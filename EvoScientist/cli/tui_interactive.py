@@ -2012,9 +2012,7 @@ def run_textual_interactive(
                     picker = focused
                 else:
                     node = focused.parent
-                    while node is not None and not isinstance(
-                        node, ModelPickerWidget
-                    ):
+                    while node is not None and not isinstance(node, ModelPickerWidget):
                         node = node.parent
                     picker = node
                 if picker is not None:
@@ -2077,9 +2075,7 @@ def run_textual_interactive(
                     picker_up = focused
                 else:
                     node = focused.parent
-                    while node is not None and not isinstance(
-                        node, ModelPickerWidget
-                    ):
+                    while node is not None and not isinstance(node, ModelPickerWidget):
                         node = node.parent
                     picker_up = node
                 if picker_up is not None:
@@ -2145,9 +2141,7 @@ def run_textual_interactive(
                     picker_down = focused
                 else:
                     node = focused.parent
-                    while node is not None and not isinstance(
-                        node, ModelPickerWidget
-                    ):
+                    while node is not None and not isinstance(node, ModelPickerWidget):
                         node = node.parent
                     picker_down = node
                 if picker_down is not None:

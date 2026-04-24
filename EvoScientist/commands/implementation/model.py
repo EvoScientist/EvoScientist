@@ -110,9 +110,7 @@ class ModelCommand(Command):
             # Always append the sentinel so users can type a name even when
             # the daemon is down or no models have been pulled yet. The widget
             # swaps the sentinel name for the typed value before posting Picked.
-            entries.append(
-                ("Custom Ollama model...", "__custom_ollama__", "ollama")
-            )
+            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
 
         result = await ctx.ui.wait_for_model_pick(
             entries,
@@ -126,7 +124,10 @@ class ModelCommand(Command):
         # Defense-in-depth: the widget should have replaced the sentinel with
         # the user-typed name. If it didn't, treat as cancel rather than try
         # to switch to a literal "__custom_ollama__" model.
-        if provider == "ollama" and name in ("Custom Ollama model...", "__custom_ollama__"):
+        if provider == "ollama" and name in (
+            "Custom Ollama model...",
+            "__custom_ollama__",
+        ):
             return
         await self._apply_model(ctx, name, provider, save=save)
 
