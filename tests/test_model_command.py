@@ -425,6 +425,7 @@ class TestApplyModelIntegration:
 
     def test_new_agent_is_bound_to_newly_selected_model(self, evo_module_state):
         from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
 
         mod = evo_module_state
 
@@ -449,7 +450,7 @@ class TestApplyModelIntegration:
             agent._bound_model = mod._ensure_chat_model()
             return agent
 
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
@@ -473,11 +474,6 @@ class TestApplyModelIntegration:
                 "EvoScientist.cli.agent._load_agent",
                 side_effect=_fake_load_agent,
             ),
-            # ``_ensure_config`` calls ``apply_config_to_env`` which reads
-            # a dozen attributes off the config.  The SimpleNamespace we
-            # use as cfg only has ``model`` / ``provider``, so stub the
-            # env propagation out — it's orthogonal to this test.
-            patch("EvoScientist.EvoScientist.apply_config_to_env"),
         ):
             cmd = ModelCommand()
             _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
@@ -557,3 +553,83 @@ class TestModelCommandLoadAgentFailure:
         call_args = ui.append_system.call_args
         assert "Failed to switch model" in call_args[0][0]
         assert call_args[1]["style"] == "red"
+
+
+class TestApplyModelLoadAgentFailureTransactional:
+    """Regression: if ``create_cli_agent`` raises AFTER partially mutating
+    module globals via ``_ensure_config`` + ``_ensure_chat_model``,
+    ``_apply_model`` must roll those back so the session stays on the
+    original model.
+
+    Complements :class:`TestModelCommandLoadAgentFailure`, which tests
+    the early-failure path where ``_load_agent`` never reaches
+    ``create_cli_agent`` and no globals get mutated.
+    """
+
+    def test_globals_restored_after_create_cli_agent_partial_mutation(
+        self, evo_module_state
+    ):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        mod = evo_module_state
+        sentinels: dict[tuple[str, str | None], MagicMock] = {}
+
+        def _fake_get_chat_model(model, provider=None):
+            key = (model, provider)
+            sentinels.setdefault(key, MagicMock(name=f"chat_model[{model}|{provider}]"))
+            return sentinels[key]
+
+        def _fake_load_agent(
+            workspace_dir=None,
+            checkpointer=None,
+            config=None,
+            *,
+            on_mcp_progress=None,
+        ):
+            # Mimic ``create_cli_agent``: mutate globals via
+            # ``_ensure_config`` + ``_ensure_chat_model``, then raise
+            # (as if middleware construction or deepagents wiring failed).
+            mod._ensure_config(config)
+            mod._ensure_chat_model()
+            raise RuntimeError("middleware build failed")
+
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        old_model = _fake_get_chat_model("claude-sonnet-4-6", "anthropic")
+        old_agent = MagicMock(name="old-default-agent")
+
+        mod._config = cfg
+        mod._chat_model = old_model
+        mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
+        mod._EvoScientist_agent = old_agent
+
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.ui.supports_interactive = True
+        ctx.workspace_dir = "/tmp/test_rollback"
+        ctx.checkpointer = None
+
+        with (
+            patch(
+                "EvoScientist.llm.get_chat_model",
+                side_effect=_fake_get_chat_model,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=_fake_load_agent,
+            ),
+        ):
+            cmd = ModelCommand()
+            _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
+
+        # All four globals restored to their pre-call state.
+        assert mod._config is cfg
+        assert mod._chat_model is old_model
+        assert mod._chat_model_key == ("claude-sonnet-4-6", "anthropic")
+        assert mod._EvoScientist_agent is old_agent
+        # The ``cfg`` object itself was not mutated.
+        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.provider == "anthropic"
+        # User sees an error message.
+        msg = ctx.ui.append_system.call_args[0][0]
+        assert "Failed to switch model" in msg

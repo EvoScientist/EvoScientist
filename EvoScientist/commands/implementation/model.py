@@ -111,6 +111,7 @@ class ModelCommand(Command):
     ) -> None:
         import copy
 
+        from ... import EvoScientist as _mod
         from ...cli.agent import _load_agent
         from ...EvoScientist import _ensure_config, set_chat_model
 
@@ -122,6 +123,22 @@ class ModelCommand(Command):
         temp_cfg.model = model_name
         temp_cfg.provider = provider
 
+        # create_cli_agent(config=temp_cfg) calls _ensure_config and
+        # _ensure_chat_model before finishing, so a failure further
+        # down (middleware build, MCP reconnect, deepagents wiring)
+        # would leave the session pointing at the new model. Snapshot
+        # the four globals those helpers write so we can restore on
+        # error. Best-effort: references already captured by concurrent
+        # readers (e.g. a channel thread mid-turn) are not retroactively
+        # patched, but /model is user-initiated from an idle prompt in
+        # practice.
+        snap = (
+            _mod._config,
+            _mod._chat_model,
+            _mod._chat_model_key,
+            _mod._EvoScientist_agent,
+        )
+
         try:
             new_agent = _load_agent(
                 workspace_dir=ctx.workspace_dir,
@@ -129,6 +146,12 @@ class ModelCommand(Command):
                 config=temp_cfg,
             )
         except Exception as e:
+            (
+                _mod._config,
+                _mod._chat_model,
+                _mod._chat_model_key,
+                _mod._EvoScientist_agent,
+            ) = snap
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return
 
