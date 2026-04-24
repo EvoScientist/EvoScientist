@@ -51,6 +51,7 @@ from .channel import (
     _channels_is_running,
     _message_queue,
     _set_channel_response,
+    dispatch_channel_slash_command,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .rich_command_ui import RichCLICommandUI
@@ -800,6 +801,63 @@ def cmd_interactive(
                 def _channel_ask_user(ask_user_data: dict) -> dict:
                     """Send ask_user questions to channel user and wait for reply."""
                     return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+
+                # ---- Slash command dispatch (cmd_manager, not the agent) ----
+                # Mirrors the TUI's behavior so ``/evoskills``, ``/mcp list``
+                # etc. sent via iMessage actually execute instead of being
+                # fed to the LLM as a plain prompt.
+                async def _on_channel_cmd_completed(
+                    ctx: Any, original_agent: Any, cmd: Any
+                ) -> None:
+                    """Mirror the REPL adoption block at
+                    ``interactive.py:1005-1030`` so ``/model`` and similar
+                    state-mutating commands invoked via a channel actually
+                    rebind the running session and keep the status bar
+                    in sync."""
+                    nonlocal model
+                    agent_swapped = (
+                        ctx.agent is not None and ctx.agent is not original_agent
+                    )
+                    if agent_swapped:
+                        from ..EvoScientist import _ensure_config
+
+                        agent_loader.adopt(ctx.agent)
+                        cfg = _ensure_config()
+                        model = cfg.model
+                        state["status_base_snapshot"] = make_empty_status_snapshot(
+                            model
+                        )
+                        if _channels_is_running():
+                            _ch_mod._cli_agent = ctx.agent
+                            _ch_mod._cli_thread_id = state["thread_id"]
+                    # ``/new`` rotates ``state["thread_id"]`` / workspace,
+                    # ``/compact`` reduces token usage — both need the
+                    # status snapshot re-rendered even when the agent
+                    # didn't swap.  ``/resume`` refreshes inline in its
+                    # own async callback.
+                    if agent_swapped or getattr(cmd, "name", None) in (
+                        "/compact",
+                        "/new",
+                    ):
+                        await _refresh_status_snapshot(reset_streaming_text=True)
+
+                _slash_handled = await dispatch_channel_slash_command(
+                    msg,
+                    agent=agent_loader.agent,
+                    thread_id=state["thread_id"],
+                    workspace_dir=state["workspace_dir"],
+                    checkpointer=checkpointer,
+                    append_system=lambda t, s="dim": console.print(t, style=s),
+                    start_new_session_cb=_on_start_new_session,
+                    handle_session_resume_cb=_on_handle_session_resume,
+                    await_agent_ready=_await_agent_ready,
+                    on_cmd_completed=_on_channel_cmd_completed,
+                )
+                if _slash_handled:
+                    _print_separator()
+                    sys.stdout.write("\033[34;1m❯\033[0m ")
+                    sys.stdout.flush()
+                    return
 
                 try:
                     ready_agent = await _await_agent_ready()

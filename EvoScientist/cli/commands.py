@@ -32,6 +32,7 @@ from .channel import (
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
+    dispatch_channel_slash_command,
 )
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
@@ -572,6 +573,27 @@ def _serve_process_message(
 
     def _ask_user_prompt(ask_user_data: dict) -> dict:
         return channel_ask_user_prompt(ask_user_data, msg)
+
+    # ---- Slash command dispatch (cmd_manager, not the agent) ----
+    # Headless equivalent of the Rich CLI / TUI slash branch so channel
+    # commands like ``/evoskills`` actually execute in serve mode instead
+    # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
+    # None because the agent is always loaded before the serve loop polls.
+    _slash_handled = asyncio.run(
+        dispatch_channel_slash_command(
+            msg,
+            agent=agent,
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            checkpointer=None,
+            append_system=lambda t, s="dim": console.print(t, style=s),
+        )
+    )
+    if _slash_handled:
+        console.print(
+            f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]"
+        )
+        return
 
     meta = build_metadata(workspace_dir, model)
     try:

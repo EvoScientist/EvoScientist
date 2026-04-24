@@ -15,6 +15,7 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -103,6 +104,142 @@ def _pop_channel_response(msg_id: str, *, cancel_pending: bool = False) -> str |
     if cancel_pending and not future.done():
         future.cancel()
     return slot["response"]
+
+
+# ---------------------------------------------------------------------------
+# Slash command dispatch for channel messages
+# ---------------------------------------------------------------------------
+# Shared by Rich CLI (``cli/interactive.py::_process_channel_message``) and
+# headless serve (``cli/commands.py::_serve_process_message``) so both
+# surfaces route ``/foo`` text through ``cmd_manager`` instead of feeding it
+# to the LLM as a plain prompt.  The Textual TUI has its own inline copy of
+# this logic in ``cli/tui_interactive.py`` — kept there to stay close to the
+# widget lifecycle.
+
+
+async def dispatch_channel_slash_command(
+    msg: ChannelMessage,
+    *,
+    agent: Any,
+    thread_id: str,
+    workspace_dir: str | None,
+    checkpointer: Any,
+    append_system: Callable[[str, str], None],
+    start_new_session_cb: Callable[[], None] | None = None,
+    handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
+    await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
+    on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
+) -> bool:
+    """Dispatch a slash command from a channel message.
+
+    Returns True if the helper handled the message (successfully or with
+    an error) — the caller must then return without streaming anything
+    to the agent.  Returns False for non-slash content or unresolved
+    slash commands, so the caller can fall through to the agent
+    streaming path (matches TUI behavior).
+
+    Parameters
+    ----------
+    msg:
+        The inbound ``ChannelMessage`` to inspect.
+    agent:
+        Default agent handle for the ``CommandContext``.  Commands that
+        do not need the agent use this value directly.
+    thread_id, workspace_dir, checkpointer:
+        Populate ``CommandContext``.
+    append_system:
+        ``(text, style)`` callback for local CLI/TUI log output.  Used
+        by ``ChannelCommandUI`` to surface system breadcrumbs and by
+        this helper to print the "Executed command from ..." line.
+    start_new_session_cb, handle_session_resume_cb:
+        Optional lifecycle callbacks forwarded to ``ChannelCommandUI``.
+        Headless serve passes ``None`` — ``/new`` and ``/resume`` degrade
+        gracefully via the default ``ChannelCommandUI`` messages.
+    await_agent_ready:
+        Optional async resolver that blocks until the background agent
+        load finishes.  Called only when ``cmd.needs_agent(args)`` is
+        True.  Headless serve passes ``None`` because the agent is
+        loaded up-front before the bus starts.
+    on_cmd_completed:
+        Optional ``async (ctx, original_agent, cmd) -> None`` callback
+        fired only after ``cmd_manager.execute`` returns True.  Used by
+        Rich CLI to (a) adopt an agent swap (``/model``) back into the
+        running session and (b) refresh the status snapshot for
+        commands that mutate session-level state (``/new``,
+        ``/compact``) — mirrors the REPL dispatch at
+        ``cli/interactive.py:1002-1030``.  Headless serve passes
+        ``None`` since it cannot hot-swap its polling-loop agent.
+    """
+    if not msg.content.strip().startswith("/"):
+        return False
+
+    # Lazy imports: avoid coupling the channel module to ``commands`` at
+    # import time (tui_interactive.py does the same).
+    from ..commands.base import CommandContext
+    from ..commands.channel_ui import ChannelCommandUI
+    from ..commands.manager import manager as cmd_manager
+
+    parsed = cmd_manager.resolve(msg.content)
+    if parsed is None:
+        # Unknown slash command — let the agent handle it (matches TUI).
+        return False
+    cmd, cmd_args = parsed
+
+    agent_for_ctx = agent
+    if cmd.needs_agent(cmd_args) and await_agent_ready is not None:
+        try:
+            agent_for_ctx = await await_agent_ready()
+        except Exception as exc:
+            _set_channel_response(msg.msg_id, f"Error: {exc}")
+            return True
+
+    ui = ChannelCommandUI(
+        msg,
+        append_system_callback=append_system,
+        start_new_session_callback=start_new_session_cb,
+        handle_session_resume_callback=handle_session_resume_cb,
+    )
+    ctx = CommandContext(
+        agent=agent_for_ctx,
+        thread_id=thread_id,
+        ui=ui,
+        workspace_dir=workspace_dir,
+        checkpointer=checkpointer,
+    )
+
+    try:
+        cmd_executed = await cmd_manager.execute(msg.content, ctx)
+    except Exception as exc:
+        _channel_logger.debug(
+            f"Channel command error: {exc}", exc_info=True
+        )
+        _set_channel_response(msg.msg_id, f"Command error: {exc}")
+        return True  # must return — do NOT fall through to the agent
+
+    if cmd_executed:
+        if on_cmd_completed is not None:
+            try:
+                # Command output already flushed by ``cmd_manager.execute``
+                # via ``ctx.ui.flush()`` — the hook does internal state
+                # sync (agent adoption, status snapshot refresh) only,
+                # so swallowing its errors keeps the user-visible reply
+                # intact even if the sync path is broken.
+                await on_cmd_completed(ctx, agent_for_ctx, cmd)
+            except Exception as exc:
+                _channel_logger.debug(
+                    f"Channel command post-exec callback error: {exc}",
+                    exc_info=True,
+                )
+        append_system(
+            f"[{msg.channel_type}: Executed command from {msg.sender}]",
+            "dim",
+        )
+        _set_channel_response(msg.msg_id, f"Command executed: {msg.content}")
+        return True
+
+    # ``cmd_manager.execute`` returned False (empty / unparseable input).
+    # Fall through to the agent streaming path.
+    return False
 
 
 # ---------------------------------------------------------------------------
