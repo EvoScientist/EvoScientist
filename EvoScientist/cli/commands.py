@@ -497,11 +497,77 @@ async def compact_conversation(
 _serve_logger = logging.getLogger(__name__)
 
 
+def _make_serve_start_new_session_cb(agent_holder: dict[str, Any]):
+    """Build the ``start_new_session_cb`` used by serve mode.
+
+    ``/new`` delegates session rotation entirely to this callback: it
+    does not mutate ``ctx.thread_id`` itself, it just calls
+    ``ctx.ui.start_new_session()`` and expects the surface to issue a
+    fresh thread id.  Without a wired callback the channel user gets
+    ``ChannelCommandUI``'s fallback "restart the channel link" message
+    and nothing actually rotates.  This helper generates a new thread
+    id, updates the shared holder, and syncs the channel-module global
+    so subsequent messages land on the new thread.
+    """
+
+    def _cb() -> None:
+        from ..sessions import generate_thread_id
+
+        new_tid = generate_thread_id()
+        agent_holder["thread_id"] = new_tid
+        try:
+            import EvoScientist.cli.channel as _ch_mod
+
+            _ch_mod._cli_thread_id = new_tid
+        except Exception:  # pragma: no cover — defensive
+            pass
+        console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
+
+    return _cb
+
+
+def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
+    """Build the ``on_cmd_completed`` hook used by serve mode.
+
+    Adopts ``/model`` agent swaps and ``/resume`` thread swaps back
+    into ``agent_holder`` so the outer poll loop picks up the new
+    handles on subsequent messages.  Also keeps
+    ``EvoScientist.cli.channel`` globals in sync so other readers
+    (e.g. the bus) see the new values.
+
+    Extracted from ``_serve_process_message`` so it can be unit tested
+    without spinning up the whole serve loop.
+    """
+
+    async def _hook(ctx: Any, original_agent: Any, cmd: Any) -> None:
+        import EvoScientist.cli.channel as _ch_mod
+
+        if ctx.agent is not None and ctx.agent is not original_agent:
+            agent_holder["agent"] = ctx.agent
+            try:
+                _ch_mod._cli_agent = ctx.agent
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+        # ``/resume`` mutates ``ctx.thread_id`` directly (its UI callback
+        # is a no-op in serve mode since there's no REPL to reset).  Pick
+        # up the new id here so subsequent messages run on the resumed
+        # thread instead of the one captured at serve startup.
+        new_tid = getattr(ctx, "thread_id", None)
+        if new_tid and new_tid != agent_holder.get("thread_id"):
+            agent_holder["thread_id"] = new_tid
+            try:
+                _ch_mod._cli_thread_id = new_tid
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+    return _hook
+
+
 def _serve_process_message(
     msg: ChannelMessage,
     *,
-    agent: Any,
-    thread_id: str,
+    agent_holder: dict[str, Any],
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
@@ -510,6 +576,12 @@ def _serve_process_message(
 
     Headless equivalent of interactive.py's ``_process_channel_message``.
     No CLI prompt manipulation — just log lines for monitoring.
+
+    ``agent_holder`` is a mutable dict (keys: ``agent``, ``thread_id``)
+    shared with the outer ``serve()`` loop.  The slash-dispatch hook
+    updates it when ``/model`` swaps the agent or ``/resume`` swaps the
+    thread so subsequent messages observe the new values instead of the
+    stale ones captured at startup.
     """
     import asyncio
 
@@ -579,16 +651,39 @@ def _serve_process_message(
     # commands like ``/evoskills`` actually execute in serve mode instead
     # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
     # None because the agent is always loaded before the serve loop polls.
-    _slash_handled = asyncio.run(
-        dispatch_channel_slash_command(
-            msg,
-            agent=agent,
-            thread_id=thread_id,
-            workspace_dir=workspace_dir,
-            checkpointer=None,
-            append_system=lambda t, s="dim": console.print(t, style=s),
+    # Uses a dedicated event loop (not ``asyncio.run``) so SIGINT handling
+    # installed by ``serve()`` remains authoritative — ``asyncio.run``
+    # swaps ``signal.set_wakeup_fd`` and can leave it dangling on edge
+    # cases, which breaks Ctrl+C between messages.
+    _slash_loop = asyncio.new_event_loop()
+    # ``set_event_loop`` is needed because some downstream commands
+    # (e.g. ``/install-mcp``) call ``asyncio.get_event_loop()``, which
+    # raises ``RuntimeError`` on Python 3.12+ when the thread has no
+    # current loop set.  Paired with a ``set_event_loop(None)`` below
+    # to avoid polluting subsequent messages' lookups.
+    _prev_loop: asyncio.AbstractEventLoop | None
+    try:
+        _prev_loop = asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        _prev_loop = None
+    asyncio.set_event_loop(_slash_loop)
+    try:
+        _slash_handled = _slash_loop.run_until_complete(
+            dispatch_channel_slash_command(
+                msg,
+                agent=agent_holder["agent"],
+                thread_id=agent_holder["thread_id"],
+                workspace_dir=workspace_dir,
+                checkpointer=None,
+                append_system=lambda t, s="dim": console.print(t, style=s),
+                start_new_session_cb=_make_serve_start_new_session_cb(agent_holder),
+                on_cmd_completed=_make_serve_cmd_completed_hook(agent_holder),
+            )
         )
-    )
+    finally:
+        _slash_loop.close()
+        asyncio.set_event_loop(_prev_loop)
+
     if _slash_handled:
         console.print(
             f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]"
@@ -599,9 +694,9 @@ def _serve_process_message(
     try:
         response = run_streaming(
             ui_backend="cli",
-            agent=agent,
+            agent=agent_holder["agent"],
             message=msg.content,
-            thread_id=thread_id,
+            thread_id=agent_holder["thread_id"],
             show_thinking=show_thinking,
             interactive=True,
             metadata=meta,
@@ -717,6 +812,12 @@ def serve(
 
     tid = generate_thread_id()
 
+    # Mutable holder shared with _serve_process_message so ``/model``
+    # invoked over a channel can hot-swap the agent for subsequent
+    # messages.  A pass-by-value parameter gets captured once at startup
+    # and never updated.
+    agent_holder: dict[str, Any] = {"agent": agent, "thread_id": tid}
+
     _start_channels_bus_mode(
         config,
         agent,
@@ -729,23 +830,55 @@ def serve(
     console.print(f"[dim]Workspace: {_shorten_path(ws)}[/dim]")
     console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
 
+    # Explicit SIGINT/SIGTERM handlers.  Python's default SIGINT raises
+    # KeyboardInterrupt in the main thread, which ought to unblock
+    # ``_message_queue.get(timeout=...)`` and land in the ``except``
+    # below — but edge cases (e.g. an asyncio ``set_wakeup_fd`` left
+    # dangling by a nested ``asyncio.run``) can silently swallow the
+    # signal.  Setting a ``threading.Event`` in addition gives us a
+    # second gate that the poll loop always observes.
+    import signal
+    import threading
+
+    shutdown_event = threading.Event()
+
+    def _handle_shutdown(signum: int, _frame: Any) -> None:
+        shutdown_event.set()
+        # Fall back to Python's default SIGINT behavior (raises
+        # KeyboardInterrupt) so blocking I/O inside ``run_streaming``
+        # is still interrupted.  For SIGTERM there's no default that
+        # raises, so the event check below is the only gate.
+        if signum == signal.SIGINT:
+            signal.default_int_handler(signum, _frame)
+
+    _orig_sigint = signal.signal(signal.SIGINT, _handle_shutdown)
+    _orig_sigterm = signal.signal(signal.SIGTERM, _handle_shutdown)
+
     try:
-        while True:
+        while not shutdown_event.is_set():
             try:
-                msg = _message_queue.get(timeout=1.0)
+                msg = _message_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            _serve_process_message(
-                msg,
-                agent=agent,
-                thread_id=tid,
-                model=config.model,
-                workspace_dir=ws,
-                show_thinking=effective_channel_thinking,
-            )
+            if shutdown_event.is_set():
+                break
+            try:
+                _serve_process_message(
+                    msg,
+                    agent_holder=agent_holder,
+                    model=config.model,
+                    workspace_dir=ws,
+                    show_thinking=effective_channel_thinking,
+                )
+            except KeyboardInterrupt:
+                shutdown_event.set()
+                break
     except KeyboardInterrupt:
-        console.print("\n[dim]Shutting down...[/dim]")
+        shutdown_event.set()
     finally:
+        signal.signal(signal.SIGINT, _orig_sigint)
+        signal.signal(signal.SIGTERM, _orig_sigterm)
+        console.print("\n[dim]Shutting down...[/dim]")
         _channels_stop()
         console.print("[dim]Stopped.[/dim]")
 
