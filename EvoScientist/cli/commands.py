@@ -28,8 +28,8 @@ from .agent import (
 from .channel import (
     ChannelMessage,
     _channel_message_cancel_scope,
-    _claim_channel_request,
     _channels_stop,
+    _claim_channel_request,
     _complete_channel_request,
     _message_queue,
     _register_channel_request,
@@ -742,7 +742,9 @@ def _serve_process_message(
 
         if _slash_error is not None:
             _set_channel_response(msg.msg_id, f"Command error: {_slash_error}")
-            console.print(f"[red]Slash command error: {escape(str(_slash_error))}[/red]")
+            console.print(
+                f"[red]Slash command error: {escape(str(_slash_error))}[/red]"
+            )
             return
 
         if _slash_handled:

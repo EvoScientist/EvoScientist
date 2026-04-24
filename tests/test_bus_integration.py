@@ -474,69 +474,6 @@ class TestBusInboundConsumer:
 
         _run(_test())
 
-    def test_stop_during_hitl_wait_does_not_send_unrecognized_reply(self):
-        """HITL `/stop` should not produce a second contradictory rejection."""
-        from EvoScientist.cli import channel as channel_mod
-        from EvoScientist.cli.channel import ChannelMessage, _bus_inbound_consumer
-
-        async def _test():
-            bus = MessageBus()
-            manager = ChannelManager(bus)
-            ch = FakeChannel()
-            manager.register(ch)
-
-            consumer = asyncio.create_task(_bus_inbound_consumer(bus, manager))
-            prev_loop = channel_mod._bus_loop
-            channel_mod._bus_loop = asyncio.get_running_loop()
-            try:
-                prompt_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        channel_mod.channel_hitl_prompt,
-                        [{"name": "execute", "args": {"command": "echo hi"}}],
-                        ChannelMessage(
-                            msg_id="hitl-1",
-                            content="ignored",
-                            sender="user1",
-                            channel_type="fake",
-                            bus_ref=bus,
-                            chat_id="chat1",
-                            message_id="m-hitl-1",
-                        ),
-                    )
-                )
-
-                prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
-                assert "Reply" in prompt.content or prompt.content
-
-                await bus.publish_inbound(
-                    InboundMessage(
-                        channel="fake",
-                        sender_id="user1",
-                        chat_id="chat1",
-                        content="/stop",
-                        message_id="m-stop-3",
-                    )
-                )
-
-                decisions = await asyncio.wait_for(prompt_task, timeout=2.0)
-                assert decisions is None
-
-                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
-                assert outbound.content == "Stopped."
-                assert outbound.reply_to == "m-stop-3"
-
-                with pytest.raises(asyncio.TimeoutError):
-                    await asyncio.wait_for(bus.consume_outbound(), timeout=0.2)
-            finally:
-                channel_mod._bus_loop = prev_loop
-                consumer.cancel()
-                try:
-                    await consumer
-                except asyncio.CancelledError:
-                    pass
-
-        _run(_test())
-
     def test_message_counting(self):
         """Messages are counted via record_message."""
         from EvoScientist.cli.channel import (

@@ -882,7 +882,9 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     # don't deadlock behind the main-thread stream we're trying to
     # interrupt. No typing indicator, no queue entry.
     if _is_stop_command(msg.content):
-        cancelled_count, active_count = _cancel_channel_session(msg.channel, msg.chat_id)
+        cancelled_count, active_count = _cancel_channel_session(
+            msg.channel, msg.chat_id
+        )
         try:
             await bus.publish_outbound(
                 OutboundMessage(

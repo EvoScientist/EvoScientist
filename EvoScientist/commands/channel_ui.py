@@ -141,31 +141,8 @@ class ChannelCommandUI(CommandUI):
     async def wait_for_thread_pick(
         self, threads: list[dict], current_thread: str, title: str
     ) -> str | None:
-        from ..sessions import _format_relative_time
-
-        lines = [title, "Available sessions:"]
-        for idx, thread in enumerate(threads, start=1):
-            thread_id = thread.get("thread_id", "") or ""
-            marker = " *" if thread_id == current_thread else ""
-            message_count = int(thread.get("message_count", 0) or 0)
-            preview = (thread.get("preview", "") or "").strip()
-            if len(preview) > 90:
-                preview = preview[:87] + "..."
-            metadata_bits = []
-            if message_count:
-                label = "msg" if message_count == 1 else "msgs"
-                metadata_bits.append(f"{message_count} {label}")
-            relative = _format_relative_time(thread.get("updated_at"))
-            if relative:
-                metadata_bits.append(relative)
-            metadata = f" ({' | '.join(metadata_bits)})" if metadata_bits else ""
-            lines.append(f"{idx}. {thread_id}{marker}{metadata}")
-            if preview:
-                lines.append(f"   {preview}")
-        lines.append("")
-        lines.append("Reply with `/resume <id>` to continue one of these sessions.")
-
-        await self._send_text_chunks("\n".join(lines))
+        self.append_system(f"{title}\nUse /resume <id> to continue.")
+        await self.flush()
         return None
 
     async def wait_for_skill_browse(
@@ -202,9 +179,6 @@ class ChannelCommandUI(CommandUI):
         from ..sessions import get_thread_messages
 
         lines = [f"Resumed session: {thread_id}"]
-        if workspace_dir:
-            lines.append(f"Workspace: {workspace_dir}")
-
         messages = await get_thread_messages(thread_id)
         display = [m for m in messages if getattr(m, "type", None) in ("human", "ai")]
 
@@ -213,11 +187,10 @@ class ChannelCommandUI(CommandUI):
             await self._send_text_chunks("\n".join(lines))
             return
 
-        HISTORY_WINDOW = 20
+        HISTORY_WINDOW = 10
         if len(display) > HISTORY_WINDOW:
-            skipped = len(display) - HISTORY_WINDOW
             display = display[-HISTORY_WINDOW:]
-            lines.append(f"Conversation history (showing last {HISTORY_WINDOW}, skipped {skipped}):")
+            lines.append(f"Conversation history (last {HISTORY_WINDOW} messages):")
         else:
             lines.append("Conversation history:")
 

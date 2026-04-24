@@ -24,37 +24,6 @@ def _make_ui(callback=None):
     return ui, captured
 
 
-def test_wait_for_thread_pick_lists_thread_ids_for_channel_users():
-    ui, captured = _make_ui()
-
-    result = _run(
-        ui.wait_for_thread_pick(
-            [
-                {
-                    "thread_id": "abc12345",
-                    "preview": "First prompt",
-                    "message_count": 3,
-                    "updated_at": None,
-                },
-                {
-                    "thread_id": "def67890",
-                    "preview": "Second prompt",
-                    "message_count": 1,
-                    "updated_at": None,
-                },
-            ],
-            current_thread="abc12345",
-            title=">>> Select session to resume <<<",
-        )
-    )
-
-    assert result is None
-    text = "\n".join(captured)
-    assert "abc12345" in text
-    assert "def67890" in text
-    assert "/resume <id>" in text
-
-
 def test_handle_session_resume_sends_history_back_to_channel():
     callback = AsyncMock()
     ui, captured = _make_ui(callback=callback)

@@ -798,7 +798,9 @@ def cmd_interactive(
                                 timeout=30,
                             )
 
-                    def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
+                    def _channel_hitl_prompt(
+                        action_requests: list,
+                    ) -> list[dict] | None:
                         """Send HITL approval prompt to channel user and wait for reply."""
                         return _ch_mod.channel_hitl_prompt(action_requests, msg)
 

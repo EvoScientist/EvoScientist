@@ -1162,8 +1162,8 @@ def run_textual_interactive(
                     ):
                         if is_stream_cancel_requested(cancel_scope):
                             state.response_text = (
-                                (state.response_text or "") + "\n[Stopped.]"
-                            )
+                                state.response_text or ""
+                            ) + "\n[Stopped.]"
                             break
                         event_type = state.handle_event(event)
 

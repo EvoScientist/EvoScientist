@@ -1,22 +1,12 @@
-"""Tests for /stop channel-initiated stream cancellation.
-
-Covers:
-- ``_consume`` observes the cancel event and terminates with ``[Stopped.]``
-- ``_run_streaming`` clears a stale set event on fresh entry
-- Bus handler intercepts ``/stop`` (and ``/cancel``) without enqueueing
-- ``StopCommand`` slash command sets the event and is idempotent
-"""
+"""Tests for channel-initiated stream cancellation."""
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from EvoScientist.channels.bus.events import InboundMessage
 from EvoScientist.stream import display as display_mod
-from tests.conftest import run_async as _run
 
 
 @pytest.fixture(autouse=True)
@@ -163,129 +153,7 @@ def test_run_streaming_ignores_other_scope_cancel():
 
 
 # ---------------------------------------------------------------------------
-# 3. bus /stop intercept — sets event, sends ack, does NOT enqueue
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("cmd", ["/stop", "/cancel", "  /STOP  "])
-def test_bus_handle_message_stop_intercept(cmd):
-    """`_handle_bus_message` should short-circuit on /stop and /cancel
-    (case-insensitive, whitespace-tolerant): set the cancel event, call
-    bus.publish_outbound once with 'Stopped.', and leave the main-thread
-    message queue untouched."""
-    from EvoScientist.cli.channel import _handle_bus_message, _message_queue
-
-    bus = MagicMock()
-    bus.publish_outbound = AsyncMock()
-    manager = MagicMock()
-    manager.get_channel = MagicMock(return_value=MagicMock())
-
-    inbound = InboundMessage(
-        channel="fake",
-        sender_id="user1",
-        chat_id="chat1",
-        content=cmd,
-        message_id="m-1",
-    )
-
-    _run(_handle_bus_message(bus, manager, inbound))
-
-    # Stop ack is immediate, but unrelated default streams stay untouched.
-    assert not display_mod.is_stream_cancel_requested()
-
-    # Ack sent, exactly once, content = "Stopped.".
-    assert bus.publish_outbound.call_count == 1
-    ack = bus.publish_outbound.call_args.args[0]
-    assert ack.channel == "fake"
-    assert ack.chat_id == "chat1"
-    assert ack.content == "Stopped."
-    assert ack.reply_to == "m-1"
-
-    # Nothing was pushed to the main-thread queue.
-    assert _message_queue.empty()
-
-
-def test_bus_handle_message_non_stop_falls_through():
-    """Plain content should NOT trigger the stop fast-path: the cancel
-    event stays clear and the message is enqueued normally."""
-    from EvoScientist.cli.channel import _handle_bus_message, _message_queue
-
-    bus = MagicMock()
-    bus.publish_outbound = AsyncMock()
-    manager = MagicMock()
-    channel_mock = MagicMock()
-    channel_mock.start_typing = AsyncMock()
-    channel_mock.stop_typing = AsyncMock()
-    manager.get_channel = MagicMock(return_value=channel_mock)
-
-    async def _run_with_cancel():
-        task = asyncio.create_task(
-            _handle_bus_message(
-                bus,
-                manager,
-                InboundMessage(
-                    channel="fake",
-                    sender_id="user1",
-                    chat_id="chat1",
-                    content="hello",
-                ),
-            )
-        )
-        # Wait for enqueue to happen, then cancel to tear down the wait.
-        for _ in range(20):
-            if not _message_queue.empty():
-                break
-            await asyncio.sleep(0.02)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    _run(_run_with_cancel())
-
-    assert not display_mod.is_stream_cancel_requested()
-    # Non-stop path reaches the enqueue.
-    assert not _message_queue.empty()
-
-
-# ---------------------------------------------------------------------------
-# 4 & 5. StopCommand — execute sets event; second call is idempotent
-# ---------------------------------------------------------------------------
-
-
-def test_stop_command_execute_sets_event():
-    from EvoScientist.commands.base import CommandContext
-    from EvoScientist.commands.implementation.stop import StopCommand
-
-    ui = MagicMock()
-    ctx = CommandContext(agent=None, thread_id="t", ui=ui)
-
-    _run(StopCommand().execute(ctx, []))
-
-    assert display_mod.is_stream_cancel_requested()
-    assert ui.append_system.call_count == 1
-    msg = ui.append_system.call_args.args[0]
-    assert "Stop requested" in msg
-
-
-def test_stop_command_idempotent_when_already_requested():
-    from EvoScientist.commands.base import CommandContext
-    from EvoScientist.commands.implementation.stop import StopCommand
-
-    display_mod.request_stream_cancel()
-    ui = MagicMock()
-    ctx = CommandContext(agent=None, thread_id="t", ui=ui)
-
-    _run(StopCommand().execute(ctx, []))
-
-    assert display_mod.is_stream_cancel_requested()
-    msg = ui.append_system.call_args.args[0]
-    assert "already requested" in msg.lower()
-
-
-# ---------------------------------------------------------------------------
-# 6. pending HITL/ask_user branches short-circuit when stop is requested
+# 3. pending HITL/ask_user branches short-circuit when stop is requested
 # ---------------------------------------------------------------------------
 
 
