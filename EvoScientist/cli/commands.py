@@ -685,9 +685,7 @@ def _serve_process_message(
         asyncio.set_event_loop(_prev_loop)
 
     if _slash_handled:
-        console.print(
-            f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]"
-        )
+        console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
         return
 
     meta = build_metadata(workspace_dir, model)

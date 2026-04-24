@@ -15,7 +15,9 @@ from EvoScientist.cli.channel import (
 from tests.conftest import run_async as _run
 
 
-def _make_msg(content: str = "/evoskills core", msg_id: str = "msg-1") -> ChannelMessage:
+def _make_msg(
+    content: str = "/evoskills core", msg_id: str = "msg-1"
+) -> ChannelMessage:
     return ChannelMessage(
         msg_id=msg_id,
         content=content,

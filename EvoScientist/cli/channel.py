@@ -210,9 +210,7 @@ async def dispatch_channel_slash_command(
     try:
         cmd_executed = await cmd_manager.execute(msg.content, ctx)
     except Exception as exc:
-        _channel_logger.debug(
-            f"Channel command error: {exc}", exc_info=True
-        )
+        _channel_logger.debug(f"Channel command error: {exc}", exc_info=True)
         _set_channel_response(msg.msg_id, f"Command error: {exc}")
         return True  # must return — do NOT fall through to the agent
 
