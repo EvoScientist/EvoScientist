@@ -655,19 +655,22 @@ def _serve_process_message(
     # installed by ``serve()`` remains authoritative — ``asyncio.run``
     # swaps ``signal.set_wakeup_fd`` and can leave it dangling on edge
     # cases, which breaks Ctrl+C between messages.
-    _slash_loop = asyncio.new_event_loop()
     # ``set_event_loop`` is needed because some downstream commands
     # (e.g. ``/install-mcp``) call ``asyncio.get_event_loop()``, which
     # raises ``RuntimeError`` on Python 3.12+ when the thread has no
-    # current loop set.  Paired with a ``set_event_loop(None)`` below
-    # to avoid polluting subsequent messages' lookups.
+    # current loop set.  The prior loop (often ``None``) is restored in
+    # the ``finally`` below so subsequent messages start from a clean
+    # slate.  Loop creation lives inside the try so an exception between
+    # creation and ``set_event_loop`` still closes the loop.
     _prev_loop: asyncio.AbstractEventLoop | None
     try:
         _prev_loop = asyncio.get_event_loop_policy().get_event_loop()
     except RuntimeError:
         _prev_loop = None
-    asyncio.set_event_loop(_slash_loop)
+    _slash_loop: asyncio.AbstractEventLoop | None = None
     try:
+        _slash_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_slash_loop)
         _slash_handled = _slash_loop.run_until_complete(
             dispatch_channel_slash_command(
                 msg,
@@ -681,7 +684,8 @@ def _serve_process_message(
             )
         )
     finally:
-        _slash_loop.close()
+        if _slash_loop is not None:
+            _slash_loop.close()
         asyncio.set_event_loop(_prev_loop)
 
     if _slash_handled:
