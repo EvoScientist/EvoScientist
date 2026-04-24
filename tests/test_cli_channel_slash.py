@@ -409,6 +409,38 @@ def test_on_cmd_completed_exception_is_absorbed():
     assert "Command executed" in mock_set_resp.call_args[0][1]
 
 
+def test_top_level_exception_is_absorbed():
+    """Last-ditch safety net: if anything inside the dispatch pipeline
+    raises unexpectedly (lazy import failure, ChannelCommandUI ctor,
+    terminal I/O from append_system, ...), the helper must NOT
+    propagate — it sets an error response and returns True so the
+    caller's polling loop stays alive and doesn't fall through to the
+    agent streaming path."""
+    msg = _make_msg()
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            side_effect=RuntimeError("exploded during resolve"),
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = _run(
+            dispatch_channel_slash_command(
+                msg,
+                agent=None,
+                thread_id="t1",
+                workspace_dir=None,
+                checkpointer=None,
+                append_system=MagicMock(),
+            )
+        )
+    assert handled is True
+    mock_set_resp.assert_called_once()
+    resp_text = mock_set_resp.call_args[0][1]
+    assert "Error" in resp_text
+    assert "exploded during resolve" in resp_text
+
+
 def test_cmd_execute_returning_false_falls_through():
     """When cmd_manager.execute returns False (empty/unparseable input),
     the helper must return False so the caller falls through to the agent."""

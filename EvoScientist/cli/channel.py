@@ -173,6 +173,58 @@ async def dispatch_channel_slash_command(
     if not msg.content.strip().startswith("/"):
         return False
 
+    try:
+        return await _dispatch_channel_slash_impl(
+            msg,
+            agent=agent,
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            checkpointer=checkpointer,
+            append_system=append_system,
+            start_new_session_cb=start_new_session_cb,
+            handle_session_resume_cb=handle_session_resume_cb,
+            await_agent_ready=await_agent_ready,
+            on_cmd_completed=on_cmd_completed,
+        )
+    except Exception as exc:
+        # Last-ditch safety: any uncaught exception from inside the
+        # dispatch pipeline (lazy import failure, ChannelCommandUI
+        # construction, terminal I/O from ``append_system``, bus
+        # publish races, ...) must not take down the caller's polling
+        # loop — a crashed serve / dead channel queue task is worse
+        # than one failed command.
+        _channel_logger.exception(
+            "Unexpected slash dispatch failure for %s (msg=%s)",
+            msg.channel_type,
+            msg.msg_id,
+        )
+        try:
+            _set_channel_response(msg.msg_id, f"Error: {exc}")
+        except Exception:  # pragma: no cover — defensive
+            pass
+        # Return True so the caller treats the message as handled and
+        # does not fall through to the agent streaming path.
+        return True
+
+
+async def _dispatch_channel_slash_impl(
+    msg: ChannelMessage,
+    *,
+    agent: Any,
+    thread_id: str,
+    workspace_dir: str | None,
+    checkpointer: Any,
+    append_system: Callable[[str, str], None],
+    start_new_session_cb: Callable[[], None] | None,
+    handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
+    await_agent_ready: Callable[[], Awaitable[Any]] | None,
+    on_cmd_completed: Callable[..., Awaitable[None]] | None,
+) -> bool:
+    """Inner body of ``dispatch_channel_slash_command``.
+
+    Split from the public wrapper so the wrapper can guard with a
+    top-level try/except without visually obscuring the main flow.
+    """
     # Lazy imports: avoid coupling the channel module to ``commands`` at
     # import time (tui_interactive.py does the same).
     from ..commands.base import CommandContext
