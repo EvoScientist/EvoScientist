@@ -16,7 +16,9 @@ def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
         ``(model_name, provider)`` tuple.
 
     Raises:
-        ValueError: If the model is not in the registry.
+        ValueError: If the model is not in the registry. Skipped when
+            ``provider_override == "ollama"``, since Ollama models are
+            locally-installed and never appear in ``MODELS``.
     """
     from ...llm.models import MODELS
 
@@ -169,6 +171,20 @@ class ModelCommand(Command):
             _mod._EvoScientist_agent,
         )
 
+        def _restore_globals() -> None:
+            """Roll back the four module globals to their pre-call values.
+
+            Keeps the two failure sites (``_load_agent`` and
+            ``set_chat_model``) in sync — adding a new snapshotted global
+            only requires updating ``snap`` and this helper.
+            """
+            (
+                _mod._config,
+                _mod._chat_model,
+                _mod._chat_model_key,
+                _mod._EvoScientist_agent,
+            ) = snap
+
         try:
             new_agent = _load_agent(
                 workspace_dir=ctx.workspace_dir,
@@ -176,12 +192,7 @@ class ModelCommand(Command):
                 config=temp_cfg,
             )
         except Exception as e:
-            (
-                _mod._config,
-                _mod._chat_model,
-                _mod._chat_model_key,
-                _mod._EvoScientist_agent,
-            ) = snap
+            _restore_globals()
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return
 
@@ -191,12 +202,7 @@ class ModelCommand(Command):
         except Exception as e:
             # _load_agent already mutated the four globals; restore them so a
             # failure here doesn't leave the session half-switched.
-            (
-                _mod._config,
-                _mod._chat_model,
-                _mod._chat_model_key,
-                _mod._EvoScientist_agent,
-            ) = snap
+            _restore_globals()
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return
 
