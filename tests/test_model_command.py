@@ -56,6 +56,26 @@ class TestExtractModelAndProvider:
         assert name == "claude-sonnet-4-6"
         assert prov == "openrouter"
 
+    def test_ollama_provider_accepts_arbitrary_name(self):
+        """Ollama models are locally-installed — the registry doesn't know
+        them. The ``ollama`` provider must pass any name through verbatim."""
+        from EvoScientist.commands.implementation.model import (
+            extract_model_and_provider,
+        )
+
+        name, prov = extract_model_and_provider(["llama3.3:8b", "ollama"])
+        assert name == "llama3.3:8b"
+        assert prov == "ollama"
+
+    def test_ollama_provider_accepts_dotted_tag(self):
+        from EvoScientist.commands.implementation.model import (
+            extract_model_and_provider,
+        )
+
+        name, prov = extract_model_and_provider(["qwen3-coder-next:latest", "ollama"])
+        assert name == "qwen3-coder-next:latest"
+        assert prov == "ollama"
+
 
 class TestModelCommandUnknownModel:
     """Verify error message for unknown models."""
@@ -633,3 +653,282 @@ class TestApplyModelLoadAgentFailureTransactional:
         # User sees an error message.
         msg = ctx.ui.append_system.call_args[0][0]
         assert "Failed to switch model" in msg
+
+
+class TestApplyModelSetChatModelFailureTransactional:
+    """Regression (CodeRabbit review on PR #187): if ``set_chat_model``
+    raises *after* ``_load_agent`` has already mutated module globals,
+    those globals must be restored. Without the rollback the session
+    ends up half-switched — new ``_config`` / ``_chat_model`` committed,
+    but no successful agent to back them.
+
+    Complements :class:`TestApplyModelLoadAgentFailureTransactional`
+    which covers the earlier failure site.
+    """
+
+    def test_globals_restored_when_set_chat_model_raises(self, evo_module_state):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        mod = evo_module_state
+        sentinels: dict[tuple[str, str | None], MagicMock] = {}
+
+        def _fake_get_chat_model(model, provider=None):
+            key = (model, provider)
+            sentinels.setdefault(key, MagicMock(name=f"chat_model[{model}|{provider}]"))
+            return sentinels[key]
+
+        def _fake_load_agent(
+            workspace_dir=None,
+            checkpointer=None,
+            config=None,
+            *,
+            on_mcp_progress=None,
+        ):
+            # Mimic the real ``create_cli_agent``: mutate globals via
+            # ``_ensure_config`` + ``_ensure_chat_model``, then succeed.
+            mod._ensure_config(config)
+            mod._ensure_chat_model()
+            return MagicMock(name="new-agent")
+
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        old_model = _fake_get_chat_model("claude-sonnet-4-6", "anthropic")
+        old_agent = MagicMock(name="old-default-agent")
+
+        mod._config = cfg
+        mod._chat_model = old_model
+        mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
+        mod._EvoScientist_agent = old_agent
+
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.ui.supports_interactive = True
+        ctx.workspace_dir = "/tmp/test_rollback_set"
+        ctx.checkpointer = None
+
+        with (
+            patch(
+                "EvoScientist.llm.get_chat_model",
+                side_effect=_fake_get_chat_model,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=_fake_load_agent,
+            ),
+            patch(
+                "EvoScientist.EvoScientist.set_chat_model",
+                side_effect=RuntimeError("API key missing at commit step"),
+            ),
+        ):
+            cmd = ModelCommand()
+            _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
+
+        # All four globals restored — the new agent was built, but the
+        # commit step (set_chat_model) failed, so the session must remain
+        # on the original model.
+        assert mod._config is cfg
+        assert mod._chat_model is old_model
+        assert mod._chat_model_key == ("claude-sonnet-4-6", "anthropic")
+        assert mod._EvoScientist_agent is old_agent
+        # cfg itself must not have been mutated (happens after the commit).
+        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.provider == "anthropic"
+        # User sees an error message.
+        msg = ctx.ui.append_system.call_args[0][0]
+        assert "Failed to switch model" in msg
+
+
+class TestModelCommandOllamaPicker:
+    """Verify Ollama discovery augments the picker entries and the sentinel
+    is always present when Ollama is configured."""
+
+    def _make_ctx_and_cfg(self, *, ollama_base_url: str | None):
+        cfg = SimpleNamespace(
+            model="claude-sonnet-4-6",
+            provider="anthropic",
+            ollama_base_url=ollama_base_url,
+        )
+        ui = MagicMock()
+        ui.supports_interactive = True
+        ui.wait_for_model_pick = AsyncMock(return_value=None)
+        ctx = MagicMock()
+        ctx.ui = ui
+        return ctx, cfg, ui
+
+    def test_picker_entries_include_detected_ollama_models(self):
+        """When Ollama is reachable, detected models appear in entries with
+        provider='ollama' and the Custom sentinel is appended."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="http://localhost:11434")
+
+        async def fake_discover(base_url, *, timeout):
+            return ["llama3.3:latest", "qwen3:8b"]
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models",
+                side_effect=fake_discover,
+            ),
+        ):
+            _run(ModelCommand().execute(ctx, []))
+
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        ollama_rows = [(n, mid, p) for (n, mid, p) in entries if p == "ollama"]
+        assert ("llama3.3:latest", "llama3.3:latest", "ollama") in ollama_rows
+        assert ("qwen3:8b", "qwen3:8b", "ollama") in ollama_rows
+        assert (
+            "Custom Ollama model...",
+            "__custom_ollama__",
+            "ollama",
+        ) in ollama_rows
+
+    def test_picker_entries_include_sentinel_when_discovery_empty(self):
+        """Daemon unreachable / no models pulled — sentinel is the user's
+        escape hatch and must always be present."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="http://localhost:11434")
+
+        async def fake_discover(base_url, *, timeout):
+            return []
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models",
+                side_effect=fake_discover,
+            ),
+        ):
+            _run(ModelCommand().execute(ctx, []))
+
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        ollama_rows = [(n, mid, p) for (n, mid, p) in entries if p == "ollama"]
+        assert ollama_rows == [
+            ("Custom Ollama model...", "__custom_ollama__", "ollama")
+        ]
+
+    def test_picker_skips_ollama_section_when_not_configured(self):
+        """ollama_base_url unset → no discovery call, no ollama entries,
+        no sentinel (issue non-goal: no implicit localhost detection)."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="")
+
+        discovery = AsyncMock(return_value=["should-never-appear"])
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models",
+                discovery,
+            ),
+        ):
+            _run(ModelCommand().execute(ctx, []))
+
+        discovery.assert_not_called()
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        assert not any(p == "ollama" for (_, _, p) in entries)
+
+    def test_picker_handles_cfg_without_ollama_base_url_attr(self):
+        """getattr(cfg, 'ollama_base_url', None) fallback: old configs
+        (or SimpleNamespace test fixtures) may not carry the attribute
+        at all. Must not raise AttributeError, must not probe."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        # Deliberately omit ollama_base_url from the namespace.
+        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        ui = MagicMock()
+        ui.supports_interactive = True
+        ui.wait_for_model_pick = AsyncMock(return_value=None)
+        ctx = MagicMock()
+        ctx.ui = ui
+
+        discovery = AsyncMock(return_value=["should-never-appear"])
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models",
+                discovery,
+            ),
+        ):
+            _run(ModelCommand().execute(ctx, []))
+
+        discovery.assert_not_called()
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        assert not any(p == "ollama" for (_, _, p) in entries)
+
+    def test_picker_sentinel_result_is_treated_as_cancel(self):
+        """Defense-in-depth: if the widget ever returns the sentinel name
+        itself (shouldn't happen — it should substitute the typed name),
+        dispatch treats it as a cancel and does NOT call _apply_model."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="http://localhost:11434")
+        ui.wait_for_model_pick = AsyncMock(return_value=("__custom_ollama__", "ollama"))
+
+        async def fake_discover(base_url, *, timeout):
+            return []
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models",
+                side_effect=fake_discover,
+            ),
+            patch("EvoScientist.cli.agent._load_agent") as load_agent,
+        ):
+            _run(ModelCommand().execute(ctx, []))
+
+        load_agent.assert_not_called()
+        assert cfg.model == "claude-sonnet-4-6"  # unchanged
+
+    def test_picker_applies_detected_ollama_model(self):
+        """User picks a live-detected Ollama model → _apply_model is invoked
+        with (name, "ollama") and the agent is rebuilt."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="http://localhost:11434")
+        ctx.workspace_dir = "/tmp/test"
+        ctx.checkpointer = MagicMock()
+        ui.wait_for_model_pick = AsyncMock(return_value=("llama3.3", "ollama"))
+
+        async def fake_discover(base_url, *, timeout):
+            return ["llama3.3"]
+
+        with (
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=cfg,
+            ),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models",
+                side_effect=fake_discover,
+            ),
+            patch("EvoScientist.EvoScientist.set_chat_model"),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                return_value=MagicMock(),
+            ),
+        ):
+            _run(ModelCommand().execute(ctx, []))
+
+        assert cfg.model == "llama3.3"
+        assert cfg.provider == "ollama"
