@@ -23,6 +23,12 @@ def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
     model_name = args[0]
     provider_override = args[1] if len(args) > 1 else None
 
+    # Ollama models are locally-installed — not in the registry. Pass the name
+    # through verbatim; get_chat_model's "Assume full model ID" fallback
+    # (models.py) accepts them.
+    if provider_override == "ollama":
+        return model_name, "ollama"
+
     if model_name not in MODELS:
         raise ValueError(f"Unknown model '{model_name}'")
 
@@ -90,6 +96,24 @@ class ModelCommand(Command):
             return
 
         entries = list_models_by_provider()
+
+        # Ollama models are locally-installed — probe the daemon for the list
+        # the user has actually pulled. Gated on ollama_base_url being set
+        # (issue non-goal forbids implicit localhost detection).
+        ollama_base_url = getattr(cfg, "ollama_base_url", None)
+        if ollama_base_url:
+            from ...llm.ollama_discovery import discover_ollama_models
+
+            detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
+            for detected_name in detected:
+                entries.append((detected_name, detected_name, "ollama"))
+            # Always append the sentinel so users can type a name even when
+            # the daemon is down or no models have been pulled yet. The widget
+            # swaps the sentinel name for the typed value before posting Picked.
+            entries.append(
+                ("Custom Ollama model...", "__custom_ollama__", "ollama")
+            )
+
         result = await ctx.ui.wait_for_model_pick(
             entries,
             current_model=current_model,
@@ -99,6 +123,11 @@ class ModelCommand(Command):
             return
 
         name, provider = result
+        # Defense-in-depth: the widget should have replaced the sentinel with
+        # the user-typed name. If it didn't, treat as cancel rather than try
+        # to switch to a literal "__custom_ollama__" model.
+        if provider == "ollama" and name in ("Custom Ollama model...", "__custom_ollama__"):
+            return
         await self._apply_model(ctx, name, provider, save=save)
 
     async def _apply_model(

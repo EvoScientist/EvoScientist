@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ..llm import get_models_for_provider
+from ..llm.ollama_discovery import validate_ollama_connection
 from .settings import (
     EvoScientistConfig,
     get_config_path,
@@ -575,36 +576,6 @@ def validate_tavily_key(api_key: str) -> tuple[bool, str]:
         if "invalid" in error_str or "unauthorized" in error_str or "401" in error_str:
             return False, "Invalid API key"
         return False, f"Error: {e}"
-
-
-def validate_ollama_connection(base_url: str) -> tuple[bool, str, list[str]]:
-    """Validate that Ollama is reachable at the given base URL.
-
-    Args:
-        base_url: The Ollama server base URL.
-
-    Returns:
-        Tuple of (is_valid, message, model_names).
-        model_names is a list of pulled model names (empty if unreachable).
-    """
-    if not base_url:
-        return True, "Skipped (no URL provided)", []
-
-    try:
-        import httpx
-
-        resp = httpx.get(f"{base_url.rstrip('/')}/api/tags", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            models = data.get("models", [])
-            names = [m.get("name", "?") for m in models]
-            if names:
-                preview = ", ".join(names[:5])
-                return True, f"Connected — {len(names)} model(s): {preview}", names
-            return True, "Connected (no models pulled yet)", []
-        return False, f"HTTP {resp.status_code}", []
-    except Exception as e:
-        return False, f"Cannot reach Ollama: {e}", []
 
 
 # =============================================================================
