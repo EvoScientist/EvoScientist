@@ -8,6 +8,8 @@ captured at startup.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from EvoScientist.cli.channel import ChannelMessage
 from EvoScientist.cli.commands import (
     _make_serve_cmd_completed_hook,
@@ -15,6 +17,19 @@ from EvoScientist.cli.commands import (
     _serve_process_message,
 )
 from tests.conftest import run_async as _run
+
+
+@pytest.fixture(autouse=True)
+def _restore_channel_globals():
+    import EvoScientist.cli.channel as _ch_mod
+
+    prev_agent = _ch_mod._cli_agent
+    prev_tid = _ch_mod._cli_thread_id
+    try:
+        yield
+    finally:
+        _ch_mod._cli_agent = prev_agent
+        _ch_mod._cli_thread_id = prev_tid
 
 
 def test_hook_updates_holder_on_agent_swap():
@@ -39,7 +54,6 @@ def test_hook_syncs_channel_module_global():
     hook keeps that global in sync with the holder update."""
     import EvoScientist.cli.channel as _ch_mod
 
-    original_global = _ch_mod._cli_agent
     holder = {"agent": "original-agent"}
     hook = _make_serve_cmd_completed_hook(holder)
 
@@ -48,11 +62,9 @@ def test_hook_syncs_channel_module_global():
     cmd = MagicMock()
     cmd.name = "/model"
 
-    try:
-        _run(hook(ctx, "original-agent", cmd))
-        assert _ch_mod._cli_agent == "new-agent"
-    finally:
-        _ch_mod._cli_agent = original_global
+    _run(hook(ctx, "original-agent", cmd))
+
+    assert _ch_mod._cli_agent == "new-agent"
 
 
 def test_hook_noop_when_agent_unchanged():
@@ -110,7 +122,6 @@ def test_hook_syncs_channel_module_thread_id():
     alongside the holder update."""
     import EvoScientist.cli.channel as _ch_mod
 
-    original_tid_global = _ch_mod._cli_thread_id
     holder = {"agent": "a", "thread_id": "original-tid"}
     hook = _make_serve_cmd_completed_hook(holder)
 
@@ -120,11 +131,9 @@ def test_hook_syncs_channel_module_thread_id():
     cmd = MagicMock()
     cmd.name = "/resume"
 
-    try:
-        _run(hook(ctx, "a", cmd))
-        assert _ch_mod._cli_thread_id == "new-tid"
-    finally:
-        _ch_mod._cli_thread_id = original_tid_global
+    _run(hook(ctx, "a", cmd))
+
+    assert _ch_mod._cli_thread_id == "new-tid"
 
 
 def test_hook_noop_when_thread_id_unchanged():
@@ -148,7 +157,6 @@ def test_start_new_session_cb_rotates_thread_id():
     thread id, push into holder, and sync the channel-module global."""
     import EvoScientist.cli.channel as _ch_mod
 
-    original_tid_global = _ch_mod._cli_thread_id
     holder = {"agent": "a", "thread_id": "old-tid"}
 
     with patch(
@@ -156,12 +164,10 @@ def test_start_new_session_cb_rotates_thread_id():
         return_value="freshly-generated-tid",
     ):
         cb = _make_serve_start_new_session_cb(holder)
-        try:
-            cb()
-            assert holder["thread_id"] == "freshly-generated-tid"
-            assert _ch_mod._cli_thread_id == "freshly-generated-tid"
-        finally:
-            _ch_mod._cli_thread_id = original_tid_global
+        cb()
+
+    assert holder["thread_id"] == "freshly-generated-tid"
+    assert _ch_mod._cli_thread_id == "freshly-generated-tid"
 
 
 def test_start_new_session_cb_leaves_agent_alone():
@@ -197,7 +203,10 @@ def test_hook_handles_both_agent_and_thread_swap():
 
 
 def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
-    """A bad slash command must not crash serve or fall through to the LLM."""
+    """Defensive: if ``dispatch_channel_slash_command`` ever leaks an
+    exception past its own wrapper, ``_serve_process_message`` must set
+    one error response and not fall through to ``run_streaming``.
+    """
     msg = ChannelMessage(
         msg_id="msg-1",
         content="/evoskills core",
