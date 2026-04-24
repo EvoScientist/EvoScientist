@@ -989,7 +989,7 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
     """
     import questionary  # type: ignore[import-untyped]
 
-    from ..cli.interactive import _PICKER_STYLE
+    from ..cli.widgets.thread_selector import PICKER_STYLE as _PICKER_STYLE
 
     questions = ask_user_data.get("questions", [])
     if not questions:

@@ -21,7 +21,7 @@ from ..mcp.registry import (
     install_mcp_servers,
 )
 from ..stream.console import console
-from .interactive import _PICKER_STYLE
+from .widgets.thread_selector import PICKER_STYLE
 
 _INSTALLED_INDICATOR = ("fg:#4caf50", "\u2713 ")
 
@@ -46,7 +46,7 @@ def _checkbox_ask(choices, message: str, **kwargs):
         return questionary.checkbox(
             message,
             choices=choices,
-            style=_PICKER_STYLE,
+            style=PICKER_STYLE,
             qmark="\u276f",
             **kwargs,
         ).ask()
@@ -89,7 +89,7 @@ def _browse_and_select(
         selected_tag = questionary.select(
             "Filter by tag:",
             choices=tag_choices,
-            style=_PICKER_STYLE,
+            style=PICKER_STYLE,
             qmark="\u276f",
         ).ask()
 

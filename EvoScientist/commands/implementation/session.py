@@ -113,6 +113,11 @@ class ThreadsCommand(Command):
 
             table.add_row(*row)
         ctx.ui.mount_renderable(table)
+        if not is_channel:
+            ctx.ui.append_system(
+                "  /resume to continue a session  "
+                "/delete <id> to remove  /new to start fresh",
+            )
 
 
 class ResumeCommand(Command):

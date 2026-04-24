@@ -5,6 +5,7 @@ import logging
 import queue
 import random
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -26,19 +27,17 @@ from prompt_toolkit.styles import Style as PtStyle  # type: ignore[import-untype
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
 
+from ..commands.base import CommandContext
+from ..commands.manager import manager as cmd_manager
 from ..sessions import (
-    _format_relative_time,
-    delete_thread,
     generate_thread_id,
     get_checkpointer,
     get_thread_messages,
     get_thread_metadata,
-    list_threads,
     resolve_thread_id_prefix,
     thread_exists,
 )
@@ -50,19 +49,11 @@ from .channel import (
     ChannelMessage,
     _auto_start_channel,
     _channels_is_running,
-    _cmd_channel,
-    _cmd_channel_stop,
     _message_queue,
     _set_channel_response,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
-from .mcp_ui import _cmd_mcp
-from .skills_cmd import (
-    _cmd_install_skill,
-    _cmd_install_skills,
-    _cmd_list_skills,
-    _cmd_uninstall_skill,
-)
+from .rich_command_ui import RichCLICommandUI
 from .status_bar import (
     SPINNER_FRAMES,
     STATUS_BAD,
@@ -88,7 +79,6 @@ _channel_logger = logging.getLogger(__name__)
 
 # Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
 _background_tasks: set[asyncio.Task] = set()
-
 
 # =============================================================================
 # Banner
@@ -155,23 +145,6 @@ def print_banner(
 # Slash-command completer
 # =============================================================================
 
-_SLASH_COMMANDS = [
-    ("/current", "Show current session info"),
-    ("/threads", "List recent sessions"),
-    ("/resume", "Resume a previous session (prefix match)"),
-    ("/delete", "Delete a saved session"),
-    ("/new", "Start a new session"),
-    ("/skills", "List installed skills"),
-    ("/install-skill", "Add a skill from path or GitHub"),
-    ("/uninstall-skill", "Remove an installed skill"),
-    ("/evoskills", "Browse and install EvoSkills (optional: /evoskills <tag>)"),
-    ("/mcp", "Manage MCP servers"),
-    ("/channel", "Configure messaging channels"),
-    ("/compact", "Compact conversation to free context"),
-    ("/model", "Switch model (--save to persist)"),
-    ("/exit", "Quit EvoScientist"),
-]
-
 _COMPLETION_STYLE = PtStyle.from_dict(
     {
         "completion-menu": "bg:default noreverse nounderline noitalic",
@@ -191,32 +164,28 @@ _COMPLETION_STYLE = PtStyle.from_dict(
     }
 )
 
-# Style for questionary pickers — matches _COMPLETION_STYLE visual language:
-# gray (#888888) for non-selected, bold for selected, no background changes.
-_PICKER_STYLE = PtStyle.from_dict(
-    {
-        "questionmark": "#888888",
-        "question": "",
-        "pointer": "bold",
-        "highlighted": "bold",
-        "text": "#888888",
-        "answer": "bold",
-    }
-)
-
 
 class SlashCommandCompleter(Completer):
-    """Autocomplete for slash commands and ``@file`` mentions."""
+    """Autocomplete for slash commands and ``@file`` mentions.
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
-        self._workspace_dir = workspace_dir
+    ``workspace_getter`` is invoked on every keystroke so ``@file``
+    suggestions automatically follow ``/new`` / ``/resume`` workspace
+    changes without having to poke the completer from the callbacks.
+    """
+
+    def __init__(
+        self,
+        workspace_getter: Callable[[], str | None] | None = None,
+    ) -> None:
+        self._workspace_getter = workspace_getter or (lambda: None)
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+        workspace_dir = self._workspace_getter()
 
         # @file mention completion
         if "@" in text:
-            candidates = complete_file_mention(text, self._workspace_dir)
+            candidates = complete_file_mention(text, workspace_dir)
             if candidates:
                 # Replace from the last '@' token
                 import re as _re
@@ -230,7 +199,9 @@ class SlashCommandCompleter(Completer):
         # Slash command completion
         if not text.startswith("/"):
             return
-        for cmd, desc in _SLASH_COMMANDS:
+        # ``list_commands`` is dedup'd on the Command instance so aliases
+        # (e.g. /quit, /q for /exit) don't appear as separate rows.
+        for cmd, desc in sorted(cmd_manager.list_commands()):
             if cmd.startswith(text):
                 yield Completion(
                     cmd,
@@ -320,7 +291,9 @@ def cmd_interactive(
     session = PromptSession(
         history=FileHistory(history_file),
         auto_suggest=AutoSuggestFromHistory(),
-        completer=SlashCommandCompleter(workspace_dir=workspace_dir),
+        completer=SlashCommandCompleter(
+            workspace_getter=lambda: state["workspace_dir"],
+        ),
         complete_style=CompleteStyle.COLUMN,
         complete_while_typing=True,
         style=_COMPLETION_STYLE,
@@ -371,6 +344,21 @@ def cmd_interactive(
         _load_agent,
         on_progress=_on_mcp_progress,
     )
+
+    def _on_status_after_compact(input_tokens: int) -> None:
+        """Mirror inline /compact post-update: refresh both fields so the
+        next status render reflects the reduced context immediately.
+        ``_refresh_status_snapshot`` is invoked by the dispatch block once
+        the command finishes (since it's async)."""
+        state["status_last_input_tokens"] = input_tokens
+        state["status_base_snapshot"] = make_usage_status_snapshot(
+            input_tokens,
+            model_name=model,
+        )
+
+    # ``rich_ui`` is constructed inside ``_async_main_loop`` so the
+    # lifecycle callbacks can close over ``checkpointer`` from
+    # ``get_checkpointer()``.
 
     def _start_agent_load(checkpointer) -> None:
         progress_tracker.prime()
@@ -523,39 +511,6 @@ def cmd_interactive(
         console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
         return None
 
-    async def _cmd_threads():
-        """Handle /threads command — show recent sessions."""
-        threads = await list_threads(
-            limit=0,
-            include_message_count=True,
-            include_preview=True,
-        )
-        if not threads:
-            console.print("[yellow]No saved sessions.[/yellow]")
-            return
-        table = Table(title="Sessions", show_header=True, header_style="bold cyan")
-        table.add_column("ID", style="bold")
-        table.add_column("Preview", style="dim", max_width=50, no_wrap=True)
-        table.add_column("Messages", justify="right")
-        table.add_column("Model", style="dim")
-        table.add_column("Last Used", style="dim")
-        for t in threads:
-            tid = t["thread_id"]
-            marker = " *" if tid == state["thread_id"] else ""
-            table.add_row(
-                f"{tid}{marker}",
-                t.get("preview", "") or "",
-                str(t.get("message_count", 0)),
-                t.get("model", "") or "",
-                _format_relative_time(t.get("updated_at")),
-            )
-        console.print()
-        console.print(table)
-        console.print(
-            "[dim]  /resume[/dim] to continue a session  [dim]/delete <id>[/dim] to remove  [dim]/new[/dim] to start fresh"
-        )
-        console.print()
-
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
         messages = await get_thread_messages(thread_id)
@@ -630,120 +585,80 @@ def cmd_interactive(
         console.print("[dim]── End of history ──[/dim]")
         console.print()
 
-    async def _cmd_resume(arg: str, checkpointer):
-        """Handle /resume [id] — resume a previous session."""
-        if not arg:
-            # Show interactive session picker with conversation previews
-            threads = await list_threads(
-                limit=0,
-                include_message_count=True,
-                include_preview=True,
-            )
-            if not threads:
-                console.print("[yellow]No sessions to resume.[/yellow]")
-                return
-
-            import questionary
-
-            from .widgets.thread_selector import _build_items
-
-            choices = []
-            items = _build_items(threads)
-            for item in items:
-                if item["type"] == "header":
-                    choices.append(
-                        questionary.Separator(
-                            f"\u2500\u2500 \U0001f4c2 {item['label']}"
-                        )
-                    )
-                elif item["type"] == "subheader":
-                    choices.append(questionary.Separator(f"   {item['label']}"))
-                else:
-                    t = item["thread"]
-                    tid = t["thread_id"]
-                    preview = t.get("preview", "") or ""
-                    msgs = t.get("message_count", 0)
-                    model = t.get("model", "") or ""
-                    when = _format_relative_time(t.get("updated_at"))
-                    indent = "    " if item.get("indented") else "  "
-                    parts = [f"{indent}{tid}"]
-                    if preview:
-                        parts.append(
-                            preview[:40] + "\u2026" if len(preview) > 40 else preview
-                        )
-                    parts.append(f"({msgs} msgs)")
-                    if model:
-                        parts.append(model)
-                    if when:
-                        parts.append(when)
-                    label = "  ".join(parts)
-                    choices.append(questionary.Choice(title=label, value=tid))
-
-            from prompt_toolkit.layout.dimension import Dimension
-            from questionary.prompts.common import InquirerControl
-
-            prompt = questionary.select(
-                "Select session to resume:",
-                choices=choices,
-                style=_PICKER_STYLE,
-            )
-            # Limit visible list to 10 rows with scrolling
-            for window in prompt.application.layout.find_all_windows():
-                if isinstance(window.content, InquirerControl):
-                    window.height = Dimension(max=10)
-                    break
-            selected = prompt.ask()
-
-            if selected is None:
-                return
-            arg = selected
-
-        resolved = await _resolve_thread_id(arg)
-        if not resolved:
-            return
-
-        meta = await get_thread_metadata(resolved)
-        ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
-
-        state["thread_id"] = resolved
-        state["resumed"] = True
-        if ws:
-            state["workspace_dir"] = ws
-        state["status_started_at"] = datetime.now()
-        state["status_last_input_tokens"] = None
-        # Rebuild the agent in the background so the resumed transcript
-        # and prompt render immediately; the next message awaits the load.
-        _start_agent_load(checkpointer)
-        await _refresh_status_snapshot(reset_streaming_text=True)
-        console.print(f"[green]Resumed session:[/green] [yellow]{resolved}[/yellow]")
-        if state["workspace_dir"]:
-            console.print(
-                f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
-            )
-        console.print()
-        await _render_history(resolved)
-
-    async def _cmd_delete(arg: str):
-        """Handle /delete <id> — delete a saved session."""
-        if not arg:
-            console.print("[red]Usage: /delete <thread-id>[/red]")
-            return
-        resolved = await _resolve_thread_id(arg)
-        if not resolved:
-            return
-        if resolved == state["thread_id"]:
-            console.print("[red]Cannot delete the current session.[/red]")
-            return
-        deleted = await delete_thread(resolved)
-        if deleted:
-            console.print(f"[green]Deleted session {resolved}.[/green]")
-        else:
-            console.print(f"[red]Session {resolved} not found.[/red]")
-
     async def _async_main_loop():
         """Async main loop with prompt_async and channel queue checking."""
         nonlocal model
         async with get_checkpointer() as checkpointer:
+            # Lifecycle callbacks (new / resume) need ``checkpointer``
+            # in scope — define the ``rich_ui`` adapter here rather than
+            # at the outer function level.
+
+            def _on_start_new_session() -> None:
+                """NewCommand callback — rotate workspace (if not fixed),
+                issue a new thread id, reset session-scoped status fields,
+                and kick off background agent reload. The dispatch block
+                refreshes the status bar post-execute (symmetric with
+                /compact)."""
+                if not workspace_fixed:
+                    state["workspace_dir"] = _create_session_workspace(run_name)
+                state["thread_id"] = generate_thread_id()
+                state["resumed"] = False
+                state["status_started_at"] = datetime.now()
+                state["status_last_input_tokens"] = None
+                _start_agent_load(checkpointer)
+                console.print(
+                    f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]"
+                )
+                if state["workspace_dir"]:
+                    console.print(
+                        f"[dim]Workspace:[/dim] [cyan]"
+                        f"{_shorten_path(state['workspace_dir'])}[/cyan]\n"
+                    )
+
+            async def _on_handle_session_resume(
+                thread_id: str, workspace_dir: str | None
+            ) -> None:
+                """ResumeCommand callback — after the command resolves
+                the thread id + restores workspace from metadata, this
+                callback mutates REPL state, reloads the agent, and
+                renders conversation history."""
+                if workspace_dir:
+                    state["workspace_dir"] = workspace_dir
+                state["thread_id"] = thread_id
+                state["resumed"] = True
+                state["status_started_at"] = datetime.now()
+                state["status_last_input_tokens"] = None
+                _start_agent_load(checkpointer)
+                await _refresh_status_snapshot(reset_streaming_text=True)
+                console.print(
+                    f"[green]Resumed session:[/green] [yellow]{thread_id}[/yellow]"
+                )
+                if state["workspace_dir"]:
+                    console.print(
+                        f"[dim]Workspace:[/dim] [cyan]"
+                        f"{_shorten_path(state['workspace_dir'])}[/cyan]"
+                    )
+                console.print()
+                await _render_history(thread_id)
+
+            # Rich CLI collapses ``request_quit`` / ``force_quit`` into the
+            # same "break the prompt loop" effect — there's no equivalent
+            # of the TUI's double-press-to-confirm quit distinction.  A
+            # shared ``_stop`` helper makes the intentional symmetry
+            # explicit instead of silently duplicating a lambda.
+            def _stop() -> None:
+                state["running"] = False
+
+            rich_ui = RichCLICommandUI(
+                console,
+                on_request_quit=_stop,
+                on_force_quit=_stop,
+                on_clear_chat=lambda: console.clear(),
+                on_status_after_compact=_on_status_after_compact,
+                on_start_new_session=_on_start_new_session,
+                on_handle_session_resume=_on_handle_session_resume,
+            )
+
             # Handle --thread-id resume
             if thread_id:
                 resolved = await _resolve_thread_id(thread_id)
@@ -1036,168 +951,75 @@ def cmd_interactive(
 
                         _print_separator()
 
-                        # Special commands
-                        if user_input.lower() in ("/exit", "/quit", "/q"):
-                            state["running"] = False
-                            break
-
-                        if user_input.lower() == "/threads":
-                            await _cmd_threads()
-                            continue
-
-                        if user_input.lower().startswith("/resume"):
-                            arg = user_input[len("/resume") :].strip()
-                            await _cmd_resume(arg, checkpointer)
-                            continue
-
-                        if user_input.lower().startswith("/delete"):
-                            arg = user_input[len("/delete") :].strip()
-                            await _cmd_delete(arg)
-                            continue
-
-                        if user_input.lower() == "/new":
-                            # New session: new thread; workspace only changes if not fixed
-                            if not workspace_fixed:
-                                state["workspace_dir"] = _create_session_workspace(
-                                    run_name
-                                )
-                            state["thread_id"] = generate_thread_id()
-                            state["resumed"] = False
-                            state["status_started_at"] = datetime.now()
-                            state["status_last_input_tokens"] = None
-                            # Background agent reload — next message awaits it.
-                            _start_agent_load(checkpointer)
-                            await _refresh_status_snapshot(reset_streaming_text=True)
-                            console.print(
-                                f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]"
-                            )
-                            if state["workspace_dir"]:
-                                console.print(
-                                    f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]\n"
-                                )
-                            continue
-
-                        if user_input.lower() == "/current":
-                            console.print(
-                                f"[dim]Thread:[/dim] [yellow]{state['thread_id']}[/yellow]"
-                            )
-                            if state["workspace_dir"]:
-                                console.print(
-                                    f"[dim]Workspace:[/dim] [cyan]{_shorten_path(state['workspace_dir'])}[/cyan]"
-                                )
-                            if memory_dir:
-                                console.print(
-                                    f"[dim]Memory dir:[/dim] [cyan]{_shorten_path(memory_dir)}[/cyan]"
-                                )
-                            console.print()
-                            continue
-
-                        if user_input.lower() == "/skills":
-                            _cmd_list_skills()
-                            continue
-
-                        if user_input.lower().startswith("/install-skill"):
-                            source = user_input[len("/install-skill") :].strip()
-                            _cmd_install_skill(source)
-                            continue
-
-                        if user_input.lower().startswith("/uninstall-skill"):
-                            name = user_input[len("/uninstall-skill") :].strip()
-                            _cmd_uninstall_skill(name)
-                            continue
-
-                        if user_input.lower().startswith("/evoskills"):
-                            browse_args = user_input[len("/evoskills") :].strip()
-                            _cmd_install_skills(browse_args)
-                            continue
-
-                        if user_input.lower().startswith("/mcp"):
-                            _cmd_mcp(user_input[len("/mcp") :])
-                            continue
-
-                        if user_input.lower().startswith("/channel"):
-                            args = user_input[len("/channel") :].strip()
-                            if args.lower().startswith("stop"):
-                                stop_arg = args[len("stop") :].strip()
-                                _cmd_channel_stop(stop_arg or None)
-                            else:
-                                await _await_agent_ready()
-                                _cmd_channel(
-                                    args,
-                                    agent_loader.agent,
-                                    state["thread_id"],
-                                    send_thinking=channel_send_thinking,
-                                )
-                            continue
-
-                        if user_input.lower() == "/compact":
-                            from .commands import (
-                                build_compact_summary_renderable,
-                                compact_conversation,
-                                render_compact_result,
-                            )
-
-                            await _await_agent_ready()
-                            with console.status(
-                                "[cyan]Compacting conversation...[/cyan]"
-                            ):
-                                result = await compact_conversation(
-                                    agent=agent_loader.agent,
-                                    thread_id=state["thread_id"],
-                                    input_tokens_hint=state.get(
-                                        "status_last_input_tokens"
-                                    ),
-                                )
-                            console.print(render_compact_result(result))
-                            summary_renderable = build_compact_summary_renderable(
-                                result
-                            )
-                            if summary_renderable is not None:
-                                console.print(summary_renderable)
-                            if result.status == "ok" and result.tokens_after > 0:
-                                state["status_last_input_tokens"] = result.tokens_after
-                                state["status_base_snapshot"] = (
-                                    make_usage_status_snapshot(
-                                        result.tokens_after,
-                                        model_name=model,
-                                    )
-                                )
-                            await _refresh_status_snapshot(
-                                reset_streaming_text=True,
-                            )
-                            continue
-
-                        if user_input.lower().startswith("/model"):
-                            from ..commands.base import CommandContext
-                            from ..commands.manager import manager as cmd_manager
-                            from ..EvoScientist import _ensure_config
-                            from .rich_command_ui import RichCLICommandUI
-
-                            # /model is ``needs_agent=False`` — it builds its
-                            # own agent — so we don't wait for the current
-                            # load; /model is the way to fix a broken one.
+                        # ==== Shared CommandManager dispatch ====
+                        # Every registered slash command routes through the
+                        # manager.  Unresolved input (non-slash, typo) falls
+                        # through to the agent message path below.
+                        _parsed = cmd_manager.resolve(user_input)
+                        if _parsed is not None:
+                            _cmd, _cmd_args = _parsed
+                            _agent_for_ctx: Any = agent_loader.agent
+                            if _cmd.needs_agent(_cmd_args):
+                                _agent_for_ctx = await _await_agent_ready()
                             ctx = CommandContext(
-                                agent=None,
+                                agent=_agent_for_ctx,
                                 thread_id=state["thread_id"],
-                                ui=RichCLICommandUI(console),
+                                ui=rich_ui,
                                 workspace_dir=state["workspace_dir"],
                                 checkpointer=checkpointer,
+                                config=config,
+                                input_tokens_hint=state.get("status_last_input_tokens"),
                             )
                             await cmd_manager.execute(user_input, ctx)
 
-                            if ctx.agent is not None:
+                            # ExitCommand signals quit via ``force_quit`` →
+                            # callback flips ``state["running"]`` to False.
+                            if not state["running"]:
+                                break
+
+                            # Agent swap (e.g. /model successfully built a
+                            # new agent): adopt into loader + reset status
+                            # snapshot + sync channel globals.
+                            agent_swapped = (
+                                ctx.agent is not None
+                                and ctx.agent is not _agent_for_ctx
+                            )
+                            if agent_swapped:
+                                from ..EvoScientist import _ensure_config
+
                                 agent_loader.adopt(ctx.agent)
                                 cfg = _ensure_config()
                                 model = cfg.model
                                 state["status_base_snapshot"] = (
                                     make_empty_status_snapshot(model)
                                 )
-                                await _refresh_status_snapshot(
-                                    reset_streaming_text=True,
-                                )
                                 if _channels_is_running():
                                     _ch_mod._cli_agent = ctx.agent
                                     _ch_mod._cli_thread_id = state["thread_id"]
+
+                            # Commands that mutate status fields need an
+                            # async refresh here (/compact + /new use sync
+                            # callbacks; /model swaps the agent).  /resume
+                            # awaits its own refresh inline inside the
+                            # async callback.
+                            if agent_swapped or _cmd.name in ("/compact", "/new"):
+                                await _refresh_status_snapshot(
+                                    reset_streaming_text=True,
+                                )
+                            continue
+
+                        # Unknown slash command (typo) — short-circuit so
+                        # it doesn't get forwarded to the agent, which
+                        # would waste tokens interpreting the nonsense.
+                        if user_input.lstrip().startswith("/"):
+                            bad_cmd = user_input.split(None, 1)[0]
+                            console.print(
+                                f"[red]Unknown command:[/red] {escape(bad_cmd)}"
+                            )
+                            console.print(
+                                "[dim]Type /help to see available commands.[/dim]"
+                            )
+                            console.print()
                             continue
 
                         # Resolve @file mentions — inject file contents inline
