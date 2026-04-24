@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PREVIEW_MAX = 40
+_pyperclip_notify_shown = False
 
 
 def _is_remote_session() -> bool:
@@ -175,11 +176,14 @@ def copy_selection_to_clipboard(app: App) -> None:
 
         copy_methods.insert(0, (pyperclip.copy, True))
     except ImportError:
-        app.notify(
-            'Failed to import "pyperclip", text copying might not work.',
-            severity="information",
-            timeout=3,
-        )
+        global _pyperclip_notify_shown
+        if not _pyperclip_notify_shown:
+            _pyperclip_notify_shown = True
+            app.notify(
+                'Failed to import "pyperclip", text copying might not work.',
+                severity="information",
+                timeout=3,
+            )
 
     copy_methods.append((_copy_osc52, False))
 
