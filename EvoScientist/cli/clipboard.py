@@ -21,7 +21,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from textual.app import App
@@ -29,6 +29,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PREVIEW_MAX = 40
+_pyperclip_notify_shown = False
+
+
+def _is_remote_session() -> bool:
+    """Return True when running over SSH without a local display."""
+    if os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION"):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            return True
+    return False
 
 
 # ── Platform-native clipboard read ────────────────────────────────
@@ -154,37 +163,59 @@ def copy_selection_to_clipboard(app: App) -> None:
 
     combined = "\n".join(selected_texts)
 
-    # Try methods in priority order
-    copy_methods = [app.copy_to_clipboard]
+    # Build method list: (fn, reliable) — reliable means we *know* the text
+    # reached the system clipboard (e.g. pyperclip).  OSC 52 / Textual write
+    # to the terminal and succeed even when the terminal silently ignores the
+    # sequence (PuTTY, older terminals).
+    copy_methods: list[tuple[Any, bool]] = [
+        (app.copy_to_clipboard, False),
+    ]
 
     try:
         import pyperclip
 
-        copy_methods.insert(0, pyperclip.copy)
+        copy_methods.insert(0, (pyperclip.copy, True))
     except ImportError:
-        pass
+        global _pyperclip_notify_shown
+        if not _pyperclip_notify_shown:
+            _pyperclip_notify_shown = True
+            app.notify(
+                'Failed to import "pyperclip", text copying might not work.',
+                severity="information",
+                timeout=3,
+            )
 
-    copy_methods.append(_copy_osc52)
+    copy_methods.append((_copy_osc52, False))
 
-    for fn in copy_methods:
+    remote = _is_remote_session()
+
+    for fn, reliable in copy_methods:
         try:
             fn(combined)
+        except (OSError, RuntimeError, TypeError) as exc:
+            logger.debug(
+                "Clipboard method %s failed: %s", getattr(fn, "__name__", repr(fn)), exc
+            )
+            continue
+
+        if reliable or not remote:
             app.notify(
                 f'"{_shorten(selected_texts)}" copied',
                 severity="information",
                 timeout=2,
                 markup=False,
             )
-        except (OSError, RuntimeError, TypeError) as exc:
-            logger.debug(
-                "Clipboard method %s failed: %s", getattr(fn, "__name__", repr(fn)), exc
-            )
-            continue
         else:
-            return
+            # OSC 52 over SSH — may be silently ignored (e.g. Windows Terminal, PuTTY)
+            app.notify(
+                "Copied text - if paste fails, use Shift+mouse-select for native copy",
+                severity="information",
+                timeout=3,
+            )
+        return
 
     app.notify(
-        "Failed to copy — no clipboard method available",
+        "Copy failed — use Shift+mouse-select for native terminal copy",
         severity="warning",
         timeout=3,
     )
