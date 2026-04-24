@@ -895,6 +895,12 @@ class TestAutoConfig:
             "summary": "auto",
         }
 
+        get_chat_model("gpt-5.5", provider="openai")
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "xhigh",
+            "summary": "auto",
+        }
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_reasoning_high_fallback(self, mock_init, monkeypatch):
         """Other OpenAI models get high reasoning effort."""
