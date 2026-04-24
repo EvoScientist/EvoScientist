@@ -655,6 +655,89 @@ class TestApplyModelLoadAgentFailureTransactional:
         assert "Failed to switch model" in msg
 
 
+class TestApplyModelSetChatModelFailureTransactional:
+    """Regression (CodeRabbit review on PR #187): if ``set_chat_model``
+    raises *after* ``_load_agent`` has already mutated module globals,
+    those globals must be restored. Without the rollback the session
+    ends up half-switched — new ``_config`` / ``_chat_model`` committed,
+    but no successful agent to back them.
+
+    Complements :class:`TestApplyModelLoadAgentFailureTransactional`
+    which covers the earlier failure site.
+    """
+
+    def test_globals_restored_when_set_chat_model_raises(self, evo_module_state):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        mod = evo_module_state
+        sentinels: dict[tuple[str, str | None], MagicMock] = {}
+
+        def _fake_get_chat_model(model, provider=None):
+            key = (model, provider)
+            sentinels.setdefault(key, MagicMock(name=f"chat_model[{model}|{provider}]"))
+            return sentinels[key]
+
+        def _fake_load_agent(
+            workspace_dir=None,
+            checkpointer=None,
+            config=None,
+            *,
+            on_mcp_progress=None,
+        ):
+            # Mimic the real ``create_cli_agent``: mutate globals via
+            # ``_ensure_config`` + ``_ensure_chat_model``, then succeed.
+            mod._ensure_config(config)
+            mod._ensure_chat_model()
+            return MagicMock(name="new-agent")
+
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        old_model = _fake_get_chat_model("claude-sonnet-4-6", "anthropic")
+        old_agent = MagicMock(name="old-default-agent")
+
+        mod._config = cfg
+        mod._chat_model = old_model
+        mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
+        mod._EvoScientist_agent = old_agent
+
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.ui.supports_interactive = True
+        ctx.workspace_dir = "/tmp/test_rollback_set"
+        ctx.checkpointer = None
+
+        with (
+            patch(
+                "EvoScientist.llm.get_chat_model",
+                side_effect=_fake_get_chat_model,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=_fake_load_agent,
+            ),
+            patch(
+                "EvoScientist.EvoScientist.set_chat_model",
+                side_effect=RuntimeError("API key missing at commit step"),
+            ),
+        ):
+            cmd = ModelCommand()
+            _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
+
+        # All four globals restored — the new agent was built, but the
+        # commit step (set_chat_model) failed, so the session must remain
+        # on the original model.
+        assert mod._config is cfg
+        assert mod._chat_model is old_model
+        assert mod._chat_model_key == ("claude-sonnet-4-6", "anthropic")
+        assert mod._EvoScientist_agent is old_agent
+        # cfg itself must not have been mutated (happens after the commit).
+        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.provider == "anthropic"
+        # User sees an error message.
+        msg = ctx.ui.append_system.call_args[0][0]
+        assert "Failed to switch model" in msg
+
+
 class TestModelCommandOllamaPicker:
     """Verify Ollama discovery augments the picker entries and the sentinel
     is always present when Ollama is configured."""

@@ -189,6 +189,14 @@ class ModelCommand(Command):
         try:
             set_chat_model(model_name, provider=provider)
         except Exception as e:
+            # _load_agent already mutated the four globals; restore them so a
+            # failure here doesn't leave the session half-switched.
+            (
+                _mod._config,
+                _mod._chat_model,
+                _mod._chat_model_key,
+                _mod._EvoScientist_agent,
+            ) = snap
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return
 

@@ -984,8 +984,13 @@ class TestModelPickerWidgetOllama(unittest.TestCase):
     with ``Picked(typed, "ollama")``, Esc returns to list, and filtering
     never hides the sentinel."""
 
-    def _make_widget(self, extra_entries=None, *, current_model=None):
-        """Build a widget with a mix of providers + the sentinel row."""
+    def _make_widget(self, entries=None, *, current_model=None):
+        """Build a widget with a mix of providers + the sentinel row.
+
+        When ``entries`` is ``None``, a default mix (anthropic + one ollama
+        model + sentinel) is used. When provided, it fully replaces the
+        default — callers that need extra rows should pass the complete list.
+        """
         from unittest.mock import MagicMock
 
         from EvoScientist.cli.widgets.model_picker import (
@@ -993,13 +998,12 @@ class TestModelPickerWidgetOllama(unittest.TestCase):
             ModelPickerWidget,
         )
 
-        entries = [
-            ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
-            ("llama3.3", "llama3.3", "ollama"),
-            ("Custom Ollama model...", _CUSTOM_OLLAMA_ID, "ollama"),
-        ]
-        if extra_entries:
-            entries = extra_entries
+        if entries is None:
+            entries = [
+                ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
+                ("llama3.3", "llama3.3", "ollama"),
+                ("Custom Ollama model...", _CUSTOM_OLLAMA_ID, "ollama"),
+            ]
         w = ModelPickerWidget(entries, current_model=current_model)
         # Stub out Textual-dependent side effects so we can drive actions
         # directly (follows the module's "no pilot" test pattern).
