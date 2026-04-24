@@ -4,6 +4,7 @@ import logging
 import os
 import queue
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -535,6 +536,13 @@ def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
     ``EvoScientist.cli.channel`` globals in sync so other readers
     (e.g. the bus) see the new values.
 
+    For ``/resume`` specifically, surface a user-visible warning via
+    ``ctx.ui``: serve uses ``InMemorySaver`` (not the SQLite
+    checkpointer the interactive CLI uses), so historical state for
+    any persisted thread is not available — the resumed thread will
+    start fresh.  Without this the ``/resume`` command appears to
+    succeed silently from the channel user's POV.
+
     Extracted from ``_serve_process_message`` so it can be unit tested
     without spinning up the whole serve loop.
     """
@@ -552,12 +560,32 @@ def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
         # ``/resume`` mutates ``ctx.thread_id`` directly (its UI callback
         # is a no-op in serve mode since there's no REPL to reset).  Pick
         # up the new id here so subsequent messages run on the resumed
-        # thread instead of the one captured at serve startup.
+        # thread instead of the one captured at serve startup.  A bare
+        # ``/resume`` with no argument just prints usage and leaves
+        # ``ctx.thread_id`` unchanged — ``thread_changed`` gates both
+        # the adoption and the user-facing warning so neither fires in
+        # that case.
         new_tid = getattr(ctx, "thread_id", None)
-        if new_tid and new_tid != agent_holder.get("thread_id"):
+        thread_changed = bool(new_tid) and new_tid != agent_holder.get("thread_id")
+        if thread_changed:
             agent_holder["thread_id"] = new_tid
             try:
                 _ch_mod._cli_thread_id = new_tid
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+        # Surface the in-memory-state limitation to the channel user
+        # for ``/resume`` so the missing history isn't silent.  Flush
+        # is required because ``cmd_manager.execute`` already flushed
+        # the command's own output before calling this hook.
+        if getattr(cmd, "name", None) == "/resume" and thread_changed:
+            try:
+                ctx.ui.append_system(
+                    "Note: serve mode uses in-memory state — "
+                    f"thread {new_tid[:8]} starts without prior history.",
+                    style="yellow",
+                )
+                await ctx.ui.flush()
             except Exception:  # pragma: no cover — defensive
                 pass
 
@@ -571,6 +599,8 @@ def _serve_process_message(
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
+    on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
+    start_new_session_cb: Callable[[], None] | None = None,
 ) -> None:
     """Process a single channel message in headless serve mode.
 
@@ -578,10 +608,12 @@ def _serve_process_message(
     No CLI prompt manipulation — just log lines for monitoring.
 
     ``agent_holder`` is a mutable dict (keys: ``agent``, ``thread_id``)
-    shared with the outer ``serve()`` loop.  The slash-dispatch hook
-    updates it when ``/model`` swaps the agent or ``/resume`` swaps the
-    thread so subsequent messages observe the new values instead of the
-    stale ones captured at startup.
+    shared with the outer ``serve()`` loop.  ``on_cmd_completed`` (the
+    agent-swap / thread-swap adoption hook) and ``start_new_session_cb``
+    (thread rotation for ``/new``) are constructed once in ``serve()``
+    — if omitted, they're rebuilt per message (backward compat for
+    existing tests).  ``/resume`` lands via the ``on_cmd_completed``
+    hook because the command mutates ``ctx.thread_id`` directly.
     """
     import asyncio
 
@@ -681,8 +713,10 @@ def _serve_process_message(
                 workspace_dir=workspace_dir,
                 checkpointer=None,
                 append_system=lambda t, s="dim": console.print(t, style=s),
-                start_new_session_cb=_make_serve_start_new_session_cb(agent_holder),
-                on_cmd_completed=_make_serve_cmd_completed_hook(agent_holder),
+                start_new_session_cb=start_new_session_cb
+                or _make_serve_start_new_session_cb(agent_holder),
+                on_cmd_completed=on_cmd_completed
+                or _make_serve_cmd_completed_hook(agent_holder),
             )
         )
     except Exception as exc:
@@ -830,6 +864,12 @@ def serve(
     # and never updated.
     agent_holder: dict[str, Any] = {"agent": agent, "thread_id": tid}
 
+    # Build the slash-dispatch callbacks once; the poll loop reuses
+    # them for every inbound message.  Without this hoist each message
+    # would allocate a fresh closure pair.
+    _serve_on_cmd_completed = _make_serve_cmd_completed_hook(agent_holder)
+    _serve_start_new_session_cb = _make_serve_start_new_session_cb(agent_holder)
+
     _start_channels_bus_mode(
         config,
         agent,
@@ -881,6 +921,8 @@ def serve(
                     model=config.model,
                     workspace_dir=ws,
                     show_thinking=effective_channel_thinking,
+                    on_cmd_completed=_serve_on_cmd_completed,
+                    start_new_session_cb=_serve_start_new_session_cb,
                 )
             except KeyboardInterrupt:
                 shutdown_event.set()

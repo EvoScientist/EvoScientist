@@ -44,6 +44,7 @@ from .channel import (
     _channels_stop,
     _message_queue,
     _set_channel_response,
+    dispatch_channel_slash_command,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .history_suggester import HistorySuggester
@@ -1819,54 +1820,23 @@ def run_textual_interactive(
                     """
                     return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
 
-                from ..commands.channel_ui import ChannelCommandUI
-
-                # Handle slash commands from channel
-                if msg.content.strip().startswith("/"):
-                    # Only wait for the agent if the command actually
-                    # needs it — otherwise ``/mcp add`` & friends would
-                    # hang behind a failing MCP load they're meant to fix.
-                    cmd, cmd_args = cmd_manager.resolve(msg.content) or (None, [])
-                    agent = None
-                    if cmd is not None and cmd.needs_agent(cmd_args):
-                        try:
-                            agent = await self._await_agent_ready()
-                        except Exception as exc:
-                            _set_channel_response(msg.msg_id, f"Error: {exc}")
-                            return
-                    ctx = CommandContext(
-                        agent=agent,
-                        thread_id=self._conversation_tid,
-                        ui=ChannelCommandUI(
-                            msg,
-                            append_system_callback=self._append_system,
-                            start_new_session_callback=self.start_new_session,
-                            handle_session_resume_callback=self.handle_session_resume,
-                        ),
-                        workspace_dir=self._workspace_dir,
-                        checkpointer=self._checkpointer,
-                    )
-                    try:
-                        cmd_executed = await cmd_manager.execute(msg.content, ctx)
-                    except Exception as _cmd_exc:
-                        # Command raised — report the error and do NOT fall through
-                        # to _stream_with_widgets (which would treat the slash
-                        # command text as a plain user message to the agent).
-                        _channel_logger.debug(
-                            f"Channel command error: {_cmd_exc}", exc_info=True
-                        )
-                        _set_channel_response(msg.msg_id, f"Command error: {_cmd_exc}")
-                        return  # outer finally handles _busy / widget cleanup
-
-                    if cmd_executed:
-                        self._append_system(
-                            f"[{msg.channel_type}: Executed command from {msg.sender}]",
-                            style="dim",
-                        )
-                        _set_channel_response(
-                            msg.msg_id, f"Command executed: {msg.content}"
-                        )
-                        return  # outer finally handles _busy / widget cleanup
+                # Handle slash commands from channel via the shared
+                # dispatcher (same path Rich CLI and headless serve use).
+                # Returns True when the command was handled (or errored)
+                # and we must NOT fall through to agent streaming.
+                _slash_handled = await dispatch_channel_slash_command(
+                    msg,
+                    agent=None,  # resolved via await_agent_ready on demand
+                    thread_id=self._conversation_tid,
+                    workspace_dir=self._workspace_dir,
+                    checkpointer=self._checkpointer,
+                    append_system=self._append_system,
+                    start_new_session_cb=self.start_new_session,
+                    handle_session_resume_cb=self.handle_session_resume,
+                    await_agent_ready=self._await_agent_ready,
+                )
+                if _slash_handled:
+                    return  # outer finally handles _busy / widget cleanup
 
                 # Non-slash message — streams through the agent, so wait
                 # for readiness now.

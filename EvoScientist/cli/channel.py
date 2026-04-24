@@ -109,12 +109,12 @@ def _pop_channel_response(msg_id: str, *, cancel_pending: bool = False) -> str |
 # ---------------------------------------------------------------------------
 # Slash command dispatch for channel messages
 # ---------------------------------------------------------------------------
-# Shared by Rich CLI (``cli/interactive.py::_process_channel_message``) and
-# headless serve (``cli/commands.py::_serve_process_message``) so both
-# surfaces route ``/foo`` text through ``cmd_manager`` instead of feeding it
-# to the LLM as a plain prompt.  The Textual TUI has its own inline copy of
-# this logic in ``cli/tui_interactive.py`` — kept there to stay close to the
-# widget lifecycle.
+# Shared by all three UI surfaces that accept inbound channel messages:
+# Rich CLI (``cli/interactive.py::_process_channel_message``), Textual
+# TUI (``cli/tui_interactive.py``'s channel handler), and headless
+# serve (``cli/commands.py::_serve_process_message``).  They all route
+# ``/foo`` text through ``cmd_manager`` instead of feeding it to the
+# LLM as a plain prompt.
 
 
 async def dispatch_channel_slash_command(
