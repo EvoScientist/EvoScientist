@@ -380,6 +380,13 @@ def _channels_running_list() -> list[str]:
     return _manager.running_channels() if _manager else []
 
 
+def _get_running_channel(channel_type: str) -> Any | None:
+    """Return a running channel instance by type, if available."""
+    if _manager is None or not _channels_is_running(channel_type):
+        return None
+    return _manager.get_channel(channel_type)
+
+
 def _channels_stop(channel_type: str | None = None) -> None:
     """Stop channel(s) and clean up module-level state."""
     global _manager, _bus_loop, _bus_thread, _cli_agent, _cli_thread_id

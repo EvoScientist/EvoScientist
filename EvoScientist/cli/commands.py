@@ -15,6 +15,12 @@ from rich.table import Table
 
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
+from ..runtime import (
+    build_runtime_bridge,
+    get_thread_runtime_registry,
+    mark_run_finished,
+    mark_run_started,
+)
 from ..stream.display import console
 from ._app import app, channel_app, config_app, mcp_app
 from ._constants import build_metadata
@@ -520,8 +526,7 @@ def _serve_process_message(
         f"[dim][{msg.channel_type}] {msg.sender}: {escape(msg.content[:80])}[/dim]"
     )
 
-    # -- channel callback helpers (same pattern as interactive.py) --
-
+    # -- channel callback helpers --
     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
         loop = _bus_loop
         if not loop:
@@ -531,68 +536,47 @@ def _serve_process_message(
         except Exception as e:
             _serve_logger.debug(f"{label} send failed: {e}")
 
-    def _send_thinking(thinking: str) -> None:
-        ch = msg.channel_ref
-        if ch and ch.send_thinking:
-            _send_to_channel(
-                ch.send_thinking_message(
-                    sender=msg.chat_id,
-                    thinking=thinking,
-                    metadata=msg.metadata,
-                ),
-                "Thinking",
-            )
-
-    def _send_todo(items: list[dict]) -> None:
-        from ..channels.consumer import _format_todo_list
-
-        if msg.channel_ref:
-            _send_to_channel(
-                msg.channel_ref.send_todo_message(
-                    sender=msg.chat_id,
-                    content=_format_todo_list(items),
-                    metadata=msg.metadata,
-                ),
-                "Todo",
-            )
-
-    def _send_media(file_path: str) -> None:
-        if msg.channel_ref:
-            _send_to_channel(
-                msg.channel_ref.send_media(
-                    recipient=msg.chat_id,
-                    file_path=file_path,
-                    metadata=msg.metadata,
-                ),
-                "Media",
-                timeout=30,
-            )
-
-    def _hitl_prompt(action_requests: list) -> list[dict] | None:
-        return channel_hitl_prompt(action_requests, msg)
-
-    def _ask_user_prompt(ask_user_data: dict) -> dict:
-        return channel_ask_user_prompt(ask_user_data, msg)
-
+    effective_thread_id = (
+        str((msg.metadata or {}).get("thread_id", "")).strip() or thread_id
+    )
     meta = build_metadata(workspace_dir, model)
+    runtime_registry = get_thread_runtime_registry()
+    bridge = build_runtime_bridge(
+        thread_id=effective_thread_id,
+        channel=msg.channel_ref,
+        metadata=msg.metadata,
+        send_async=_send_to_channel,
+        fallback_hitl_prompt=lambda action_requests: channel_hitl_prompt(
+            action_requests, msg
+        ),
+        fallback_ask_user_prompt=lambda ask_user_data: channel_ask_user_prompt(
+            ask_user_data, msg
+        ),
+        registry=runtime_registry,
+    )
+    mark_run_started(effective_thread_id, registry=runtime_registry)
     try:
         response = run_streaming(
             ui_backend="cli",
             agent=agent,
             message=msg.content,
-            thread_id=thread_id,
+            thread_id=effective_thread_id,
             show_thinking=show_thinking,
             interactive=True,
             metadata=meta,
-            on_thinking=_send_thinking,
-            on_todo=_send_todo,
-            on_file_write=_send_media,
-            hitl_prompt_fn=_hitl_prompt,
-            ask_user_prompt_fn=_ask_user_prompt,
+            on_thinking=bridge.on_thinking,
+            on_todo=bridge.on_todo,
+            on_file_write=bridge.on_file_write,
+            on_stream_event=bridge.on_stream_event,
+            on_raw_stream_event=bridge.on_raw_stream_event,
+            hitl_prompt_fn=bridge.hitl_prompt_fn,
+            ask_user_prompt_fn=bridge.ask_user_prompt_fn,
         )
     except Exception as e:
         response = f"Error: {e}"
         console.print(f"[red]Serve error: {e}[/red]")
+    finally:
+        mark_run_finished(effective_thread_id, registry=runtime_registry)
 
     _set_channel_response(msg.msg_id, response)
     console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")

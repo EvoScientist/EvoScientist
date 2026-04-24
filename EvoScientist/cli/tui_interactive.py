@@ -23,6 +23,13 @@ import EvoScientist.cli.channel as _ch_mod
 from ..commands import CommandContext
 from ..commands import manager as cmd_manager
 from ..paths import DATA_DIR
+from ..runtime import (
+    build_runtime_bridge,
+    get_thread_runtime_registry,
+    make_threadsafe_sender,
+    mark_run_finished,
+    mark_run_started,
+)
 from ..sessions import (
     find_similar_threads,
     generate_thread_id,
@@ -40,6 +47,7 @@ from .channel import (
     _channels_is_running,
     _channels_running_list,
     _channels_stop,
+    _get_running_channel,
     _message_queue,
     _set_channel_response,
 )
@@ -788,10 +796,13 @@ def run_textual_interactive(
             self,
             user_text: str,
             *,
+            thread_id_override: str | None = None,
             display_text: str | None = None,
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
+            on_stream_state_cb: Callable[[Any], None] | None = None,
+            on_raw_stream_event_cb: Callable[[dict[str, Any]], None] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
@@ -877,6 +888,8 @@ def run_textual_interactive(
 
             metadata = build_metadata(self._workspace_dir, model)
             response = ""
+            effective_thread_id = thread_id_override or self._conversation_tid
+            runtime_registry = get_thread_runtime_registry()
 
             async def _remove_w(w: Static | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -885,6 +898,113 @@ def run_textual_interactive(
                         await w.remove()
                     except Exception:
                         pass
+
+            async def _wait_for_ask_user_or_external(
+                questions: list[dict], ask_w
+            ) -> dict:
+                """Wait for AskUserWidget or queued WebUI ask_user reply."""
+                local_wait = asyncio.create_task(self._wait_for_ask_user(ask_w))
+                try:
+                    while True:
+                        queued_reply = runtime_registry.pop_ask_user_reply(
+                            effective_thread_id
+                        )
+                        if queued_reply is not None:
+                            if not local_wait.done():
+                                local_wait.cancel()
+                                try:
+                                    await local_wait
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+
+                            raw = str(queued_reply).strip()
+                            if not raw or raw.lower() == "cancel":
+                                return {"status": "cancelled"}
+
+                            # For multi-question prompts, allow newline-separated answers
+                            # from WebUI clients while still supporting single-reply flows.
+                            if len(questions) > 1:
+                                parts = [
+                                    p.strip() for p in raw.splitlines() if p.strip()
+                                ]
+                                if len(parts) >= len(questions):
+                                    return {
+                                        "answers": parts[: len(questions)],
+                                        "status": "answered",
+                                    }
+                            return {"answers": [raw], "status": "answered"}
+
+                        if local_wait.done():
+                            try:
+                                return local_wait.result()
+                            except (asyncio.CancelledError, Exception):
+                                return {"status": "cancelled"}
+
+                        await asyncio.sleep(0.1)
+                finally:
+                    if not local_wait.done():
+                        local_wait.cancel()
+                        try:
+                            await local_wait
+                        except (asyncio.CancelledError, Exception):
+                            pass
+
+            async def _wait_for_approval_or_external(
+                *,
+                action_count: int,
+                approval_w,
+            ) -> tuple[list[dict] | None, bool]:
+                """Wait for ApprovalWidget or queued WebUI approval decision."""
+                local_wait = asyncio.create_task(self._wait_for_approval(approval_w))
+                try:
+                    while True:
+                        queued_decision = runtime_registry.pop_approval_decision(
+                            effective_thread_id
+                        )
+                        if queued_decision is not None:
+                            if not local_wait.done():
+                                local_wait.cancel()
+                                try:
+                                    await local_wait
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+
+                            decision = str(queued_decision).strip().lower()
+                            if decision == "auto":
+                                return (
+                                    [{"type": "approve"} for _ in range(action_count)],
+                                    True,
+                                )
+                            if decision == "approve":
+                                return (
+                                    [{"type": "approve"} for _ in range(action_count)],
+                                    False,
+                                )
+                            return None, False
+
+                        if local_wait.done():
+                            try:
+                                decided_event = local_wait.result()
+                            except (asyncio.CancelledError, Exception):
+                                decided_event = None
+                            if (
+                                decided_event is not None
+                                and decided_event.decisions is not None
+                            ):
+                                return (
+                                    decided_event.decisions,
+                                    bool(decided_event.auto_approve_session),
+                                )
+                            return None, False
+
+                        await asyncio.sleep(0.1)
+                finally:
+                    if not local_wait.done():
+                        local_wait.cancel()
+                        try:
+                            await local_wait
+                        except (asyncio.CancelledError, Exception):
+                            pass
 
             def _finalize_active_summarization() -> None:
                 """Stop the active summary timer once the stream moves on."""
@@ -972,10 +1092,17 @@ def run_textual_interactive(
                     async for event in stream_agent_events(
                         self._agent,
                         _stream_input,
-                        self._conversation_tid,
+                        effective_thread_id,
                         metadata=metadata,
                     ):
                         event_type = state.handle_event(event)
+
+                        if on_stream_state_cb is not None:
+                            on_stream_state_cb(state)
+                        if on_raw_stream_event_cb is not None and event_type.startswith(
+                            "subagent_"
+                        ):
+                            on_raw_stream_event_cb(event)
 
                         if event_type == "usage_stats":
                             self._set_status_usage_baseline(state.last_input_tokens)
@@ -1280,6 +1407,38 @@ def run_textual_interactive(
                                     )
                                 else:
                                     # Interactive TUI: display widget, collect via arrow keys
+                                    first_question = questions[0]
+                                    q_type = str(
+                                        first_question.get("type", "text") or "text"
+                                    )
+                                    choices = first_question.get("choices", [])
+                                    runtime_registry.set_prompt(
+                                        effective_thread_id,
+                                        ask_user={
+                                            "title": (
+                                                "Quick check-in from EvoScientist"
+                                                if len(questions) == 1
+                                                else f"Question 1/{len(questions)}"
+                                            ),
+                                            "question": str(
+                                                first_question.get("question", "")
+                                            ),
+                                            "required": bool(
+                                                first_question.get("required", True)
+                                            ),
+                                            "type": q_type,
+                                            "choices": [
+                                                {
+                                                    "value": str(
+                                                        choice.get("value", str(choice))
+                                                    )
+                                                }
+                                                for choice in choices
+                                                if isinstance(choice, dict)
+                                                or isinstance(choice, str)
+                                            ],
+                                        },
+                                    )
                                     from .widgets.ask_user_widget import AskUserWidget
 
                                     _prompt = self.query_one("#prompt", ChatTextArea)
@@ -1288,12 +1447,21 @@ def run_textual_interactive(
                                     await container.mount(ask_w)
                                     _schedule_scroll()
                                     self.call_after_refresh(ask_w.focus_active)
-                                    result = await self._wait_for_ask_user(ask_w)
                                     try:
-                                        await ask_w.remove()
-                                    except Exception:
-                                        pass
-                                    _prompt.disabled = False
+                                        result = await _wait_for_ask_user_or_external(
+                                            questions,
+                                            ask_w,
+                                        )
+                                    finally:
+                                        runtime_registry.set_prompt(
+                                            effective_thread_id,
+                                            ask_user=None,
+                                        )
+                                        try:
+                                            await ask_w.remove()
+                                        except Exception:
+                                            pass
+                                        _prompt.disabled = False
                                 from langgraph.types import (
                                     Command,  # type: ignore[import-untyped]
                                 )
@@ -1354,6 +1522,37 @@ def run_textual_interactive(
                                 continue
 
                             # Interactive TUI: mount approval widget
+                            runtime_registry.set_prompt(
+                                effective_thread_id,
+                                approval={
+                                    "kind": "tool_approval",
+                                    "title": "Approval Required",
+                                    "options": [
+                                        {"id": "approve", "label": "Approve"},
+                                        {"id": "reject", "label": "Reject"},
+                                        {"id": "auto", "label": "Approve All"},
+                                    ],
+                                    "actions": [
+                                        {
+                                            "name": (
+                                                req.get("name", "")
+                                                if isinstance(req, dict)
+                                                else getattr(req, "name", "")
+                                            ),
+                                            "command": (
+                                                (req.get("args", {}) or {}).get(
+                                                    "command", ""
+                                                )
+                                                if isinstance(req, dict)
+                                                else getattr(req, "args", {}).get(
+                                                    "command", ""
+                                                )
+                                            ),
+                                        }
+                                        for req in action_reqs
+                                    ],
+                                },
+                            )
                             # Disable main prompt so it can't steal focus
                             _prompt = self.query_one("#prompt", ChatTextArea)
                             _prompt.disabled = True
@@ -1362,19 +1561,29 @@ def run_textual_interactive(
                             approval_w = ApprovalWidget(action_reqs)
                             await container.mount(approval_w)
                             _schedule_scroll()
-                            decided_event = await self._wait_for_approval(approval_w)
-                            await approval_w.remove()
-                            _prompt.disabled = False
-                            if decided_event and decided_event.decisions is not None:
-                                if decided_event.auto_approve_session:
+                            try:
+                                (
+                                    decisions,
+                                    auto_approve_session,
+                                ) = await _wait_for_approval_or_external(
+                                    action_count=n,
+                                    approval_w=approval_w,
+                                )
+                            finally:
+                                runtime_registry.set_prompt(
+                                    effective_thread_id,
+                                    approval=None,
+                                )
+                                await approval_w.remove()
+                                _prompt.disabled = False
+                            if decisions is not None:
+                                if auto_approve_session:
                                     self._hitl_auto_approve = True
                                 from langgraph.types import (
                                     Command,  # type: ignore[import-untyped]
                                 )
 
-                                _stream_input = Command(
-                                    resume={"decisions": decided_event.decisions}
-                                )
+                                _stream_input = Command(resume={"decisions": decisions})
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop with resume
                             else:
@@ -1534,11 +1743,41 @@ def run_textual_interactive(
                 )
                 await self._refresh_status_snapshot(message_to_send)
 
-                await self._stream_with_widgets(
-                    message_to_send,
-                    display_text=user_text,
-                    file_warnings=file_warnings,
+                webui_channel = _get_running_channel("webui")
+                runtime_registry = get_thread_runtime_registry()
+                bridge = build_runtime_bridge(
+                    thread_id=self._conversation_tid,
+                    channel=webui_channel,
+                    metadata={
+                        "chat_id": self._conversation_tid,
+                        "thread_id": self._conversation_tid,
+                    },
+                    send_async=(
+                        make_threadsafe_sender(_ch_mod._bus_loop)
+                        if webui_channel
+                        else None
+                    ),
+                    registry=runtime_registry,
                 )
+
+                def _bridge_stream_state(stream_state: Any) -> None:
+                    if bridge.on_stream_event is not None:
+                        bridge.on_stream_event("stream_state", stream_state)
+
+                mark_run_started(self._conversation_tid, registry=runtime_registry)
+                try:
+                    await self._stream_with_widgets(
+                        message_to_send,
+                        display_text=user_text,
+                        file_warnings=file_warnings,
+                        on_thinking_cb=bridge.on_thinking,
+                        on_todo_cb=bridge.on_todo,
+                        on_media_cb=bridge.on_file_write,
+                        on_stream_state_cb=_bridge_stream_state,
+                        on_raw_stream_event_cb=bridge.on_raw_stream_event,
+                    )
+                finally:
+                    mark_run_finished(self._conversation_tid, registry=runtime_registry)
             except asyncio.CancelledError:
                 cancelled = True
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
@@ -1598,65 +1837,36 @@ def run_textual_interactive(
                         )
                     )
 
-                def _send_thinking(thinking: str) -> None:
-                    ch = msg.channel_ref
-                    if ch and ch.send_thinking:
-                        _send_to_channel(
-                            ch.send_thinking_message(
-                                sender=msg.chat_id,
-                                thinking=thinking,
-                                metadata=msg.metadata,
-                            ),
-                            "Thinking",
-                        )
-
-                def _send_todo(items: list[dict]) -> None:
-                    from ..channels.consumer import _format_todo_list
-
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_todo_message(
-                                sender=msg.chat_id,
-                                content=_format_todo_list(items),
-                                metadata=msg.metadata,
-                            ),
-                            "Todo",
-                        )
-
-                def _send_media(file_path: str) -> None:
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_media(
-                                recipient=msg.chat_id,
-                                file_path=file_path,
-                                metadata=msg.metadata,
-                            ),
-                            "Media",
-                        )
-
-                def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
-                    """Send HITL approval prompt to channel user and wait for reply.
-
-                    This runs in a thread (called via asyncio.to_thread) so it can
-                    block without freezing the Textual event loop.
-                    """
-                    return _ch_mod.channel_hitl_prompt(action_requests, msg)
-
-                def _channel_ask_user(ask_user_data: dict) -> dict:
-                    """Send ask_user questions to channel user and wait for reply.
-
-                    This runs in a thread (called via asyncio.to_thread) so it can
-                    block without freezing the Textual event loop.
-                    """
-                    return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
-
                 from ..commands.channel_ui import ChannelCommandUI
+
+                effective_thread_id = (
+                    str((msg.metadata or {}).get("thread_id", "")).strip()
+                    or self._conversation_tid
+                )
+                runtime_registry = get_thread_runtime_registry()
+                bridge = build_runtime_bridge(
+                    thread_id=effective_thread_id,
+                    channel=msg.channel_ref,
+                    metadata=msg.metadata,
+                    send_async=_send_to_channel,
+                    fallback_hitl_prompt=lambda action_requests: _ch_mod.channel_hitl_prompt(
+                        action_requests, msg
+                    ),
+                    fallback_ask_user_prompt=lambda ask_user_data: _ch_mod.channel_ask_user_prompt(
+                        ask_user_data, msg
+                    ),
+                    registry=runtime_registry,
+                )
+
+                def _stream_state_callback(stream_state: Any) -> None:
+                    if bridge.on_stream_event is not None:
+                        bridge.on_stream_event("stream_state", stream_state)
 
                 # Handle slash commands from channel
                 if msg.content.strip().startswith("/"):
                     ctx = CommandContext(
                         agent=self._agent,
-                        thread_id=self._conversation_tid,
+                        thread_id=effective_thread_id,
                         ui=ChannelCommandUI(
                             msg,
                             append_system_callback=self._append_system,
@@ -1690,20 +1900,26 @@ def run_textual_interactive(
 
                 response = ""
                 try:
+                    mark_run_started(effective_thread_id, registry=runtime_registry)
                     response = await self._stream_with_widgets(
                         msg.content,
-                        on_thinking_cb=_send_thinking
+                        thread_id_override=effective_thread_id,
+                        on_thinking_cb=bridge.on_thinking
                         if self._channel_send_thinking
                         else None,
-                        on_todo_cb=_send_todo,
-                        on_media_cb=_send_media,
+                        on_todo_cb=bridge.on_todo,
+                        on_media_cb=bridge.on_file_write,
+                        on_stream_state_cb=_stream_state_callback,
+                        on_raw_stream_event_cb=bridge.on_raw_stream_event,
                         skip_user_message=True,
-                        channel_hitl_fn=_channel_hitl_prompt,
-                        channel_ask_user_fn=_channel_ask_user,
+                        channel_hitl_fn=bridge.hitl_prompt_fn,
+                        channel_ask_user_fn=bridge.ask_user_prompt_fn,
                     )
                 except Exception as exc:
                     response = f"Error: {exc}"
                     self._append_system(f"Error: {exc}", style="red")
+                finally:
+                    mark_run_finished(effective_thread_id, registry=runtime_registry)
 
                 _set_channel_response(msg.msg_id, response)
                 self._append_system(

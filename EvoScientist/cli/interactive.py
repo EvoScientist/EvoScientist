@@ -30,6 +30,12 @@ from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
 
+from ..runtime import (
+    build_runtime_bridge,
+    get_thread_runtime_registry,
+    mark_run_finished,
+    mark_run_started,
+)
 from ..sessions import (
     _format_relative_time,
     delete_thread,
@@ -50,6 +56,7 @@ from .channel import (
     _channels_is_running,
     _cmd_channel,
     _cmd_channel_stop,
+    _get_running_channel,
     _message_queue,
     _set_channel_response,
 )
@@ -765,75 +772,62 @@ def cmd_interactive(
                     except Exception as e:
                         _channel_logger.debug(f"{label} send failed: {e}")
 
-                def _send_thinking_to_channel(thinking: str) -> None:
-                    ch = msg.channel_ref
-                    if ch and ch.send_thinking:
-                        _send_to_channel(
-                            ch.send_thinking_message(
-                                sender=msg.chat_id,
-                                thinking=thinking,
-                                metadata=msg.metadata,
-                            ),
-                            "Thinking",
-                        )
-
-                def _send_todo_to_channel(items: list[dict]) -> None:
-                    from ..channels.consumer import _format_todo_list
-
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_todo_message(
-                                sender=msg.chat_id,
-                                content=_format_todo_list(items),
-                                metadata=msg.metadata,
-                            ),
-                            "Todo",
-                        )
-
-                def _send_media_to_channel(file_path: str) -> None:
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_media(
-                                recipient=msg.chat_id,
-                                file_path=file_path,
-                                metadata=msg.metadata,
-                            ),
-                            "Media",
-                            timeout=30,
-                        )
-
-                def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
-                    """Send HITL approval prompt to channel user and wait for reply."""
-                    return _ch_mod.channel_hitl_prompt(action_requests, msg)
-
-                def _channel_ask_user(ask_user_data: dict) -> dict:
-                    """Send ask_user questions to channel user and wait for reply."""
-                    return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
-
+                effective_thread_id = (
+                    str((msg.metadata or {}).get("thread_id", "")).strip()
+                    or state["thread_id"]
+                )
                 meta = build_metadata(state["workspace_dir"], model)
+                runtime_registry = get_thread_runtime_registry()
+                bridge = build_runtime_bridge(
+                    thread_id=effective_thread_id,
+                    channel=msg.channel_ref,
+                    metadata=msg.metadata,
+                    send_async=_send_to_channel,
+                    fallback_hitl_prompt=lambda action_requests: _ch_mod.channel_hitl_prompt(
+                        action_requests, msg
+                    ),
+                    fallback_ask_user_prompt=lambda ask_user_data: _ch_mod.channel_ask_user_prompt(
+                        ask_user_data, msg
+                    ),
+                    registry=runtime_registry,
+                )
+
+                def _combined_stream_event(
+                    event_type: str,
+                    stream_state: Any,
+                    _bridge=bridge,
+                ) -> None:
+                    if _bridge.on_stream_event is not None:
+                        _bridge.on_stream_event(event_type, stream_state)
+                    _handle_stream_status_event(event_type, stream_state)
+
                 try:
                     await _refresh_status_snapshot(
                         msg.content, reset_streaming_text=True
                     )
+                    mark_run_started(effective_thread_id, registry=runtime_registry)
                     response = run_streaming(
                         ui_backend=state["ui_backend"],
                         agent=state["agent"],
                         message=msg.content,
-                        thread_id=state["thread_id"],
+                        thread_id=effective_thread_id,
                         show_thinking=show_thinking,
                         interactive=True,
                         metadata=meta,
-                        on_thinking=_send_thinking_to_channel,
-                        on_todo=_send_todo_to_channel,
-                        on_file_write=_send_media_to_channel,
-                        hitl_prompt_fn=_channel_hitl_prompt,
-                        ask_user_prompt_fn=_channel_ask_user,
-                        on_stream_event=_handle_stream_status_event,
+                        on_thinking=bridge.on_thinking,
+                        on_todo=bridge.on_todo,
+                        on_file_write=bridge.on_file_write,
+                        hitl_prompt_fn=bridge.hitl_prompt_fn,
+                        ask_user_prompt_fn=bridge.ask_user_prompt_fn,
+                        on_raw_stream_event=bridge.on_raw_stream_event,
+                        on_stream_event=_combined_stream_event,
                         status_footer_builder=_stream_status_footer,
                     )
                 except Exception as e:
                     response = f"Error: {e}"
                     console.print(f"[red]Channel error: {e}[/red]")
+                finally:
+                    mark_run_finished(effective_thread_id, registry=runtime_registry)
 
                 _set_channel_response(msg.msg_id, response)
                 await _refresh_status_snapshot(reset_streaming_text=True)
@@ -1091,17 +1085,67 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        run_streaming(
-                            ui_backend=state["ui_backend"],
-                            agent=state["agent"],
-                            message=message_to_send,
+                        webui_channel = _get_running_channel("webui")
+                        runtime_registry = get_thread_runtime_registry()
+
+                        def _send_to_webui(coro, label: str, timeout: int = 15) -> None:
+                            loop = _ch_mod._bus_loop
+                            if not loop:
+                                return
+                            try:
+                                asyncio.run_coroutine_threadsafe(coro, loop).result(
+                                    timeout=timeout
+                                )
+                            except Exception as e:
+                                _channel_logger.debug(f"{label} send failed: {e}")
+
+                        bridge = build_runtime_bridge(
                             thread_id=state["thread_id"],
-                            show_thinking=show_thinking,
-                            interactive=True,
-                            metadata=meta,
-                            on_stream_event=_handle_stream_status_event,
-                            status_footer_builder=_stream_status_footer,
+                            channel=webui_channel,
+                            metadata={
+                                "chat_id": state["thread_id"],
+                                "thread_id": state["thread_id"],
+                            },
+                            send_async=_send_to_webui if webui_channel else None,
+                            registry=runtime_registry,
                         )
+
+                        def _combined_stream_event(
+                            event_type: str,
+                            stream_state: Any,
+                            _bridge=bridge,
+                        ) -> None:
+                            if _bridge.on_stream_event is not None:
+                                _bridge.on_stream_event(event_type, stream_state)
+                            _handle_stream_status_event(event_type, stream_state)
+
+                        mark_run_started(state["thread_id"], registry=runtime_registry)
+                        try:
+                            run_streaming(
+                                ui_backend=state["ui_backend"],
+                                agent=state["agent"],
+                                message=message_to_send,
+                                thread_id=state["thread_id"],
+                                show_thinking=show_thinking,
+                                interactive=True,
+                                metadata=meta,
+                                on_thinking=bridge.on_thinking,
+                                on_todo=bridge.on_todo,
+                                on_file_write=bridge.on_file_write,
+                                on_stream_event=_combined_stream_event,
+                                on_raw_stream_event=bridge.on_raw_stream_event,
+                                hitl_prompt_fn=(
+                                    bridge.hitl_prompt_fn if webui_channel else None
+                                ),
+                                ask_user_prompt_fn=(
+                                    bridge.ask_user_prompt_fn if webui_channel else None
+                                ),
+                                status_footer_builder=_stream_status_footer,
+                            )
+                        finally:
+                            mark_run_finished(
+                                state["thread_id"], registry=runtime_registry
+                            )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
                         _print_separator()
