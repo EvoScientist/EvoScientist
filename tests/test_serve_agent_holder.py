@@ -6,11 +6,13 @@ subsequent messages, not silently keep the stale one the while-loop
 captured at startup.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from EvoScientist.cli.channel import ChannelMessage
 from EvoScientist.cli.commands import (
     _make_serve_cmd_completed_hook,
     _make_serve_start_new_session_cb,
+    _serve_process_message,
 )
 from tests.conftest import run_async as _run
 
@@ -192,3 +194,38 @@ def test_hook_handles_both_agent_and_thread_swap():
 
     assert holder["agent"] == "new-agent"
     assert holder["thread_id"] == "new-tid"
+
+
+def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
+    """A bad slash command must not crash serve or fall through to the LLM."""
+    msg = ChannelMessage(
+        msg_id="msg-1",
+        content="/evoskills core",
+        sender="channel-user",
+        channel_type="imessage",
+        metadata={},
+        channel_ref=None,
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-1",
+    )
+    holder = {"agent": "agent", "thread_id": "tid"}
+
+    with (
+        patch(
+            "EvoScientist.cli.commands.dispatch_channel_slash_command",
+            new=AsyncMock(side_effect=RuntimeError("slash broke")),
+        ),
+        patch("EvoScientist.cli.commands._set_channel_response") as mock_set_resp,
+        patch("EvoScientist.cli.tui_runtime.run_streaming") as mock_run_streaming,
+    ):
+        _serve_process_message(
+            msg,
+            agent_holder=holder,
+            model="model",
+            workspace_dir="/tmp",
+            show_thinking=False,
+        )
+
+    mock_set_resp.assert_called_once_with("msg-1", "Command error: slash broke")
+    mock_run_streaming.assert_not_called()

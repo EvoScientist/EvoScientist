@@ -668,6 +668,8 @@ def _serve_process_message(
     except RuntimeError:
         _prev_loop = None
     _slash_loop: asyncio.AbstractEventLoop | None = None
+    _slash_handled = False
+    _slash_error: Exception | None = None
     try:
         _slash_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_slash_loop)
@@ -683,10 +685,18 @@ def _serve_process_message(
                 on_cmd_completed=_make_serve_cmd_completed_hook(agent_holder),
             )
         )
+    except Exception as exc:
+        _slash_error = exc
+        _serve_logger.exception("Slash dispatch failed for %s", msg.channel_type)
     finally:
         if _slash_loop is not None:
             _slash_loop.close()
         asyncio.set_event_loop(_prev_loop)
+
+    if _slash_error is not None:
+        _set_channel_response(msg.msg_id, f"Command error: {_slash_error}")
+        console.print(f"[red]Slash command error: {escape(str(_slash_error))}[/red]")
+        return
 
     if _slash_handled:
         console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")

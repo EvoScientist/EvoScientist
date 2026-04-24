@@ -178,7 +178,7 @@ def test_await_agent_ready_failure_sets_error_response():
     assert handled is True
     mock_set_resp.assert_called_once()
     resp_text = mock_set_resp.call_args[0][1]
-    assert "Error" in resp_text
+    assert "Command error" in resp_text
     assert "agent blew up" in resp_text
 
 
@@ -437,7 +437,7 @@ def test_top_level_exception_is_absorbed():
     assert handled is True
     mock_set_resp.assert_called_once()
     resp_text = mock_set_resp.call_args[0][1]
-    assert "Error" in resp_text
+    assert "Command error" in resp_text
     assert "exploded during resolve" in resp_text
 
 

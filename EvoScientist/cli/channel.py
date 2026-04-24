@@ -162,8 +162,13 @@ async def dispatch_channel_slash_command(
         loaded up-front before the bus starts.
     on_cmd_completed:
         Optional ``async (ctx, original_agent, cmd) -> None`` callback
-        fired only after ``cmd_manager.execute`` returns True.  Used by
-        Rich CLI to (a) adopt an agent swap (``/model``) back into the
+        fired only after ``cmd_manager.execute`` returns True.  The
+        ``original_agent`` argument is the agent handle command execution
+        started against: ``agent_for_ctx`` after any ``await_agent_ready``
+        resolution, or the dispatcher's input agent when no resolver is
+        supplied.  Callers can compare ``ctx.agent`` with
+        ``original_agent`` to detect command-driven swaps.  Used by Rich
+        CLI to (a) adopt an agent swap (``/model``) back into the
         running session and (b) refresh the status snapshot for
         commands that mutate session-level state (``/new``,
         ``/compact``) — mirrors the REPL dispatch at
@@ -199,7 +204,7 @@ async def dispatch_channel_slash_command(
             msg.msg_id,
         )
         try:
-            _set_channel_response(msg.msg_id, f"Error: {exc}")
+            _set_channel_response(msg.msg_id, f"Command error: {exc}")
         except Exception:  # pragma: no cover — defensive
             pass
         # Return True so the caller treats the message as handled and
@@ -242,7 +247,7 @@ async def _dispatch_channel_slash_impl(
         try:
             agent_for_ctx = await await_agent_ready()
         except Exception as exc:
-            _set_channel_response(msg.msg_id, f"Error: {exc}")
+            _set_channel_response(msg.msg_id, f"Command error: {exc}")
             return True
 
     ui = ChannelCommandUI(
