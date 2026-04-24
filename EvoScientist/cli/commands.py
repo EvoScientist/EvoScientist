@@ -32,7 +32,6 @@ from .channel import (
     _claim_channel_request,
     _complete_channel_request,
     _message_queue,
-    _register_channel_request,
     _set_channel_response,
     _start_channels_bus_mode,
     channel_ask_user_prompt,
@@ -534,9 +533,9 @@ def _make_serve_start_new_session_cb(agent_holder: dict[str, Any]):
 def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
     """Build the ``on_cmd_completed`` hook used by serve mode.
 
-    Adopts ``/model`` agent swaps and ``/resume`` thread swaps back
-    into ``agent_holder`` so the outer poll loop picks up the new
-    handles on subsequent messages.  Also keeps
+    Adopts ``/model`` agent swaps and ``/resume`` thread/workspace
+    swaps back into ``agent_holder`` so the outer poll loop picks up
+    the new handles on subsequent messages.  Also keeps
     ``EvoScientist.cli.channel`` globals in sync so other readers
     (e.g. the bus) see the new values.
 
@@ -578,6 +577,10 @@ def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
             except Exception:  # pragma: no cover — defensive
                 pass
 
+        new_workspace = getattr(ctx, "workspace_dir", None)
+        if new_workspace and new_workspace != agent_holder.get("workspace_dir"):
+            agent_holder["workspace_dir"] = new_workspace
+
         # Surface the in-memory-state limitation to the channel user
         # for ``/resume`` so the missing history isn't silent.  Flush
         # is required because ``cmd_manager.execute`` already flushed
@@ -611,13 +614,14 @@ def _serve_process_message(
     Headless equivalent of interactive.py's ``_process_channel_message``.
     No CLI prompt manipulation — just log lines for monitoring.
 
-    ``agent_holder`` is a mutable dict (keys: ``agent``, ``thread_id``)
-    shared with the outer ``serve()`` loop.  ``on_cmd_completed`` (the
-    agent-swap / thread-swap adoption hook) and ``start_new_session_cb``
-    (thread rotation for ``/new``) are constructed once in ``serve()``
-    — if omitted, they're rebuilt per message (backward compat for
-    existing tests).  ``/resume`` lands via the ``on_cmd_completed``
-    hook because the command mutates ``ctx.thread_id`` directly.
+    ``agent_holder`` is a mutable dict (keys: ``agent``, ``thread_id``,
+    ``workspace_dir``) shared with the outer ``serve()`` loop.
+    ``on_cmd_completed`` (the agent-swap / session-adoption hook) and
+    ``start_new_session_cb`` (thread rotation for ``/new``) are
+    constructed once in ``serve()`` — if omitted, they're rebuilt per
+    message (backward compat for existing tests).  ``/resume`` lands
+    via the ``on_cmd_completed`` hook because the command mutates
+    ``ctx.thread_id`` / ``ctx.workspace_dir`` directly.
     """
     import asyncio
 
@@ -625,12 +629,9 @@ def _serve_process_message(
     from .tui_runtime import run_streaming
 
     if not _claim_channel_request(msg):
-        if msg.bus_ref is None and msg.channel_ref is None:
-            _register_channel_request(msg)
-            if not _claim_channel_request(msg):
-                return
-        else:
-            return
+        return
+
+    runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
 
     console.print(
         f"[dim][{msg.channel_type}] {msg.sender}: {escape(msg.content[:80])}[/dim]"
@@ -723,7 +724,7 @@ def _serve_process_message(
                     msg,
                     agent=agent_holder["agent"],
                     thread_id=agent_holder["thread_id"],
-                    workspace_dir=workspace_dir,
+                    workspace_dir=runtime_workspace,
                     checkpointer=None,
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
@@ -751,7 +752,7 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(workspace_dir, model)
+        meta = build_metadata(runtime_workspace, model)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -880,7 +881,11 @@ def serve(
     # invoked over a channel can hot-swap the agent for subsequent
     # messages.  A pass-by-value parameter gets captured once at startup
     # and never updated.
-    agent_holder: dict[str, Any] = {"agent": agent, "thread_id": tid}
+    agent_holder: dict[str, Any] = {
+        "agent": agent,
+        "thread_id": tid,
+        "workspace_dir": ws,
+    }
 
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message

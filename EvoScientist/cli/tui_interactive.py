@@ -1068,6 +1068,33 @@ def run_textual_interactive(
                     except Exception:
                         pass
 
+            async def _mark_cancelled_response() -> str:
+                nonlocal assistant_w
+                marker = "[Stopped.]"
+                previous_text = state.response_text or ""
+                current = previous_text.rstrip()
+                if not current:
+                    final_text = marker
+                elif current.endswith(marker):
+                    final_text = current
+                else:
+                    final_text = f"{current}\n{marker}"
+
+                state.response_text = final_text
+                self._set_status_streaming_text(final_text)
+
+                if assistant_w is None:
+                    if final_text:
+                        assistant_w = AssistantMessage(final_text)
+                        await container.mount(assistant_w)
+                else:
+                    suffix = final_text[len(previous_text) :]
+                    if suffix:
+                        await assistant_w.append_content(suffix)
+
+                _schedule_scroll()
+                return final_text
+
             def _finalize_active_summarization() -> None:
                 """Stop the active summary timer once the stream moves on."""
                 if summarization_w is not None and summarization_w._is_active:
@@ -1144,7 +1171,7 @@ def run_textual_interactive(
 
             for _hitl_round in range(_MAX_HITL_ROUNDS):
                 if is_stream_cancel_requested(cancel_scope):
-                    response = state.response_text or "[Stopped.]"
+                    response = await _mark_cancelled_response()
                     break
                 state.pending_interrupt = None
                 state.pending_ask_user = None
@@ -1161,9 +1188,7 @@ def run_textual_interactive(
                         metadata=metadata,
                     ):
                         if is_stream_cancel_requested(cancel_scope):
-                            state.response_text = (
-                                state.response_text or ""
-                            ) + "\n[Stopped.]"
+                            response = await _mark_cancelled_response()
                             break
                         event_type = state.handle_event(event)
 
@@ -1470,7 +1495,7 @@ def run_textual_interactive(
                                     )
                                     if is_stream_cancel_requested(cancel_scope):
                                         state.pending_ask_user = None
-                                        response = state.response_text or "[Stopped.]"
+                                        response = await _mark_cancelled_response()
                                         break
                                 else:
                                     # Interactive TUI: display widget, collect via arrow keys
@@ -1528,7 +1553,7 @@ def run_textual_interactive(
                                 )
                                 if is_stream_cancel_requested(cancel_scope):
                                     state.pending_interrupt = None
-                                    response = state.response_text or "[Stopped.]"
+                                    response = await _mark_cancelled_response()
                                     break
                                 if decisions is not None:
                                     from langgraph.types import (
@@ -1694,6 +1719,7 @@ def run_textual_interactive(
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
+                    response = await _mark_cancelled_response()
                     break
                 if state.pending_interrupt is None and state.pending_ask_user is None:
                     break  # normal completion or rejection — exit HITL loop

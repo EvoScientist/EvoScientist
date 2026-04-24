@@ -27,35 +27,6 @@ def _clean_cancel_event():
         )
 
 
-@pytest.fixture(autouse=True)
-def _clean_channel_queue():
-    """Drain the channel message queue before and after each test."""
-    from EvoScientist.cli import channel as channel_mod
-
-    def _drain():
-        while not channel_mod._message_queue.empty():
-            try:
-                channel_mod._message_queue.get_nowait()
-            except Exception:
-                break
-
-    _drain()
-    with channel_mod._response_lock:
-        channel_mod._pending_responses.clear()
-    with channel_mod._channel_request_lock:
-        channel_mod._channel_requests.clear()
-        channel_mod._session_requests.clear()
-        channel_mod._cancelled_channel_messages.clear()
-    yield
-    _drain()
-    with channel_mod._response_lock:
-        channel_mod._pending_responses.clear()
-    with channel_mod._channel_request_lock:
-        channel_mod._channel_requests.clear()
-        channel_mod._session_requests.clear()
-        channel_mod._cancelled_channel_messages.clear()
-
-
 # ---------------------------------------------------------------------------
 # 1. _consume breaks on cancel event
 # ---------------------------------------------------------------------------
@@ -127,6 +98,7 @@ def test_run_streaming_short_circuits_when_scope_already_cancelled():
 
     assert result == "[Stopped.]"
     assert seen_event is False
+    assert not display_mod.is_stream_cancel_requested(cancel_scope)
 
 
 def test_run_streaming_ignores_other_scope_cancel():
@@ -165,6 +137,7 @@ def test_run_streaming_pending_interrupt_short_circuits_on_cancel():
             yield {}
 
     state = display_mod.StreamState()
+    state.response_text = "Partial answer"
     state.pending_interrupt = {
         "action_requests": [{"name": "execute", "args": {"command": "echo hi"}}]
     }
@@ -189,5 +162,5 @@ def test_run_streaming_pending_interrupt_short_circuits_on_cancel():
             _state=state,
         )
 
-    assert result == "[Stopped.]"
+    assert result == "Partial answer\n[Stopped.]"
     assert prompt_called is False

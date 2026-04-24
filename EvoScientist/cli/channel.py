@@ -157,7 +157,6 @@ def _complete_channel_request(
     discard_cancel_scope: bool = True,
 ) -> None:
     """Forget a request once its waiter is resolved or cancelled."""
-    slot = None
     with _channel_request_lock:
         slot = _channel_requests.pop(msg_id, None)
         _cancelled_channel_messages.discard(msg_id)

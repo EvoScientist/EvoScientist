@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from .base import CommandUI
+
+_logger = logging.getLogger(__name__)
 
 
 class ChannelCommandUI(CommandUI):
@@ -28,13 +31,21 @@ class ChannelCommandUI(CommandUI):
         self.handle_session_resume_callback = handle_session_resume_callback
         self._system_buffer: list[str] = []
 
-    def append_system(self, text: str, style: str = "dim") -> None:
-        if self.append_system_callback:
+    def _queue_system(
+        self,
+        text: str,
+        style: str = "dim",
+        *,
+        mirror_local: bool = True,
+    ) -> None:
+        if mirror_local and self.append_system_callback:
             self.append_system_callback(text, style)
-
         # Buffer the text for grouped delivery to the channel
         # We ignore style for grouping but keep it for individual lines if needed
         self._system_buffer.append(text)
+
+    def append_system(self, text: str, style: str = "dim") -> None:
+        self._queue_system(text, style)
 
     @staticmethod
     def _extract_message_text(message: Any) -> str:
@@ -48,7 +59,7 @@ class ChannelCommandUI(CommandUI):
             content = " ".join(parts) if parts else ""
         return str(content).strip()
 
-    async def _send_text_chunks(self, text: str) -> None:
+    async def _send_text_chunks(self, text: str, *, mirror_local: bool = True) -> None:
         """Flush long plain-text payloads in channel-safe chunks."""
         text = (text or "").strip()
         if not text:
@@ -64,7 +75,7 @@ class ChannelCommandUI(CommandUI):
             chunk = chunk.rstrip()
             if not chunk:
                 chunk = pending[: self._TEXT_CHUNK_LIMIT]
-            self.append_system(chunk)
+            self._queue_system(chunk, mirror_local=mirror_local)
             await self.flush()
             pending = pending[len(chunk) :].lstrip("\n")
 
@@ -174,17 +185,31 @@ class ChannelCommandUI(CommandUI):
     async def handle_session_resume(
         self, thread_id: str, workspace_dir: str | None = None
     ) -> None:
+        mirror_local = self.handle_session_resume_callback is None
         if self.handle_session_resume_callback:
             await self.handle_session_resume_callback(thread_id, workspace_dir)
         from ..sessions import get_thread_messages
 
         lines = [f"Resumed session: {thread_id}"]
-        messages = await get_thread_messages(thread_id)
+        try:
+            messages = await get_thread_messages(thread_id)
+        except Exception as exc:
+            _logger.exception(
+                "Failed to load saved history for resumed thread %s",
+                thread_id,
+            )
+            lines.append(f"(history unavailable: {exc})")
+            await self._send_text_chunks("\n".join(lines), mirror_local=mirror_local)
+            return
+
         display = [m for m in messages if getattr(m, "type", None) in ("human", "ai")]
 
         if not display:
-            lines.append("No saved messages in this session.")
-            await self._send_text_chunks("\n".join(lines))
+            if messages:
+                lines.append("No displayable messages in this session.")
+            else:
+                lines.append("No saved messages in this session.")
+            await self._send_text_chunks("\n".join(lines), mirror_local=mirror_local)
             return
 
         HISTORY_WINDOW = 10
@@ -203,4 +228,4 @@ class ChannelCommandUI(CommandUI):
             else:
                 lines.append(f"EvoScientist: {text}")
 
-        await self._send_text_chunks("\n".join(lines))
+        await self._send_text_chunks("\n".join(lines), mirror_local=mirror_local)

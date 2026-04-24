@@ -1197,8 +1197,17 @@ def _run_streaming(
         _media_sent = set()
     _MIN_THINKING_LEN = 200
 
-    if is_stream_cancel_requested(cancel_scope):
-        return state.response_text or "[Stopped.]"
+    def _stopped_response() -> str:
+        marker = "[Stopped.]"
+        current = (state.response_text or "").rstrip()
+        if not current:
+            final_text = marker
+        elif current.endswith(marker):
+            final_text = current
+        else:
+            final_text = f"{current}\n{marker}"
+        state.response_text = final_text
+        return final_text
 
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
@@ -1206,7 +1215,7 @@ def _run_streaming(
             agent, message, thread_id, metadata=metadata
         ):
             if is_stream_cancel_requested(cancel_scope):
-                state.response_text = (state.response_text or "") + "\n[Stopped.]"
+                _stopped_response()
                 return
             event_type = state.handle_event(event)
 
@@ -1301,6 +1310,9 @@ def _run_streaming(
             )
 
     try:
+        if is_stream_cancel_requested(cancel_scope):
+            return _stopped_response()
+
         with Live(
             console=console,
             auto_refresh=False,
@@ -1413,7 +1425,7 @@ def _run_streaming(
         # ask_user: check before HITL (ask_user uses the same resume loop)
         if state.pending_ask_user is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
             if is_stream_cancel_requested(cancel_scope):
-                return state.response_text or "[Stopped.]"
+                return _stopped_response()
             if ask_user_prompt_fn is not None:
                 result = ask_user_prompt_fn(state.pending_ask_user)
             else:
@@ -1423,7 +1435,7 @@ def _run_streaming(
             state.pending_ask_user = None
             state.thinking_text = ""  # reset accumulation for fresh round
             if is_stream_cancel_requested(cancel_scope):
-                return state.response_text or "[Stopped.]"
+                return _stopped_response()
             return _run_streaming(
                 agent=agent,
                 message=Command(resume=result),
@@ -1448,20 +1460,20 @@ def _run_streaming(
         # HITL: check for pending interrupt and handle approval
         if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
             if is_stream_cancel_requested(cancel_scope):
-                return state.response_text or "[Stopped.]"
+                return _stopped_response()
             decisions = _resolve_hitl_approval(
                 state.pending_interrupt,
                 prompt_fn=hitl_prompt_fn,
             )
             if is_stream_cancel_requested(cancel_scope):
-                return state.response_text or "[Stopped.]"
+                return _stopped_response()
             if decisions is not None:
                 from langgraph.types import Command  # type: ignore[import-untyped]
 
                 state.pending_interrupt = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):
-                    return state.response_text or "[Stopped.]"
+                    return _stopped_response()
                 return _run_streaming(
                     agent=agent,
                     message=Command(resume={"decisions": decisions}),

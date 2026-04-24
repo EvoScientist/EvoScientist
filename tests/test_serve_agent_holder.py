@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from EvoScientist.cli.channel import ChannelMessage
+from EvoScientist.cli.channel import (
+    ChannelMessage,
+    _register_channel_request,
+)
 from EvoScientist.cli.commands import (
     _make_serve_cmd_completed_hook,
     _make_serve_start_new_session_cb,
@@ -115,6 +118,23 @@ def test_hook_updates_thread_id_on_resume():
     _run(hook(ctx, "a", cmd))
 
     assert holder["thread_id"] == "new-tid"
+
+
+def test_hook_updates_workspace_dir_on_resume():
+    """`/resume` can restore a different workspace; serve must adopt it."""
+    holder = {"agent": "a", "thread_id": "original-tid", "workspace_dir": "/old-ws"}
+    hook = _make_serve_cmd_completed_hook(holder)
+
+    ctx = MagicMock()
+    ctx.agent = "a"
+    ctx.thread_id = "new-tid"
+    ctx.workspace_dir = "/restored-ws"
+    cmd = MagicMock()
+    cmd.name = "/resume"
+
+    _run(hook(ctx, "a", cmd))
+
+    assert holder["workspace_dir"] == "/restored-ws"
 
 
 def test_hook_syncs_channel_module_thread_id():
@@ -274,6 +294,7 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
         patch("EvoScientist.cli.commands._set_channel_response") as mock_set_resp,
         patch("EvoScientist.cli.tui_runtime.run_streaming") as mock_run_streaming,
     ):
+        _register_channel_request(msg)
         _serve_process_message(
             msg,
             agent_holder=holder,
@@ -284,3 +305,55 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
 
     mock_set_resp.assert_called_once_with("msg-1", "Command error: slash broke")
     mock_run_streaming.assert_not_called()
+
+
+def test_serve_process_message_uses_runtime_workspace_from_holder():
+    """After `/resume`, serve should use the adopted workspace, not startup ws."""
+    msg = ChannelMessage(
+        msg_id="msg-2",
+        content="hello",
+        sender="channel-user",
+        channel_type="imessage",
+        metadata={},
+        channel_ref=None,
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-2",
+    )
+    holder = {
+        "agent": "agent",
+        "thread_id": "tid",
+        "workspace_dir": "/restored-workspace",
+    }
+    captured: dict[str, str] = {}
+
+    async def _fake_dispatch(*args, **kwargs):
+        captured["slash_workspace"] = kwargs["workspace_dir"]
+        return False
+
+    def _fake_build_metadata(workspace_dir: str, _model: str | None):
+        captured["meta_workspace"] = workspace_dir
+        return {}
+
+    with (
+        patch(
+            "EvoScientist.cli.commands.dispatch_channel_slash_command",
+            new=AsyncMock(side_effect=_fake_dispatch),
+        ),
+        patch(
+            "EvoScientist.cli.commands.build_metadata",
+            side_effect=_fake_build_metadata,
+        ),
+        patch("EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"),
+    ):
+        _register_channel_request(msg)
+        _serve_process_message(
+            msg,
+            agent_holder=holder,
+            model="model",
+            workspace_dir="/startup-workspace",
+            show_thinking=False,
+        )
+
+    assert captured["slash_workspace"] == "/restored-workspace"
+    assert captured["meta_workspace"] == "/restored-workspace"
