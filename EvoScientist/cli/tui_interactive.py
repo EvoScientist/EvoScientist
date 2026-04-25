@@ -191,6 +191,29 @@ _SUMMARY_CONTINUATION_EVENTS = {
 }
 
 
+async def _sync_tui_command_completion(
+    app: Any,
+    ctx: CommandContext,
+    original_agent: Any,
+    cmd: Any,
+) -> None:
+    """Adopt successful command-side state changes back into the TUI app."""
+    agent_swapped = ctx.agent is not None and ctx.agent is not original_agent
+    if agent_swapped:
+        from ..EvoScientist import _ensure_config
+
+        app._agent_loader.adopt(ctx.agent)
+        cfg = _ensure_config()
+        update_model = getattr(app, "update_status_after_model_change", None)
+        if callable(update_model):
+            update_model(cfg.model, cfg.provider)
+        if _channels_is_running():
+            _ch_mod._cli_agent = ctx.agent
+            _ch_mod._cli_thread_id = app._conversation_tid
+
+    await app._refresh_status_snapshot(reset_streaming_text=True)
+
+
 def _should_finalize_active_summarization(event_type: str) -> bool:
     """Return whether an active summary panel should stop for this event."""
     return bool(event_type) and event_type not in _SUMMARY_CONTINUATION_EVENTS
@@ -729,6 +752,14 @@ def run_textual_interactive(
             self.call_later(
                 lambda m=msg: asyncio.ensure_future(self._process_channel_message(m))
             )
+
+        async def _on_channel_cmd_completed(
+            self,
+            ctx: CommandContext,
+            original_agent: Any,
+            cmd: Any,
+        ) -> None:
+            await _sync_tui_command_completion(self, ctx, original_agent, cmd)
 
         # ── Widget helpers ─────────────────────────────────────
 
@@ -1883,6 +1914,7 @@ def run_textual_interactive(
                     start_new_session_cb=self.start_new_session,
                     handle_session_resume_cb=self.handle_session_resume,
                     await_agent_ready=self._await_agent_ready,
+                    on_cmd_completed=self._on_channel_cmd_completed,
                 )
                 if _slash_handled:
                     return  # outer finally handles _busy / widget cleanup
@@ -2343,27 +2375,11 @@ def run_textual_interactive(
                 )
 
                 if await cmd_manager.execute(command, ctx):
-                    # Sync agent back if command replaced it (e.g. /model).
-                    # ``is not None`` guard: non-agent commands (ctx.agent
-                    # starts None) must not clobber a valid loaded agent.
-                    if (
-                        ctx.agent is not None
-                        and ctx.agent is not self._agent_loader.agent
-                    ):
-                        # ``adopt`` also cancels/supersedes any in-flight
-                        # load so a late completion can't overwrite the
-                        # replacement agent (/model on a broken provider).
-                        self._agent_loader.adopt(ctx.agent)
-                        if _channels_is_running():
-                            _ch_mod._cli_agent = ctx.agent
-                            _ch_mod._cli_thread_id = self._conversation_tid
-                    # Do NOT invalidate the usage baseline after /compact.
-                    # build_session_status_snapshot() only counts raw checkpoint
-                    # messages (~46 tokens) and misses system prompt + tool
-                    # definitions (~50K overhead). The stale pre-compact count
-                    # is far more accurate; the next LLM call will correct it.
-                    await self._refresh_status_snapshot(
-                        reset_streaming_text=True,
+                    await _sync_tui_command_completion(
+                        self,
+                        ctx,
+                        self._agent_loader.agent,
+                        cmd,
                     )
                     return
 

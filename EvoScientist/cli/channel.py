@@ -188,14 +188,38 @@ def _cancel_channel_session(channel_type: str, chat_id: str) -> tuple[int, int]:
     """Cancel queued and active work for one channel chat session."""
     session_key = _channel_session_key(channel_type, chat_id)
     with _channel_request_lock:
-        request_ids = tuple(_session_requests.get(session_key, ()))
-        active_scopes = tuple(
-            slot["cancel_scope"]
-            for msg_id in request_ids
-            if (slot := _channel_requests.get(msg_id)) is not None
-            and slot.get("state") == "active"
-        )
-        _cancelled_channel_messages.update(request_ids)
+        request_ids: list[str] = []
+        cancelled_ids: list[str] = []
+        active_scopes: list[str] = []
+        with _response_lock:
+            for msg_id in tuple(_session_requests.get(session_key, ())):
+                request_slot = _channel_requests.get(msg_id)
+                if request_slot is None:
+                    continue
+                response_slot = _pending_responses.get(msg_id)
+                response_resolved = False
+                if response_slot is not None:
+                    future = response_slot["future"]
+                    # Once a response is already resolved, leave the slot alone
+                    # so the bus waiter can still publish it instead of falling
+                    # back to "No response".
+                    response_resolved = (
+                        response_slot.get("response") is not None or future.done()
+                    )
+                    if not response_resolved:
+                        request_ids.append(msg_id)
+
+                should_cancel = False
+                if response_slot is None:
+                    should_cancel = request_slot.get("state") == "active"
+                else:
+                    should_cancel = not response_resolved
+
+                if should_cancel:
+                    cancelled_ids.append(msg_id)
+                if request_slot.get("state") == "active" and should_cancel:
+                    active_scopes.append(request_slot["cancel_scope"])
+        _cancelled_channel_messages.update(cancelled_ids)
 
     for msg_id in request_ids:
         _pop_channel_response(msg_id, cancel_pending=True)

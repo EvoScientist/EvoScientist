@@ -540,6 +540,54 @@ class TestBusInboundConsumer:
 
         _run(_test())
 
+    def test_stop_leaves_resolved_response_available_for_delivery(self):
+        """`/stop` must not steal a response whose waiter already resolved."""
+        from EvoScientist.cli import channel as channel_mod
+        from EvoScientist.cli.channel import (
+            ChannelMessage,
+            _cancel_channel_session,
+            _claim_channel_request,
+            _complete_channel_request,
+            _enqueue_channel_message,
+            _pop_channel_response,
+            _set_channel_response,
+        )
+
+        async def _test():
+            msg = ChannelMessage(
+                msg_id="msg-resolved",
+                content="already answered",
+                sender="user1",
+                channel_type="fake",
+                metadata={},
+                channel_ref=None,
+                bus_ref=None,
+                chat_id="chat1",
+                message_id="m-resolved",
+            )
+
+            waiter = _enqueue_channel_message(msg)
+            assert _claim_channel_request(msg) is True
+
+            _set_channel_response(msg.msg_id, "final answer")
+            assert await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0) == (
+                "final answer"
+            )
+
+            cancelled_count, active_count = _cancel_channel_session("fake", "chat1")
+            assert cancelled_count == 0
+            assert active_count == 0
+
+            with channel_mod._response_lock:
+                assert msg.msg_id in channel_mod._pending_responses
+            with channel_mod._channel_request_lock:
+                assert msg.msg_id not in channel_mod._cancelled_channel_messages
+
+            assert _pop_channel_response(msg.msg_id) == "final answer"
+            _complete_channel_request(msg.msg_id)
+
+        _run(_test())
+
     def test_message_counting(self):
         """Messages are counted via record_message."""
         from EvoScientist.cli.channel import (
