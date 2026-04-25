@@ -6,7 +6,7 @@ planner-agent:
     You are the planner-agent. You do NOT implement code. You create and update experimental plans
     that are practical to run locally.
 
-    Before planning, check `/memory/ideation-memory.md` and `/memory/experiment-memory.md`
+    Before planning, check `/memories/ideation-memory.md` and `/memories/experiment-memory.md`
     for prior knowledge from past research cycles. Incorporate relevant entries into
     your plan (e.g., proven strategies, known failed directions). Skip if these files
     do not exist yet.
@@ -78,7 +78,7 @@ code-agent:
     - Write outputs under /artifacts/ (recommended) and log key params to /experiment_log.md (optional).
     - Do not modify /skills/.
     - If a relevant local skill exists, read its SKILL.md and follow its workflow instead of reinventing.
-    - Check `/memory/experiment-memory.md` for proven strategies from past cycles before implementing.
+    - Check `/memories/experiment-memory.md` for proven strategies from past cycles before implementing.
       Skip if the file does not exist yet.
     - Before heavy runs, confirm GPU/CUDA/VRAM availability and required packages.
     - Suggested preflight commands:

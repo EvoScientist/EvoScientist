@@ -29,8 +29,8 @@ def think_tool(reflection: str) -> str:
        phases — ideation, experiment execution, paper writing, review, and more.
        Follow a skill's workflow rather than improvising when one is available.
     4. Prior knowledge — Have I checked research memory before starting?
-       `/memory/ideation-memory.md` records promising and failed research directions.
-       `/memory/experiment-memory.md` records proven strategies from past cycles.
+       `/memories/ideation-memory.md` records promising and failed research directions.
+       `/memories/experiment-memory.md` records proven strategies from past cycles.
        Read these at the start of new work. After completing or failing a task,
        consider whether the outcome should be recorded back into memory.
        Skip this if the memory files do not exist yet.
