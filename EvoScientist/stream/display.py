@@ -110,6 +110,19 @@ def discard_stream_cancel(cancel_scope: str | None = None) -> None:
             _stream_cancel_events.pop(scope_key, None)
 
 
+def build_stopped_response_text(previous_text: str | None) -> tuple[str, str]:
+    """Normalize a cancelled response and return `(trimmed_previous, final_text)`."""
+    marker = "[Stopped.]"
+    current = (previous_text or "").rstrip()
+    if not current:
+        final_text = marker
+    elif current.endswith(marker):
+        final_text = current
+    else:
+        final_text = f"{current}\n{marker}"
+    return current, final_text
+
+
 # ---------------------------------------------------------------------------
 # Todo formatting
 # ---------------------------------------------------------------------------
@@ -1198,14 +1211,7 @@ def _run_streaming(
     _MIN_THINKING_LEN = 200
 
     def _stopped_response() -> str:
-        marker = "[Stopped.]"
-        current = (state.response_text or "").rstrip()
-        if not current:
-            final_text = marker
-        elif current.endswith(marker):
-            final_text = current
-        else:
-            final_text = f"{current}\n{marker}"
+        _, final_text = build_stopped_response_text(state.response_text)
         state.response_text = final_text
         return final_text
 

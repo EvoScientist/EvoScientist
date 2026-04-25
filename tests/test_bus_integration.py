@@ -32,39 +32,27 @@ def clean_channel_state():
     from EvoScientist.cli.channel import _message_queue
     from EvoScientist.stream import display as display_mod
 
-    _drain_queue(_message_queue)
-    with channel_mod._response_lock:
-        channel_mod._pending_responses.clear()
-    with channel_mod._channel_request_lock:
-        channel_mod._channel_requests.clear()
-        channel_mod._session_requests.clear()
-        channel_mod._cancelled_channel_messages.clear()
-    with channel_mod._hitl_lock:
-        channel_mod._pending_hitl.clear()
-        channel_mod._hitl_auto_approve.clear()
-    with display_mod._stream_cancel_lock:
-        display_mod._stream_cancel_event.clear()
-        display_mod._stream_cancel_events.clear()
-        display_mod._stream_cancel_events[display_mod._DEFAULT_STREAM_CANCEL_SCOPE] = (
-            display_mod._stream_cancel_event
-        )
+    def _reset() -> None:
+        _drain_queue(_message_queue)
+        with channel_mod._response_lock:
+            channel_mod._pending_responses.clear()
+        with channel_mod._channel_request_lock:
+            channel_mod._channel_requests.clear()
+            channel_mod._session_requests.clear()
+            channel_mod._cancelled_channel_messages.clear()
+        with channel_mod._hitl_lock:
+            channel_mod._pending_hitl.clear()
+            channel_mod._hitl_auto_approve.clear()
+        with display_mod._stream_cancel_lock:
+            display_mod._stream_cancel_event.clear()
+            display_mod._stream_cancel_events.clear()
+            display_mod._stream_cancel_events[
+                display_mod._DEFAULT_STREAM_CANCEL_SCOPE
+            ] = display_mod._stream_cancel_event
+
+    _reset()
     yield
-    _drain_queue(_message_queue)
-    with channel_mod._response_lock:
-        channel_mod._pending_responses.clear()
-    with channel_mod._channel_request_lock:
-        channel_mod._channel_requests.clear()
-        channel_mod._session_requests.clear()
-        channel_mod._cancelled_channel_messages.clear()
-    with channel_mod._hitl_lock:
-        channel_mod._pending_hitl.clear()
-        channel_mod._hitl_auto_approve.clear()
-    with display_mod._stream_cancel_lock:
-        display_mod._stream_cancel_event.clear()
-        display_mod._stream_cancel_events.clear()
-        display_mod._stream_cancel_events[display_mod._DEFAULT_STREAM_CANCEL_SCOPE] = (
-            display_mod._stream_cancel_event
-        )
+    _reset()
 
 
 class _FakeConfig:
@@ -481,7 +469,7 @@ class TestBusInboundConsumer:
         """`/stop` should cancel a queued request instead of only acking."""
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import (
-            _claim_channel_request,
+            _claim_or_complete_channel_request,
             _handle_bus_message,
             _message_queue,
         )
@@ -535,10 +523,14 @@ class TestBusInboundConsumer:
 
             skipped = _message_queue.get_nowait()
             assert skipped.msg_id == queued.msg_id
-            assert _claim_channel_request(skipped) is False
+            assert _claim_or_complete_channel_request(skipped) is False
 
             with channel_mod._response_lock:
                 assert queued.msg_id not in channel_mod._pending_responses
+            with channel_mod._channel_request_lock:
+                assert queued.msg_id not in channel_mod._channel_requests
+                assert queued.msg_id not in channel_mod._cancelled_channel_messages
+                assert "fake:chat1" not in channel_mod._session_requests
 
             outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
             assert outbound.content == "Stopped."

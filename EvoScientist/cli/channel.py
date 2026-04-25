@@ -145,6 +145,14 @@ def _claim_channel_request(msg: ChannelMessage) -> bool:
         return True
 
 
+def _claim_or_complete_channel_request(msg: ChannelMessage) -> bool:
+    """Claim a request, or clean it up if `/stop` cancelled it while queued."""
+    if _claim_channel_request(msg):
+        return True
+    _complete_channel_request(msg.msg_id)
+    return False
+
+
 def _channel_request_state(msg_id: str) -> str | None:
     with _channel_request_lock:
         slot = _channel_requests.get(msg_id)

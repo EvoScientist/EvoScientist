@@ -73,19 +73,6 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
-def _build_cancelled_response_text(previous_text: str | None) -> tuple[str, str]:
-    """Normalize a cancelled response and return `(trimmed_previous, final_text)`."""
-    marker = "[Stopped.]"
-    current = (previous_text or "").rstrip()
-    if not current:
-        final_text = marker
-    elif current.endswith(marker):
-        final_text = current
-    else:
-        final_text = f"{current}\n{marker}"
-    return current, final_text
-
-
 def _build_welcome_banner(
     *,
     thread_id: str,
@@ -1010,7 +997,10 @@ def run_textual_interactive(
                     When provided (channel messages), this is called instead
                     of mounting the AskUserWidget.
             """
-            from ..stream.display import is_stream_cancel_requested
+            from ..stream.display import (
+                build_stopped_response_text,
+                is_stream_cancel_requested,
+            )
 
             container = self.query_one("#chat", VerticalScroll)
 
@@ -1084,7 +1074,7 @@ def run_textual_interactive(
             async def _mark_cancelled_response() -> str:
                 nonlocal assistant_w
                 previous_text = state.response_text or ""
-                current, final_text = _build_cancelled_response_text(previous_text)
+                current, final_text = build_stopped_response_text(previous_text)
 
                 state.response_text = final_text
                 self._set_status_streaming_text(final_text)
@@ -1792,7 +1782,7 @@ def run_textual_interactive(
               [channel: Replied to sender]
             """
             prompt_widget = None
-            if not _ch_mod._claim_channel_request(msg):
+            if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
             try:
                 self._busy = True

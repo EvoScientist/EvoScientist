@@ -29,7 +29,7 @@ from .channel import (
     ChannelMessage,
     _channel_message_cancel_scope,
     _channels_stop,
-    _claim_channel_request,
+    _claim_or_complete_channel_request,
     _complete_channel_request,
     _message_queue,
     _set_channel_response,
@@ -628,7 +628,7 @@ def _serve_process_message(
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
-    if not _claim_channel_request(msg):
+    if not _claim_or_complete_channel_request(msg):
         return
 
     runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir

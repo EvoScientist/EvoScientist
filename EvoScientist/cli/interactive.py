@@ -729,7 +729,7 @@ def cmd_interactive(
                   [channel: Replied to sender]
                   ─────────────────
                 """
-                if not _ch_mod._claim_channel_request(msg):
+                if not _ch_mod._claim_or_complete_channel_request(msg):
                     return
 
                 try:
