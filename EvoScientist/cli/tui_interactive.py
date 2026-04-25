@@ -73,6 +73,19 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
+def _build_cancelled_response_text(previous_text: str | None) -> tuple[str, str]:
+    """Normalize a cancelled response and return `(trimmed_previous, final_text)`."""
+    marker = "[Stopped.]"
+    current = (previous_text or "").rstrip()
+    if not current:
+        final_text = marker
+    elif current.endswith(marker):
+        final_text = current
+    else:
+        final_text = f"{current}\n{marker}"
+    return current, final_text
+
+
 def _build_welcome_banner(
     *,
     thread_id: str,
@@ -1070,15 +1083,8 @@ def run_textual_interactive(
 
             async def _mark_cancelled_response() -> str:
                 nonlocal assistant_w
-                marker = "[Stopped.]"
                 previous_text = state.response_text or ""
-                current = previous_text.rstrip()
-                if not current:
-                    final_text = marker
-                elif current.endswith(marker):
-                    final_text = current
-                else:
-                    final_text = f"{current}\n{marker}"
+                current, final_text = _build_cancelled_response_text(previous_text)
 
                 state.response_text = final_text
                 self._set_status_streaming_text(final_text)
@@ -1088,9 +1094,13 @@ def run_textual_interactive(
                         assistant_w = AssistantMessage(final_text)
                         await container.mount(assistant_w)
                 else:
-                    suffix = final_text[len(previous_text) :]
-                    if suffix:
-                        await assistant_w.append_content(suffix)
+                    if previous_text != current:
+                        assistant_w._content = final_text
+                        await assistant_w.stop_stream()
+                    else:
+                        suffix = final_text[len(current) :]
+                        if suffix:
+                            await assistant_w.append_content(suffix)
 
                 _schedule_scroll()
                 return final_text

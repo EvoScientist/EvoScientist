@@ -278,6 +278,80 @@ class TestBusInboundConsumer:
 
         _run(_test())
 
+    def test_late_timeout_keeps_active_request_cancellable(self, monkeypatch):
+        """Late timeout must not discard an active request's cancel scope."""
+        from EvoScientist.cli import channel as channel_mod
+        from EvoScientist.cli.channel import (
+            _channel_message_cancel_scope,
+            _channel_request_state,
+            _claim_channel_request,
+            _handle_bus_message,
+            _message_queue,
+        )
+        from EvoScientist.stream import display as display_mod
+
+        monkeypatch.setattr(channel_mod, "_RESPONSE_TIMEOUT", 0.05)
+        monkeypatch.setattr(channel_mod, "_LATE_RESPONSE_TIMEOUT", 0.05)
+
+        async def _test():
+            bus = MessageBus()
+            manager = ChannelManager(bus)
+            ch = FakeChannel()
+            manager.register(ch)
+
+            task = asyncio.create_task(
+                _handle_bus_message(
+                    bus,
+                    manager,
+                    InboundMessage(
+                        channel="fake",
+                        sender_id="user1",
+                        chat_id="chat1",
+                        content="still running",
+                        message_id="msg-active",
+                    ),
+                )
+            )
+
+            queued = None
+            for _ in range(20):
+                with _message_queue.mutex:
+                    queued = _message_queue.queue[0] if _message_queue.queue else None
+                if queued is not None:
+                    break
+                await asyncio.sleep(0.05)
+
+            assert queued is not None
+            assert _claim_channel_request(queued) is True
+
+            notice = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+            assert "Still working on it" in notice.content
+
+            await task
+
+            assert _channel_request_state(queued.msg_id) == "active"
+            cancel_scope = _channel_message_cancel_scope(queued)
+            assert not display_mod.is_stream_cancel_requested(cancel_scope)
+
+            await _handle_bus_message(
+                bus,
+                manager,
+                InboundMessage(
+                    channel="fake",
+                    sender_id="user1",
+                    chat_id="chat1",
+                    content="/stop",
+                    message_id="msg-stop-active",
+                ),
+            )
+
+            ack = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+            assert ack.content == "Stopped."
+            assert ack.reply_to == "msg-stop-active"
+            assert display_mod.is_stream_cancel_requested(cancel_scope)
+
+        _run(_test())
+
     def test_cancelled_wait_cleans_pending_response(self):
         """Cancelling a pending bus message should not leak its response slot."""
         from EvoScientist.cli import channel as channel_mod

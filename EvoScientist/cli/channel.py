@@ -977,7 +977,8 @@ async def _handle_bus_message(bus, manager, msg) -> None:
                     f"for {cm.msg_id}"
                 )
                 _pop_channel_response(cm.msg_id, cancel_pending=True)
-                _complete_channel_request(cm.msg_id)
+                if _channel_request_state(cm.msg_id) != "active":
+                    _complete_channel_request(cm.msg_id)
                 return
 
         response = _pop_channel_response(cm.msg_id) or "No response"
