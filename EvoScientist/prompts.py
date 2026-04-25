@@ -2,33 +2,23 @@
 
 Layout
 ------
-The main agent's system prompt is assembled by :func:`get_system_prompt` from
-several discrete sections, each owning one concern:
+The main agent's system prompt is assembled by :func:`get_system_prompt` from:
 
-- :data:`EVOSCIENTIST_IDENTITY` — who the agent is and how it should operate
+- :data:`EVOSCIENTIST_IDENTITY` — agent role and operating principles
 - :data:`EXPERIMENT_WORKFLOW` — six-phase research process (intake → verify)
-- :data:`REPORT_TEMPLATE` — single source of truth for final-report structure
+- :data:`REPORT_TEMPLATE` — final-report structure
 - :data:`WRITING_GUIDELINES` — style rules for written output
-- :data:`SHELL_GUIDELINES` — sandbox limits and `execute` tool usage rules
+- :data:`SHELL_GUIDELINES` — sandbox limits and `execute` tool usage
 - :data:`DELEGATION_STRATEGY` — sub-agent delegation strategy
 
-:data:`RESEARCHER_INSTRUCTIONS` is a separate sub-agent prompt (research-agent)
+:data:`RESEARCHER_INSTRUCTIONS` is the research-agent sub-agent prompt,
 loaded via ``_build_prompt_refs`` in ``EvoScientist.py``.
 
 Style notes
 -----------
-1. **No hard wrapping inside prose paragraphs.** The model receives every
-   literal ``\\n`` as a token, so wrapping a sentence onto multiple source
-   lines just inserts noise. Bullet lists and code blocks keep their natural
-   line structure. Modern editors will soft-wrap long lines for humans.
-
-2. **Cross-references: functional only, not decorative.** Every section is
-   concatenated into one prompt that the model sees in full, so backward
-   references like "see your identity section above" are pure noise — the
-   identity is already in context. Only keep a cross-reference when it
-   replaces content that would otherwise need to be inlined (e.g. Step 5
-   pointing at ``Experiment Report Template`` instead of duplicating the
-   six-section schema).
+1. No hard wrapping inside prose paragraphs (``\\n`` is a token).
+2. Cross-references: functional only, not decorative.
+3. Skill internals belong in ``SKILL.md`` — keep here only *which* skill, *when*.
 """
 
 # =============================================================================
@@ -67,13 +57,14 @@ When the task is to plan, run, or report on experiments, follow the workflow bel
 
 ## Research Lifecycle (when applicable)
 For end-to-end research projects, the recommended skill sequence is:
-1. `research-ideation` — Explore the field, identify problems and opportunities
-2. `idea-tournament` — Generate and rank candidate ideas via tree-search + Elo tournament
-3. `paper-planning` — Plan the paper structure, experiments, and figures
-4. `experiment-pipeline` — Execute experiments through 4-stage validation
-5. `paper-writing` — Draft the paper following structured workflow
-6. `paper-review` — Self-review across quality dimensions
-7. `paper-rebuttal` — Respond to reviewer comments (if applicable)
+1. `research-ideation` — Explore the field, rank candidate ideas, produce a research proposal
+2. `paper-planning` — Plan the paper structure, experiments, and figures
+3. `experiment-pipeline` — Execute experiments through staged validation
+4. `paper-writing` — Draft the paper following the structured workflow
+5. `paper-review` — Self-review across quality dimensions
+6. `paper-rebuttal` — Respond to reviewer comments (if applicable)
+
+Other installed skills (debugging, slide generation, memory evolution, paper discovery, etc.) appear in the Skills System listing — use them as needed and read each `SKILL.md` for instructions.
 
 Not every project needs all steps. Match the starting point to what the user already has. Read the appropriate skill's `SKILL.md` for workflow guidance at each phase.
 
@@ -141,13 +132,13 @@ Before delegating code tasks to code-agent, ask the user which code generation m
 - Stop iterating when evidence is sufficient or diminishing returns appear.
 
 ### Memory Evolution (after significant outcomes)
-After completing or failing a major workflow phase, update research memory using the `evo-memory` skill if installed (read `/skills/evo-memory/SKILL.md`):
+At these trigger points, invoke the `evo-memory` skill (read `/skills/evo-memory/SKILL.md` for the protocols, I/O specs, and classification rules):
 
-- **After idea-tournament completes**: Run IDE (Idea Direction Evolution). Input: `/direction-summary.md` + user goal. Output: updated `/memories/ideation-memory.md`.
-- **After experiment-pipeline fails** (no executable code within budget, or method underperforms baseline): Run IVE (Idea Validation Evolution). Input: `/research-proposal.md` + stage trajectory logs. Output: updated `/memories/ideation-memory.md` with failure classification.
-- **After experiment-pipeline succeeds** (all stages pass): Run ESE (Experiment Strategy Evolution). Input: `/research-proposal.md` + all stage trajectory logs. Output: updated `/memories/experiment-memory.md` with proven strategies.
+- After **research-ideation** completes
+- After **experiment-pipeline** fails
+- After **experiment-pipeline** succeeds
 
-If the `evo-memory` skill is not installed, manually update the memory files with key learnings: what worked, what failed, and why.
+If the `evo-memory` skill is not installed, manually log key learnings to `/memories/`: what worked, what failed, and why.
 
 ### Stage Reflection (Recommended Checkpoint)
 After any meaningful experimental stage (baseline, new dataset, new training recipe, etc.), delegate a short reflection to the planner-agent and use it to update the remaining plan.
