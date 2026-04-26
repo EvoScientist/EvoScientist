@@ -9,6 +9,12 @@ Patches:
     - _patch_openai_compat_content: list content→string for strict APIs
     - _patch_ccproxy_codex_compat: ccproxy model fixes + langchain None guard
     - _patch_ccproxy_system_to_developer: system→developer role for ccproxy
+    - _patch_openai_capture_reasoning_content: capture provider
+      reasoning_content into AIMessage.additional_kwargs (module-level,
+      applied at import)
+    - _patch_deepseek_reasoning_passback: re-inject reasoning_content into
+      outgoing DeepSeek assistant messages for thinking-mode multi-turn /
+      tool_use scenarios
 
 Utilities:
     - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
@@ -442,9 +448,12 @@ def _patch_openai_capture_reasoning_content() -> None:
             chunk = _orig_delta_to_chunk(_dict, *args, **kwargs)
             rc = _dict.get("reasoning_content") if hasattr(_dict, "get") else None
             if rc and hasattr(chunk, "additional_kwargs"):
-                # Streaming: accumulate reasoning_content across chunks
-                existing = chunk.additional_kwargs.get("reasoning_content", "")
-                chunk.additional_kwargs["reasoning_content"] = existing + rc
+                # Per-chunk: stash this delta's reasoning_content on the chunk.
+                # Cross-chunk accumulation is handled by AIMessageChunk.__add__
+                # via merge_dicts (string values in additional_kwargs concatenate).
+                chunk.additional_kwargs["reasoning_content"] = (
+                    chunk.additional_kwargs.get("reasoning_content", "") + rc
+                )
             return chunk
 
         _base._convert_dict_to_message = _patched_dict_to_msg
