@@ -1059,8 +1059,9 @@ class TestPatchOpenAICaptureReasoningContent:
     def test_capture_from_non_streaming_response(self):
         """reasoning_content in OpenAI response dict → AIMessage.additional_kwargs."""
         # Importing patches.py applies the monkey-patch at module load
-        import EvoScientist.llm.patches  # noqa: F401
         from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        import EvoScientist.llm.patches  # noqa: F401
 
         msg = _convert_dict_to_message(
             {
@@ -1073,19 +1074,21 @@ class TestPatchOpenAICaptureReasoningContent:
 
     def test_capture_absent_when_field_missing(self):
         """No reasoning_content in response → not added to additional_kwargs."""
-        import EvoScientist.llm.patches  # noqa: F401
         from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        import EvoScientist.llm.patches  # noqa: F401
 
         msg = _convert_dict_to_message({"role": "assistant", "content": "hi"})
         assert "reasoning_content" not in msg.additional_kwargs
 
     def test_capture_from_streaming_chunk(self):
         """reasoning_content delta accumulates across streaming chunks."""
-        import EvoScientist.llm.patches  # noqa: F401
         from langchain_core.messages import AIMessageChunk
         from langchain_openai.chat_models.base import (
             _convert_delta_to_message_chunk,
         )
+
+        import EvoScientist.llm.patches  # noqa: F401
 
         chunk = _convert_delta_to_message_chunk(
             {"role": "assistant", "content": "", "reasoning_content": "thinking"},
@@ -1095,8 +1098,9 @@ class TestPatchOpenAICaptureReasoningContent:
 
     def test_capture_does_not_affect_other_fields(self):
         """Existing tool_calls / function_call extraction unaffected."""
-        import EvoScientist.llm.patches  # noqa: F401
         from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        import EvoScientist.llm.patches  # noqa: F401
 
         msg = _convert_dict_to_message(
             {
