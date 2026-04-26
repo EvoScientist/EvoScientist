@@ -139,7 +139,10 @@ class TestWritingGuidelines:
         assert len(WRITING_GUIDELINES) > 0
 
     def test_mentions_first_person_avoidance(self):
-        assert "first-person" in WRITING_GUIDELINES.lower() or "I ..." in WRITING_GUIDELINES
+        assert (
+            "first-person" in WRITING_GUIDELINES.lower()
+            or "I ..." in WRITING_GUIDELINES
+        )
 
 
 class TestShellGuidelines:
