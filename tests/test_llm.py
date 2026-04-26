@@ -800,6 +800,324 @@ class TestPatchOpenAICompatContent:
 
 
 # =============================================================================
+# Test _patch_deepseek_reasoning_passback
+# =============================================================================
+
+
+class TestPatchDeepseekReasoningPassback:
+    """Verify reasoning_content is injected into DeepSeek payload assistant messages.
+
+    This patch fixes the 400 error from DeepSeek V4 thinking mode in multi-turn
+    + tool_use scenarios.  See langchain PR #34516 for upstream reference.
+    """
+
+    def _make_model(self, model_name="deepseek-v4-pro", payload_messages=None):
+        """Create a mock ChatOpenAI-like model for the DeepSeek base URL."""
+        from unittest.mock import MagicMock
+
+        if payload_messages is None:
+            payload_messages = [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "ok"},
+            ]
+
+        model = MagicMock()
+        model.model_name = model_name
+
+        class _Wrapped:
+            def __init__(self, msgs):
+                self._msgs = msgs
+
+            def to_messages(self):
+                return self._msgs
+
+        model._convert_input = lambda x: _Wrapped(x)
+        model._get_request_payload = MagicMock(
+            return_value={"messages": payload_messages}
+        )
+        return model
+
+    def test_injects_reasoning_content_from_additional_kwargs(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = self._make_model()
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("hi"),
+            AIMessage(
+                content="hello",
+                additional_kwargs={"reasoning_content": "let me think..."},
+            ),
+            HumanMessage("ok"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        assert payload["messages"][1]["reasoning_content"] == "let me think..."
+
+    def test_empty_reasoning_for_reasoner_model(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = self._make_model(model_name="deepseek-reasoner")
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("hi"),
+            AIMessage(content="hello"),  # no reasoning_content
+            HumanMessage("ok"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        assert payload["messages"][1]["reasoning_content"] == ""
+
+    def test_no_injection_for_non_reasoner_without_rc(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = self._make_model(model_name="deepseek-v4-pro")
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("hi"),
+            AIMessage(content="hello"),  # no reasoning_content
+            HumanMessage("ok"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        assert "reasoning_content" not in payload["messages"][1]
+
+    def test_handles_multiple_ai_messages(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = self._make_model(
+            payload_messages=[
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},
+                {"role": "user", "content": "q3"},
+            ]
+        )
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("q1"),
+            AIMessage(content="a1", additional_kwargs={"reasoning_content": "rc1"}),
+            HumanMessage("q2"),
+            AIMessage(content="a2", additional_kwargs={"reasoning_content": "rc2"}),
+            HumanMessage("q3"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        assert payload["messages"][1]["reasoning_content"] == "rc1"
+        assert payload["messages"][3]["reasoning_content"] == "rc2"
+
+    def test_real_world_tool_use_flow(self):
+        """The real scenario this patch was built for: AI thinks → tool_call →
+        ToolMessage → next turn must carry reasoning_content from prior AI msg.
+
+        This mirrors what happens in /tmp/verify_deepseek.py and what the user
+        actually triggers via 'create file then read it' in EvoSci CLI.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        # Mock payload that mirrors what langchain-openai produces:
+        # user → assistant (with tool_calls) → tool_result → user (next turn)
+        model = self._make_model(
+            payload_messages=[
+                {"role": "user", "content": "Read hello.txt"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "file contents", "tool_call_id": "call_1"},
+                {"role": "user", "content": "now what?"},
+            ]
+        )
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("Read hello.txt"),
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "I should call read_file"},
+                tool_calls=[
+                    {"name": "read_file", "args": {}, "id": "call_1"}
+                ],
+            ),
+            ToolMessage(content="file contents", tool_call_id="call_1"),
+            HumanMessage("now what?"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        # The assistant message (index 1) must carry reasoning_content
+        assistant_msg = payload["messages"][1]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["reasoning_content"] == "I should call read_file"
+        # tool_calls preserved
+        assert "tool_calls" in assistant_msg
+        # ToolMessage (index 2) untouched
+        assert "reasoning_content" not in payload["messages"][2]
+
+    def test_mixed_ai_messages_with_and_without_rc(self):
+        """Some AIMessages have reasoning_content, some don't (e.g., legacy turns
+        before patch was deployed). Each should be handled independently."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = self._make_model(
+            model_name="deepseek-v4-pro",  # NOT reasoner — empty fallback off
+            payload_messages=[
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},  # no rc
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},  # has rc
+                {"role": "user", "content": "q3"},
+            ],
+        )
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("q1"),
+            AIMessage(content="a1"),  # no reasoning_content
+            HumanMessage("q2"),
+            AIMessage(
+                content="a2",
+                additional_kwargs={"reasoning_content": "rc2"},
+            ),
+            HumanMessage("q3"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        # First AI msg: no rc → not injected (V4 Pro doesn't get empty fallback)
+        assert "reasoning_content" not in payload["messages"][1]
+        # Second AI msg: has rc → injected
+        assert payload["messages"][3]["reasoning_content"] == "rc2"
+
+    def test_handles_responses_api_payload(self):
+        """Payload without 'messages' key (e.g. Responses API) should not crash."""
+        from unittest.mock import MagicMock
+
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = MagicMock()
+        model.model_name = "deepseek-v4-pro"
+
+        class _Wrapped:
+            def __init__(self, msgs):
+                self._msgs = msgs
+
+            def to_messages(self):
+                return self._msgs
+
+        model._convert_input = lambda x: _Wrapped(x)
+        # Simulate Responses API payload (no 'messages' key)
+        model._get_request_payload = MagicMock(
+            return_value={"input": [{"role": "user", "content": "hi"}]}
+        )
+
+        _patch_deepseek_reasoning_passback(model)
+
+        # Should not raise, just return the payload as-is
+        payload = model._get_request_payload([HumanMessage("hi")])
+        assert "input" in payload
+        assert "messages" not in payload
+
+
+# =============================================================================
+# Test _patch_openai_capture_reasoning_content (module-level monkey-patch)
+# =============================================================================
+
+
+class TestPatchOpenAICaptureReasoningContent:
+    """Verify reasoning_content is captured into AIMessage.additional_kwargs.
+
+    This patch is applied at import time and globally affects langchain-openai's
+    _convert_dict_to_message and _convert_delta_to_message_chunk.
+    """
+
+    def test_capture_from_non_streaming_response(self):
+        """reasoning_content in OpenAI response dict → AIMessage.additional_kwargs."""
+        # Importing patches.py applies the monkey-patch at module load
+        import EvoScientist.llm.patches  # noqa: F401
+        from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        msg = _convert_dict_to_message(
+            {
+                "role": "assistant",
+                "content": "hi",
+                "reasoning_content": "let me think...",
+            }
+        )
+        assert msg.additional_kwargs.get("reasoning_content") == "let me think..."
+
+    def test_capture_absent_when_field_missing(self):
+        """No reasoning_content in response → not added to additional_kwargs."""
+        import EvoScientist.llm.patches  # noqa: F401
+        from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        msg = _convert_dict_to_message({"role": "assistant", "content": "hi"})
+        assert "reasoning_content" not in msg.additional_kwargs
+
+    def test_capture_from_streaming_chunk(self):
+        """reasoning_content delta accumulates across streaming chunks."""
+        import EvoScientist.llm.patches  # noqa: F401
+        from langchain_core.messages import AIMessageChunk
+        from langchain_openai.chat_models.base import (
+            _convert_delta_to_message_chunk,
+        )
+
+        chunk = _convert_delta_to_message_chunk(
+            {"role": "assistant", "content": "", "reasoning_content": "thinking"},
+            AIMessageChunk,
+        )
+        assert chunk.additional_kwargs.get("reasoning_content") == "thinking"
+
+    def test_capture_does_not_affect_other_fields(self):
+        """Existing tool_calls / function_call extraction unaffected."""
+        import EvoScientist.llm.patches  # noqa: F401
+        from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        msg = _convert_dict_to_message(
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+                "reasoning_content": "use the tool",
+            }
+        )
+        assert len(msg.tool_calls) == 1
+        assert msg.tool_calls[0]["name"] == "get_weather"
+        assert msg.additional_kwargs.get("reasoning_content") == "use the tool"
+
+
+# =============================================================================
 # Test _apply_auto_config
 # =============================================================================
 

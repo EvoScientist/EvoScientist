@@ -17,6 +17,7 @@ from langchain.chat_models import init_chat_model
 from .patches import (
     _is_ccproxy_codex,
     _patch_ccproxy_system_to_developer,
+    _patch_deepseek_reasoning_passback,
     _patch_openai_compat_content,
     _patch_openrouter_reasoning_details,
 )
@@ -451,6 +452,11 @@ def get_chat_model(
         _is_third_party or _is_openai_proxy
     ) and _original_provider not in _no_patch_providers:
         _patch_openai_compat_content(chat_model)
+
+    # DeepSeek thinking mode requires reasoning_content passback in multi-turn
+    # + tool_use scenarios.
+    if _original_provider == "deepseek":
+        _patch_deepseek_reasoning_passback(chat_model)
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)

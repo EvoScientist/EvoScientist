@@ -408,3 +408,122 @@ def _patch_ccproxy_system_to_developer(model: Any) -> None:
                 yield chunk
 
         model._astream = _patched_astream
+
+
+# ---------------------------------------------------------------------------
+# Patch (module-level): langchain-openai's _convert_dict_to_message and
+# _convert_delta_to_message_chunk discard provider-specific fields like
+# `reasoning_content`. We monkey-patch them to capture reasoning_content
+# into AIMessage.additional_kwargs so downstream code (incl. our passback
+# patch) can find it. Benign for non-DeepSeek providers — they just don't
+# return this field, so the patch is a no-op for them.
+# ---------------------------------------------------------------------------
+_openai_capture_patched = False
+
+
+def _patch_openai_capture_reasoning_content() -> None:
+    global _openai_capture_patched
+    if _openai_capture_patched:
+        return
+    try:
+        import langchain_openai.chat_models.base as _base
+
+        _orig_dict_to_msg = _base._convert_dict_to_message
+        _orig_delta_to_chunk = _base._convert_delta_to_message_chunk
+
+        def _patched_dict_to_msg(_dict, *args, **kwargs):
+            msg = _orig_dict_to_msg(_dict, *args, **kwargs)
+            rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
+            if rc and hasattr(msg, "additional_kwargs"):
+                msg.additional_kwargs["reasoning_content"] = rc
+            return msg
+
+        def _patched_delta_to_chunk(_dict, *args, **kwargs):
+            chunk = _orig_delta_to_chunk(_dict, *args, **kwargs)
+            rc = _dict.get("reasoning_content") if hasattr(_dict, "get") else None
+            if rc and hasattr(chunk, "additional_kwargs"):
+                # Streaming: accumulate reasoning_content across chunks
+                existing = chunk.additional_kwargs.get("reasoning_content", "")
+                chunk.additional_kwargs["reasoning_content"] = existing + rc
+            return chunk
+
+        _base._convert_dict_to_message = _patched_dict_to_msg
+        _base._convert_delta_to_message_chunk = _patched_delta_to_chunk
+        _openai_capture_patched = True
+    except Exception:
+        pass
+
+
+_patch_openai_capture_reasoning_content()
+
+
+# ---------------------------------------------------------------------------
+# Patch: DeepSeek thinking mode requires reasoning_content to be passed back
+# in all assistant messages for multi-turn + tool_use scenarios.
+# langchain-openai's _convert_message_to_dict drops this field, causing
+# HTTP 400 "The reasoning_content in the thinking mode must be passed back".
+# Mirrors langchain-ai/langchain PR #34516 (which patches langchain-deepseek;
+# we apply equivalent logic to a langchain-openai ChatOpenAI instance).
+# ---------------------------------------------------------------------------
+def _patch_deepseek_reasoning_passback(model: Any) -> None:
+    """Inject reasoning_content into outgoing payload assistant messages.
+
+    DeepSeek V4 thinking mode + tool_use requires every historical assistant
+    message to carry its reasoning_content as a top-level field (sibling to
+    content / tool_calls).  Without this, multi-turn requests fail with 400.
+
+    For deepseek-reasoner models, also injects an empty reasoning_content
+    when none is present (DeepSeek API requires the field even if empty).
+
+    Args:
+        model: A langchain-openai ChatOpenAI instance configured for DeepSeek.
+    """
+    import functools
+
+    from langchain_core.messages import AIMessage
+
+    orig = getattr(model, "_get_request_payload", None)
+    if orig is None:
+        return
+
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+
+    @functools.wraps(orig)
+    def _patched(input_: Any, *, stop: Any = None, **kwargs: Any) -> dict:
+        try:
+            lc_messages = model._convert_input(input_).to_messages()
+        except Exception:
+            _logger.warning(
+                "DeepSeek passback patch: _convert_input failed, "
+                "falling back to unpatched payload (reasoning_content "
+                "will not be injected)",
+                exc_info=True,
+            )
+            return orig(input_, stop=stop, **kwargs)
+
+        rc_map: dict[int, str] = {}
+        for i, m in enumerate(lc_messages):
+            if isinstance(m, AIMessage):
+                rc = m.additional_kwargs.get("reasoning_content")
+                if rc:
+                    rc_map[i] = rc
+
+        payload = orig(input_, stop=stop, **kwargs)
+        msgs = payload.get("messages")
+        if not isinstance(msgs, list):
+            return payload
+
+        is_reasoner = "deepseek-reasoner" in str(getattr(model, "model_name", ""))
+        for i, msg in enumerate(msgs):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            if i in rc_map:
+                msg["reasoning_content"] = rc_map[i]
+            elif is_reasoner and "reasoning_content" not in msg:
+                msg["reasoning_content"] = ""
+
+        return payload
+
+    model._get_request_payload = _patched
