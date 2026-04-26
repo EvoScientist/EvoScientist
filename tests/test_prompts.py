@@ -129,9 +129,12 @@ class TestReportTemplate:
 
     def test_not_duplicated_in_workflow_step5(self):
         """Step 5 should reference REPORT_TEMPLATE, not redefine the schema."""
-        # Heuristic: the verbose enumerated list from the old Step 5 should be
-        # gone (it had "Problem summary\n  - Experiment plan ...").
-        assert "- Problem summary\n  - Experiment plan" not in EXPERIMENT_WORKFLOW
+        # Positive: Step 5 must actually reference the report template.
+        assert "Experiment Report Template" in EXPERIMENT_WORKFLOW
+        # Negative: section headers unique to REPORT_TEMPLATE must not appear
+        # inlined inside EXPERIMENT_WORKFLOW (would mean the schema was
+        # duplicated again, regardless of indentation style).
+        assert "Baselines and comparisons" not in EXPERIMENT_WORKFLOW
 
 
 class TestWritingGuidelines:

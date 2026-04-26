@@ -31,6 +31,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired, cast
 
 from langchain.agents.middleware.types import (
@@ -357,8 +358,6 @@ def _merge_memory(existing_md: str, extracted: dict[str, Any]) -> str:
     exp = extracted.get("experiment_conclusion")
     should_add_exp = bool(exp and isinstance(exp, dict) and exp.get("title"))
     if should_add_exp:
-        from datetime import datetime
-
         date_str = datetime.now().strftime("%Y-%m-%d")
         title = str(exp.get("title", "Untitled")).strip()
         entry = f"\n### [{date_str}] {title}\n"
@@ -690,8 +689,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
         # Use placeholder when memory file doesn't exist yet
         if not memory_content:
             memory_content = "(No memory saved yet. Create `/memories/MEMORY.md` when you learn important information.)"
-
-        from datetime import datetime
 
         from deepagents.middleware._utils import append_to_system_message
 

@@ -155,6 +155,7 @@ When calling the planner-agent in reflection mode, provide:
 - Commands run + key parameters (model, dataset, seeds, batch size, lr, epochs, hardware)
 - Key metrics vs baseline (a small table is ideal)
 - Artifact paths (logs, plots, checkpoints)
+- Which success signals were met/unmet
 - If proposing skills, use skill names from your available skills listing.
 
 Ask the planner-agent to output a **Plan Update JSON** with this schema:
