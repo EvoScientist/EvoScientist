@@ -512,12 +512,11 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
             )
             return orig(input_, stop=stop, **kwargs)
 
-        rc_map: dict[int, str] = {}
-        for i, m in enumerate(lc_messages):
-            if isinstance(m, AIMessage):
-                rc = m.additional_kwargs.get("reasoning_content")
-                if rc:
-                    rc_map[i] = rc
+        ai_rcs: list[str | None] = [
+            m.additional_kwargs.get("reasoning_content")
+            for m in lc_messages
+            if isinstance(m, AIMessage)
+        ]
 
         payload = orig(input_, stop=stop, **kwargs)
         msgs = payload.get("messages")
@@ -525,13 +524,16 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
             return payload
 
         is_reasoner = "deepseek-reasoner" in str(getattr(model, "model_name", ""))
-        for i, msg in enumerate(msgs):
+        ai_idx = 0
+        for msg in msgs:
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
-            if i in rc_map:
-                msg["reasoning_content"] = rc_map[i]
+            rc = ai_rcs[ai_idx] if ai_idx < len(ai_rcs) else None
+            if rc:
+                msg["reasoning_content"] = rc
             elif is_reasoner and "reasoning_content" not in msg:
                 msg["reasoning_content"] = ""
+            ai_idx += 1
 
         return payload
 
