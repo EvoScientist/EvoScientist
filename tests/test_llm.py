@@ -958,9 +958,7 @@ class TestPatchDeepseekReasoningPassback:
             AIMessage(
                 content="",
                 additional_kwargs={"reasoning_content": "I should call read_file"},
-                tool_calls=[
-                    {"name": "read_file", "args": {}, "id": "call_1"}
-                ],
+                tool_calls=[{"name": "read_file", "args": {}, "id": "call_1"}],
             ),
             ToolMessage(content="file contents", tool_call_id="call_1"),
             HumanMessage("now what?"),
