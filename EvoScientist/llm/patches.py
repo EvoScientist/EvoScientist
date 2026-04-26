@@ -440,14 +440,14 @@ def _patch_openai_capture_reasoning_content() -> None:
         def _patched_dict_to_msg(_dict, *args, **kwargs):
             msg = _orig_dict_to_msg(_dict, *args, **kwargs)
             rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
-            if rc and hasattr(msg, "additional_kwargs"):
+            if isinstance(rc, str) and rc and hasattr(msg, "additional_kwargs"):
                 msg.additional_kwargs["reasoning_content"] = rc
             return msg
 
         def _patched_delta_to_chunk(_dict, *args, **kwargs):
             chunk = _orig_delta_to_chunk(_dict, *args, **kwargs)
-            rc = _dict.get("reasoning_content") if hasattr(_dict, "get") else None
-            if rc and hasattr(chunk, "additional_kwargs"):
+            rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
+            if isinstance(rc, str) and rc and hasattr(chunk, "additional_kwargs"):
                 # Per-chunk: stash this delta's reasoning_content on the chunk.
                 # Cross-chunk accumulation is handled by AIMessageChunk.__add__
                 # via merge_dicts (string values in additional_kwargs concatenate).
