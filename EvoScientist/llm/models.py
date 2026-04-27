@@ -14,6 +14,7 @@ from typing import Any
 
 from langchain.chat_models import init_chat_model
 
+from .context_window import apply_known_context_window
 from .patches import (
     _is_ccproxy_codex,
     _patch_ccproxy_system_to_developer,
@@ -465,6 +466,8 @@ def get_chat_model(
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)
+
+    apply_known_context_window(chat_model)
 
     return chat_model
 
