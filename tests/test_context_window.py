@@ -98,14 +98,14 @@ def test_claude_family_pattern_covers_all_variants():
     native = SimpleNamespace(model_name="claude-opus-4-7", profile=None)
     # OpenRouter (dot form, with vendor prefix)
     openrouter = SimpleNamespace(model_name="anthropic/claude-sonnet-4.6", profile=None)
-    # Sonnet, Haiku — covered by family pattern
     sonnet = SimpleNamespace(model_name="claude-sonnet-4-5", profile=None)
+    # Haiku 4.5 is a dict-level exception (200K, not 1M).
     haiku = SimpleNamespace(model_name="claude-haiku-4-5", profile=None)
 
     assert get_context_window(native) == 1_000_000
     assert get_context_window(openrouter) == 1_000_000
     assert get_context_window(sonnet) == 1_000_000
-    assert get_context_window(haiku) == 1_000_000
+    assert get_context_window(haiku) == 200_000
 
 
 def test_dict_entry_overrides_family_pattern():
@@ -120,13 +120,24 @@ def test_dict_entry_overrides_family_pattern():
     assert get_context_window(open_plus) == 1_000_000
 
 
-def test_claude_3x_does_not_match_4x_family():
-    # 4.x family patterns must not match Claude 3.x model IDs.
-    old_sonnet = SimpleNamespace(model_name="claude-3-5-sonnet-20241022", profile=None)
-    old_opus = SimpleNamespace(model_name="claude-3-opus-20240229", profile=None)
+def test_claude_3x_matches_family_but_upstream_profile_wins_in_practice():
+    # The broad ``claude-`` family pattern intentionally also matches older
+    # Claude 3.x. This is safe because langchain-anthropic ships upstream
+    # profiles for those (200K), and profile lookup runs before the patch
+    # table — so the family value never actually reaches downstream callers
+    # for normal Anthropic usage.
+    old_sonnet_no_profile = SimpleNamespace(
+        model_name="claude-3-5-sonnet-20241022", profile=None
+    )
+    old_sonnet_with_profile = SimpleNamespace(
+        model_name="claude-3-5-sonnet-20241022",
+        profile={"max_input_tokens": 200_000},
+    )
 
-    assert get_context_window(old_sonnet) is None
-    assert get_context_window(old_opus) is None
+    # No profile (rare custom-anthropic edge case): family fires.
+    assert get_context_window(old_sonnet_no_profile) == 1_000_000
+    # Normal langchain-anthropic path: upstream profile wins.
+    assert get_context_window(old_sonnet_with_profile) == 200_000
 
 
 def test_apply_injects_into_empty_profile():

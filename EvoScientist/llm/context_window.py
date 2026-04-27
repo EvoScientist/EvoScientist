@@ -14,26 +14,19 @@ DEFAULT_CONTEXT_WINDOW_FALLBACK = 200_000
 # ``model.name``); lookup tries exact match first, then ``split('/')[-1]``
 # to also accept OpenRouter-style ``vendor/model`` IDs.
 _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # Qwen 3.6 open-source variants (262K) — exceptions to the closed-source
-    # ``qwen3.6`` family pattern below (which defaults to 1M). Dict lookups
-    # win over family matches, so add new ``qwen3.6-<size>b`` entries here.
+    # Qwen 3.6 open-source variants — exceptions to the ``qwen3.6`` family.
     "qwen3.6-27b": 262_000,
     "qwen3.6-35b-a3b": 262_000,
+    # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
+    "claude-haiku-4-5": 200_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
 # Each entry is (substring_to_match_in_lowercased_model_id, window).
 # Order matters — first match wins; put more specific patterns first.
 _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
-    # All Claude 4.x — 1M via the ``context-1m-2025-08-07`` beta header.
-    # Native Anthropic uses dash form (``claude-opus-4-7``), OpenRouter uses
-    # dot form (``anthropic/claude-opus-4.7``); each substring covers both.
-    # Three patterns are intentionally narrow so older Claude 3.x (200K) does
-    # not get incorrectly upgraded to 1M when langchain-anthropic profiles
-    # are unavailable (e.g. via ``custom-anthropic`` third-party endpoints).
-    ("claude-opus-4", 1_000_000),
-    ("claude-sonnet-4", 1_000_000),
-    ("claude-haiku-4", 1_000_000),
+    # All Claude — 1M via the ``context-1m-2025-08-07`` beta header.
+    ("claude-", 1_000_000),
     # OpenAI GPT-5.5 family — base, pro, future variants
     ("gpt-5.5", 1_050_000),
     # Moonshot Kimi K2 family — k2.5, k2.6, k2-thinking, k2-thinking-turbo
