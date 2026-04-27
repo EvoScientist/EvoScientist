@@ -97,9 +97,7 @@ def test_claude_family_pattern_covers_all_variants():
     # Native Anthropic (dash form)
     native = SimpleNamespace(model_name="claude-opus-4-7", profile=None)
     # OpenRouter (dot form, with vendor prefix)
-    openrouter = SimpleNamespace(
-        model_name="anthropic/claude-sonnet-4.6", profile=None
-    )
+    openrouter = SimpleNamespace(model_name="anthropic/claude-sonnet-4.6", profile=None)
     # Sonnet, Haiku — covered by family pattern
     sonnet = SimpleNamespace(model_name="claude-sonnet-4-5", profile=None)
     haiku = SimpleNamespace(model_name="claude-haiku-4-5", profile=None)
@@ -187,9 +185,7 @@ def test_apply_handles_non_dict_profile_safely():
 
 def test_lookup_is_case_insensitive():
     # SiliconFlow uses capitalized IDs like "Pro/moonshotai/Kimi-K2.5"
-    siliconflow = SimpleNamespace(
-        model_name="Pro/moonshotai/Kimi-K2.5", profile=None
-    )
+    siliconflow = SimpleNamespace(model_name="Pro/moonshotai/Kimi-K2.5", profile=None)
     assert get_context_window(siliconflow) == 262_000
 
     # GLM-5 capitalized variant
