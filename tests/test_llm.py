@@ -879,7 +879,7 @@ class TestPatchDeepseekReasoningPassback:
 
         assert payload["messages"][1]["reasoning_content"] == ""
 
-    def test_no_injection_for_non_reasoner_without_rc(self):
+    def test_empty_fallback_for_non_reasoner_without_rc(self):
         from langchain_core.messages import AIMessage, HumanMessage
 
         from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
@@ -894,7 +894,9 @@ class TestPatchDeepseekReasoningPassback:
         ]
         payload = model._get_request_payload(messages)
 
-        assert "reasoning_content" not in payload["messages"][1]
+        # Empty-string fallback applies to ALL DeepSeek models (not just
+        # reasoner) so cross-provider history doesn't trigger 400.
+        assert payload["messages"][1]["reasoning_content"] == ""
 
     def test_handles_multiple_ai_messages(self):
         from langchain_core.messages import AIMessage, HumanMessage
@@ -986,7 +988,7 @@ class TestPatchDeepseekReasoningPassback:
         from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
 
         model = self._make_model(
-            model_name="deepseek-v4-pro",  # NOT reasoner — empty fallback off
+            model_name="deepseek-v4-pro",
             payload_messages=[
                 {"role": "user", "content": "q1"},
                 {"role": "assistant", "content": "a1"},  # no rc
@@ -1009,8 +1011,8 @@ class TestPatchDeepseekReasoningPassback:
         ]
         payload = model._get_request_payload(messages)
 
-        # First AI msg: no rc → not injected (V4 Pro doesn't get empty fallback)
-        assert "reasoning_content" not in payload["messages"][1]
+        # First AI msg: no rc → empty-string fallback (covers cross-model switch)
+        assert payload["messages"][1]["reasoning_content"] == ""
         # Second AI msg: has rc → injected
         assert payload["messages"][3]["reasoning_content"] == "rc2"
 
@@ -1044,6 +1046,37 @@ class TestPatchDeepseekReasoningPassback:
         payload = model._get_request_payload([HumanMessage("hi")])
         assert "input" in payload
         assert "messages" not in payload
+
+    def test_cross_provider_switch_history(self):
+        """User chats with Anthropic/OpenAI then switches to DeepSeek V4 Pro.
+
+        Historical AI messages have no reasoning_content (the previous
+        provider never produced it). The patch must inject an empty-string
+        fallback so DeepSeek doesn't 400 on
+        "reasoning_content must be passed back to the API".
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+
+        model = self._make_model(
+            model_name="deepseek-v4-pro",
+            payload_messages=[
+                {"role": "user", "content": "earlier question to anthropic"},
+                {"role": "assistant", "content": "anthropic answer"},
+                {"role": "user", "content": "now ask deepseek pro"},
+            ],
+        )
+        _patch_deepseek_reasoning_passback(model)
+
+        messages = [
+            HumanMessage("earlier question to anthropic"),
+            AIMessage(content="anthropic answer"),  # no reasoning_content
+            HumanMessage("now ask deepseek pro"),
+        ]
+        payload = model._get_request_payload(messages)
+
+        assert payload["messages"][1]["reasoning_content"] == ""
 
 
 # =============================================================================

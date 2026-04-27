@@ -481,8 +481,18 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
     message to carry its reasoning_content as a top-level field (sibling to
     content / tool_calls).  Without this, multi-turn requests fail with 400.
 
-    For deepseek-reasoner models, also injects an empty reasoning_content
-    when none is present (DeepSeek API requires the field even if empty).
+    For assistant messages where no reasoning_content was captured (e.g.
+    history left over from another provider, from DeepSeek Flash, or from an
+    older EvoSci version that ran before the capture patch landed), we
+    inject an empty string.  This satisfies DeepSeek's format requirement
+    in thinking mode.  Non-thinking DeepSeek endpoints are believed to
+    accept the extra field without complaint based on observed behavior,
+    but this has not been independently audited; if a future DeepSeek
+    release rejects empty reasoning_content on non-thinking models, this
+    fallback would need a per-call thinking-mode check instead of a blanket
+    inject.  The check is intentionally not gated on model name: this
+    function is only mounted when provider == "deepseek" (see
+    EvoScientist/llm/models.py), so all callers are DeepSeek endpoints.
 
     Args:
         model: A langchain-openai ChatOpenAI instance configured for DeepSeek.
@@ -523,7 +533,6 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
         if not isinstance(msgs, list):
             return payload
 
-        is_reasoner = "deepseek-reasoner" in str(getattr(model, "model_name", ""))
         ai_idx = 0
         for msg in msgs:
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
@@ -531,7 +540,13 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
             rc = ai_rcs[ai_idx] if ai_idx < len(ai_rcs) else None
             if rc:
                 msg["reasoning_content"] = rc
-            elif is_reasoner and "reasoning_content" not in msg:
+            elif "reasoning_content" not in msg:
+                # Empty-string fallback for ALL DeepSeek models (not just
+                # reasoner). Required when history contains AI messages that
+                # came from a different provider (Anthropic / OpenAI /
+                # DeepSeek Flash) or from an older EvoSci that didn't capture
+                # reasoning_content. Empirically tolerated by non-thinking
+                # DeepSeek endpoints; see docstring for the audit caveat.
                 msg["reasoning_content"] = ""
             ai_idx += 1
 
