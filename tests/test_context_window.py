@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from EvoScientist.llm.context_window import (
     DEFAULT_CONTEXT_WINDOW_FALLBACK,
+    apply_known_context_window,
     get_context_window,
     resolve_context_window,
 )
@@ -59,3 +60,138 @@ def test_resolve_context_window_falls_back_when_missing():
     assert get_context_window(model) is None
     assert resolve_context_window(model) == DEFAULT_CONTEXT_WINDOW_FALLBACK
     assert resolve_context_window(model, fallback=42_000) == 42_000
+
+
+def test_patch_table_resolves_known_model_name():
+    model = SimpleNamespace(model_name="claude-opus-4.7", profile=None)
+
+    assert get_context_window(model) == 1_000_000
+
+
+def test_patch_table_strips_provider_prefix():
+    full = SimpleNamespace(model_name="openai/gpt-5.5", profile=None)
+    short = SimpleNamespace(model_name="gpt-5.5", profile=None)
+
+    assert get_context_window(full) == 1_050_000
+    assert get_context_window(short) == 1_050_000
+
+
+def test_real_attribute_beats_patch_table():
+    model = SimpleNamespace(
+        model_name="claude-opus-4.7",
+        context_window=500_000,
+        profile=None,
+    )
+
+    assert get_context_window(model) == 500_000
+
+
+def test_unknown_model_falls_through_to_fallback():
+    model = SimpleNamespace(model_name="some-unreleased-model", profile=None)
+
+    assert get_context_window(model) is None
+    assert resolve_context_window(model) == DEFAULT_CONTEXT_WINDOW_FALLBACK
+
+
+def test_claude_family_pattern_covers_all_variants():
+    # Native Anthropic (dash form)
+    native = SimpleNamespace(model_name="claude-opus-4-7", profile=None)
+    # OpenRouter (dot form, with vendor prefix)
+    openrouter = SimpleNamespace(
+        model_name="anthropic/claude-sonnet-4.6", profile=None
+    )
+    # Sonnet, Haiku — covered by family pattern
+    sonnet = SimpleNamespace(model_name="claude-sonnet-4-5", profile=None)
+    haiku = SimpleNamespace(model_name="claude-haiku-4-5", profile=None)
+
+    assert get_context_window(native) == 1_000_000
+    assert get_context_window(openrouter) == 1_000_000
+    assert get_context_window(sonnet) == 1_000_000
+    assert get_context_window(haiku) == 1_000_000
+
+
+def test_dict_entry_overrides_family_pattern():
+    # Qwen 3.6 closed-source default is 1M (family), but open-source -27b
+    # variant is 262K (dict override). Dict wins because it's checked first.
+    closed = SimpleNamespace(model_name="qwen/qwen3.6-flash", profile=None)
+    open_27b = SimpleNamespace(model_name="qwen/qwen3.6-27b", profile=None)
+    open_plus = SimpleNamespace(model_name="qwen3.6-plus", profile=None)
+
+    assert get_context_window(closed) == 1_000_000
+    assert get_context_window(open_27b) == 262_000
+    assert get_context_window(open_plus) == 1_000_000
+
+
+def test_claude_3x_does_not_match_4x_family():
+    # 4.x family patterns must not match Claude 3.x model IDs.
+    old_sonnet = SimpleNamespace(model_name="claude-3-5-sonnet-20241022", profile=None)
+    old_opus = SimpleNamespace(model_name="claude-3-opus-20240229", profile=None)
+
+    assert get_context_window(old_sonnet) is None
+    assert get_context_window(old_opus) is None
+
+
+def test_apply_injects_into_empty_profile():
+    model = SimpleNamespace(model_name="claude-opus-4-7", profile=None)
+
+    apply_known_context_window(model)
+
+    assert model.profile == {"max_input_tokens": 1_000_000}
+
+
+def test_apply_preserves_existing_profile_keys():
+    model = SimpleNamespace(
+        model_name="qwen3.6-flash",
+        profile={"name": "Qwen 3.6 Flash"},
+    )
+
+    apply_known_context_window(model)
+
+    assert model.profile == {
+        "name": "Qwen 3.6 Flash",
+        "max_input_tokens": 1_000_000,
+    }
+
+
+def test_apply_does_not_overwrite_existing_max_input_tokens():
+    model = SimpleNamespace(
+        model_name="claude-opus-4-7",
+        profile={"max_input_tokens": 500_000},
+    )
+
+    apply_known_context_window(model)
+
+    assert model.profile == {"max_input_tokens": 500_000}
+
+
+def test_apply_skips_unknown_models():
+    model = SimpleNamespace(model_name="some-unknown-model", profile=None)
+
+    apply_known_context_window(model)
+
+    assert model.profile is None
+
+
+def test_apply_handles_non_dict_profile_safely():
+    # Non-dict profile (e.g. namespace from a future langchain version) must
+    # not raise — fall back to a fresh dict so deepagents can still read it.
+    model = SimpleNamespace(
+        model_name="claude-opus-4-7",
+        profile=SimpleNamespace(name="opaque object"),
+    )
+
+    apply_known_context_window(model)
+
+    assert model.profile == {"max_input_tokens": 1_000_000}
+
+
+def test_lookup_is_case_insensitive():
+    # SiliconFlow uses capitalized IDs like "Pro/moonshotai/Kimi-K2.5"
+    siliconflow = SimpleNamespace(
+        model_name="Pro/moonshotai/Kimi-K2.5", profile=None
+    )
+    assert get_context_window(siliconflow) == 262_000
+
+    # GLM-5 capitalized variant
+    glm = SimpleNamespace(model_name="Pro/zai-org/GLM-5", profile=None)
+    assert get_context_window(glm) == 203_000
