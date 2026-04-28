@@ -738,25 +738,39 @@ class TestPruningCheckpointer(unittest.TestCase):
         """Concurrent ``aput()`` calls cannot squeeze either caller's
         just-written row out of the top-N retention window.
 
-        Regression test for the put+prune atomicity fix: without the
-        outer ``_aput_lock`` and with ``keep_per_ns=1``, an interleaving
-        of A.aput → A.prune-released → B.aput → B.prune (which now sees
-        only B's row in top-1 and deletes A's) could happen. With the
-        outer lock, A.aput+A.prune complete atomically before B starts.
+        Directly validates put+prune serialization: gates ``_prune_after_put``
+        on the first call so we can launch the second ``aput()`` while
+        the first is paused mid-prune. The second call must be blocked
+        by ``_aput_lock`` — without that outer lock, the ``self.lock``
+        held by ``super().aput`` would not span the prune phase, and
+        the two callers would interleave with the buggy result.
         """
         tid = "tcc_001"
 
         async def _body(saver):
-            # Write two checkpoints concurrently; the loop guarantees they
-            # interleave at suspension points (each ``aput`` awaits I/O).
+            entered_prune = asyncio.Event()
+            release_prune = asyncio.Event()
+            orig_prune = saver._prune_after_put
+
+            async def _gated_prune(thread_id: str, checkpoint_ns: str):
+                if not entered_prune.is_set():
+                    entered_prune.set()
+                    await release_prune.wait()
+                await orig_prune(thread_id, checkpoint_ns)
+
+            saver._prune_after_put = _gated_prune  # type: ignore[method-assign]
+
             cfg_a = self._config(tid)
             cfg_b = self._config(tid)
             cp_a = self._checkpoint("cc_a", step=0)
             cp_b = self._checkpoint("cc_b", step=1)
-            results = await asyncio.gather(
-                saver.aput(cfg_a, cp_a, self._metadata(), {}),
-                saver.aput(cfg_b, cp_b, self._metadata(), {}),
-            )
+            t1 = asyncio.create_task(saver.aput(cfg_a, cp_a, self._metadata(), {}))
+            await entered_prune.wait()
+            t2 = asyncio.create_task(saver.aput(cfg_b, cp_b, self._metadata(), {}))
+            await asyncio.sleep(0)
+            assert not t2.done()  # verifies second call is blocked by outer lock
+            release_prune.set()
+            results = await asyncio.gather(t1, t2)
             return results
 
         results = self._run_with_wrapper(keep=1, body=_body)
