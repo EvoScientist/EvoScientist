@@ -51,3 +51,10 @@ app.add_typer(mcp_app, name="mcp")
 # Channel subcommand group
 channel_app = typer.Typer(help="Channel management commands")
 app.add_typer(channel_app, name="channel")
+
+# Sessions subcommand group — diagnostic tools for the LangGraph checkpoint DB
+sessions_app = typer.Typer(
+    help="Inspect and manage the sessions DB (~/.evoscientist/sessions.db)",
+    invoke_without_command=True,
+)
+app.add_typer(sessions_app, name="sessions")

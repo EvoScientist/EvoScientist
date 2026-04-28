@@ -17,7 +17,7 @@ from rich.table import Table
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
 from ..stream.console import console
-from ._app import app, channel_app, config_app, mcp_app
+from ._app import app, channel_app, config_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
     _create_session_workspace,
@@ -1279,6 +1279,66 @@ def mcp_install(
     from .mcp_install_cmd import _cmd_install_mcp
 
     _cmd_install_mcp(source or "")
+
+
+# =============================================================================
+# Sessions commands — read-only diagnostics for ~/.evoscientist/sessions.db
+# =============================================================================
+
+
+def _format_bytes(n: int) -> str:
+    """Render a byte count as a human-readable string (KB / MB / GB)."""
+    if n < 1024:
+        return f"{n} B"
+    units = ["KB", "MB", "GB", "TB"]
+    size = float(n) / 1024.0
+    for unit in units:
+        if size < 1024.0:
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
+
+
+@sessions_app.callback(invoke_without_command=True)
+def sessions_callback(ctx: typer.Context):
+    """Inspect and manage the sessions DB.
+
+    Running ``EvoSci sessions`` with no subcommand defaults to ``stats``
+    so the bare command is informative rather than silent.
+    """
+    if ctx.invoked_subcommand is None:
+        sessions_stats()
+
+
+@sessions_app.command("stats")
+def sessions_stats():
+    """Show DB size, thread count, total checkpoints, top heaviest threads."""
+    import asyncio
+
+    from ..sessions import db_stats
+
+    try:
+        stats = asyncio.get_event_loop().run_until_complete(db_stats())
+    except RuntimeError:
+        stats = asyncio.new_event_loop().run_until_complete(db_stats())
+
+    table = Table(title="EvoScientist sessions DB", show_header=True)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value")
+    table.add_row("Path", stats["db_path"])
+    table.add_row("Size", _format_bytes(int(stats["size_bytes"])))
+    table.add_row("Threads", str(stats["thread_count"]))
+    table.add_row("Checkpoints", str(stats["checkpoint_count"]))
+    table.add_row("Writes", str(stats["write_count"]))
+    console.print(table)
+
+    if stats["top_threads"]:
+        top = Table(title="Heaviest threads (checkpoints per thread)")
+        top.add_column("thread_id", style="yellow")
+        top.add_column("checkpoints", justify="right")
+        for row in stats["top_threads"]:
+            top.add_row(str(row["thread_id"]), str(row["count"]))
+        console.print(top)
 
 
 # =============================================================================

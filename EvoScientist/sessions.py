@@ -4,17 +4,32 @@ Provides thread CRUD operations, prefix-matched resume, and an async
 context manager for the shared ``AsyncSqliteSaver`` checkpointer.
 
 Adapted from upstream ``deepagents_cli/sessions.py``.
+
+Per-step pruning:
+    LangGraph's checkpointer writes a full state snapshot per super-step,
+    causing unbounded growth (multi-GB sessions.db). EvoScientist never
+    reads historical checkpoints — resume always reads the latest, HITL
+    interrupts attach pending writes to the just-written row. So
+    ``get_checkpointer()`` yields a ``PruningCheckpointer`` that prunes
+    older rows for the same ``(thread_id, checkpoint_ns)`` after every
+    ``aput()``. The first-run migration sweep cleans up legacy bloat.
 """
 
+import asyncio
+import atexit
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Monkey-patch aiosqlite for langgraph-checkpoint >= 2.1.0 compatibility
@@ -81,15 +96,210 @@ def generate_thread_id() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint pruning
+# ---------------------------------------------------------------------------
+
+# Default kept when the caller cannot resolve config (tests, unit-init paths).
+# Production callers use ``EvoScientistConfig.checkpoint_keep_per_thread``.
+_DEFAULT_KEEP_PER_NS = 10
+
+
+class PruningCheckpointer(AsyncSqliteSaver):
+    """``AsyncSqliteSaver`` that prunes stale checkpoints after every ``aput()``.
+
+    After a successful ``aput()``, deletes rows in ``checkpoints`` and
+    ``writes`` whose ``(thread_id, checkpoint_ns)`` matches the just-written
+    row but whose ``checkpoint_id`` is not among the ``keep_per_ns`` most
+    recent ids. The just-written row is always kept (it is the head of the
+    descending order and ``keep_per_ns >= 1`` is enforced).
+
+    Inherits from ``AsyncSqliteSaver`` (rather than wrapping it) so
+    LangGraph's ``compile()`` ``isinstance(x, BaseCheckpointSaver)`` check
+    succeeds. All other behavior — ``aget_tuple``, ``alist``,
+    ``aput_writes``, ``adelete_thread``, ``setup``, the async context
+    manager protocol, the connection lock — is inherited unchanged.
+
+    HITL safety: pregel records pending writes (e.g. ``interrupt``) against
+    the checkpoint id returned by the most recent ``aput()``, which is
+    exactly the row we keep. Older rows can never receive new writes after
+    a newer ``aput()`` lands, so deleting them is provably safe.
+
+    Setting ``keep_per_ns <= 0`` disables pruning (escape hatch for debug).
+    """
+
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        keep_per_ns: int = _DEFAULT_KEEP_PER_NS,
+        serde: Any = None,
+    ) -> None:
+        super().__init__(conn, serde=serde)
+        self._keep_per_ns = max(0, int(keep_per_ns))
+        # Outer lock guarantees ``super().aput()`` and ``_prune_after_put()``
+        # are atomic *as a pair*. Without this, a concurrent ``aput()`` on a
+        # different ``(thread_id, checkpoint_ns)`` could land between the
+        # two phases and squeeze the earlier caller's just-written row out
+        # of the top-N retention window (only matters when ``keep_per_ns``
+        # is small or N parallel writers race; harmless otherwise but the
+        # invariant "the just-written row is always kept" must hold).
+        self._aput_lock = asyncio.Lock()
+
+    @classmethod
+    @asynccontextmanager
+    async def from_conn_string_with_keep(
+        cls, conn_string: str, keep_per_ns: int = _DEFAULT_KEEP_PER_NS
+    ) -> AsyncIterator["PruningCheckpointer"]:
+        """Build a ``PruningCheckpointer`` from a SQLite connection string.
+
+        Mirrors ``AsyncSqliteSaver.from_conn_string`` but threads
+        ``keep_per_ns`` into ``__init__``. The native ``from_conn_string``
+        classmethod cannot accept extra kwargs, so callers that need
+        retention control should use this method instead.
+        """
+        async with aiosqlite.connect(conn_string) as conn:
+            yield cls(conn, keep_per_ns=keep_per_ns)
+
+    async def aput(
+        self,
+        config: Any,
+        checkpoint: Any,
+        metadata: Any,
+        new_versions: Any,
+    ) -> Any:
+        """Delegate to ``super().aput``, then prune older rows atomically.
+
+        Wraps both the inner write and the prune in ``self._aput_lock`` so
+        a concurrent ``aput()`` cannot squeeze this caller's just-written
+        row out of the top-N retention window. The inner ``self.lock``
+        (held by ``super().aput`` and by ``_prune_after_put``) is a
+        separate, finer-grained lock that protects the SQLite connection;
+        the outer lock here is about the put+prune pair invariant.
+
+        Pruning is best-effort: any exception is logged at WARNING and
+        swallowed so a transient SQLite error never fails the agent step.
+        """
+        async with self._aput_lock:
+            result = await super().aput(config, checkpoint, metadata, new_versions)
+            if self._keep_per_ns <= 0:
+                return result
+            try:
+                thread_id = config["configurable"]["thread_id"]
+                checkpoint_ns = config["configurable"].get("checkpoint_ns", "") or ""
+                await self._prune_after_put(str(thread_id), str(checkpoint_ns))
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.warning("checkpoint pruning failed: %s", exc, exc_info=True)
+            return result
+
+    async def _prune_after_put(self, thread_id: str, checkpoint_ns: str) -> None:
+        """Run the two DELETE queries (writes first, then checkpoints).
+
+        Restricted to rows whose ``metadata.agent_name == AGENT_NAME``.
+        ``json_extract(metadata, '$.agent_name') = ?`` evaluates to NULL
+        (and so fails the predicate) for any row whose metadata does not
+        carry an ``agent_name`` key — by design, those rows belong to
+        third-party LangGraph users and must never be pruned by us.
+
+        Runs through the saver's connection and lock for atomicity with
+        concurrent ``aput()`` calls on the same thread.
+        """
+        keep = self._keep_per_ns
+        agent = AGENT_NAME
+        # writes first — we look up which checkpoint ids will be deleted, then
+        # delete the writes pointing at them. Doing checkpoints first would
+        # leave orphan writes whose `checkpoint_id` we can no longer resolve.
+        del_writes = (
+            "DELETE FROM writes "
+            "WHERE thread_id = ? AND checkpoint_ns = ? "
+            "  AND checkpoint_id IN ("
+            "    SELECT checkpoint_id FROM checkpoints "
+            "    WHERE thread_id = ? AND checkpoint_ns = ? "
+            "      AND json_extract(metadata, '$.agent_name') = ? "
+            "      AND checkpoint_id NOT IN ("
+            "        SELECT checkpoint_id FROM checkpoints "
+            "        WHERE thread_id = ? AND checkpoint_ns = ? "
+            "          AND json_extract(metadata, '$.agent_name') = ? "
+            "        ORDER BY checkpoint_id DESC LIMIT ?"
+            "      )"
+            "  )"
+        )
+        del_checkpoints = (
+            "DELETE FROM checkpoints "
+            "WHERE thread_id = ? AND checkpoint_ns = ? "
+            "  AND json_extract(metadata, '$.agent_name') = ? "
+            "  AND checkpoint_id NOT IN ("
+            "    SELECT checkpoint_id FROM checkpoints "
+            "    WHERE thread_id = ? AND checkpoint_ns = ? "
+            "      AND json_extract(metadata, '$.agent_name') = ? "
+            "    ORDER BY checkpoint_id DESC LIMIT ?"
+            "  )"
+        )
+        async with self.lock:
+            await self.conn.execute(
+                del_writes,
+                (
+                    thread_id,
+                    checkpoint_ns,
+                    thread_id,
+                    checkpoint_ns,
+                    agent,
+                    thread_id,
+                    checkpoint_ns,
+                    agent,
+                    keep,
+                ),
+            )
+            await self.conn.execute(
+                del_checkpoints,
+                (
+                    thread_id,
+                    checkpoint_ns,
+                    agent,
+                    thread_id,
+                    checkpoint_ns,
+                    agent,
+                    keep,
+                ),
+            )
+            await self.conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Checkpointer context manager
 # ---------------------------------------------------------------------------
 
 
+def _resolve_keep_per_ns() -> int:
+    """Resolve the retention count from EvoScientistConfig, with safe fallback."""
+    try:
+        from .config import get_effective_config
+
+        return max(0, int(get_effective_config().checkpoint_keep_per_thread))
+    except Exception:  # pragma: no cover - defensive (config import errors)
+        return _DEFAULT_KEEP_PER_NS
+
+
 @asynccontextmanager
-async def get_checkpointer() -> AsyncIterator[AsyncSqliteSaver]:
-    """Yield an ``AsyncSqliteSaver`` connected to the global sessions DB."""
-    async with AsyncSqliteSaver.from_conn_string(str(get_db_path())) as cp:
-        yield cp
+async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
+    """Yield a pruning-enabled checkpointer connected to the sessions DB.
+
+    Wraps ``AsyncSqliteSaver`` with ``PruningCheckpointer`` so every
+    super-step trims the per-(thread, ns) history to ``keep_per_ns``. The
+    retention count is read from ``EvoScientistConfig`` at context entry;
+    setting it to 0 disables pruning entirely.
+
+    Also opportunistically kicks the legacy-bloat migration sweep as a
+    background task on first entry of an oversized DB. The sweep is a
+    no-op once ``PRAGMA user_version`` has been bumped, so subsequent
+    invocations cost nothing.
+    """
+    keep = _resolve_keep_per_ns()
+    async with PruningCheckpointer.from_conn_string_with_keep(
+        str(get_db_path()), keep_per_ns=keep
+    ) as saver:
+        # Fire-and-forget; runs concurrent with the agent on the same loop.
+        maybe_kick_migration_sweep(keep)
+        yield saver
 
 
 # ---------------------------------------------------------------------------
@@ -438,3 +648,289 @@ async def get_thread_messages(thread_id: str) -> list:
         messages = channel_values.get("messages", [])
         event = channel_values.get("_summarization_event")
         return _apply_summarization_event(messages, event)
+
+
+# ---------------------------------------------------------------------------
+# Migration sweep & VACUUM (one-time legacy cleanup)
+# ---------------------------------------------------------------------------
+
+# PRAGMA user_version is a 32-bit int slot in the SQLite file header. We
+# bump this to 1 once the legacy-bloat sweep has run successfully so it
+# never runs again. Future structural migrations can use 2, 3, ...
+_MIGRATION_VERSION = 1
+
+# Threshold below which the sweep is skipped (DB is already small enough
+# that legacy bloat is not the user's problem). 100 MB is chosen so a
+# normally-pruned DB after a few months of use never triggers the sweep,
+# while the 2.6 GB pathology is comfortably above the line.
+_MIGRATION_THRESHOLD_BYTES = 100 * 1024 * 1024
+
+# Inter-pair sleep so the sweep yields to the agent loop and never spikes
+# CPU on a large DB. Tunable for tests via monkeypatch.
+_SWEEP_YIELD_SECONDS = 0.0
+
+
+async def _get_user_version(conn: aiosqlite.Connection) -> int:
+    async with conn.execute("PRAGMA user_version") as cur:
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+async def _set_user_version(conn: aiosqlite.Connection, version: int) -> None:
+    # PRAGMAs cannot be parameter-bound; the integer is interpolated safely
+    # because we control the value (constant int).
+    await conn.execute(f"PRAGMA user_version = {int(version)}")
+    await conn.commit()
+
+
+async def _needs_migration() -> bool:
+    """Return True if the legacy-bloat sweep should run now.
+
+    True iff the DB exists, is larger than ``_MIGRATION_THRESHOLD_BYTES``,
+    and ``PRAGMA user_version`` is below ``_MIGRATION_VERSION``.
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return False
+    try:
+        size = db_path.stat().st_size
+    except OSError:
+        return False
+    if size < _MIGRATION_THRESHOLD_BYTES:
+        return False
+    try:
+        async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
+            if not await _table_exists(conn, "checkpoints"):
+                return False
+            return await _get_user_version(conn) < _MIGRATION_VERSION
+    except aiosqlite.Error:
+        return False
+
+
+async def _run_migration_sweep(keep: int) -> int:
+    """Prune all ``(thread_id, checkpoint_ns)`` pairs to ``keep`` rows each.
+
+    Iterates pairs in deterministic order, applies the same DELETE pattern
+    the per-step pruner uses, and yields to the event loop between pairs
+    so the agent stays responsive. On success bumps ``PRAGMA user_version``
+    so the sweep never reruns.
+
+    Returns the number of pairs pruned.
+    """
+    if keep <= 0:
+        return 0
+    db_path = str(get_db_path())
+    pairs_pruned = 0
+    async with aiosqlite.connect(db_path, timeout=60.0) as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return 0
+        if await _get_user_version(conn) >= _MIGRATION_VERSION:
+            return 0
+
+        async with conn.execute(
+            "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
+            "WHERE json_extract(metadata, '$.agent_name') = ?",
+            (AGENT_NAME,),
+        ) as cur:
+            pairs = await cur.fetchall()
+
+        del_writes = (
+            "DELETE FROM writes "
+            "WHERE thread_id = ? AND checkpoint_ns = ? "
+            "  AND checkpoint_id IN ("
+            "    SELECT checkpoint_id FROM checkpoints "
+            "    WHERE thread_id = ? AND checkpoint_ns = ? "
+            "      AND json_extract(metadata, '$.agent_name') = ? "
+            "      AND checkpoint_id NOT IN ("
+            "        SELECT checkpoint_id FROM checkpoints "
+            "        WHERE thread_id = ? AND checkpoint_ns = ? "
+            "          AND json_extract(metadata, '$.agent_name') = ? "
+            "        ORDER BY checkpoint_id DESC LIMIT ?"
+            "      )"
+            "  )"
+        )
+        del_checkpoints = (
+            "DELETE FROM checkpoints "
+            "WHERE thread_id = ? AND checkpoint_ns = ? "
+            "  AND json_extract(metadata, '$.agent_name') = ? "
+            "  AND checkpoint_id NOT IN ("
+            "    SELECT checkpoint_id FROM checkpoints "
+            "    WHERE thread_id = ? AND checkpoint_ns = ? "
+            "      AND json_extract(metadata, '$.agent_name') = ? "
+            "    ORDER BY checkpoint_id DESC LIMIT ?"
+            "  )"
+        )
+        for thread_id, checkpoint_ns in pairs:
+            ns = checkpoint_ns or ""
+            await conn.execute(
+                del_writes,
+                (
+                    thread_id,
+                    ns,
+                    thread_id,
+                    ns,
+                    AGENT_NAME,
+                    thread_id,
+                    ns,
+                    AGENT_NAME,
+                    keep,
+                ),
+            )
+            await conn.execute(
+                del_checkpoints,
+                (
+                    thread_id,
+                    ns,
+                    AGENT_NAME,
+                    thread_id,
+                    ns,
+                    AGENT_NAME,
+                    keep,
+                ),
+            )
+            await conn.commit()
+            pairs_pruned += 1
+            if _SWEEP_YIELD_SECONDS >= 0:
+                await asyncio.sleep(_SWEEP_YIELD_SECONDS)
+
+        await _set_user_version(conn, _MIGRATION_VERSION)
+
+    # Schedule VACUUM at process exit (must run after the long-lived saver
+    # connection closes to acquire the exclusive lock VACUUM requires).
+    _schedule_vacuum_atexit()
+    return pairs_pruned
+
+
+_vacuum_scheduled = False
+
+
+def _schedule_vacuum_atexit() -> None:
+    """Register the atexit VACUUM hook exactly once per process."""
+    global _vacuum_scheduled
+    if _vacuum_scheduled:
+        return
+    _vacuum_scheduled = True
+    atexit.register(_atexit_vacuum)
+
+
+def _atexit_vacuum() -> None:
+    """Run ``VACUUM`` synchronously at process exit.
+
+    Uses stdlib ``sqlite3`` (atexit can't await aiosqlite). Best-effort:
+    swallow any error since this runs during shutdown when stderr may be
+    closed.
+    """
+    import sqlite3
+
+    db_path = get_db_path()
+    if not db_path.exists():
+        return
+    try:
+        with sqlite3.connect(str(db_path), timeout=60.0) as conn:
+            # VACUUM cannot run inside a transaction; sqlite3 starts one
+            # implicitly on the first execute, so isolation_level=None ensures
+            # we are in autocommit mode for the VACUUM statement.
+            conn.isolation_level = None
+            conn.execute("VACUUM")
+    except sqlite3.Error as exc:
+        # Best-effort during shutdown: stderr may already be closed, but
+        # try to log so a persistent VACUUM failure is at least diagnosable
+        # from the next session. Swallow any logging error in turn.
+        try:
+            _logger.warning("VACUUM at exit failed: %s", exc)
+        except Exception:
+            pass
+
+
+def maybe_kick_migration_sweep(keep: int) -> asyncio.Task | None:
+    """Schedule the legacy-bloat sweep as a background task if needed.
+
+    Returns the spawned ``asyncio.Task`` (caller does NOT await — sweep
+    runs concurrent with the agent), or ``None`` if migration is not
+    needed. Safe to call multiple times: the task itself rechecks the
+    user_version marker so a duplicate fire is a no-op.
+    """
+    if keep <= 0:
+        return None
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return None
+
+    async def _runner() -> None:
+        try:
+            if not await _needs_migration():
+                return
+            pairs = await _run_migration_sweep(keep)
+            if pairs:
+                _logger.info(
+                    "checkpoint migration sweep pruned %d (thread, ns) pairs; "
+                    "VACUUM will run at exit",
+                    pairs,
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("migration sweep failed: %s", exc, exc_info=True)
+
+    return loop.create_task(_runner())
+
+
+# ---------------------------------------------------------------------------
+# DB stats (read-only diagnostic for `EvoSci sessions stats`)
+# ---------------------------------------------------------------------------
+
+
+async def db_stats(top_n: int = 5) -> dict[str, Any]:
+    """Return read-only diagnostics about the sessions DB.
+
+    Keys: ``db_path`` (str), ``size_bytes`` (int, file size or 0 if absent),
+    ``thread_count`` (int, EvoScientist threads), ``checkpoint_count``
+    (int, EvoScientist rows), ``write_count`` (int, all writes — the table
+    has no agent_name column), ``top_threads`` (list of dicts with
+    ``thread_id`` and ``count``, sorted desc).
+    """
+    db_path = get_db_path()
+    size = db_path.stat().st_size if db_path.exists() else 0
+    out: dict[str, Any] = {
+        "db_path": str(db_path),
+        "size_bytes": size,
+        "thread_count": 0,
+        "checkpoint_count": 0,
+        "write_count": 0,
+        "top_threads": [],
+    }
+    if not db_path.exists():
+        return out
+    try:
+        async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
+            if not await _table_exists(conn, "checkpoints"):
+                return out
+            async with conn.execute(
+                "SELECT COUNT(DISTINCT thread_id), COUNT(*) FROM checkpoints "
+                "WHERE json_extract(metadata, '$.agent_name') = ?",
+                (AGENT_NAME,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    out["thread_count"] = int(row[0] or 0)
+                    out["checkpoint_count"] = int(row[1] or 0)
+
+            if await _table_exists(conn, "writes"):
+                async with conn.execute("SELECT COUNT(*) FROM writes") as cur:
+                    row = await cur.fetchone()
+                    if row:
+                        out["write_count"] = int(row[0] or 0)
+
+            async with conn.execute(
+                "SELECT thread_id, COUNT(*) AS n FROM checkpoints "
+                "WHERE json_extract(metadata, '$.agent_name') = ? "
+                "GROUP BY thread_id ORDER BY n DESC LIMIT ?",
+                (AGENT_NAME, int(top_n)),
+            ) as cur:
+                rows = await cur.fetchall()
+                out["top_threads"] = [
+                    {"thread_id": r[0], "count": int(r[1])} for r in rows
+                ]
+    except aiosqlite.Error:
+        # Read-only — corrupt/locked DB → return zeroed stats rather than crash.
+        return out
+    return out

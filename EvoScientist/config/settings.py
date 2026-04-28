@@ -201,6 +201,9 @@ class EvoScientistConfig:
     # Agent features
     enable_ask_user: bool = True  # Enable ask_user tool for agent-initiated questions
 
+    # Checkpoint pruning (sessions.db retention per (thread_id, checkpoint_ns))
+    checkpoint_keep_per_thread: int = 10
+
     # DM access control policy
     dm_policy: str = "allowlist"
 
@@ -389,6 +392,7 @@ _ENV_MAPPINGS = {
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
+    "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
 }
 
 

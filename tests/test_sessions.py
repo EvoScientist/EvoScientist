@@ -1,5 +1,6 @@
 """Tests for EvoScientist.sessions — thread CRUD, ID generation, helpers."""
 
+import asyncio
 import json
 import os
 import tempfile
@@ -427,6 +428,723 @@ class TestThreadFunctions(unittest.TestCase):
         remaining = _run(_check())
         assert "cp_other_shared" in remaining
         assert "cp_evo_shared" not in remaining
+
+
+class TestPruningCheckpointer(unittest.TestCase):
+    """Integration tests for ``PruningCheckpointer`` against a real
+    ``AsyncSqliteSaver`` backed by a temp SQLite file.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path = os.path.join(self._tmpdir, "prune.db")
+
+    def tearDown(self):
+        try:
+            os.unlink(self._db_path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    def _run_with_wrapper(self, keep: int, body):
+        """Open ``PruningCheckpointer`` against the temp DB on a single
+        loop, invoke ``body(saver)`` (an async callable), then close
+        cleanly.
+
+        Required because ``aiosqlite.Connection`` is bound to the event
+        loop it was opened on; reusing it across separate ``run_async``
+        calls raises ``ValueError("no active connection")``.
+        """
+        from EvoScientist.sessions import PruningCheckpointer
+
+        async def _go():
+            async with PruningCheckpointer.from_conn_string_with_keep(
+                self._db_path, keep_per_ns=keep
+            ) as saver:
+                await saver.setup()
+                return await body(saver)
+
+        return _run(_go())
+
+    @staticmethod
+    def _config(thread_id: str, ns: str = "") -> dict:
+        return {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": ns,
+                "checkpoint_id": None,
+            }
+        }
+
+    @staticmethod
+    def _checkpoint(cid: str, step: int = 0) -> dict:
+        # Minimal Checkpoint dict accepted by JsonPlusSerializer.dumps_typed.
+        return {
+            "v": 1,
+            "ts": "2026-01-01T00:00:00+00:00",
+            "id": cid,
+            "channel_values": {},
+            "channel_versions": {},
+            "versions_seen": {},
+            "pending_sends": [],
+        }
+
+    @staticmethod
+    def _metadata() -> dict:
+        return {"agent_name": AGENT_NAME, "step": 0, "writes": {}, "parents": {}}
+
+    def _row_count(self, thread_id: str, ns: str = "") -> int:
+        async def _count():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?",
+                    (thread_id, ns),
+                ) as cur:
+                    row = await cur.fetchone()
+                    return int(row[0]) if row else 0
+
+        return _run(_count())
+
+    def test_aput_prunes_after_insert(self):
+        tid = "tprune01"
+
+        async def _body(wrapper):
+            for i in range(7):
+                await wrapper.aput(
+                    self._config(tid),
+                    self._checkpoint(f"cp_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+
+        self._run_with_wrapper(keep=3, body=_body)
+        assert self._row_count(tid) == 3
+
+    def test_aput_keeps_latest_for_resume(self):
+        """After pruning, ``aget_tuple`` must return the just-written checkpoint."""
+        tid = "tresume1"
+
+        async def _body(wrapper):
+            last_cfg = None
+            for i in range(5):
+                last_cfg = await wrapper.aput(
+                    self._config(tid),
+                    self._checkpoint(f"cpr_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+            tuple_ = await wrapper.aget_tuple(
+                {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+            )
+            return last_cfg, tuple_
+
+        last_cfg, tuple_ = self._run_with_wrapper(keep=2, body=_body)
+        assert last_cfg["configurable"]["checkpoint_id"] == "cpr_0004"
+        assert tuple_ is not None
+        assert tuple_.checkpoint["id"] == "cpr_0004"
+
+    def test_aput_writes_against_kept_checkpoint(self):
+        """HITL safety: ``aput_writes`` after prune still attaches successfully."""
+        tid = "twrites1"
+
+        async def _body(wrapper):
+            last = None
+            for i in range(4):
+                last = await wrapper.aput(
+                    self._config(tid),
+                    self._checkpoint(f"cpw_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+            # Attach a write to the just-written checkpoint id (mimics how
+            # pregel stores ``interrupt`` pending writes).
+            await wrapper.aput_writes(last, [("__interrupt__", "v")], "task1")
+            return last
+
+        last_cfg = self._run_with_wrapper(keep=2, body=_body)
+
+        async def _check():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM writes WHERE thread_id = ? AND checkpoint_id = ?",
+                    (tid, last_cfg["configurable"]["checkpoint_id"]),
+                ) as cur:
+                    row = await cur.fetchone()
+                    return int(row[0]) if row else 0
+
+        assert _run(_check()) == 1
+
+    def test_aput_partitions_by_ns(self):
+        """Two checkpoint namespaces are pruned independently."""
+        tid = "tns01"
+
+        async def _body(wrapper):
+            for i in range(4):
+                await wrapper.aput(
+                    self._config(tid, ns=""),
+                    self._checkpoint(f"main_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+                await wrapper.aput(
+                    self._config(tid, ns="sub:1"),
+                    self._checkpoint(f"sub_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+
+        self._run_with_wrapper(keep=2, body=_body)
+        assert self._row_count(tid, ns="") == 2
+        assert self._row_count(tid, ns="sub:1") == 2
+
+    def test_inherits_base_checkpoint_saver(self):
+        """LangGraph's ``compile()`` requires ``isinstance(saver, BaseCheckpointSaver)``.
+
+        Inheriting from ``AsyncSqliteSaver`` (which inherits from
+        ``BaseCheckpointSaver``) is what unblocks agent compilation.
+        """
+        from langgraph.checkpoint.base import BaseCheckpointSaver
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        from EvoScientist.sessions import PruningCheckpointer
+
+        async def _body(saver):
+            assert isinstance(saver, BaseCheckpointSaver)
+            assert isinstance(saver, AsyncSqliteSaver)
+            assert isinstance(saver, PruningCheckpointer)
+            # Critical inherited attributes/methods.
+            assert saver.serde is not None
+            assert saver.lock is not None
+            assert saver.conn is not None
+            assert callable(saver.aget_tuple)
+            assert callable(saver.aput_writes)
+
+        self._run_with_wrapper(keep=2, body=_body)
+
+    def test_prune_failure_does_not_break_aput(self):
+        """If pruning raises, ``aput`` still returns successfully."""
+        tid = "tfail01"
+
+        async def _body(wrapper):
+            async def _boom(*args, **kwargs):
+                raise RuntimeError("simulated prune failure")
+
+            wrapper._prune_after_put = _boom  # type: ignore[assignment]
+            return await wrapper.aput(
+                self._config(tid),
+                self._checkpoint("cpf_0001", step=0),
+                self._metadata(),
+                {},
+            )
+
+        result = self._run_with_wrapper(keep=2, body=_body)
+        assert result["configurable"]["checkpoint_id"] == "cpf_0001"
+
+    def test_prune_keep_zero_disables(self):
+        """``keep_per_ns=0`` is a no-op — all rows survive."""
+        tid = "tzero01"
+
+        async def _body(wrapper):
+            for i in range(4):
+                await wrapper.aput(
+                    self._config(tid),
+                    self._checkpoint(f"cz_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+
+        self._run_with_wrapper(keep=0, body=_body)
+        assert self._row_count(tid) == 4
+
+    def test_prune_preserves_other_agent(self):
+        """A row with a different ``agent_name`` is never deleted."""
+        tid = "tother1"
+
+        async def _body(saver):
+            # Seed the OtherAgent row through the same connection so it
+            # shares the loop with the saver.
+            other_meta = json.dumps({"agent_name": "OtherAgent", "step": 0})
+            async with saver.lock:
+                await saver.conn.execute(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, metadata) "
+                    "VALUES (?, '', ?, ?)",
+                    (tid, "cp_other_keep", other_meta),
+                )
+                await saver.conn.commit()
+
+            for i in range(5):
+                await saver.aput(
+                    self._config(tid),
+                    self._checkpoint(f"co_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+
+        self._run_with_wrapper(keep=2, body=_body)
+
+        # OtherAgent's row + 2 EvoScientist rows = 3 total
+        assert self._row_count(tid) == 3
+
+        async def _check_other():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ?",
+                    (tid, "cp_other_keep"),
+                ) as cur:
+                    return (await cur.fetchone()) is not None
+
+        assert _run(_check_other())
+
+    def test_keep_one_boundary(self):
+        """``keep_per_ns=1`` keeps only the latest row, deletes the rest."""
+        tid = "tk1_001"
+
+        async def _body(saver):
+            for i in range(2):
+                await saver.aput(
+                    self._config(tid),
+                    self._checkpoint(f"k1_{i:04d}", step=i),
+                    self._metadata(),
+                    {},
+                )
+
+        self._run_with_wrapper(keep=1, body=_body)
+        assert self._row_count(tid) == 1
+
+        async def _which():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ?",
+                    (tid,),
+                ) as cur:
+                    row = await cur.fetchone()
+                    return row[0] if row else None
+
+        # The newest write (highest checkpoint_id) is the one kept.
+        assert _run(_which()) == "k1_0001"
+
+    def test_concurrent_same_thread_aput_invariant(self):
+        """Concurrent ``aput()`` calls cannot squeeze either caller's
+        just-written row out of the top-N retention window.
+
+        Regression test for the put+prune atomicity fix: without the
+        outer ``_aput_lock`` and with ``keep_per_ns=1``, an interleaving
+        of A.aput → A.prune-released → B.aput → B.prune (which now sees
+        only B's row in top-1 and deletes A's) could happen. With the
+        outer lock, A.aput+A.prune complete atomically before B starts.
+        """
+        tid = "tcc_001"
+
+        async def _body(saver):
+            # Write two checkpoints concurrently; the loop guarantees they
+            # interleave at suspension points (each ``aput`` awaits I/O).
+            cfg_a = self._config(tid)
+            cfg_b = self._config(tid)
+            cp_a = self._checkpoint("cc_a", step=0)
+            cp_b = self._checkpoint("cc_b", step=1)
+            results = await asyncio.gather(
+                saver.aput(cfg_a, cp_a, self._metadata(), {}),
+                saver.aput(cfg_b, cp_b, self._metadata(), {}),
+            )
+            return results
+
+        results = self._run_with_wrapper(keep=1, body=_body)
+        # Whichever caller landed last is the one survivor; importantly,
+        # the row count is exactly 1 (no torn state where both rows
+        # disappeared or both survived).
+        assert self._row_count(tid) == 1
+
+        async def _winner():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ?",
+                    (tid,),
+                ) as cur:
+                    row = await cur.fetchone()
+                    return row[0] if row else None
+
+        survivor = _run(_winner())
+        # The survivor must be one of the two we wrote, not some torn ID.
+        assert survivor in {"cc_a", "cc_b"}
+        # And both aput results must report a valid checkpoint_id (neither
+        # call raised mid-prune).
+        for r in results:
+            assert r["configurable"]["checkpoint_id"] in {"cc_a", "cc_b"}
+
+    def test_uuid_ordering_keeps_latest(self):
+        """Uses langgraph's actual UUIDv6-shaped checkpoint IDs to confirm
+        ``ORDER BY checkpoint_id DESC`` keeps the chronologically latest.
+
+        ``checkpoint_id`` is set by pregel from ``uuid6.uuid6()``, which
+        is monotonic-by-time. Lexicographic sort of the canonical hex form
+        therefore matches creation order — but the prune SQL relies on
+        this, so we exercise it explicitly.
+        """
+        # langgraph ships its own ``uuid6`` (60-bit timestamp + counter,
+        # canonical hex form is monotonic by time). Pregel uses this to
+        # mint checkpoint ids — the prune SQL relies on
+        # ``ORDER BY checkpoint_id DESC`` matching chronological order.
+        from langgraph.checkpoint.base.id import uuid6 as _uuid6
+
+        tid = "tuu_001"
+
+        async def _body(saver):
+            ids: list[str] = []
+            for i in range(5):
+                cid = str(_uuid6(clock_seq=i))
+                ids.append(cid)
+                cp = {
+                    "v": 1,
+                    "ts": "2026-01-01T00:00:00+00:00",
+                    "id": cid,
+                    "channel_values": {},
+                    "channel_versions": {},
+                    "versions_seen": {},
+                    "pending_sends": [],
+                }
+                await saver.aput(self._config(tid), cp, self._metadata(), {})
+            return ids
+
+        ids = self._run_with_wrapper(keep=2, body=_body)
+        assert self._row_count(tid) == 2
+
+        async def _check():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? ORDER BY checkpoint_id DESC",
+                    (tid,),
+                ) as cur:
+                    return [r[0] for r in await cur.fetchall()]
+
+        survivors = _run(_check())
+        # The two latest UUIDv6 ids — by chronological generation —
+        # must be the survivors. Lexicographic DESC ordering must match.
+        assert survivors == [ids[4], ids[3]]
+
+
+class TestMigrationSweep(unittest.TestCase):
+    """Tests for the legacy-bloat migration sweep."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path = os.path.join(self._tmpdir, "sweep.db")
+        # Patch get_db_path so all sessions.py helpers point at our temp DB.
+        self._patcher = patch(
+            "EvoScientist.sessions.get_db_path",
+            return_value=type(
+                "P",
+                (),
+                {
+                    "__str__": lambda s: self._db_path,
+                    "__fspath__": lambda s: self._db_path,
+                    "exists": lambda s: os.path.exists(self._db_path),
+                    "stat": lambda s: os.stat(self._db_path),
+                },
+            )(),
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        try:
+            os.unlink(self._db_path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    def _seed(self, threads_x_ns_x_count: list[tuple[str, str, int]]):
+        async def _go():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS checkpoints (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_ns TEXT NOT NULL DEFAULT '',
+                        checkpoint_id TEXT NOT NULL,
+                        parent_checkpoint_id TEXT,
+                        type TEXT,
+                        checkpoint BLOB,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS writes (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_ns TEXT NOT NULL DEFAULT '',
+                        checkpoint_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        idx INTEGER NOT NULL,
+                        channel TEXT NOT NULL,
+                        type TEXT,
+                        blob BLOB,
+                        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+                    )
+                    """
+                )
+                meta = json.dumps({"agent_name": AGENT_NAME, "step": 0})
+                for tid, ns, n in threads_x_ns_x_count:
+                    for i in range(n):
+                        await conn.execute(
+                            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, metadata) "
+                            "VALUES (?, ?, ?, ?)",
+                            (tid, ns, f"{tid}_{ns}_{i:04d}", meta),
+                        )
+                await conn.commit()
+
+        _run(_go())
+
+    def _user_version(self) -> int:
+        async def _go():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute("PRAGMA user_version") as cur:
+                    row = await cur.fetchone()
+                    return int(row[0]) if row else 0
+
+        return _run(_go())
+
+    def _row_count(self, thread_id: str, ns: str) -> int:
+        async def _go():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?",
+                    (thread_id, ns),
+                ) as cur:
+                    row = await cur.fetchone()
+                    return int(row[0]) if row else 0
+
+        return _run(_go())
+
+    def test_sweep_partitions_threads_and_ns(self):
+        from EvoScientist.sessions import _run_migration_sweep
+
+        self._seed(
+            [
+                ("t1", "", 8),
+                ("t1", "sub:1", 6),
+                ("t2", "", 4),
+            ]
+        )
+
+        pairs = _run(_run_migration_sweep(keep=3))
+        assert pairs == 3
+
+        assert self._row_count("t1", "") == 3
+        assert self._row_count("t1", "sub:1") == 3
+        assert self._row_count("t2", "") == 3
+
+    def test_sweep_sets_user_version(self):
+        from EvoScientist.sessions import _MIGRATION_VERSION, _run_migration_sweep
+
+        self._seed([("ta", "", 5)])
+        assert self._user_version() == 0
+        _run(_run_migration_sweep(keep=2))
+        assert self._user_version() == _MIGRATION_VERSION
+
+    def test_sweep_skipped_when_marker_set(self):
+        from EvoScientist.sessions import (
+            _MIGRATION_VERSION,
+            _run_migration_sweep,
+            _set_user_version,
+        )
+
+        self._seed([("tb", "", 5)])
+
+        async def _bump():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await _set_user_version(conn, _MIGRATION_VERSION)
+
+        _run(_bump())
+        # Already at marker → sweep is a no-op even though many rows exist.
+        pairs = _run(_run_migration_sweep(keep=2))
+        assert pairs == 0
+        assert self._row_count("tb", "") == 5
+
+    def test_needs_migration_below_threshold(self):
+        from EvoScientist.sessions import _needs_migration
+
+        # Empty DB (file doesn't exist yet) → False
+        assert not _run(_needs_migration())
+        # Tiny DB → False
+        self._seed([("tc", "", 1)])
+        assert not _run(_needs_migration())
+
+    def test_needs_migration_above_threshold(self):
+        """Use monkeypatch on the threshold constant so tests stay fast."""
+        from EvoScientist import sessions as sessions_module
+
+        self._seed([("td", "", 3)])
+        with patch.object(sessions_module, "_MIGRATION_THRESHOLD_BYTES", 1):
+            # Tiny DB exceeds the 1-byte threshold → marker check kicks in.
+            assert _run(sessions_module._needs_migration())
+
+    def test_keep_zero_short_circuits_sweep(self):
+        from EvoScientist.sessions import _run_migration_sweep
+
+        self._seed([("te", "", 4)])
+        pairs = _run(_run_migration_sweep(keep=0))
+        assert pairs == 0
+        assert self._row_count("te", "") == 4
+
+
+class TestDbStats(unittest.TestCase):
+    """Tests for the read-only ``db_stats`` diagnostic helper."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path = os.path.join(self._tmpdir, "stats.db")
+        self._patcher = patch(
+            "EvoScientist.sessions.get_db_path",
+            return_value=type(
+                "P",
+                (),
+                {
+                    "__str__": lambda s: self._db_path,
+                    "__fspath__": lambda s: self._db_path,
+                    "exists": lambda s: os.path.exists(self._db_path),
+                    "stat": lambda s: os.stat(self._db_path),
+                },
+            )(),
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        try:
+            os.unlink(self._db_path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    def _seed(self):
+        async def _go():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS checkpoints (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_ns TEXT NOT NULL DEFAULT '',
+                        checkpoint_id TEXT NOT NULL,
+                        parent_checkpoint_id TEXT,
+                        type TEXT,
+                        checkpoint BLOB,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS writes (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_ns TEXT NOT NULL DEFAULT '',
+                        checkpoint_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        idx INTEGER NOT NULL,
+                        channel TEXT NOT NULL,
+                        type TEXT,
+                        blob BLOB,
+                        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+                    )
+                    """
+                )
+                evo = json.dumps({"agent_name": AGENT_NAME, "step": 0})
+                other = json.dumps({"agent_name": "OtherAgent", "step": 0})
+                # 2 EvoScientist threads, 5 + 3 = 8 checkpoints
+                for i in range(5):
+                    await conn.execute(
+                        "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, metadata) "
+                        "VALUES (?, '', ?, ?)",
+                        ("evo01", f"ce01_{i}", evo),
+                    )
+                for i in range(3):
+                    await conn.execute(
+                        "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, metadata) "
+                        "VALUES (?, '', ?, ?)",
+                        ("evo02", f"ce02_{i}", evo),
+                    )
+                # 1 OtherAgent thread (excluded from EvoSci counts)
+                await conn.execute(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, metadata) "
+                    "VALUES (?, '', ?, ?)",
+                    ("oth01", "co01_0", other),
+                )
+                # 4 writes (writes table has no agent_name column → counted as-is)
+                for i in range(4):
+                    await conn.execute(
+                        "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                        "VALUES ('evo01', '', 'ce01_0', 't1', ?, 'ch', 'str', X'AA')",
+                        (i,),
+                    )
+                await conn.commit()
+
+        _run(_go())
+
+    def test_stats_returns_evo_only_counts(self):
+        from EvoScientist.sessions import db_stats
+
+        self._seed()
+        stats = _run(db_stats())
+        assert stats["thread_count"] == 2
+        assert stats["checkpoint_count"] == 8  # OtherAgent's 1 row excluded
+        assert stats["write_count"] == 4
+        assert stats["size_bytes"] > 0
+        assert stats["db_path"].endswith("stats.db")
+
+    def test_stats_top_threads_ordered_desc(self):
+        from EvoScientist.sessions import db_stats
+
+        self._seed()
+        stats = _run(db_stats(top_n=5))
+        ids = [row["thread_id"] for row in stats["top_threads"]]
+        counts = [row["count"] for row in stats["top_threads"]]
+        # Sorted desc by count: evo01 (5) before evo02 (3); OtherAgent excluded
+        assert ids == ["evo01", "evo02"]
+        assert counts == [5, 3]
+
+    def test_stats_missing_db(self):
+        """No DB on disk → returns zeroed stats, never raises."""
+        from EvoScientist.sessions import db_stats
+
+        # Don't seed — file doesn't exist.
+        stats = _run(db_stats())
+        assert stats["thread_count"] == 0
+        assert stats["checkpoint_count"] == 0
+        assert stats["write_count"] == 0
+        assert stats["size_bytes"] == 0
 
 
 if __name__ == "__main__":
