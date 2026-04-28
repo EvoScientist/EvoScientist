@@ -28,6 +28,24 @@ from EvoScientist.sessions import (
 from tests.conftest import run_async as _run
 
 
+def _mock_path(db_path: str):
+    """Build a Path-like object for patching ``EvoScientist.sessions.get_db_path``.
+
+    Implements the subset of ``pathlib.Path`` that ``sessions.py`` actually
+    touches: ``__str__``, ``__fspath__``, ``exists``, ``stat``.
+    """
+    return type(
+        "MockPath",
+        (),
+        {
+            "__str__": lambda s: db_path,
+            "__fspath__": lambda s: db_path,
+            "exists": lambda s: os.path.exists(db_path),
+            "stat": lambda s: os.stat(db_path),
+        },
+    )()
+
+
 class TestGenerateThreadId(unittest.TestCase):
     def test_length(self):
         tid = generate_thread_id()
@@ -860,16 +878,7 @@ class TestMigrationSweep(unittest.TestCase):
         # Patch get_db_path so all sessions.py helpers point at our temp DB.
         self._patcher = patch(
             "EvoScientist.sessions.get_db_path",
-            return_value=type(
-                "P",
-                (),
-                {
-                    "__str__": lambda s: self._db_path,
-                    "__fspath__": lambda s: self._db_path,
-                    "exists": lambda s: os.path.exists(self._db_path),
-                    "stat": lambda s: os.stat(self._db_path),
-                },
-            )(),
+            return_value=_mock_path(self._db_path),
         )
         self._patcher.start()
         # Mock atexit.register so sweep-spawned hooks don't leak past the fixture.
@@ -1073,16 +1082,7 @@ class TestDbStats(unittest.TestCase):
         self._db_path = os.path.join(self._tmpdir, "stats.db")
         self._patcher = patch(
             "EvoScientist.sessions.get_db_path",
-            return_value=type(
-                "P",
-                (),
-                {
-                    "__str__": lambda s: self._db_path,
-                    "__fspath__": lambda s: self._db_path,
-                    "exists": lambda s: os.path.exists(self._db_path),
-                    "stat": lambda s: os.stat(self._db_path),
-                },
-            )(),
+            return_value=_mock_path(self._db_path),
         )
         self._patcher.start()
 
