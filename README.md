@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/evoscientist-evoscientist-badge.png)](https://mseep.ai/app/evoscientist-evoscientist)
+
 <div align="center">
     <picture>
       <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-dark.svg">
