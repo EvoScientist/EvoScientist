@@ -91,7 +91,17 @@ def _normalize_relative_path(path: str) -> str:
     return "/".join(parts)
 
 
-async def _resolve_thread_workspace(thread_id: str) -> Path:
+async def _resolve_thread_workspace(
+    thread_id: str,
+    *,
+    workspace_dir: str | None = None,
+) -> Path:
+    if isinstance(workspace_dir, str) and workspace_dir.strip():
+        workspace_root = Path(workspace_dir).expanduser().resolve()
+        if not workspace_root.exists() or not workspace_root.is_dir():
+            raise FileNotFoundError(f"workspace does not exist: {workspace_root}")
+        return workspace_root
+
     from ..sessions import get_thread_metadata
 
     metadata = await get_thread_metadata(thread_id)
@@ -645,8 +655,12 @@ async def get_workspace_tree(
     *,
     thread_id: str,
     relative_path: str = "",
+    workspace_dir: str | None = None,
 ) -> dict[str, Any]:
-    workspace_root = await _resolve_thread_workspace(thread_id)
+    workspace_root = await _resolve_thread_workspace(
+        thread_id,
+        workspace_dir=workspace_dir,
+    )
     target_dir, normalized_rel = _resolve_workspace_path(workspace_root, relative_path)
 
     if not target_dir.exists():
@@ -676,9 +690,13 @@ async def read_workspace_file_preview(
     *,
     thread_id: str,
     relative_path: str,
+    workspace_dir: str | None = None,
     max_bytes: int = _MAX_FILE_PREVIEW_BYTES,
 ) -> dict[str, Any]:
-    workspace_root = await _resolve_thread_workspace(thread_id)
+    workspace_root = await _resolve_thread_workspace(
+        thread_id,
+        workspace_dir=workspace_dir,
+    )
     target_file, normalized_rel = _resolve_workspace_path(workspace_root, relative_path)
 
     if not normalized_rel:
@@ -718,8 +736,15 @@ async def read_workspace_file_preview(
     }
 
 
-async def create_workspace_archive(*, thread_id: str) -> dict[str, Any]:
-    workspace_root = await _resolve_thread_workspace(thread_id)
+async def create_workspace_archive(
+    *,
+    thread_id: str,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
+    workspace_root = await _resolve_thread_workspace(
+        thread_id,
+        workspace_dir=workspace_dir,
+    )
     fd, tmp_name = tempfile.mkstemp(prefix="evosci-workspace-", suffix=".zip")
     os.close(fd)
     archive_path = Path(tmp_name)

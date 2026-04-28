@@ -936,6 +936,8 @@ class WebUIChannel(Channel, WebhookMixin):
         token = re.sub(r"[^A-Za-z0-9._-]+", "-", thread_id).strip(" .-_")
         if not token:
             token = "thread"
+        if token.startswith("webui_"):
+            return token[:120]
         return f"webui_{token}"[:120]
 
     async def _resolve_or_create_workspace(self, thread_id: str) -> str:
@@ -1361,9 +1363,11 @@ class WebUIChannel(Channel, WebhookMixin):
 
         relative_path = str(request.query.get("path", "") or "")
         try:
+            workspace_dir = await self._resolve_or_create_workspace(thread_id)
             payload = await get_workspace_tree(
                 thread_id=thread_id,
                 relative_path=relative_path,
+                workspace_dir=workspace_dir,
             )
         except LookupError as exc:
             return web.json_response(
@@ -1420,9 +1424,11 @@ class WebUIChannel(Channel, WebhookMixin):
             )
 
         try:
+            workspace_dir = await self._resolve_or_create_workspace(thread_id)
             payload = await read_workspace_file_preview(
                 thread_id=thread_id,
                 relative_path=relative_path,
+                workspace_dir=workspace_dir,
             )
         except LookupError as exc:
             return web.json_response(
@@ -1471,7 +1477,11 @@ class WebUIChannel(Channel, WebhookMixin):
             )
 
         try:
-            payload = await create_workspace_archive(thread_id=thread_id)
+            workspace_dir = await self._resolve_or_create_workspace(thread_id)
+            payload = await create_workspace_archive(
+                thread_id=thread_id,
+                workspace_dir=workspace_dir,
+            )
         except LookupError as exc:
             return web.json_response(
                 {"error": str(exc)},

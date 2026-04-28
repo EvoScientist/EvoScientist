@@ -11,6 +11,7 @@ from EvoScientist.runtime.command_runtime import (
     build_command_catalog,
     execute_command_line,
 )
+from EvoScientist.runtime.native_ui import get_workspace_tree
 from EvoScientist.runtime.thread_registry import ThreadRuntimeRegistry
 
 
@@ -156,6 +157,68 @@ def test_workspace_name_for_thread_is_sanitized():
     assert ":" not in name
     assert "/" not in name
     assert " " not in name
+    assert (
+        WebUIChannel._workspace_name_for_thread(
+            "webui_fe51316f-3f2c-4910-af37-33a1fb8b173b"
+        )
+        == "webui_fe51316f-3f2c-4910-af37-33a1fb8b173b"
+    )
+
+
+def test_workspace_tree_accepts_explicit_workspace_without_thread_metadata(tmp_path):
+    (tmp_path / "notes.md").write_text("# Notes\n", encoding="utf-8")
+
+    async def _case():
+        payload = await get_workspace_tree(
+            thread_id="new-webui-thread",
+            workspace_dir=str(tmp_path),
+        )
+        assert payload["threadId"] == "new-webui-thread"
+        assert payload["workspaceDir"] == str(tmp_path)
+        assert [entry["name"] for entry in payload["entries"]] == ["notes.md"]
+
+    _run(_case())
+
+
+def test_webui_files_tree_creates_workspace_for_new_thread(monkeypatch):
+    async def _case():
+        channel = WebUIChannel(WebUIConfig())
+        captured: dict[str, str] = {}
+
+        class _Request:
+            def __init__(self) -> None:
+                self.headers = {"Origin": "http://localhost:3000"}
+                self.query = {"threadId": "new-thread", "path": ""}
+
+        async def _resolve_workspace(thread_id: str):
+            captured["resolved_thread_id"] = thread_id
+            return "/tmp/new-thread-workspace"
+
+        async def _get_workspace_tree(**kwargs):
+            captured["tree_thread_id"] = kwargs["thread_id"]
+            captured["tree_workspace_dir"] = kwargs["workspace_dir"]
+            return {
+                "ok": True,
+                "threadId": kwargs["thread_id"],
+                "workspaceDir": kwargs["workspace_dir"],
+                "path": kwargs["relative_path"],
+                "entries": [],
+            }
+
+        monkeypatch.setattr(channel, "_resolve_or_create_workspace", _resolve_workspace)
+        monkeypatch.setattr(
+            "EvoScientist.channels.webui.channel.get_workspace_tree",
+            _get_workspace_tree,
+        )
+
+        response = await channel._handle_ui_files_tree(_Request())
+
+        assert response.status == 200
+        assert captured["resolved_thread_id"] == "new-thread"
+        assert captured["tree_thread_id"] == "new-thread"
+        assert captured["tree_workspace_dir"] == "/tmp/new-thread-workspace"
+
+    _run(_case())
 
 
 def test_webui_send_updates_pending_run():
