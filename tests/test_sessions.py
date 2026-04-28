@@ -858,10 +858,9 @@ class TestMigrationSweep(unittest.TestCase):
             )(),
         )
         self._patcher.start()
-        # Reset the module-level "VACUUM scheduled" flag so each test that
-        # exercises ``_run_migration_sweep`` registers its own atexit hook
-        # against its own temp DB. Without this, the first test grabs the
-        # singleton and subsequent tests' VACUUMs are swallowed.
+        # Mock atexit.register so sweep-spawned hooks don't leak past the fixture.
+        self._atexit_patcher = patch("EvoScientist.sessions.atexit.register")
+        self._atexit_patcher.start()
         import EvoScientist.sessions as _sessions_mod
 
         self._prev_vacuum_scheduled = _sessions_mod._vacuum_scheduled
@@ -869,10 +868,7 @@ class TestMigrationSweep(unittest.TestCase):
 
     def tearDown(self):
         self._patcher.stop()
-        # Restore module-level state and immediately neutralize any
-        # atexit hook that was registered against this test's now-deleted
-        # temp DB. Re-asserting ``_vacuum_scheduled = True`` blocks
-        # additional registrations from outliving the test fixture.
+        self._atexit_patcher.stop()
         import EvoScientist.sessions as _sessions_mod
 
         _sessions_mod._vacuum_scheduled = self._prev_vacuum_scheduled
