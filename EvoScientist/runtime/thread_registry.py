@@ -18,6 +18,7 @@ from typing import Any
 _MAX_ACTIVITY_ITEMS = 200
 _MAX_EVENT_BUFFER = 2000
 _MAX_TOOL_RESULT_CHARS = 8000
+_MAX_SEEN_TOOL_IDS = 500
 _UNSET = object()
 
 
@@ -444,6 +445,72 @@ class ThreadRuntimeRegistry:
                 runtime,
                 event_type,
                 {"threadId": thread_id, "event": copy.deepcopy(payload)},
+            )
+
+    def apply_tool_event(
+        self,
+        thread_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if event_type != "tool_call":
+            return
+
+        tool_name = str(payload.get("name", "") or "").strip()
+        if tool_name not in {"write_file", "edit_file"}:
+            return
+
+        args = payload.get("args", {})
+        if not isinstance(args, dict):
+            args = {}
+        file_path = str(args.get("path") or args.get("file_path") or "").strip()
+        if not file_path:
+            return
+
+        tool_call_id = str(payload.get("id", "") or "").strip()
+
+        with self._lock:
+            runtime = self._ensure(thread_id)
+
+            if tool_call_id:
+                seen_ids = runtime.state.setdefault("_seenToolCallIds", [])
+                if not isinstance(seen_ids, list):
+                    seen_ids = []
+                    runtime.state["_seenToolCallIds"] = seen_ids
+                if tool_call_id in seen_ids:
+                    return
+                seen_ids.append(tool_call_id)
+                if len(seen_ids) > _MAX_SEEN_TOOL_IDS:
+                    del seen_ids[: len(seen_ids) - _MAX_SEEN_TOOL_IDS]
+
+            activity = runtime.state.setdefault("activity", [])
+            if not isinstance(activity, list):
+                activity = []
+                runtime.state["activity"] = activity
+
+            activity_entry = {
+                "id": f"activity_{uuid.uuid4().hex}",
+                "type": tool_name,
+                "agent": "main",
+                "title": f"{tool_name}({file_path})",
+                "detail": file_path,
+                "filePath": file_path,
+                "status": "complete",
+                "createdAt": _utc_now_iso(),
+            }
+            activity.append(activity_entry)
+            if len(activity) > _MAX_ACTIVITY_ITEMS:
+                del activity[: len(activity) - _MAX_ACTIVITY_ITEMS]
+
+            runtime.state["isRunning"] = bool(runtime.state.get("isRunning", False))
+            self._append_event_locked(
+                runtime,
+                "tool_call",
+                {
+                    "threadId": thread_id,
+                    "event": copy.deepcopy(payload),
+                    "filePath": file_path,
+                },
             )
 
     def clear_thread(self, thread_id: str) -> None:

@@ -797,6 +797,7 @@ def run_textual_interactive(
             user_text: str,
             *,
             thread_id_override: str | None = None,
+            workspace_dir_override: str | None = None,
             display_text: str | None = None,
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
@@ -886,7 +887,9 @@ def run_textual_interactive(
                     lambda: container.scroll_end(animate=False),
                 )
 
-            metadata = build_metadata(self._workspace_dir, model)
+            metadata = build_metadata(
+                workspace_dir_override or self._workspace_dir, model
+            )
             response = ""
             effective_thread_id = thread_id_override or self._conversation_tid
             runtime_registry = get_thread_runtime_registry()
@@ -1099,8 +1102,9 @@ def run_textual_interactive(
 
                         if on_stream_state_cb is not None:
                             on_stream_state_cb(state)
-                        if on_raw_stream_event_cb is not None and event_type.startswith(
-                            "subagent_"
+                        if on_raw_stream_event_cb is not None and (
+                            event_type.startswith("subagent_")
+                            or event_type == "tool_call"
                         ):
                             on_raw_stream_event_cb(event)
 
@@ -1843,6 +1847,10 @@ def run_textual_interactive(
                     str((msg.metadata or {}).get("thread_id", "")).strip()
                     or self._conversation_tid
                 )
+                effective_workspace_dir = (
+                    str((msg.metadata or {}).get("workspace_dir", "")).strip()
+                    or self._workspace_dir
+                )
                 runtime_registry = get_thread_runtime_registry()
                 bridge = build_runtime_bridge(
                     thread_id=effective_thread_id,
@@ -1873,7 +1881,7 @@ def run_textual_interactive(
                             start_new_session_callback=self.start_new_session,
                             handle_session_resume_callback=self.handle_session_resume,
                         ),
-                        workspace_dir=self._workspace_dir,
+                        workspace_dir=effective_workspace_dir,
                         checkpointer=self._checkpointer,
                     )
                     try:
@@ -1904,6 +1912,7 @@ def run_textual_interactive(
                     response = await self._stream_with_widgets(
                         msg.content,
                         thread_id_override=effective_thread_id,
+                        workspace_dir_override=effective_workspace_dir,
                         on_thinking_cb=bridge.on_thinking
                         if self._channel_send_thinking
                         else None,

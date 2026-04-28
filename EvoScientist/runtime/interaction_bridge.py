@@ -205,29 +205,52 @@ def build_runtime_bridge(
 
     def _raw_stream_callback(event: dict[str, Any]) -> None:
         event_type = str(event.get("type", ""))
-        if not event_type.startswith("subagent_"):
-            return
-        runtime_registry.apply_subagent_event(thread_id, event_type, event)
-        if channel is None:
-            return
-        if hasattr(channel, "send_subagent_event_nowait"):
-            channel.send_subagent_event_nowait(
-                sender=thread_id,
-                event_type=event_type,
-                payload=event,
-                metadata=meta,
-            )
-            return
-        if hasattr(channel, "send_subagent_event"):
-            _send_to_channel(
-                channel.send_subagent_event(
+        if event_type.startswith("subagent_"):
+            runtime_registry.apply_subagent_event(thread_id, event_type, event)
+            if channel is None:
+                return
+            if hasattr(channel, "send_subagent_event_nowait"):
+                channel.send_subagent_event_nowait(
                     sender=thread_id,
                     event_type=event_type,
                     payload=event,
                     metadata=meta,
-                ),
-                "SubagentEvent",
-            )
+                )
+                return
+            if hasattr(channel, "send_subagent_event"):
+                _send_to_channel(
+                    channel.send_subagent_event(
+                        sender=thread_id,
+                        event_type=event_type,
+                        payload=event,
+                        metadata=meta,
+                    ),
+                    "SubagentEvent",
+                )
+            return
+
+        if event_type == "tool_call":
+            runtime_registry.apply_tool_event(thread_id, event_type, event)
+            if channel is None:
+                return
+            if hasattr(channel, "send_tool_event_nowait"):
+                channel.send_tool_event_nowait(
+                    sender=thread_id,
+                    event_type=event_type,
+                    payload=event,
+                    metadata=meta,
+                )
+                return
+            if hasattr(channel, "send_tool_event"):
+                _send_to_channel(
+                    channel.send_tool_event(
+                        sender=thread_id,
+                        event_type=event_type,
+                        payload=event,
+                        metadata=meta,
+                    ),
+                    "ToolEvent",
+                )
 
     def _hitl_prompt(action_requests: list) -> list[dict] | None:
         if channel is not None and hasattr(channel, "prompt_approval"):

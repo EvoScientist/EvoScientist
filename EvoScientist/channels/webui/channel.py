@@ -17,6 +17,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import shlex
 import threading
 import uuid
@@ -30,11 +31,15 @@ from ...runtime import (
     get_thread_runtime_registry,
 )
 from ...runtime.native_ui import (
+    cleanup_temp_file,
+    create_workspace_archive,
     get_channels_overview,
     get_mcp_overview,
     get_skills_overview,
+    get_workspace_tree,
     install_mcp_servers,
     install_skills,
+    read_workspace_file_preview,
     remove_mcp,
     schedule_shutdown,
     start_channels,
@@ -122,6 +127,13 @@ def _normalize_tool_result(value: Any) -> str:
     except Exception:
         rendered = str(value)
     return rendered[:_MAX_TOOL_RESULT_CHARS]
+
+
+def _extract_file_tool_path(payload: dict[str, Any]) -> str:
+    args = payload.get("args", {})
+    if not isinstance(args, dict):
+        args = {}
+    return str(args.get("path") or args.get("file_path") or "").strip()
 
 
 @dataclass
@@ -259,6 +271,16 @@ class WebUIChannel(Channel, WebhookMixin):
             ),
             ("OPTIONS", self._route("/ui/channels/stop"), self._handle_options),
             ("POST", self._route("/ui/channels/stop"), self._handle_ui_channels_stop),
+            ("OPTIONS", self._route("/ui/files/tree"), self._handle_options),
+            ("GET", self._route("/ui/files/tree"), self._handle_ui_files_tree),
+            ("OPTIONS", self._route("/ui/files/read"), self._handle_options),
+            ("GET", self._route("/ui/files/read"), self._handle_ui_files_read),
+            ("OPTIONS", self._route("/ui/files/download-all"), self._handle_options),
+            (
+                "GET",
+                self._route("/ui/files/download-all"),
+                self._handle_ui_files_download_all,
+            ),
             ("OPTIONS", self._route("/ui/session/shutdown"), self._handle_options),
             (
                 "POST",
@@ -283,6 +305,7 @@ class WebUIChannel(Channel, WebhookMixin):
             "Access-Control-Allow-Headers": (
                 "Content-Type, Authorization, X-API-Key, X-Thread-Id"
             ),
+            "Access-Control-Expose-Headers": "Content-Disposition",
             "Access-Control-Max-Age": "86400",
             "Vary": "Origin",
         }
@@ -532,6 +555,50 @@ class WebUIChannel(Channel, WebhookMixin):
             {"type": "set", "path": ["activity"], "value": pending.state["activity"]},
         ]
 
+    def _apply_tool_event(
+        self,
+        pending: _PendingRun,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if event_type != "tool_call":
+            return []
+        tool_name = str(payload.get("name", "") or "").strip()
+        if tool_name not in {"write_file", "edit_file"}:
+            return []
+
+        file_path = _extract_file_tool_path(payload)
+        if not file_path:
+            return []
+
+        tool_call_id = str(payload.get("id", "") or "").strip()
+        if tool_call_id:
+            seen_ids = pending.state.setdefault("_seenToolCallIds", [])
+            if not isinstance(seen_ids, list):
+                seen_ids = []
+                pending.state["_seenToolCallIds"] = seen_ids
+            if tool_call_id in seen_ids:
+                return []
+            seen_ids.append(tool_call_id)
+            if len(seen_ids) > 500:
+                del seen_ids[: len(seen_ids) - 500]
+
+        pending.append_activity(
+            {
+                "id": f"activity_{uuid.uuid4().hex}",
+                "type": tool_name,
+                "agent": "main",
+                "title": f"{tool_name}({file_path})",
+                "detail": file_path,
+                "filePath": file_path,
+                "status": "complete",
+                "createdAt": _utc_now_iso(),
+            }
+        )
+        return [
+            {"type": "set", "path": ["activity"], "value": pending.state["activity"]}
+        ]
+
     async def send_subagent_event(
         self,
         sender: str,
@@ -545,6 +612,38 @@ class WebUIChannel(Channel, WebhookMixin):
         if pending is None:
             return
         ops = self._apply_subagent_event(pending, event_type, payload)
+        if not ops:
+            return
+        await pending.queue.put(("ops", ops))
+
+    def send_tool_event_nowait(
+        self,
+        sender: str,
+        event_type: str,
+        payload: dict[str, Any],
+        metadata: dict | None = None,
+    ) -> bool:
+        thread_id = str((metadata or {}).get("chat_id", sender) or sender)
+        self._runtime.apply_tool_event(thread_id, event_type, payload)
+
+        def _build_ops(pending: _PendingRun) -> list[dict[str, Any]]:
+            return self._apply_tool_event(pending, event_type, payload)
+
+        return self._enqueue_pending_ops_nowait(thread_id, _build_ops)
+
+    async def send_tool_event(
+        self,
+        sender: str,
+        event_type: str,
+        payload: dict[str, Any],
+        metadata: dict | None = None,
+    ) -> None:
+        thread_id = str((metadata or {}).get("chat_id", sender) or sender)
+        self._runtime.apply_tool_event(thread_id, event_type, payload)
+        pending = await self._get_pending_run(thread_id)
+        if pending is None:
+            return
+        ops = self._apply_tool_event(pending, event_type, payload)
         if not ops:
             return
         await pending.queue.put(("ops", ops))
@@ -832,6 +931,49 @@ class WebUIChannel(Channel, WebhookMixin):
             return workspace
         return None
 
+    @staticmethod
+    def _workspace_name_for_thread(thread_id: str) -> str:
+        token = re.sub(r"[^A-Za-z0-9._-]+", "-", thread_id).strip(" .-_")
+        if not token:
+            token = "thread"
+        return f"webui_{token}"[:120]
+
+    async def _resolve_or_create_workspace(self, thread_id: str) -> str:
+        existing = await self._resolve_command_workspace(thread_id)
+        if existing:
+            return existing
+
+        from ...cli.agent import _create_session_workspace
+
+        workspace_name = self._workspace_name_for_thread(thread_id)
+        return await asyncio.to_thread(_create_session_workspace, workspace_name)
+
+    def _extract_thread_id(
+        self,
+        request: Any,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        data = payload or {}
+        return str(
+            request.query.get("threadId", "")
+            or data.get("threadId")
+            or data.get("clientThreadId")
+            or request.headers.get("X-Thread-Id", "")
+            or ""
+        ).strip()
+
+    def _schedule_temp_file_cleanup(
+        self,
+        file_path: str,
+        *,
+        delay_seconds: float = 120.0,
+    ) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            cleanup_temp_file(file_path)
+            return
+        loop.call_later(delay_seconds, cleanup_temp_file, file_path)
+
     async def _handle_commands_catalog(self, request):
         from aiohttp import web
 
@@ -873,12 +1015,7 @@ class WebUIChannel(Channel, WebhookMixin):
                 headers=self._cors_headers(request),
             )
 
-        thread_id = str(
-            request.headers.get("X-Thread-Id", "")
-            or payload.get("threadId")
-            or payload.get("clientThreadId")
-            or ""
-        ).strip()
+        thread_id = self._extract_thread_id(request, payload)
         if not thread_id:
             return web.json_response(
                 {"error": "threadId is required"},
@@ -1152,9 +1289,7 @@ class WebUIChannel(Channel, WebhookMixin):
         if channel_type:
             channel_types.append(channel_type)
 
-        thread_id = str(
-            payload.get("threadId") or request.headers.get("X-Thread-Id", "") or ""
-        ).strip()
+        thread_id = self._extract_thread_id(request, payload)
         result = await asyncio.to_thread(
             start_channels,
             channel_types,
@@ -1206,6 +1341,177 @@ class WebUIChannel(Channel, WebhookMixin):
             headers=self._cors_headers(request),
         )
 
+    async def _handle_ui_files_tree(self, request):
+        from aiohttp import web
+
+        if not self._check_auth(request):
+            return web.json_response(
+                {"error": "unauthorized"},
+                status=401,
+                headers=self._cors_headers(request),
+            )
+
+        thread_id = self._extract_thread_id(request)
+        if not thread_id:
+            return web.json_response(
+                {"error": "threadId is required"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        relative_path = str(request.query.get("path", "") or "")
+        try:
+            payload = await get_workspace_tree(
+                thread_id=thread_id,
+                relative_path=relative_path,
+            )
+        except LookupError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=404,
+                headers=self._cors_headers(request),
+            )
+        except FileNotFoundError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=404,
+                headers=self._cors_headers(request),
+            )
+        except (NotADirectoryError, ValueError) as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+        except Exception as exc:
+            logger.exception("Failed to list workspace tree for %s", thread_id)
+            return web.json_response(
+                {"error": f"failed to list files: {exc}"},
+                status=500,
+                headers=self._cors_headers(request),
+            )
+
+        return web.json_response(payload, headers=self._cors_headers(request))
+
+    async def _handle_ui_files_read(self, request):
+        from aiohttp import web
+
+        if not self._check_auth(request):
+            return web.json_response(
+                {"error": "unauthorized"},
+                status=401,
+                headers=self._cors_headers(request),
+            )
+
+        thread_id = self._extract_thread_id(request)
+        if not thread_id:
+            return web.json_response(
+                {"error": "threadId is required"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        relative_path = str(request.query.get("path", "") or "")
+        if not relative_path.strip():
+            return web.json_response(
+                {"error": "path is required"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        try:
+            payload = await read_workspace_file_preview(
+                thread_id=thread_id,
+                relative_path=relative_path,
+            )
+        except LookupError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=404,
+                headers=self._cors_headers(request),
+            )
+        except FileNotFoundError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=404,
+                headers=self._cors_headers(request),
+            )
+        except ValueError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+        except Exception as exc:
+            logger.exception("Failed to read workspace file for %s", thread_id)
+            return web.json_response(
+                {"error": f"failed to read file: {exc}"},
+                status=500,
+                headers=self._cors_headers(request),
+            )
+
+        return web.json_response(payload, headers=self._cors_headers(request))
+
+    async def _handle_ui_files_download_all(self, request):
+        from aiohttp import web
+
+        if not self._check_auth(request):
+            return web.json_response(
+                {"error": "unauthorized"},
+                status=401,
+                headers=self._cors_headers(request),
+            )
+
+        thread_id = self._extract_thread_id(request)
+        if not thread_id:
+            return web.json_response(
+                {"error": "threadId is required"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        try:
+            payload = await create_workspace_archive(thread_id=thread_id)
+        except LookupError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=404,
+                headers=self._cors_headers(request),
+            )
+        except FileNotFoundError as exc:
+            return web.json_response(
+                {"error": str(exc)},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+        except Exception as exc:
+            logger.exception("Failed to build workspace archive for %s", thread_id)
+            return web.json_response(
+                {"error": f"failed to build archive: {exc}"},
+                status=500,
+                headers=self._cors_headers(request),
+            )
+
+        archive_path = str(payload.get("archivePath", "") or "")
+        download_name = str(payload.get("downloadName", "") or "workspace.zip")
+        if not archive_path:
+            return web.json_response(
+                {"error": "archive path missing"},
+                status=500,
+                headers=self._cors_headers(request),
+            )
+
+        self._schedule_temp_file_cleanup(archive_path)
+        response = web.FileResponse(
+            path=archive_path, headers=self._cors_headers(request)
+        )
+        response.headers["Content-Type"] = "application/zip"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="{download_name}"'
+        )
+        return response
+
     async def _handle_ui_session_shutdown(self, request):
         from aiohttp import web
 
@@ -1256,13 +1562,7 @@ class WebUIChannel(Channel, WebhookMixin):
         except Exception:
             payload = {}
 
-        thread_id = str(
-            request.headers.get("X-Thread-Id", "")
-            or payload.get("threadId")
-            or payload.get("clientThreadId")
-            or request.query.get("threadId", "")
-            or ""
-        ).strip()
+        thread_id = self._extract_thread_id(request, payload)
         if not thread_id:
             return web.json_response(
                 {"error": "threadId is required"},
@@ -1420,12 +1720,7 @@ class WebUIChannel(Channel, WebhookMixin):
                 headers=self._cors_headers(request),
             )
 
-        thread_id = str(
-            request.headers.get("X-Thread-Id", "")
-            or payload.get("threadId")
-            or payload.get("clientThreadId")
-            or ""
-        ).strip()
+        thread_id = self._extract_thread_id(request, payload)
         decision = str(payload.get("decision", "")).strip().lower()
         if not thread_id or decision not in {"approve", "reject", "auto"}:
             return web.json_response(
@@ -1520,12 +1815,7 @@ class WebUIChannel(Channel, WebhookMixin):
                 headers=self._cors_headers(request),
             )
 
-        thread_id = str(
-            request.headers.get("X-Thread-Id", "")
-            or payload.get("threadId")
-            or payload.get("clientThreadId")
-            or ""
-        ).strip()
+        thread_id = self._extract_thread_id(request, payload)
         reply = str(payload.get("reply", "")).strip()
         if not thread_id:
             return web.json_response(
@@ -1727,19 +2017,23 @@ class WebUIChannel(Channel, WebhookMixin):
         thread_id: str,
         content: str,
         request_id: str,
+        workspace_dir: str = "",
     ) -> None:
         if not self._bus:
             raise ChannelError("webui channel is not attached to a MessageBus")
+        metadata = {
+            "chat_id": thread_id,
+            "thread_id": thread_id,
+            "webui_request_id": request_id,
+        }
+        if workspace_dir.strip():
+            metadata["workspace_dir"] = workspace_dir.strip()
         inbound = InboundMessage(
             channel=self.name,
             sender_id=thread_id,
             chat_id=thread_id,
             content=content,
-            metadata={
-                "chat_id": thread_id,
-                "thread_id": thread_id,
-                "webui_request_id": request_id,
-            },
+            metadata=metadata,
         )
         await self._bus.publish_inbound(inbound)
 
@@ -1820,10 +2114,7 @@ class WebUIChannel(Channel, WebhookMixin):
                 headers=self._cors_headers(request),
             )
 
-        header_thread_id = request.headers.get("X-Thread-Id", "")
-        thread_id = (
-            header_thread_id or payload.get("threadId") or payload.get("clientThreadId")
-        )
+        thread_id = self._extract_thread_id(request, payload)
         if not isinstance(thread_id, str) or not thread_id.strip():
             thread_id = f"thread_{uuid.uuid4().hex}"
         else:
@@ -1853,12 +2144,14 @@ class WebUIChannel(Channel, WebhookMixin):
 
         self._runtime.begin_run(thread_id)
         await pending.queue.put(("ops", [{"type": "set", "path": [], "value": state}]))
+        workspace_dir = await self._resolve_or_create_workspace(thread_id)
 
         try:
             await self._publish_inbound(
                 thread_id=thread_id,
                 content=latest_text,
                 request_id=str(uuid.uuid4()),
+                workspace_dir=workspace_dir,
             )
         except Exception as e:
             self._runtime.set_status(thread_id, status=None, is_running=False)

@@ -505,6 +505,7 @@ class InboundConsumer:
                         self.agent,
                         stream_input,
                         thread_id,
+                        metadata=msg.metadata or None,
                         media=msg.media or None
                         if isinstance(stream_input, str)
                         else None,
@@ -535,6 +536,13 @@ class InboundConsumer:
                                     msg.metadata,
                                 )
                                 todo_sent = True
+                        if channel and hasattr(channel, "send_tool_event"):
+                            await channel.send_tool_event(
+                                msg.sender_id,
+                                event_type,
+                                event,
+                                msg.metadata,
+                            )
 
                     elif event_type == "text":
                         final_content += event.get("content", "")

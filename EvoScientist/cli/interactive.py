@@ -776,7 +776,11 @@ def cmd_interactive(
                     str((msg.metadata or {}).get("thread_id", "")).strip()
                     or state["thread_id"]
                 )
-                meta = build_metadata(state["workspace_dir"], model)
+                effective_workspace_dir = (
+                    str((msg.metadata or {}).get("workspace_dir", "")).strip()
+                    or state["workspace_dir"]
+                )
+                meta = build_metadata(effective_workspace_dir, model)
                 runtime_registry = get_thread_runtime_registry()
                 bridge = build_runtime_bridge(
                     thread_id=effective_thread_id,

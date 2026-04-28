@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import signal
-from datetime import datetime
+import tempfile
+import zipfile
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -31,6 +36,162 @@ def _serializable(value: Any) -> Any:
     if isinstance(value, list):
         return [_serializable(item) for item in value]
     return value
+
+
+_MAX_FILE_PREVIEW_BYTES = 256 * 1024
+_BINARY_PROBE_BYTES = 8192
+_LANGUAGE_BY_SUFFIX = {
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".css": "css",
+    ".go": "go",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".htm": "html",
+    ".html": "html",
+    ".java": "java",
+    ".js": "javascript",
+    ".json": "json",
+    ".jsx": "javascript",
+    ".kt": "kotlin",
+    ".md": "markdown",
+    ".mjs": "javascript",
+    ".php": "php",
+    ".py": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".sh": "bash",
+    ".sql": "sql",
+    ".swift": "swift",
+    ".toml": "ini",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".txt": "plaintext",
+    ".xml": "xml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+}
+
+
+def _safe_filename_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(" .-_")
+    return token or "workspace"
+
+
+def _normalize_relative_path(path: str) -> str:
+    normalized = (path or "").strip().replace("\\", "/")
+    normalized = normalized.lstrip("/")
+    if not normalized or normalized == ".":
+        return ""
+
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        raise ValueError("path traversal is not allowed")
+    return "/".join(parts)
+
+
+async def _resolve_thread_workspace(thread_id: str) -> Path:
+    from ..sessions import get_thread_metadata
+
+    metadata = await get_thread_metadata(thread_id)
+    workspace_dir = (metadata or {}).get("workspace_dir")
+    if not isinstance(workspace_dir, str) or not workspace_dir.strip():
+        raise LookupError(f"workspace not found for thread {thread_id}")
+
+    workspace_root = Path(workspace_dir).expanduser().resolve()
+    if not workspace_root.exists() or not workspace_root.is_dir():
+        raise FileNotFoundError(f"workspace does not exist: {workspace_root}")
+    return workspace_root
+
+
+def _resolve_workspace_path(
+    workspace_root: Path, relative_path: str
+) -> tuple[Path, str]:
+    normalized_rel = _normalize_relative_path(relative_path)
+    base = workspace_root.resolve()
+    candidate = base if not normalized_rel else (base / normalized_rel).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("path is outside workspace") from exc
+    return candidate, normalized_rel
+
+
+def _looks_binary(data: bytes) -> bool:
+    if not data:
+        return False
+    sample = data[:_BINARY_PROBE_BYTES]
+    if b"\x00" in sample:
+        return True
+    non_printable = sum(
+        1 for byte in sample if byte < 32 and byte not in (9, 10, 12, 13)
+    )
+    return (non_printable / len(sample)) > 0.3
+
+
+def _language_for_name(name: str) -> str | None:
+    suffix = Path(name).suffix.lower()
+    return _LANGUAGE_BY_SUFFIX.get(suffix)
+
+
+def _serialize_dir_entry(entry: Path, workspace_root: Path) -> dict[str, Any] | None:
+    if entry.is_symlink():
+        return None
+
+    try:
+        relative = entry.relative_to(workspace_root).as_posix()
+    except ValueError:
+        return None
+
+    is_directory = entry.is_dir()
+    stats = entry.stat()
+    return {
+        "name": entry.name,
+        "relativePath": relative,
+        "kind": "directory" if is_directory else "file",
+        "size": None if is_directory else int(stats.st_size),
+        "modifiedAt": datetime.fromtimestamp(stats.st_mtime, UTC).isoformat(),
+    }
+
+
+def _write_workspace_zip(workspace_root: Path, archive_path: Path) -> int:
+    count = 0
+    root = workspace_root.resolve()
+    with zipfile.ZipFile(
+        archive_path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as zf:
+        for current_root, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            current = Path(current_root)
+            try:
+                current.relative_to(root)
+            except ValueError:
+                dirs[:] = []
+                continue
+
+            dirs[:] = sorted(dirs, key=str.lower)
+            for filename in sorted(files, key=str.lower):
+                candidate = current / filename
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                try:
+                    relative = candidate.resolve().relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                zf.write(candidate, arcname=relative)
+                count += 1
+    return count
+
+
+def cleanup_temp_file(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
 
 
 async def get_skills_overview(
@@ -477,6 +638,112 @@ def stop_channels(
     return {
         "ok": True,
         "channels": get_channels_overview(),
+    }
+
+
+async def get_workspace_tree(
+    *,
+    thread_id: str,
+    relative_path: str = "",
+) -> dict[str, Any]:
+    workspace_root = await _resolve_thread_workspace(thread_id)
+    target_dir, normalized_rel = _resolve_workspace_path(workspace_root, relative_path)
+
+    if not target_dir.exists():
+        raise FileNotFoundError(f"path does not exist: {normalized_rel or '.'}")
+    if not target_dir.is_dir():
+        raise NotADirectoryError(f"path is not a directory: {normalized_rel or '.'}")
+
+    entries: list[dict[str, Any]] = []
+    for entry in target_dir.iterdir():
+        serialized = _serialize_dir_entry(entry, workspace_root)
+        if serialized is None:
+            continue
+        entries.append(serialized)
+
+    entries.sort(key=lambda item: (item["kind"] != "directory", item["name"].lower()))
+
+    return {
+        "ok": True,
+        "threadId": thread_id,
+        "workspaceDir": str(workspace_root),
+        "path": normalized_rel,
+        "entries": entries,
+    }
+
+
+async def read_workspace_file_preview(
+    *,
+    thread_id: str,
+    relative_path: str,
+    max_bytes: int = _MAX_FILE_PREVIEW_BYTES,
+) -> dict[str, Any]:
+    workspace_root = await _resolve_thread_workspace(thread_id)
+    target_file, normalized_rel = _resolve_workspace_path(workspace_root, relative_path)
+
+    if not normalized_rel:
+        raise ValueError("path is required")
+    if not target_file.exists():
+        raise FileNotFoundError(f"path does not exist: {normalized_rel}")
+    if not target_file.is_file():
+        raise ValueError(f"path is not a file: {normalized_rel}")
+    if target_file.is_symlink():
+        raise ValueError("symlinks are not supported")
+
+    stats = target_file.stat()
+    with target_file.open("rb") as handle:
+        raw = handle.read(max_bytes + 1)
+
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[:max_bytes]
+
+    is_text = not _looks_binary(raw)
+    content = raw.decode("utf-8", errors="replace") if is_text else ""
+    message = None if is_text else "Binary or unsupported file type."
+
+    return {
+        "ok": True,
+        "threadId": thread_id,
+        "workspaceDir": str(workspace_root),
+        "path": normalized_rel,
+        "name": target_file.name,
+        "extension": target_file.suffix.lower(),
+        "language": _language_for_name(target_file.name),
+        "isText": is_text,
+        "content": content,
+        "truncated": truncated,
+        "size": int(stats.st_size),
+        "message": message,
+    }
+
+
+async def create_workspace_archive(*, thread_id: str) -> dict[str, Any]:
+    workspace_root = await _resolve_thread_workspace(thread_id)
+    fd, tmp_name = tempfile.mkstemp(prefix="evosci-workspace-", suffix=".zip")
+    os.close(fd)
+    archive_path = Path(tmp_name)
+
+    try:
+        file_count = await asyncio.to_thread(
+            _write_workspace_zip,
+            workspace_root,
+            archive_path,
+        )
+    except Exception:
+        cleanup_temp_file(str(archive_path))
+        raise
+
+    workspace_token = _safe_filename_token(workspace_root.name)
+    thread_token = _safe_filename_token(thread_id)
+    download_name = f"{workspace_token}-{thread_token}.zip"
+    return {
+        "ok": True,
+        "threadId": thread_id,
+        "workspaceDir": str(workspace_root),
+        "archivePath": str(archive_path),
+        "downloadName": download_name,
+        "fileCount": file_count,
     }
 
 

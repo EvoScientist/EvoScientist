@@ -34,6 +34,7 @@ bridge/package-lock.json
 # Project specific
 .langgraph_api/
 workspace/
+runs/
 skills/
 memory/
 media/
