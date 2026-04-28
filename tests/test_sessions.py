@@ -858,9 +858,24 @@ class TestMigrationSweep(unittest.TestCase):
             )(),
         )
         self._patcher.start()
+        # Reset the module-level "VACUUM scheduled" flag so each test that
+        # exercises ``_run_migration_sweep`` registers its own atexit hook
+        # against its own temp DB. Without this, the first test grabs the
+        # singleton and subsequent tests' VACUUMs are swallowed.
+        import EvoScientist.sessions as _sessions_mod
+
+        self._prev_vacuum_scheduled = _sessions_mod._vacuum_scheduled
+        _sessions_mod._vacuum_scheduled = False
 
     def tearDown(self):
         self._patcher.stop()
+        # Restore module-level state and immediately neutralize any
+        # atexit hook that was registered against this test's now-deleted
+        # temp DB. Re-asserting ``_vacuum_scheduled = True`` blocks
+        # additional registrations from outliving the test fixture.
+        import EvoScientist.sessions as _sessions_mod
+
+        _sessions_mod._vacuum_scheduled = self._prev_vacuum_scheduled
         try:
             os.unlink(self._db_path)
         except OSError:
@@ -1014,6 +1029,31 @@ class TestMigrationSweep(unittest.TestCase):
         assert pairs == 0
         assert self._row_count("te", "") == 4
 
+    def test_sweep_handles_missing_writes_table(self):
+        """Legacy DB with only ``checkpoints`` (no ``writes``) must still prune.
+
+        Regression test: the sweep used to unconditionally
+        ``DELETE FROM writes`` and would abort on the first iteration
+        with ``no such table: writes``, leaving the bloat in place.
+        """
+        from EvoScientist.sessions import _run_migration_sweep
+
+        # Seed creates both tables; drop ``writes`` to simulate legacy.
+        self._seed([("tw", "", 5)])
+
+        async def _drop_writes():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute("DROP TABLE writes")
+                await conn.commit()
+
+        _run(_drop_writes())
+
+        pairs = _run(_run_migration_sweep(keep=2))
+        assert pairs == 1
+        assert self._row_count("tw", "") == 2
+
 
 class TestDbStats(unittest.TestCase):
     """Tests for the read-only ``db_stats`` diagnostic helper."""
@@ -1102,11 +1142,21 @@ class TestDbStats(unittest.TestCase):
                     "VALUES (?, '', ?, ?)",
                     ("oth01", "co01_0", other),
                 )
-                # 4 writes (writes table has no agent_name column → counted as-is)
+                # 4 writes linked to an EvoScientist checkpoint
+                # (counted by db_stats via the JOIN to checkpoints).
                 for i in range(4):
                     await conn.execute(
                         "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
                         "VALUES ('evo01', '', 'ce01_0', 't1', ?, 'ch', 'str', X'AA')",
+                        (i,),
+                    )
+                # 2 writes linked to OtherAgent's checkpoint — must NOT
+                # be counted in ``write_count`` (db_stats joins to
+                # checkpoints and filters by agent_name).
+                for i in range(2):
+                    await conn.execute(
+                        "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                        "VALUES ('oth01', '', 'co01_0', 't2', ?, 'ch', 'str', X'BB')",
                         (i,),
                     )
                 await conn.commit()
@@ -1114,13 +1164,20 @@ class TestDbStats(unittest.TestCase):
         _run(_go())
 
     def test_stats_returns_evo_only_counts(self):
+        """All counts (incl. ``write_count``) must scope to EvoScientist rows.
+
+        Regression for the previous bare ``COUNT(*) FROM writes`` which
+        over-reported when other LangGraph apps share the DB. The seed
+        fixture inserts 4 EvoSci writes and 2 OtherAgent writes; only the
+        4 should count.
+        """
         from EvoScientist.sessions import db_stats
 
         self._seed()
         stats = _run(db_stats())
         assert stats["thread_count"] == 2
         assert stats["checkpoint_count"] == 8  # OtherAgent's 1 row excluded
-        assert stats["write_count"] == 4
+        assert stats["write_count"] == 4  # 2 OtherAgent writes excluded
         assert stats["size_bytes"] > 0
         assert stats["db_path"].endswith("stats.db")
 

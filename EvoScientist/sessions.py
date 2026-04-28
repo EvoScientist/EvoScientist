@@ -235,20 +235,28 @@ class PruningCheckpointer(AsyncSqliteSaver):
             "  )"
         )
         async with self.lock:
-            await self.conn.execute(
-                del_writes,
-                (
-                    thread_id,
-                    checkpoint_ns,
-                    thread_id,
-                    checkpoint_ns,
-                    agent,
-                    thread_id,
-                    checkpoint_ns,
-                    agent,
-                    keep,
-                ),
-            )
+            # Skip the writes DELETE on a legacy DB that only has the
+            # checkpoints table — without this guard, a missing ``writes``
+            # would raise sqlite3.OperationalError, the outer try/except
+            # in ``aput`` would log+swallow it, and pruning would silently
+            # stop working on the very databases this feature is meant to
+            # clean up. ``AsyncSqliteSaver.setup()`` normally creates both
+            # tables, but inherited DBs from older builds may lag.
+            if await _table_exists(self.conn, "writes"):
+                await self.conn.execute(
+                    del_writes,
+                    (
+                        thread_id,
+                        checkpoint_ns,
+                        thread_id,
+                        checkpoint_ns,
+                        agent,
+                        thread_id,
+                        checkpoint_ns,
+                        agent,
+                        keep,
+                    ),
+                )
             await self.conn.execute(
                 del_checkpoints,
                 (
@@ -726,6 +734,9 @@ async def _run_migration_sweep(keep: int) -> int:
             return 0
         if await _get_user_version(conn) >= _MIGRATION_VERSION:
             return 0
+        # ``writes`` is optional on legacy DBs: skip the writes DELETE
+        # if the table is absent rather than aborting the whole sweep.
+        has_writes = await _table_exists(conn, "writes")
 
         async with conn.execute(
             "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
@@ -762,20 +773,21 @@ async def _run_migration_sweep(keep: int) -> int:
         )
         for thread_id, checkpoint_ns in pairs:
             ns = checkpoint_ns or ""
-            await conn.execute(
-                del_writes,
-                (
-                    thread_id,
-                    ns,
-                    thread_id,
-                    ns,
-                    AGENT_NAME,
-                    thread_id,
-                    ns,
-                    AGENT_NAME,
-                    keep,
-                ),
-            )
+            if has_writes:
+                await conn.execute(
+                    del_writes,
+                    (
+                        thread_id,
+                        ns,
+                        thread_id,
+                        ns,
+                        AGENT_NAME,
+                        thread_id,
+                        ns,
+                        AGENT_NAME,
+                        keep,
+                    ),
+                )
             await conn.execute(
                 del_checkpoints,
                 (
@@ -797,36 +809,46 @@ async def _run_migration_sweep(keep: int) -> int:
 
     # Schedule VACUUM at process exit (must run after the long-lived saver
     # connection closes to acquire the exclusive lock VACUUM requires).
-    _schedule_vacuum_atexit()
+    # Pass ``db_path`` explicitly so test-time monkeypatches of
+    # ``get_db_path`` don't leak into atexit and hit the real DB.
+    _schedule_vacuum_atexit(db_path)
     return pairs_pruned
 
 
 _vacuum_scheduled = False
 
 
-def _schedule_vacuum_atexit() -> None:
-    """Register the atexit VACUUM hook exactly once per process."""
+def _schedule_vacuum_atexit(db_path: str) -> None:
+    """Register the atexit VACUUM hook exactly once per process.
+
+    Captures ``db_path`` at registration time so the hook always operates
+    on the path that was current when the sweep ran. This matters in
+    tests, where ``get_db_path`` is monkey-patched to a temp file but the
+    patch has unwound by the time atexit fires — re-resolving at exit
+    would point at the user's real ``sessions.db`` and trigger an
+    unwanted VACUUM on production data.
+    """
     global _vacuum_scheduled
     if _vacuum_scheduled:
         return
     _vacuum_scheduled = True
-    atexit.register(_atexit_vacuum)
+    atexit.register(_atexit_vacuum, db_path)
 
 
-def _atexit_vacuum() -> None:
-    """Run ``VACUUM`` synchronously at process exit.
+def _atexit_vacuum(db_path: str) -> None:
+    """Run ``VACUUM`` synchronously at process exit on the captured path.
 
     Uses stdlib ``sqlite3`` (atexit can't await aiosqlite). Best-effort:
     swallow any error since this runs during shutdown when stderr may be
     closed.
     """
+    import os
     import sqlite3
 
-    db_path = get_db_path()
-    if not db_path.exists():
+    if not os.path.exists(db_path):
         return
     try:
-        with sqlite3.connect(str(db_path), timeout=60.0) as conn:
+        with sqlite3.connect(db_path, timeout=60.0) as conn:
             # VACUUM cannot run inside a transaction; sqlite3 starts one
             # implicitly on the first execute, so isolation_level=None ensures
             # we are in autocommit mode for the VACUUM statement.
@@ -884,9 +906,10 @@ async def db_stats(top_n: int = 5) -> dict[str, Any]:
 
     Keys: ``db_path`` (str), ``size_bytes`` (int, file size or 0 if absent),
     ``thread_count`` (int, EvoScientist threads), ``checkpoint_count``
-    (int, EvoScientist rows), ``write_count`` (int, all writes — the table
-    has no agent_name column), ``top_threads`` (list of dicts with
-    ``thread_id`` and ``count``, sorted desc).
+    (int, EvoScientist rows), ``write_count`` (int, EvoScientist writes
+    only — scoped via JOIN to ``checkpoints.metadata.agent_name`` so
+    co-located non-EvoSci agents are excluded), ``top_threads`` (list of
+    dicts with ``thread_id`` and ``count``, sorted desc).
     """
     db_path = get_db_path()
     size = db_path.stat().st_size if db_path.exists() else 0
@@ -915,7 +938,19 @@ async def db_stats(top_n: int = 5) -> dict[str, Any]:
                     out["checkpoint_count"] = int(row[1] or 0)
 
             if await _table_exists(conn, "writes"):
-                async with conn.execute("SELECT COUNT(*) FROM writes") as cur:
+                # Scope writes to EvoScientist rows by joining against
+                # checkpoints — the ``writes`` table itself has no
+                # ``agent_name`` column, so a bare ``COUNT(*)`` would
+                # over-report when other LangGraph apps share this DB.
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM writes w "
+                    "JOIN checkpoints c "
+                    "  ON c.thread_id = w.thread_id "
+                    " AND c.checkpoint_ns = w.checkpoint_ns "
+                    " AND c.checkpoint_id = w.checkpoint_id "
+                    "WHERE json_extract(c.metadata, '$.agent_name') = ?",
+                    (AGENT_NAME,),
+                ) as cur:
                     row = await cur.fetchone()
                     if row:
                         out["write_count"] = int(row[0] or 0)
