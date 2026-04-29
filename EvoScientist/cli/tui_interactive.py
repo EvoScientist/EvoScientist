@@ -644,6 +644,12 @@ def run_textual_interactive(
             yield Static("", id="status")
 
         def on_mount(self) -> None:
+            # Register fallback middleware UI callback so messages appear
+            # as SystemMessage widgets in the chat container.
+            from ..middleware.model_fallback import set_ui_emit
+
+            set_ui_emit(lambda text, style: self._append_system(text, style))
+
             self._render_welcome()
             self._render_status()
             self.set_interval(1.0, self._render_status)

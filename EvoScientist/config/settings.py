@@ -86,6 +86,7 @@ class EvoScientistConfig:
     # LLM Settings
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5"
+    model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -388,6 +389,7 @@ _ENV_MAPPINGS = {
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
+    "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
