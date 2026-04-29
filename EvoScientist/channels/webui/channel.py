@@ -314,6 +314,7 @@ def _merge_transcripts(
 
 @dataclass
 class WebUIConfig(BaseChannelConfig):
+    bind_host: str = "127.0.0.1"
     webhook_port: int = 8010
     base_path: str = "/webui"
     api_key: str = ""
@@ -403,6 +404,9 @@ class WebUIChannel(Channel, WebhookMixin):
 
     def _get_webhook_port(self) -> int:
         return self.config.webhook_port
+
+    def _get_webhook_host(self) -> str:
+        return (self.config.bind_host or "127.0.0.1").strip() or "127.0.0.1"
 
     def _route(self, suffix: str) -> str:
         base = self.config.base_path.rstrip("/") or "/webui"
@@ -518,7 +522,8 @@ class WebUIChannel(Channel, WebhookMixin):
             pass
 
         logger.info(
-            "Web UI channel started on port %s at %s/assistant",
+            "Web UI channel started on %s:%s at %s/assistant",
+            self._get_webhook_host(),
             self.config.webhook_port,
             self.config.base_path.rstrip("/") or "/webui",
         )

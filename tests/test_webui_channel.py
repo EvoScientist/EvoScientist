@@ -36,15 +36,23 @@ def test_webui_registered():
 
 def test_webui_create_from_config():
     config = SimpleNamespace(
+        webui_bind_host="0.0.0.0",
         webui_port=8123,
         webui_api_key="secret",
         webui_base_path="/assistant",
     )
     channel = create_from_config(config)
     assert isinstance(channel, WebUIChannel)
+    assert channel.config.bind_host == "0.0.0.0"
     assert channel.config.webhook_port == 8123
     assert channel.config.api_key == "secret"
     assert channel.config.base_path == "/assistant"
+
+
+def test_webui_config_defaults_to_localhost_bind():
+    channel = WebUIChannel(WebUIConfig())
+    assert channel.config.bind_host == "127.0.0.1"
+    assert channel._get_webhook_host() == "127.0.0.1"
 
 
 def test_webui_apply_commands_is_append_only():

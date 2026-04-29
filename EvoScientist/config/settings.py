@@ -191,6 +191,7 @@ class EvoScientistConfig:
     signal_rpc_port: int = 7583
 
     # Web UI Settings
+    webui_bind_host: str = "127.0.0.1"
     webui_port: int = 8010
     webui_api_key: str = ""
     webui_base_path: str = "/webui"
@@ -392,6 +393,10 @@ _ENV_MAPPINGS = {
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
+    "webui_bind_host": "EVOSCIENTIST_WEBUI_BIND_HOST",
+    "webui_port": "EVOSCIENTIST_WEBUI_PORT",
+    "webui_api_key": "EVOSCIENTIST_WEBUI_API_KEY",
+    "webui_base_path": "EVOSCIENTIST_WEBUI_BASE_PATH",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
 }

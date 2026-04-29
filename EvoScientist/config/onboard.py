@@ -2560,6 +2560,16 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             console.print(
                 "  [dim]Configure the browser-facing channel used by the Next.js UI.[/dim]"
             )
+            webui_bind_host = questionary.text(
+                "Web UI bind host (127.0.0.1 = local only, 0.0.0.0 = network):",
+                default=str(getattr(config, "webui_bind_host", "127.0.0.1")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if webui_bind_host is None:
+                raise KeyboardInterrupt()
+            updates["webui_bind_host"] = (webui_bind_host or "127.0.0.1").strip()
+
             webui_port = questionary.text(
                 "Web UI port:",
                 default=str(getattr(config, "webui_port", 8010)),
@@ -2578,7 +2588,10 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             ).ask()
             if webui_base_path is None:
                 raise KeyboardInterrupt()
-            updates["webui_base_path"] = (webui_base_path or "/webui").strip()
+            normalized_base_path = (webui_base_path or "/webui").strip()
+            if normalized_base_path and not normalized_base_path.startswith("/"):
+                normalized_base_path = f"/{normalized_base_path}"
+            updates["webui_base_path"] = normalized_base_path or "/webui"
 
             webui_api_key = questionary.text(
                 "Web UI API key (optional):",

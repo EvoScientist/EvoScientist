@@ -504,6 +504,38 @@ async def compact_conversation(
 _serve_logger = logging.getLogger(__name__)
 
 
+def _channels_include(config: Any, channel_name: str) -> bool:
+    enabled = str(getattr(config, "channel_enabled", "") or "")
+    return channel_name in {part.strip() for part in enabled.split(",") if part.strip()}
+
+
+def _normalize_webui_base_path(base_path: str) -> str:
+    normalized = (base_path or "/webui").strip() or "/webui"
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/") or "/webui"
+
+
+def _format_webui_url_host(bind_host: str) -> str:
+    host = (bind_host or "127.0.0.1").strip() or "127.0.0.1"
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return "localhost"
+    if host in {"0.0.0.0", "::"}:
+        return "localhost"
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _webui_base_from_config(config: Any) -> str:
+    bind_host = str(getattr(config, "webui_bind_host", "127.0.0.1") or "127.0.0.1")
+    port = int(getattr(config, "webui_port", 8010) or 8010)
+    base_path = _normalize_webui_base_path(
+        str(getattr(config, "webui_base_path", "/webui") or "/webui")
+    )
+    return f"http://{_format_webui_url_host(bind_host)}:{port}{base_path}"
+
+
 def _serve_process_message(
     msg: ChannelMessage,
     *,
@@ -693,6 +725,17 @@ def serve(
 
     console.print(f"[dim]Thread: {tid}[/dim]")
     console.print(f"[dim]Workspace: {_shorten_path(ws)}[/dim]")
+    if _channels_include(config, "webui"):
+        webui_bind_host = str(
+            getattr(config, "webui_bind_host", "127.0.0.1") or "127.0.0.1"
+        ).strip()
+        console.print(f"[dim]WebUI base: {_webui_base_from_config(config)}[/dim]")
+        if webui_bind_host in {"0.0.0.0", "::"}:
+            console.print(
+                "[dim]WebUI bind: "
+                f"{webui_bind_host}:{getattr(config, 'webui_port', 8010)} "
+                "(use this machine's LAN IP from another device).[/dim]"
+            )
     console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
 
     try:

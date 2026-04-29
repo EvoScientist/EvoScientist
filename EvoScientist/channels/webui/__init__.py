@@ -7,6 +7,7 @@ __all__ = ["WebUIChannel", "WebUIConfig"]
 def create_from_config(config) -> WebUIChannel:
     return WebUIChannel(
         WebUIConfig(
+            bind_host=getattr(config, "webui_bind_host", "127.0.0.1") or "127.0.0.1",
             webhook_port=getattr(config, "webui_port", 8010),
             api_key=getattr(config, "webui_api_key", ""),
             base_path=getattr(config, "webui_base_path", "/webui") or "/webui",

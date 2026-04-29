@@ -22,6 +22,13 @@ def parse_args():
         help="Port for the Assistant Transport endpoint",
     )
     parser.add_argument(
+        "--host",
+        "--bind-host",
+        dest="bind_host",
+        default="127.0.0.1",
+        help="Host/interface to bind (default: 127.0.0.1; use 0.0.0.0 for LAN)",
+    )
+    parser.add_argument(
         "--base-path",
         default="/webui",
         help="Base route prefix for the channel",
@@ -44,6 +51,7 @@ def main():
     bus = MessageBus()
     channel = WebUIChannel(
         WebUIConfig(
+            bind_host=args.bind_host,
             webhook_port=args.port,
             base_path=args.base_path,
             api_key=args.api_key,

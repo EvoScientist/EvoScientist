@@ -84,6 +84,13 @@ class WebhookMixin:
     def _get_webhook_port(self) -> int:
         return getattr(self.config, "webhook_port", 9000)
 
+    def _get_webhook_host(self) -> str:
+        return (
+            getattr(self.config, "webhook_host", None)
+            or getattr(self.config, "bind_host", None)
+            or "0.0.0.0"
+        )
+
     def _webhook_routes(self) -> list[tuple[str, str, Any]]:
         """Return [(method, path, handler), ...]. Override in subclass."""
         return []
@@ -120,9 +127,10 @@ class WebhookMixin:
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         port = self._get_webhook_port()
-        self._site = web.TCPSite(self._runner, "0.0.0.0", port)
+        host = self._get_webhook_host()
+        self._site = web.TCPSite(self._runner, host, port)
         await self._site.start()
-        logger.info(f"{getattr(self, 'name', '?')} webhook on port {port}")
+        logger.info(f"{getattr(self, 'name', '?')} webhook on {host}:{port}")
 
     async def _stop_webhook_server(self) -> None:
         if self._site:

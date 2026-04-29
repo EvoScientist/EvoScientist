@@ -11,15 +11,19 @@ from EvoScientist.cli import commands
 def _make_config(
     *,
     default_workdir: str = "",
+    channel_enabled: str = "telegram",
     channel_send_thinking: bool = True,
     log_level: str = "warning",
     channel_debug_tracing: bool = False,
     auto_approve: bool = False,
     auto_mode: bool = False,
     enable_ask_user: bool = True,
+    webui_bind_host: str = "127.0.0.1",
+    webui_port: int = 8010,
+    webui_base_path: str = "/webui",
 ):
     return SimpleNamespace(
-        channel_enabled="telegram",
+        channel_enabled=channel_enabled,
         default_workdir=default_workdir,
         channel_send_thinking=channel_send_thinking,
         log_level=log_level,
@@ -30,6 +34,9 @@ def _make_config(
         provider="anthropic",
         anthropic_auth_mode="api_key",
         openai_auth_mode="api_key",
+        webui_bind_host=webui_bind_host,
+        webui_port=webui_port,
+        webui_base_path=webui_base_path,
     )
 
 
@@ -49,6 +56,7 @@ def _run_serve_once(
 
     order: list[tuple[str, str | None]] = []
     captured: dict[str, object] = {}
+    printed: list[str] = []
 
     def _fake_set_workspace_root(path):
         order.append(("set_workspace_root", str(path)))
@@ -82,6 +90,11 @@ def _run_serve_once(
     )
     monkeypatch.setattr(commands, "_channels_stop", _fake_channels_stop)
     monkeypatch.setattr(commands, "_message_queue", _InterruptQueue())
+    monkeypatch.setattr(
+        commands.console,
+        "print",
+        lambda *args, **_kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
 
     def _fake_get_effective_config(cli_overrides=None):
         captured["cli_overrides"] = dict(cli_overrides or {})
@@ -103,6 +116,7 @@ def _run_serve_once(
         auto_mode=auto_mode,
         ask_user=ask_user,
     )
+    captured["printed"] = printed
     return order, captured
 
 
@@ -240,3 +254,20 @@ def test_serve_auto_mode_implies_auto_approve_and_disables_ask_user(
         "auto_approve": True,
         "enable_ask_user": False,
     }
+
+
+def test_serve_prints_webui_base_when_enabled(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(
+        default_workdir=ws,
+        channel_enabled="webui",
+        webui_bind_host="0.0.0.0",
+        webui_port=8123,
+        webui_base_path="assistant",
+    )
+
+    _, captured = _run_serve_once(monkeypatch, config, workdir=ws)
+
+    printed = "\n".join(captured["printed"])
+    assert "WebUI base: http://localhost:8123/assistant" in printed
+    assert "WebUI bind: 0.0.0.0:8123" in printed
