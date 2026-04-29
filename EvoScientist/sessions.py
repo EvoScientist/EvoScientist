@@ -18,8 +18,9 @@ Per-step pruning:
 import asyncio
 import atexit
 import logging
+import math
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -314,22 +315,45 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
         if keep > 0:
             try:
                 if await _needs_migration():
-                    import sys
                     import time
 
-                    size_str, pair_count = await _migration_preview()
-                    print(
-                        f"[Compacting sessions DB ({size_str}, "
-                        f"{pair_count} thread-namespace pairs)...]",
-                        file=sys.stderr,
-                        flush=True,
+                    from rich.console import Console
+
+                    # stderr-bound so non-interactive callers redirecting
+                    # stdout don't capture migration progress noise.
+                    console = Console(stderr=True)
+                    size_str, pair_count, size_bytes = await _migration_preview()
+                    eta_str = _format_duration(_estimate_sweep_seconds(size_bytes))
+                    console.print(
+                        f"[dim]·[/dim] Compacting sessions DB "
+                        f"([cyan]{size_str}[/cyan], "
+                        f"[yellow]{pair_count} thread-namespace pairs[/yellow]"
+                        f"[dim], est. ~{eta_str}[/dim])"
                     )
+
                     t0 = time.time()
-                    await _run_migration_sweep(keep)
-                    print(
-                        f"[Compaction done in {time.time() - t0:.1f}s]",
-                        file=sys.stderr,
-                        flush=True,
+
+                    with console.status(
+                        "[dim]Compacting...[/dim]", spinner="dots"
+                    ) as status:
+
+                        async def _on_progress(done: int, total: int) -> None:
+                            elapsed = time.time() - t0
+                            pct = (done * 100 // total) if total else 0
+                            eta = (elapsed / done) * (total - done) if done > 0 else 0
+                            status.update(
+                                f"[dim]Compacting[/dim] "
+                                f"[yellow]{pct}%[/yellow] "
+                                f"[dim]({done}/{total} pairs · "
+                                f"{_format_duration(elapsed)} elapsed · "
+                                f"~{_format_duration(eta)} remaining)[/dim]"
+                            )
+
+                        await _run_migration_sweep(keep, progress_cb=_on_progress)
+
+                    console.print(
+                        f"[dim]·[/dim] [green]✓[/green] Compaction done in "
+                        f"[green]{_format_duration(time.time() - t0)}[/green]"
                     )
             except Exception as exc:
                 _logger.warning("migration sweep failed: %s", exc, exc_info=True)
@@ -707,12 +731,44 @@ async def _set_user_version(conn: aiosqlite.Connection, version: int) -> None:
     await conn.commit()
 
 
-async def _migration_preview() -> tuple[str, int]:
-    """Return ``(size_str, pair_count)`` for the pre-sweep status line.
+def _format_duration(seconds: float) -> str:
+    """Render a number of seconds as ``45s`` / ``2m 18s`` / ``1h 5m``.
+
+    Guards against ``inf`` / ``nan`` so a stray non-finite value (e.g. an
+    ETA computed before any pair completes) cannot raise ``OverflowError``
+    via ``int(float('inf'))``.
+    """
+    if not math.isfinite(seconds):
+        return "?"
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def _estimate_sweep_seconds(size_bytes: int) -> int:
+    """Rough ETA for a full migration sweep on the given DB size.
+
+    Empirical baseline: 14.53 GB ≈ 138s on a typical SSD, i.e. ~10 s/GB.
+    Used only for a user-facing pre-sweep hint — real time is reported
+    after completion so the estimate doesn't need to be precise.
+    """
+    return max(2, round(size_bytes / (1024 * 1024 * 1024) * 9.5))
+
+
+async def _migration_preview() -> tuple[str, int, int]:
+    """Return ``(size_str, pair_count, size_bytes)`` for the pre-sweep status line.
 
     ``size_str`` is a human-readable file size (``"2.62 GB"`` / ``"364.3 MB"``).
     ``pair_count`` is the number of distinct ``(thread_id, checkpoint_ns)``
-    pairs the sweep will iterate. Best-effort: returns zeros on any error.
+    pairs the sweep will iterate. ``size_bytes`` is the raw byte count
+    (used by ``_estimate_sweep_seconds`` for the ETA). Best-effort:
+    returns zeros on any error.
     """
     db_path = get_db_path()
     try:
@@ -741,7 +797,7 @@ async def _migration_preview() -> tuple[str, int]:
                     pair_count = int(row[0]) if row else 0
     except aiosqlite.Error:
         pass
-    return size_str, pair_count
+    return size_str, pair_count, size_bytes
 
 
 async def _needs_migration() -> bool:
@@ -768,13 +824,20 @@ async def _needs_migration() -> bool:
         return False
 
 
-async def _run_migration_sweep(keep: int) -> int:
+async def _run_migration_sweep(
+    keep: int,
+    progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+) -> int:
     """Prune all ``(thread_id, checkpoint_ns)`` pairs to ``keep`` rows each.
 
     Iterates pairs in deterministic order, applies the same DELETE pattern
     the per-step pruner uses, and yields to the event loop between pairs
     so the agent stays responsive. On success bumps ``PRAGMA user_version``
     so the sweep never reruns.
+
+    ``progress_cb``: optional ``async (done: int, total: int) -> None``
+    fired after each pair is committed; used by callers to drive a live
+    progress indicator.
 
     Returns the number of pairs pruned.
     """
@@ -855,6 +918,11 @@ async def _run_migration_sweep(keep: int) -> int:
             )
             await conn.commit()
             pairs_pruned += 1
+            if progress_cb is not None:
+                try:
+                    await progress_cb(pairs_pruned, len(pairs))
+                except Exception:  # pragma: no cover - never let UI break sweep
+                    pass
             if _SWEEP_YIELD_SECONDS >= 0:
                 await asyncio.sleep(_SWEEP_YIELD_SECONDS)
 
