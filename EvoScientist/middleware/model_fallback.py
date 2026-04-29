@@ -14,6 +14,7 @@ can deal with them.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware.types import (
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _ui_emit_fn: Callable[[str, str], None] | None = None
 """UI callback registered by the CLI/TUI entrypoint.  ``None`` until set."""
 
+_fallback_chain_lock = threading.Lock()
 _fallback_chain: list[tuple[str, str]] = []
 """Ordered list of ``(model_name, provider)`` fallback entries."""
 
@@ -46,11 +48,18 @@ _MALFORMED_REQUEST_PATTERNS: list[str] = [
     "invalid_request_error",
     "invalid request",
     "malformed",
+]
+"""Substrings that identify a malformed request (client-side bug)."""
+
+_AUTH_ERROR_PATTERNS: list[str] = [
     "invalid_api_key",
     "authentication",
     "permission",
 ]
-"""Substrings that identify a malformed / auth request error."""
+"""Substrings that identify auth/permission errors.
+
+These are intentionally *not* treated as non-fallbackable because a different
+provider in the chain may have valid credentials."""
 
 
 def set_ui_emit(fn: Callable[[str, str], None] | None) -> None:
@@ -117,10 +126,11 @@ def add_fallback(model: str, provider: str) -> bool:
         ``True`` if added, ``False`` if the entry was already present.
     """
     entry = (model, provider)
-    if entry in _fallback_chain:
-        return False
-    _fallback_chain.append(entry)
-    return True
+    with _fallback_chain_lock:
+        if entry in _fallback_chain:
+            return False
+        _fallback_chain.append(entry)
+        return True
 
 
 def remove_fallback(model: str) -> bool:
