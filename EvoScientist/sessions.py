@@ -18,8 +18,9 @@ Per-step pruning:
 import asyncio
 import atexit
 import logging
+import math
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -296,17 +297,66 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
     retention count is read from ``EvoScientistConfig`` at context entry;
     setting it to 0 disables pruning entirely.
 
-    Also opportunistically kicks the legacy-bloat migration sweep as a
-    background task on first entry of an oversized DB. The sweep is a
-    no-op once ``PRAGMA user_version`` has been bumped, so subsequent
-    invocations cost nothing.
+    Also runs the legacy-bloat migration sweep synchronously *before*
+    yielding the saver when needed. Sequencing sweep ahead of any agent
+    ``aput()`` eliminates the SQLite file-lock contention that produced
+    "database is locked" when channel inbound raced the sweep mid-DELETE.
+    The sweep is gated by ``PRAGMA user_version`` so it runs at most
+    once across all future launches; subsequent invocations cost nothing.
+    On failure ``user_version`` is NOT bumped, so the next launch retries.
     """
     keep = _resolve_keep_per_ns()
     async with PruningCheckpointer.from_conn_string_with_keep(
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
-        # Fire-and-forget; runs concurrent with the agent on the same loop.
-        maybe_kick_migration_sweep(keep)
+        # The whole gate is wrapped in a broad try/except: any unexpected
+        # failure (incl. preview / status print) must degrade to "yield
+        # the saver, log a warning" — never to "hang startup".
+        if keep > 0:
+            try:
+                if await _needs_migration():
+                    import time
+
+                    from rich.console import Console
+
+                    # stderr-bound so non-interactive callers redirecting
+                    # stdout don't capture migration progress noise.
+                    console = Console(stderr=True)
+                    size_str, pair_count, size_bytes = await _migration_preview()
+                    eta_str = _format_duration(_estimate_sweep_seconds(size_bytes))
+                    console.print(
+                        f"[dim]·[/dim] Compacting sessions DB "
+                        f"([cyan]{size_str}[/cyan], "
+                        f"[yellow]{pair_count} thread-namespace pairs[/yellow]"
+                        f"[dim], est. ~{eta_str}[/dim])"
+                    )
+
+                    t0 = time.time()
+
+                    with console.status(
+                        "[dim]Compacting...[/dim]", spinner="dots"
+                    ) as status:
+
+                        async def _on_progress(done: int, total: int) -> None:
+                            elapsed = time.time() - t0
+                            pct = (done * 100 // total) if total else 0
+                            eta = (elapsed / done) * (total - done) if done > 0 else 0
+                            status.update(
+                                f"[dim]Compacting[/dim] "
+                                f"[yellow]{pct}%[/yellow] "
+                                f"[dim]({done}/{total} pairs · "
+                                f"{_format_duration(elapsed)} elapsed · "
+                                f"~{_format_duration(eta)} remaining)[/dim]"
+                            )
+
+                        await _run_migration_sweep(keep, progress_cb=_on_progress)
+
+                    console.print(
+                        f"[dim]·[/dim] [green]✓[/green] Compaction done in "
+                        f"[green]{_format_duration(time.time() - t0)}[/green]"
+                    )
+            except Exception as exc:
+                _logger.warning("migration sweep failed: %s", exc, exc_info=True)
         yield saver
 
 
@@ -384,16 +434,6 @@ def _apply_summarization_event(messages: list, event: dict | None) -> list:
         return list(messages)
 
     return [summary_message, *messages[cutoff_index:]]
-
-
-async def _count_messages(
-    conn: aiosqlite.Connection,
-    thread_id: str,
-    serde: JsonPlusSerializer,
-) -> int:
-    """Count messages in the most recent checkpoint for *thread_id*."""
-    msgs = await _load_checkpoint_messages(conn, thread_id, serde)
-    return len(msgs)
 
 
 def _extract_preview(messages: list, max_len: int = 50) -> str:
@@ -691,6 +731,75 @@ async def _set_user_version(conn: aiosqlite.Connection, version: int) -> None:
     await conn.commit()
 
 
+def _format_duration(seconds: float) -> str:
+    """Render a number of seconds as ``45s`` / ``2m 18s`` / ``1h 5m``.
+
+    Guards against ``inf`` / ``nan`` so a stray non-finite value (e.g. an
+    ETA computed before any pair completes) cannot raise ``OverflowError``
+    via ``int(float('inf'))``.
+    """
+    if not math.isfinite(seconds):
+        return "?"
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def _estimate_sweep_seconds(size_bytes: int) -> int:
+    """Rough ETA for a full migration sweep on the given DB size.
+
+    Empirical baseline: 14.53 GB ≈ 138s on a typical SSD, i.e. ~10 s/GB.
+    Used only for a user-facing pre-sweep hint — real time is reported
+    after completion so the estimate doesn't need to be precise.
+    """
+    return max(2, round(size_bytes / (1024 * 1024 * 1024) * 9.5))
+
+
+async def _migration_preview() -> tuple[str, int, int]:
+    """Return ``(size_str, pair_count, size_bytes)`` for the pre-sweep status line.
+
+    ``size_str`` is a human-readable file size (``"2.62 GB"`` / ``"364.3 MB"``).
+    ``pair_count`` is the number of distinct ``(thread_id, checkpoint_ns)``
+    pairs the sweep will iterate. ``size_bytes`` is the raw byte count
+    (used by ``_estimate_sweep_seconds`` for the ETA). Best-effort:
+    returns zeros on any error.
+    """
+    db_path = get_db_path()
+    try:
+        size_bytes = db_path.stat().st_size
+    except OSError:
+        size_bytes = 0
+    if size_bytes < 1024 * 1024:
+        size_str = f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        size_str = f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+    pair_count = 0
+    try:
+        async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
+            if await _table_exists(conn, "checkpoints"):
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
+                    "  WHERE json_extract(metadata, '$.agent_name') = ?"
+                    ")",
+                    (AGENT_NAME,),
+                ) as cur:
+                    row = await cur.fetchone()
+                    pair_count = int(row[0]) if row else 0
+    except aiosqlite.Error:
+        pass
+    return size_str, pair_count, size_bytes
+
+
 async def _needs_migration() -> bool:
     """Return True if the legacy-bloat sweep should run now.
 
@@ -715,13 +824,20 @@ async def _needs_migration() -> bool:
         return False
 
 
-async def _run_migration_sweep(keep: int) -> int:
+async def _run_migration_sweep(
+    keep: int,
+    progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+) -> int:
     """Prune all ``(thread_id, checkpoint_ns)`` pairs to ``keep`` rows each.
 
     Iterates pairs in deterministic order, applies the same DELETE pattern
     the per-step pruner uses, and yields to the event loop between pairs
     so the agent stays responsive. On success bumps ``PRAGMA user_version``
     so the sweep never reruns.
+
+    ``progress_cb``: optional ``async (done: int, total: int) -> None``
+    fired after each pair is committed; used by callers to drive a live
+    progress indicator.
 
     Returns the number of pairs pruned.
     """
@@ -802,6 +918,11 @@ async def _run_migration_sweep(keep: int) -> int:
             )
             await conn.commit()
             pairs_pruned += 1
+            if progress_cb is not None:
+                try:
+                    await progress_cb(pairs_pruned, len(pairs))
+                except Exception:  # pragma: no cover - never let UI break sweep
+                    pass
             if _SWEEP_YIELD_SECONDS >= 0:
                 await asyncio.sleep(_SWEEP_YIELD_SECONDS)
 
@@ -862,38 +983,6 @@ def _atexit_vacuum(db_path: str) -> None:
             _logger.warning("VACUUM at exit failed: %s", exc)
         except Exception:
             pass
-
-
-def maybe_kick_migration_sweep(keep: int) -> asyncio.Task | None:
-    """Schedule the legacy-bloat sweep as a background task if needed.
-
-    Returns the spawned ``asyncio.Task`` (caller does NOT await — sweep
-    runs concurrent with the agent), or ``None`` if migration is not
-    needed. Safe to call multiple times: the task itself rechecks the
-    user_version marker so a duplicate fire is a no-op.
-    """
-    if keep <= 0:
-        return None
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        return None
-
-    async def _runner() -> None:
-        try:
-            if not await _needs_migration():
-                return
-            pairs = await _run_migration_sweep(keep)
-            if pairs:
-                _logger.info(
-                    "checkpoint migration sweep pruned %d (thread, ns) pairs; "
-                    "VACUUM will run at exit",
-                    pairs,
-                )
-        except Exception as exc:  # pragma: no cover - defensive
-            _logger.warning("migration sweep failed: %s", exc, exc_info=True)
-
-    return loop.create_task(_runner())
 
 
 # ---------------------------------------------------------------------------
