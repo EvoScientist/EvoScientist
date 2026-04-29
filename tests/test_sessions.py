@@ -1073,6 +1073,47 @@ class TestMigrationSweep(unittest.TestCase):
         assert pairs == 1
         assert self._row_count("tw", "") == 2
 
+    def test_get_checkpointer_blocks_on_sweep_then_idempotent(self):
+        """End-to-end: ``get_checkpointer()`` must run the sweep BEFORE
+        yielding the saver so a concurrent ``aput()`` can't race the
+        DELETEs. After the first call sets ``user_version=1``, subsequent
+        calls must skip the sweep entirely.
+        """
+        from EvoScientist import sessions as sessions_module
+        from EvoScientist.sessions import (
+            _MIGRATION_VERSION,
+            get_checkpointer,
+        )
+
+        self._seed([("ge", "", 6)])
+
+        # Force the sweep to be needed regardless of file size.
+        with patch.object(sessions_module, "_MIGRATION_THRESHOLD_BYTES", 1):
+            # First entry: sweep should run, prune to keep=10 (default), and
+            # set user_version. With only 6 rows in one (thread, ns) pair,
+            # the prune is a no-op but user_version is still bumped.
+            async def _first():
+                async with get_checkpointer() as saver:
+                    return saver is not None
+
+            assert _run(_first())
+            assert self._user_version() == _MIGRATION_VERSION
+
+            # Second entry: sweep must be skipped — patch _run_migration_sweep
+            # to raise so any accidental re-invocation fails the test loudly.
+            async def _exploding_sweep(*_args, **_kwargs):
+                raise AssertionError("sweep must not re-run after marker is set")
+
+            with patch.object(
+                sessions_module, "_run_migration_sweep", _exploding_sweep
+            ):
+
+                async def _second():
+                    async with get_checkpointer() as saver:
+                        return saver is not None
+
+                assert _run(_second())
+
 
 class TestDbStats(unittest.TestCase):
     """Tests for the read-only ``db_stats`` diagnostic helper."""
