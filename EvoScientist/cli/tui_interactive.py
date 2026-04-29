@@ -13,6 +13,7 @@ import random
 import sys
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.console import Group
@@ -67,6 +68,30 @@ from .status_bar import (
 )
 
 _channel_logger = logging.getLogger(__name__)
+
+
+def _normalize_workspace_key(workspace_dir: str | None) -> str:
+    if not workspace_dir:
+        return ""
+    try:
+        return str(Path(workspace_dir).expanduser().resolve())
+    except Exception:
+        return str(workspace_dir).strip()
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", "") or ""
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text", "")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts).strip()
+    return str(content).strip()
 
 
 def _shorten_path(path: str) -> str:
@@ -343,6 +368,10 @@ def run_textual_interactive(
             self._conversation_tid = thread_id_value
             self._workspace_dir = workspace
             self._checkpointer = checkpointer
+            self._workspace_agents: dict[str, Any] = {}
+            initial_workspace_key = _normalize_workspace_key(workspace)
+            if initial_workspace_key:
+                self._workspace_agents[initial_workspace_key] = agent
             self._channel_send_thinking = channel_send_thinking_value
             self._resumed = resumed
             self._resume_warning = resume_warning
@@ -372,6 +401,27 @@ def run_textual_interactive(
             self._status_streaming_text = ""
             self._status_last_input_tokens: int | None = None
             self._compacting_widget: CompactingWidget | None = None
+
+        def _agent_for_workspace(self, workspace_dir: str | None) -> Any:
+            """Return an agent whose file tools are bound to *workspace_dir*."""
+            workspace_key = _normalize_workspace_key(workspace_dir)
+            if not workspace_key:
+                return self._agent
+
+            current_key = _normalize_workspace_key(self._workspace_dir)
+            if workspace_key == current_key:
+                return self._agent
+
+            cached = self._workspace_agents.get(workspace_key)
+            if cached is not None:
+                return cached
+
+            workspace_agent = load_agent(
+                workspace_dir=workspace_key,
+                checkpointer=self._checkpointer,
+            )
+            self._workspace_agents[workspace_key] = workspace_agent
+            return workspace_agent
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -459,6 +509,9 @@ def run_textual_interactive(
                 workspace_dir=self._workspace_dir,
                 checkpointer=self._checkpointer,
             )
+            workspace_key = _normalize_workspace_key(self._workspace_dir)
+            if workspace_key:
+                self._workspace_agents[workspace_key] = self._agent
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(model)
             self._status_snapshot = self._status_base_snapshot
@@ -485,6 +538,9 @@ def run_textual_interactive(
                 workspace_dir=self._workspace_dir,
                 checkpointer=self._checkpointer,
             )
+            workspace_key = _normalize_workspace_key(self._workspace_dir)
+            if workspace_key:
+                self._workspace_agents[workspace_key] = self._agent
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(model)
             self._status_snapshot = self._status_base_snapshot
@@ -892,7 +948,13 @@ def run_textual_interactive(
             )
             response = ""
             effective_thread_id = thread_id_override or self._conversation_tid
+            effective_workspace_dir = workspace_dir_override or self._workspace_dir
+            stream_agent = self._agent_for_workspace(effective_workspace_dir)
             runtime_registry = get_thread_runtime_registry()
+            assistant_message = runtime_registry.start_assistant_message(
+                effective_thread_id
+            )
+            assistant_message_id = str(assistant_message.get("id", "") or "")
 
             async def _remove_w(w: Static | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -1093,7 +1155,7 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     async for event in stream_agent_events(
-                        self._agent,
+                        stream_agent,
                         _stream_input,
                         effective_thread_id,
                         metadata=metadata,
@@ -1104,7 +1166,7 @@ def run_textual_interactive(
                             on_stream_state_cb(state)
                         if on_raw_stream_event_cb is not None and (
                             event_type.startswith("subagent_")
-                            or event_type == "tool_call"
+                            or event_type in {"tool_call", "tool_result"}
                         ):
                             on_raw_stream_event_cb(event)
 
@@ -1237,9 +1299,19 @@ def run_textual_interactive(
                                 if assistant_w is None:
                                     assistant_w = AssistantMessage(state.response_text)
                                     await container.mount(assistant_w)
+                                    runtime_registry.set_assistant_message_content(
+                                        effective_thread_id,
+                                        state.response_text,
+                                        message_id=assistant_message_id,
+                                    )
                                 else:
                                     await assistant_w.append_content(
                                         event.get("content", ""),
+                                    )
+                                    runtime_registry.append_assistant_delta(
+                                        effective_thread_id,
+                                        event.get("content", ""),
+                                        message_id=assistant_message_id,
                                     )
                                 self._set_status_streaming_text(state.response_text)
 
@@ -1262,6 +1334,11 @@ def run_textual_interactive(
                                 except Exception:
                                     pass
                                 assistant_w = None
+                                runtime_registry.set_assistant_message_content(
+                                    effective_thread_id,
+                                    "",
+                                    message_id=assistant_message_id,
+                                )
                             # Skip internal tools and task (handled by SubAgentWidget)
                             if tool_name not in _INTERNAL_TOOLS and tool_name != "task":
                                 has_used_tools = True
@@ -1618,6 +1695,11 @@ def run_textual_interactive(
                                     clean or state.response_text
                                 )
                                 await container.mount(assistant_w)
+                                runtime_registry.finish_assistant_message(
+                                    effective_thread_id,
+                                    content=clean or state.response_text,
+                                    message_id=assistant_message_id,
+                                )
                                 # Markdown rendering is async and needs multiple
                                 # layout cycles to compute final height.  Schedule
                                 # repeated deferred scrolls so long content stays
@@ -1629,6 +1711,12 @@ def run_textual_interactive(
                                             lambda: container.scroll_end(animate=False),
                                         ),
                                     )
+                            elif assistant_w is not None:
+                                runtime_registry.finish_assistant_message(
+                                    effective_thread_id,
+                                    content=state.response_text,
+                                    message_id=assistant_message_id,
+                                )
                             # Mount token usage stats
                             if state.total_input_tokens or state.total_output_tokens:
                                 await container.mount(
@@ -1641,6 +1729,11 @@ def run_textual_interactive(
                         elif event_type == "error":
                             error_msg = event.get("message", "Unknown error")
                             self._append_system(f"Error: {error_msg}", style="red")
+                            runtime_registry.finish_assistant_message(
+                                effective_thread_id,
+                                content=f"Error: {error_msg}",
+                                message_id=assistant_message_id,
+                            )
 
                         # Scroll after Textual processes the layout update
                         _schedule_scroll()
@@ -1768,6 +1861,35 @@ def run_textual_interactive(
                     if bridge.on_stream_event is not None:
                         bridge.on_stream_event("stream_state", stream_state)
 
+                if not runtime_registry.snapshot(self._conversation_tid).get(
+                    "messages"
+                ):
+                    persisted_messages = await get_thread_messages(
+                        self._conversation_tid
+                    )
+                    seed_messages = []
+                    for index, message in enumerate(persisted_messages):
+                        role = getattr(message, "type", "")
+                        if role == "human":
+                            seed_role = "user"
+                        elif role == "ai":
+                            seed_role = "assistant"
+                        else:
+                            continue
+                        content = _message_text(message)
+                        if content:
+                            seed_messages.append(
+                                {
+                                    "id": f"{seed_role}_{self._conversation_tid}_{index}",
+                                    "role": seed_role,
+                                    "content": content,
+                                }
+                            )
+                    runtime_registry.seed_messages(
+                        self._conversation_tid,
+                        seed_messages,
+                    )
+                runtime_registry.append_user_message(self._conversation_tid, user_text)
                 mark_run_started(self._conversation_tid, registry=runtime_registry)
                 try:
                     await self._stream_with_widgets(
@@ -1872,8 +1994,9 @@ def run_textual_interactive(
 
                 # Handle slash commands from channel
                 if msg.content.strip().startswith("/"):
+                    command_agent = self._agent_for_workspace(effective_workspace_dir)
                     ctx = CommandContext(
-                        agent=self._agent,
+                        agent=command_agent,
                         thread_id=effective_thread_id,
                         ui=ChannelCommandUI(
                             msg,
@@ -1908,6 +2031,11 @@ def run_textual_interactive(
 
                 response = ""
                 try:
+                    if not (msg.metadata or {}).get("webui_request_id"):
+                        runtime_registry.append_user_message(
+                            effective_thread_id,
+                            msg.content,
+                        )
                     mark_run_started(effective_thread_id, registry=runtime_registry)
                     response = await self._stream_with_widgets(
                         msg.content,

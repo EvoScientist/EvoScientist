@@ -995,10 +995,11 @@ def _process_tool_result(chunk, emitter: StreamEventEmitter, tracker: ToolCallTr
         yield emitter.tool_call(info.name, info.args, info.id)
 
     name = getattr(chunk, "name", "unknown")
+    tool_call_id = getattr(chunk, "tool_call_id", "") or ""
     raw_content, _is_img = _extract_tool_content(chunk)
     content = raw_content[: DisplayLimits.TOOL_RESULT_MAX]
     if len(raw_content) > DisplayLimits.TOOL_RESULT_MAX:
         content += "\n... (truncated)"
 
     success = is_success(content)
-    yield emitter.tool_result(name, content, success)
+    yield emitter.tool_result(name, content, success, tool_call_id)

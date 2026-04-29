@@ -544,6 +544,15 @@ class InboundConsumer:
                                 msg.metadata,
                             )
 
+                    elif event_type == "tool_result":
+                        if channel and hasattr(channel, "send_tool_event"):
+                            await channel.send_tool_event(
+                                msg.sender_id,
+                                event_type,
+                                event,
+                                msg.metadata,
+                            )
+
                     elif event_type == "text":
                         final_content += event.get("content", "")
 

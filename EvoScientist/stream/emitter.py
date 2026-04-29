@@ -40,7 +40,12 @@ class StreamEventEmitter:
         )
 
     @staticmethod
-    def tool_result(name: str, content: str, success: bool = True) -> StreamEvent:
+    def tool_result(
+        name: str,
+        content: str,
+        success: bool = True,
+        tool_call_id: str = "",
+    ) -> StreamEvent:
         """Tool result event."""
         return StreamEvent(
             "tool_result",
@@ -49,6 +54,7 @@ class StreamEventEmitter:
                 "name": name,
                 "content": content,
                 "success": success,
+                "id": tool_call_id,
             },
         )
 

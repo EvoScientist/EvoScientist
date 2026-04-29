@@ -136,6 +136,182 @@ def _extract_file_tool_path(payload: dict[str, Any]) -> str:
     return str(args.get("path") or args.get("file_path") or "").strip()
 
 
+def _dedupe_key_for_file_activity(
+    tool_name: str,
+    file_path: str,
+    tool_call_id: str,
+    payload: dict[str, Any],
+) -> str:
+    if tool_call_id:
+        return f"id:{tool_call_id}"
+    try:
+        rendered = json.dumps(payload, sort_keys=True, default=str)
+    except Exception:
+        rendered = str(payload)
+    digest = hashlib.sha1(rendered.encode("utf-8")).hexdigest()[:16]
+    return f"payload:{tool_name}:{file_path}:{digest}"
+
+
+def _remember_pending_file_tool_call(
+    state: dict[str, Any],
+    *,
+    tool_name: str,
+    file_path: str,
+    tool_call_id: str,
+) -> None:
+    if not tool_call_id and not file_path:
+        return
+
+    pending_by_id = state.setdefault("_pendingFileToolCallsById", {})
+    if not isinstance(pending_by_id, dict):
+        pending_by_id = {}
+        state["_pendingFileToolCallsById"] = pending_by_id
+
+    pending_queue = state.setdefault("_pendingFileToolCallQueue", [])
+    if not isinstance(pending_queue, list):
+        pending_queue = []
+        state["_pendingFileToolCallQueue"] = pending_queue
+
+    call = {"id": tool_call_id, "name": tool_name, "filePath": file_path}
+    if tool_call_id:
+        existing = pending_by_id.get(tool_call_id)
+        if isinstance(existing, dict):
+            existing["name"] = tool_name or existing.get("name", "")
+            if file_path:
+                existing["filePath"] = file_path
+            call = {
+                "id": tool_call_id,
+                "name": str(existing.get("name", "") or tool_name),
+                "filePath": str(existing.get("filePath", "") or file_path),
+            }
+        pending_by_id[tool_call_id] = call
+
+    for existing in pending_queue:
+        if not isinstance(existing, dict):
+            continue
+        if tool_call_id and existing.get("id") == tool_call_id:
+            existing["name"] = tool_name or existing.get("name", "")
+            if file_path:
+                existing["filePath"] = file_path
+            return
+
+    pending_queue.append(call)
+    if len(pending_queue) > 500:
+        del pending_queue[: len(pending_queue) - 500]
+
+
+def _resolve_completed_file_tool_path(
+    state: dict[str, Any],
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    payload: dict[str, Any],
+) -> str:
+    file_path = _extract_file_tool_path(payload)
+    pending_by_id = state.get("_pendingFileToolCallsById", {})
+    if not isinstance(pending_by_id, dict):
+        pending_by_id = {}
+
+    pending_queue = state.get("_pendingFileToolCallQueue", [])
+    if not isinstance(pending_queue, list):
+        pending_queue = []
+
+    if tool_call_id:
+        pending = pending_by_id.pop(tool_call_id, None)
+        if isinstance(pending, dict):
+            file_path = file_path or str(pending.get("filePath", "") or "")
+
+    matched_index: int | None = None
+    if not file_path or tool_call_id:
+        for index, pending in enumerate(pending_queue):
+            if not isinstance(pending, dict):
+                continue
+            pending_id = str(pending.get("id", "") or "")
+            pending_name = str(pending.get("name", "") or "")
+            if tool_call_id and pending_id != tool_call_id:
+                continue
+            if not tool_call_id and pending_name != tool_name:
+                continue
+            file_path = file_path or str(pending.get("filePath", "") or "")
+            matched_index = index
+            break
+
+    if matched_index is not None:
+        del pending_queue[matched_index]
+    elif not tool_call_id:
+        for index, pending in enumerate(pending_queue):
+            if not isinstance(pending, dict):
+                continue
+            if str(pending.get("name", "") or "") != tool_name:
+                continue
+            pending_path = str(pending.get("filePath", "") or "")
+            if not pending_path:
+                continue
+            file_path = file_path or pending_path
+            del pending_queue[index]
+            break
+
+    return file_path.strip()
+
+
+def _message_content_matches(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    if left.get("role") != right.get("role"):
+        return False
+    left_content = str(left.get("content", "") or "")
+    right_content = str(right.get("content", "") or "")
+    if left_content == right_content:
+        return True
+    if left.get("role") == "assistant":
+        return left_content.startswith(right_content) or right_content.startswith(
+            left_content
+        )
+    return False
+
+
+def _transcript_prefix_matches(
+    candidate: list[dict[str, Any]],
+    baseline: list[dict[str, Any]],
+) -> bool:
+    if len(candidate) < len(baseline):
+        return False
+    return all(
+        _message_content_matches(candidate[index], baseline_message)
+        for index, baseline_message in enumerate(baseline)
+    )
+
+
+def _transcript_suffix_matches(
+    candidate: list[dict[str, Any]],
+    suffix: list[dict[str, Any]],
+) -> bool:
+    if len(candidate) < len(suffix):
+        return False
+    offset = len(candidate) - len(suffix)
+    return all(
+        _message_content_matches(candidate[offset + index], suffix_message)
+        for index, suffix_message in enumerate(suffix)
+    )
+
+
+def _merge_transcripts(
+    persisted: list[dict[str, Any]],
+    live: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge durable checkpoint history with process-live runtime messages."""
+    if not live:
+        return copy.deepcopy(persisted)
+    if not persisted:
+        return copy.deepcopy(live)
+    if _transcript_prefix_matches(live, persisted):
+        return copy.deepcopy(live)
+    if _transcript_suffix_matches(persisted, live):
+        return copy.deepcopy(persisted)
+    return [*copy.deepcopy(persisted), *copy.deepcopy(live)]
+
+
 @dataclass
 class WebUIConfig(BaseChannelConfig):
     webhook_port: int = 8010
@@ -241,6 +417,8 @@ class WebUIChannel(Channel, WebhookMixin):
             ("GET", self._route("/thread-state"), self._handle_thread_state),
             ("OPTIONS", self._route("/thread-events"), self._handle_options),
             ("GET", self._route("/thread-events"), self._handle_thread_events),
+            ("OPTIONS", self._route("/messages"), self._handle_options),
+            ("POST", self._route("/messages"), self._handle_messages_submit),
             ("OPTIONS", self._route("/commands/catalog"), self._handle_options),
             ("GET", self._route("/commands/catalog"), self._handle_commands_catalog),
             ("OPTIONS", self._route("/commands/execute"), self._handle_options),
@@ -561,27 +739,52 @@ class WebUIChannel(Channel, WebhookMixin):
         event_type: str,
         payload: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        if event_type != "tool_call":
-            return []
         tool_name = str(payload.get("name", "") or "").strip()
         if tool_name not in {"write_file", "edit_file"}:
             return []
 
-        file_path = _extract_file_tool_path(payload)
+        if event_type not in {"tool_call", "tool_result"}:
+            return []
+
+        tool_call_id = str(
+            payload.get("id") or payload.get("tool_call_id") or ""
+        ).strip()
+        if event_type == "tool_call":
+            _remember_pending_file_tool_call(
+                pending.state,
+                tool_name=tool_name,
+                file_path=_extract_file_tool_path(payload),
+                tool_call_id=tool_call_id,
+            )
+            return []
+
+        if not bool(payload.get("success", True)):
+            return []
+
+        file_path = _resolve_completed_file_tool_path(
+            pending.state,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            payload=payload,
+        )
         if not file_path:
             return []
 
-        tool_call_id = str(payload.get("id", "") or "").strip()
-        if tool_call_id:
-            seen_ids = pending.state.setdefault("_seenToolCallIds", [])
-            if not isinstance(seen_ids, list):
-                seen_ids = []
-                pending.state["_seenToolCallIds"] = seen_ids
-            if tool_call_id in seen_ids:
-                return []
-            seen_ids.append(tool_call_id)
-            if len(seen_ids) > 500:
-                del seen_ids[: len(seen_ids) - 500]
+        activity_key = _dedupe_key_for_file_activity(
+            tool_name,
+            file_path,
+            tool_call_id,
+            payload,
+        )
+        seen_keys = pending.state.setdefault("_seenFileToolActivityKeys", [])
+        if not isinstance(seen_keys, list):
+            seen_keys = []
+            pending.state["_seenFileToolActivityKeys"] = seen_keys
+        if activity_key in seen_keys:
+            return []
+        seen_keys.append(activity_key)
+        if len(seen_keys) > 500:
+            del seen_keys[: len(seen_keys) - 500]
 
         pending.append_activity(
             {
@@ -821,6 +1024,17 @@ class WebUIChannel(Channel, WebhookMixin):
 
         runtime_state = self._runtime.snapshot(thread_id)
         if runtime_state:
+            runtime_messages = runtime_state.get("messages")
+            if isinstance(runtime_messages, list):
+                state["messages"] = _merge_transcripts(
+                    persisted_messages,
+                    [
+                        message
+                        for message in runtime_messages
+                        if isinstance(message, dict)
+                        and message.get("role") in {"user", "assistant"}
+                    ],
+                )
             for field in (
                 "status",
                 "isRunning",
@@ -842,6 +1056,119 @@ class WebUIChannel(Channel, WebhookMixin):
                 ),
                 "updatedAt": metadata.get("updated_at") if metadata else None,
                 "state": state,
+            },
+            headers=self._cors_headers(request),
+        )
+
+    async def _load_persisted_webui_messages(
+        self,
+        thread_id: str,
+    ) -> list[dict[str, Any]]:
+        from ...sessions import get_thread_messages
+
+        messages = await get_thread_messages(thread_id)
+        persisted_messages: list[dict[str, Any]] = []
+        for index, message in enumerate(messages):
+            role = _role_from_langchain_message(message)
+            if role is None:
+                continue
+            content = _text_from_langchain_message(message)
+            if not content:
+                continue
+            persisted_messages.append(
+                {
+                    "id": _stable_message_id(thread_id, role, index, content),
+                    "role": role,
+                    "content": content,
+                }
+            )
+        return persisted_messages
+
+    async def _handle_messages_submit(self, request):
+        from aiohttp import web
+
+        if not self._check_auth(request):
+            return web.json_response(
+                {"error": "unauthorized"},
+                status=401,
+                headers=self._cors_headers(request),
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "invalid json"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {"error": "payload must be a JSON object"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        thread_id = self._extract_thread_id(request, payload)
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            thread_id = f"thread_{uuid.uuid4().hex}"
+        else:
+            thread_id = thread_id.strip()
+
+        content = str(payload.get("content") or payload.get("text") or "").strip()
+        if not content:
+            return web.json_response(
+                {"error": "content is required"},
+                status=400,
+                headers=self._cors_headers(request),
+            )
+
+        persisted_messages = await self._load_persisted_webui_messages(thread_id)
+        runtime_state = self._runtime.snapshot(thread_id)
+        if not runtime_state.get("messages"):
+            self._runtime.seed_messages(
+                thread_id,
+                persisted_messages,
+            )
+
+        workspace_dir = await self._resolve_or_create_workspace(thread_id)
+        self._runtime.append_user_message(thread_id, content)
+        self._runtime.begin_run(thread_id)
+
+        try:
+            await self._publish_inbound(
+                thread_id=thread_id,
+                content=content,
+                request_id=str(uuid.uuid4()),
+                workspace_dir=workspace_dir,
+            )
+        except Exception as exc:
+            self._runtime.set_status(thread_id, status=None, is_running=False)
+            return web.json_response(
+                {"error": f"failed to queue message: {exc}"},
+                status=500,
+                headers=self._cors_headers(request),
+            )
+
+        next_state = self._runtime.snapshot(thread_id)
+        live_messages = next_state.get("messages")
+        if isinstance(live_messages, list):
+            next_state["messages"] = _merge_transcripts(
+                persisted_messages,
+                [
+                    message
+                    for message in live_messages
+                    if isinstance(message, dict)
+                    and message.get("role") in {"user", "assistant"}
+                ],
+            )
+
+        return web.json_response(
+            {
+                "ok": True,
+                "threadId": thread_id,
+                "state": next_state,
             },
             headers=self._cors_headers(request),
         )

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 from EvoScientist.channels.bus import MessageBus
@@ -292,6 +293,66 @@ def test_publish_inbound_includes_workspace_dir():
     _run(_case())
 
 
+def test_webui_messages_submit_appends_backend_owned_user_message(monkeypatch):
+    async def _case():
+        channel = WebUIChannel(WebUIConfig())
+        payload = {"threadId": "thread-submit", "content": "hello from webui"}
+        captured: dict[str, str] = {}
+
+        class _Request:
+            def __init__(self) -> None:
+                self.headers = {"X-Thread-Id": "header-thread"}
+                self.query: dict[str, str] = {}
+
+            async def json(self):
+                return payload
+
+        async def _resolve_workspace(thread_id: str):
+            captured["workspace_thread_id"] = thread_id
+            return "/tmp/webui-submit-workspace"
+
+        async def _publish_inbound(**kwargs):
+            captured["inbound_thread_id"] = str(kwargs.get("thread_id", ""))
+            captured["content"] = str(kwargs.get("content", ""))
+            captured["workspace_dir"] = str(kwargs.get("workspace_dir", ""))
+
+        async def _load_persisted(_thread_id: str):
+            return [
+                {
+                    "id": "user-old",
+                    "role": "user",
+                    "content": "old prompt",
+                },
+                {
+                    "id": "assistant-old",
+                    "role": "assistant",
+                    "content": "old answer",
+                },
+            ]
+
+        monkeypatch.setattr(channel, "_resolve_or_create_workspace", _resolve_workspace)
+        monkeypatch.setattr(channel, "_publish_inbound", _publish_inbound)
+        monkeypatch.setattr(channel, "_load_persisted_webui_messages", _load_persisted)
+
+        response = await channel._handle_messages_submit(_Request())
+        body = json.loads(response.text)
+
+        assert response.status == 200
+        assert body["ok"] is True
+        assert captured["workspace_thread_id"] == "thread-submit"
+        assert captured["inbound_thread_id"] == "thread-submit"
+        assert captured["workspace_dir"] == "/tmp/webui-submit-workspace"
+        assert captured["content"] == "hello from webui"
+        assert [message["content"] for message in body["state"]["messages"]] == [
+            "old prompt",
+            "old answer",
+            "hello from webui",
+        ]
+        assert body["state"]["isRunning"] is True
+
+    _run(_case())
+
+
 def test_consumer_prefers_explicit_thread_id():
     consumer = InboundConsumer(
         bus=MessageBus(),
@@ -385,6 +446,7 @@ def test_webui_routes_include_native_ui_endpoints():
     assert ("GET", "/webui/ui/files/read") in routes
     assert ("GET", "/webui/ui/files/download-all") in routes
     assert ("POST", "/webui/ui/session/shutdown") in routes
+    assert ("POST", "/webui/messages") in routes
 
 
 def test_execute_command_line_help():
@@ -411,9 +473,29 @@ def test_runtime_registry_tracks_file_tool_calls():
         thread_id,
         "tool_call",
         {
-            "id": "tool-1",
+            "id": "tool-0",
             "name": "write_file",
-            "args": {"path": "reports/summary.md"},
+            "args": {},
+        },
+    )
+    registry.apply_tool_event(
+        thread_id,
+        "tool_call",
+        {
+            "id": "tool-0",
+            "name": "write_file",
+            "args": {"path": "reports/intro.md"},
+        },
+    )
+    assert registry.snapshot(thread_id).get("activity") == []
+    registry.apply_tool_event(
+        thread_id,
+        "tool_result",
+        {
+            "id": "tool-0",
+            "name": "write_file",
+            "content": "[OK] wrote file",
+            "success": True,
         },
     )
     registry.apply_tool_event(
@@ -423,6 +505,26 @@ def test_runtime_registry_tracks_file_tool_calls():
             "id": "tool-1",
             "name": "write_file",
             "args": {"path": "reports/summary.md"},
+        },
+    )
+    registry.apply_tool_event(
+        thread_id,
+        "tool_result",
+        {
+            "id": "tool-1",
+            "name": "write_file",
+            "content": "[OK] wrote file",
+            "success": True,
+        },
+    )
+    registry.apply_tool_event(
+        thread_id,
+        "tool_result",
+        {
+            "id": "tool-1",
+            "name": "write_file",
+            "content": "[OK] wrote file",
+            "success": True,
         },
     )
     registry.apply_tool_event(
@@ -434,6 +536,16 @@ def test_runtime_registry_tracks_file_tool_calls():
             "args": {"path": "reports/summary.md"},
         },
     )
+    registry.apply_tool_event(
+        thread_id,
+        "tool_result",
+        {
+            "id": "tool-2",
+            "name": "edit_file",
+            "content": "[OK] edited file",
+            "success": True,
+        },
+    )
 
     state = registry.snapshot(thread_id)
     file_events = [
@@ -442,5 +554,41 @@ def test_runtime_registry_tracks_file_tool_calls():
         if isinstance(item, dict) and item.get("type") in {"write_file", "edit_file"}
     ]
 
-    assert len(file_events) == 2
-    assert all(item["filePath"] == "reports/summary.md" for item in file_events)
+    assert len(file_events) == 3
+    assert [item["filePath"] for item in file_events] == [
+        "reports/intro.md",
+        "reports/summary.md",
+        "reports/summary.md",
+    ]
+
+
+def test_runtime_registry_tracks_backend_owned_messages():
+    registry = ThreadRuntimeRegistry()
+    thread_id = "thread-messages"
+
+    registry.seed_messages(
+        thread_id,
+        [{"id": "u0", "role": "user", "content": "before"}],
+    )
+    registry.append_user_message(thread_id, "new prompt", message_id="u1")
+    assistant = registry.start_assistant_message(thread_id, message_id="a1")
+    registry.append_assistant_delta(thread_id, "hel", message_id=assistant["id"])
+    registry.append_assistant_delta(thread_id, "lo", message_id=assistant["id"])
+    registry.finish_assistant_message(thread_id, message_id=assistant["id"])
+
+    state = registry.snapshot(thread_id)
+    assert [message["content"] for message in state["messages"]] == [
+        "before",
+        "new prompt",
+        "hello",
+    ]
+
+    _cursor, events = registry.events_since(thread_id, 0)
+    assert [event["type"] for event in events] == [
+        "messages_seeded",
+        "user_message",
+        "assistant_start",
+        "assistant_delta",
+        "assistant_delta",
+        "assistant_done",
+    ]

@@ -229,9 +229,9 @@ def build_runtime_bridge(
                 )
             return
 
-        if event_type == "tool_call":
-            runtime_registry.apply_tool_event(thread_id, event_type, event)
+        if event_type in {"tool_call", "tool_result"}:
             if channel is None:
+                runtime_registry.apply_tool_event(thread_id, event_type, event)
                 return
             if hasattr(channel, "send_tool_event_nowait"):
                 channel.send_tool_event_nowait(
@@ -251,6 +251,8 @@ def build_runtime_bridge(
                     ),
                     "ToolEvent",
                 )
+                return
+            runtime_registry.apply_tool_event(thread_id, event_type, event)
 
     def _hitl_prompt(action_requests: list) -> list[dict] | None:
         if channel is not None and hasattr(channel, "prompt_approval"):
