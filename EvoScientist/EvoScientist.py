@@ -432,17 +432,22 @@ def _get_default_middleware():
     """Build the default middleware list."""
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_middleware,
         create_tool_selector_middleware,
+        load_fallback_chain,
     )
 
     cfg = _ensure_config()
+    if cfg.model_fallbacks:
+        load_fallback_chain(cfg.model_fallbacks)
     model = _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     mw = [
         create_context_editing_middleware(model),
+        ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
@@ -543,13 +548,17 @@ def create_cli_agent(
     from .backends import CustomSandboxBackend, MergedSkillsBackend
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_middleware,
         create_tool_selector_middleware,
+        load_fallback_chain,
     )
 
     cfg = _ensure_config(config)
+    if cfg.model_fallbacks:
+        load_fallback_chain(cfg.model_fallbacks)
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
@@ -600,6 +609,7 @@ def create_cli_agent(
     model = _ensure_chat_model()
     mw: list[AgentMiddleware] = [
         create_context_editing_middleware(model),
+        ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
