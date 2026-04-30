@@ -3,6 +3,8 @@
 ARG BASE_IMAGE=ghcr.io/astral-sh/uv:python3.11-trixie-slim@sha256:7936cc6625ca04cafa6ecc3c2881ddfe90a747c55c74480cd4ac6ffad6a5af1e
 ARG NODE_IMAGE=node:24-trixie-slim@sha256:735dd688da64d22ebd9dd374b3e7e5a874635668fd2a6ec20ca1f99264294086
 
+FROM ${NODE_IMAGE} AS nodejs
+
 # ---------- Builder ----------
 FROM ${BASE_IMAGE} AS builder
 
@@ -34,9 +36,8 @@ RUN apt-get update \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-ARG NODE_IMAGE
-COPY --from=${NODE_IMAGE} /usr/local/bin/node /usr/local/bin/node
-COPY --from=${NODE_IMAGE} /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=nodejs /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodejs /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
