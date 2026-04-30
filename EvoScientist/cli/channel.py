@@ -22,6 +22,7 @@ from typing import Any
 from rich.panel import Panel
 from rich.text import Text
 
+from ..commands.base import ChannelRuntime
 from ..stream.console import console
 
 _channel_logger = logging.getLogger(__name__)
@@ -256,6 +257,7 @@ async def dispatch_channel_slash_command(
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
+    channel_runtime: ChannelRuntime | None = None,
 ) -> bool:
     """Dispatch a slash command from a channel message.
 
@@ -317,6 +319,7 @@ async def dispatch_channel_slash_command(
             handle_session_resume_cb=handle_session_resume_cb,
             await_agent_ready=await_agent_ready,
             on_cmd_completed=on_cmd_completed,
+            channel_runtime=channel_runtime,
         )
     except Exception as exc:
         # Last-ditch safety: any uncaught exception from inside the
@@ -351,6 +354,7 @@ async def _dispatch_channel_slash_impl(
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None,
+    channel_runtime: ChannelRuntime | None,
 ) -> bool:
     """Inner body of ``dispatch_channel_slash_command``.
 
@@ -389,6 +393,7 @@ async def _dispatch_channel_slash_impl(
         ui=ui,
         workspace_dir=workspace_dir,
         checkpointer=checkpointer,
+        channel_runtime=channel_runtime,
     )
 
     try:
@@ -695,8 +700,6 @@ def channel_hitl_prompt(
 _manager: Any | None = None  # ChannelManager
 _bus_loop: asyncio.AbstractEventLoop | None = None
 _bus_thread: threading.Thread | None = None
-_cli_agent: Any = None  # shared agent reference (same as CLI)
-_cli_thread_id: str | None = None  # shared thread_id (same conversation)
 
 
 def _channels_is_running(channel_type: str | None = None) -> bool:
@@ -714,9 +717,18 @@ def _channels_running_list() -> list[str]:
     return _manager.running_channels() if _manager else []
 
 
-def _channels_stop(channel_type: str | None = None) -> None:
-    """Stop channel(s) and clean up module-level state."""
-    global _manager, _bus_loop, _bus_thread, _cli_agent, _cli_thread_id
+def _channels_stop(
+    channel_type: str | None = None,
+    *,
+    runtime: ChannelRuntime | None = None,
+) -> None:
+    """Stop channel(s) and clean up module-level state.
+
+    ``runtime`` is the ``ChannelRuntime`` whose binding should be
+    cleared once the channels are gone — the caller owns it (commands
+    keep a reference via ``ctx.channel_runtime``).
+    """
+    global _manager, _bus_loop, _bus_thread
 
     if channel_type is None:
         # Stop everything
@@ -736,8 +748,8 @@ def _channels_stop(channel_type: str | None = None) -> None:
         _manager = None
         _bus_loop = None
         _bus_thread = None
-        _cli_agent = None
-        _cli_thread_id = None
+        if runtime is not None:
+            runtime.clear()
         return
 
     # Stop a specific channel
@@ -751,9 +763,8 @@ def _channels_stop(channel_type: str | None = None) -> None:
         except Exception as e:
             _channel_logger.debug(f"Error removing channel {channel_type}: {e}")
 
-    if _manager and not _manager.running_channels():
-        _cli_agent = None
-        _cli_thread_id = None
+    if _manager and not _manager.running_channels() and runtime is not None:
+        runtime.clear()
 
 
 def _start_channels_bus_mode(
@@ -1071,6 +1082,7 @@ def _auto_start_channel(
     config,
     *,
     send_thinking: bool | None = None,
+    runtime: ChannelRuntime | None = None,
 ) -> None:
     """Start channels automatically from config (bus mode).
 
@@ -1078,14 +1090,15 @@ def _auto_start_channel(
         agent: Compiled agent graph.
         thread_id: Current thread ID.
         config: EvoScientistConfig with channel settings.
+        runtime: Caller-owned ``ChannelRuntime`` to bind so commands
+            running over the channels can swap the agent later.  ``None``
+            is accepted for callers that don't yet pass one.
     """
-    global _cli_agent, _cli_thread_id
-
     if not config.channel_enabled:
         return
 
-    _cli_agent = agent
-    _cli_thread_id = thread_id
+    if runtime is not None:
+        runtime.bind(agent, thread_id)
 
     _start_channels_bus_mode(
         config,

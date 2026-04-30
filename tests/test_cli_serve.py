@@ -65,7 +65,7 @@ def _run_serve_once(
         captured["send_thinking"] = send_thinking
         captured["thread_id"] = thread_id
 
-    def _fake_channels_stop():
+    def _fake_channels_stop(channel_type=None, *, runtime=None):
         captured["stopped"] = True
 
     class _InterruptQueue:

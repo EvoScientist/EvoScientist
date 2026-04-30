@@ -71,10 +71,10 @@ class ChannelCommand(Command):
                 ctx.ui.append_system("No channels are running.", style="dim")
             else:
                 if target:
-                    _channels_stop(target)
+                    _channels_stop(target, runtime=ctx.channel_runtime)
                     ctx.ui.append_system(f"Channel '{target}' stopped.", style="green")
                 else:
-                    _channels_stop()
+                    _channels_stop(runtime=ctx.channel_runtime)
                     ctx.ui.append_system("All channels stopped.", style="green")
             return
 
@@ -98,12 +98,11 @@ class ChannelCommand(Command):
             ctx.ui.append_system(f"Adding channel(s): {', '.join(requested)}...")
             from ...cli.channel import _add_channel_to_running_bus
 
-            # Sync CLI-side globals up-front so partial-success states (one
-            # channel attached, next one raises) still leave
-            # _auto_start_channel observing the latest agent/thread refs.
-            # See cli/channel.py _cli_agent / _cli_thread_id.
-            _ch_mod._cli_agent = ctx.agent
-            _ch_mod._cli_thread_id = ctx.thread_id
+            # Bind the runtime up-front so partial-success states (one
+            # channel attached, next one raises) still leave the bus
+            # observing the latest agent/thread refs.
+            if ctx.channel_runtime is not None:
+                ctx.channel_runtime.bind(ctx.agent, ctx.thread_id)
             try:
                 for ct in requested:
                     _add_channel_to_running_bus(ct, config, send_thinking=send_thinking)
@@ -137,12 +136,8 @@ class ChannelCommand(Command):
                 ctx.thread_id,
                 send_thinking=send_thinking,
             )
-            # Sync CLI-side globals so _auto_start_channel observes the
-            # latest agent/thread refs (see cli/channel.py _cli_agent /
-            # _cli_thread_id). The pre-migration inline helper set these
-            # in the same branch.
-            _ch_mod._cli_agent = ctx.agent
-            _ch_mod._cli_thread_id = ctx.thread_id
+            if ctx.channel_runtime is not None:
+                ctx.channel_runtime.bind(ctx.agent, ctx.thread_id)
 
             # Show status panel
             if _ch_mod._manager:

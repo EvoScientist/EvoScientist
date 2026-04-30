@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from EvoScientist.commands.base import CommandContext
+from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from tests.conftest import run_async as _run
 
 pytest.importorskip("textual")
@@ -22,6 +22,7 @@ class _StubApp:
     def __init__(self) -> None:
         self._agent_loader = _Loader()
         self._conversation_tid = "thread-1"
+        self._channel_runtime = ChannelRuntime()
         self.model_updates: list[tuple[str, str | None]] = []
         self.refresh_calls: list[bool] = []
 
@@ -58,16 +59,15 @@ def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
         lambda: SimpleNamespace(model="gpt-5.5", provider="openai"),
     )
     monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: True)
-    monkeypatch.setattr(tui_mod._ch_mod, "_cli_agent", "old-agent", raising=False)
-    monkeypatch.setattr(tui_mod._ch_mod, "_cli_thread_id", "old-thread", raising=False)
+    app._channel_runtime.bind("old-agent", "old-thread")
 
     _run(tui_mod._sync_tui_command_completion(app, ctx, "old-agent", cmd))
 
     assert app._agent_loader.adopt_calls == ["new-agent"]
     assert app.model_updates == [("gpt-5.5", "openai")]
     assert app.refresh_calls == [True]
-    assert tui_mod._ch_mod._cli_agent == "new-agent"
-    assert tui_mod._ch_mod._cli_thread_id == "thread-1"
+    assert app._channel_runtime.agent == "new-agent"
+    assert app._channel_runtime.thread_id == "thread-1"
 
 
 def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypatch):

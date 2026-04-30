@@ -11,23 +11,21 @@ from EvoScientist.cli import channel as channel_cli
 
 @pytest.fixture(autouse=True)
 def _restore_channel_globals():
-    """Restore mutable module globals after each test."""
+    """Restore the bus-mode globals after each test."""
     original = {
         "_manager": channel_cli._manager,
         "_bus_loop": channel_cli._bus_loop,
         "_bus_thread": channel_cli._bus_thread,
-        "_cli_agent": channel_cli._cli_agent,
-        "_cli_thread_id": channel_cli._cli_thread_id,
     }
     yield
     channel_cli._manager = original["_manager"]
     channel_cli._bus_loop = original["_bus_loop"]
     channel_cli._bus_thread = original["_bus_thread"]
-    channel_cli._cli_agent = original["_cli_agent"]
-    channel_cli._cli_thread_id = original["_cli_thread_id"]
 
 
 def test_auto_start_channel_passes_send_thinking(monkeypatch):
+    from EvoScientist.commands.base import ChannelRuntime
+
     captured = {}
 
     def _fake_start(config, agent, thread_id, *, send_thinking=None):
@@ -40,13 +38,17 @@ def test_auto_start_channel_passes_send_thinking(monkeypatch):
 
     config = SimpleNamespace(channel_enabled="telegram")
     agent = object()
+    runtime = ChannelRuntime()
     channel_cli._auto_start_channel(
         agent,
         "thread-1",
         config,
         send_thinking=False,
+        runtime=runtime,
     )
 
     assert captured["send_thinking"] is False
     assert captured["thread_id"] == "thread-1"
     assert captured["agent"] is agent
+    assert runtime.agent is agent
+    assert runtime.thread_id == "thread-1"

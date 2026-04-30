@@ -52,6 +52,22 @@ class CommandUI(Protocol):
 
 
 @dataclass
+class ChannelRuntime:
+    """Mutable handle to the agent + thread bound to running channels."""
+
+    agent: Any = None
+    thread_id: str | None = None
+
+    def bind(self, agent: Any, thread_id: str | None) -> None:
+        self.agent = agent
+        self.thread_id = thread_id
+
+    def clear(self) -> None:
+        self.agent = None
+        self.thread_id = None
+
+
+@dataclass
 class CommandContext:
     """Context passed to commands during execution."""
 
@@ -61,6 +77,7 @@ class CommandContext:
     workspace_dir: str | None = None
     checkpointer: Any = None
     config: Any = None
+    channel_runtime: ChannelRuntime | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.
     input_tokens_hint: int | None = None

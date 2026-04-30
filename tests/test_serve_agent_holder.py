@@ -8,8 +8,6 @@ captured at startup.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from EvoScientist.cli.channel import (
     ChannelMessage,
     _register_channel_request,
@@ -19,20 +17,8 @@ from EvoScientist.cli.commands import (
     _make_serve_start_new_session_cb,
     _serve_process_message,
 )
+from EvoScientist.commands.base import ChannelRuntime
 from tests.conftest import run_async as _run
-
-
-@pytest.fixture(autouse=True)
-def _restore_channel_globals():
-    import EvoScientist.cli.channel as _ch_mod
-
-    prev_agent = _ch_mod._cli_agent
-    prev_tid = _ch_mod._cli_thread_id
-    try:
-        yield
-    finally:
-        _ch_mod._cli_agent = prev_agent
-        _ch_mod._cli_thread_id = prev_tid
 
 
 def test_hook_updates_holder_on_agent_swap():
@@ -52,13 +38,12 @@ def test_hook_updates_holder_on_agent_swap():
     assert holder["agent"] == "new-agent"
 
 
-def test_hook_syncs_channel_module_global():
-    """Other readers (the bus) look at ``cli.channel._cli_agent``; the
-    hook keeps that global in sync with the holder update."""
-    import EvoScientist.cli.channel as _ch_mod
-
+def test_hook_syncs_channel_runtime():
+    """Other readers (the bus) look at ``ChannelRuntime.agent``; the
+    hook keeps the runtime in sync with the holder update."""
     holder = {"agent": "original-agent"}
-    hook = _make_serve_cmd_completed_hook(holder)
+    runtime = ChannelRuntime(agent="original-agent", thread_id="t")
+    hook = _make_serve_cmd_completed_hook(holder, runtime)
 
     ctx = MagicMock()
     ctx.agent = "new-agent"
@@ -67,7 +52,7 @@ def test_hook_syncs_channel_module_global():
 
     _run(hook(ctx, "original-agent", cmd))
 
-    assert _ch_mod._cli_agent == "new-agent"
+    assert runtime.agent == "new-agent"
 
 
 def test_hook_noop_when_agent_unchanged():
@@ -137,13 +122,12 @@ def test_hook_updates_workspace_dir_on_resume():
     assert holder["workspace_dir"] == "/restored-ws"
 
 
-def test_hook_syncs_channel_module_thread_id():
-    """The bus reads ``cli.channel._cli_thread_id``; hook must sync it
+def test_hook_syncs_channel_runtime_thread_id():
+    """The bus reads ``ChannelRuntime.thread_id``; hook must sync it
     alongside the holder update."""
-    import EvoScientist.cli.channel as _ch_mod
-
     holder = {"agent": "a", "thread_id": "original-tid"}
-    hook = _make_serve_cmd_completed_hook(holder)
+    runtime = ChannelRuntime(agent="a", thread_id="original-tid")
+    hook = _make_serve_cmd_completed_hook(holder, runtime)
 
     ctx = MagicMock()
     ctx.agent = "a"
@@ -153,7 +137,7 @@ def test_hook_syncs_channel_module_thread_id():
 
     _run(hook(ctx, "a", cmd))
 
-    assert _ch_mod._cli_thread_id == "new-tid"
+    assert runtime.thread_id == "new-tid"
 
 
 def test_hook_noop_when_thread_id_unchanged():
@@ -220,20 +204,19 @@ def test_hook_emits_resume_warning_when_thread_changed():
 
 def test_start_new_session_cb_rotates_thread_id():
     """``/new`` via channel calls this callback — must generate a new
-    thread id, push into holder, and sync the channel-module global."""
-    import EvoScientist.cli.channel as _ch_mod
-
+    thread id, push into holder, and sync the channel runtime."""
     holder = {"agent": "a", "thread_id": "old-tid"}
+    runtime = ChannelRuntime(agent="a", thread_id="old-tid")
 
     with patch(
         "EvoScientist.sessions.generate_thread_id",
         return_value="freshly-generated-tid",
     ):
-        cb = _make_serve_start_new_session_cb(holder)
+        cb = _make_serve_start_new_session_cb(holder, runtime)
         cb()
 
     assert holder["thread_id"] == "freshly-generated-tid"
-    assert _ch_mod._cli_thread_id == "freshly-generated-tid"
+    assert runtime.thread_id == "freshly-generated-tid"
 
 
 def test_start_new_session_cb_leaves_agent_alone():
