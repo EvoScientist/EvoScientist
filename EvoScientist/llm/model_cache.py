@@ -112,7 +112,7 @@ def _resolve(
 
     default_base_url, api_key_env = _SUPPORTED[provider]
 
-    resolved_key = api_key or os.environ.get(api_key_env, "") or None
+    resolved_key = api_key or os.environ.get(api_key_env) or None
 
     if base_url:
         resolved_base_url = base_url.rstrip("/")

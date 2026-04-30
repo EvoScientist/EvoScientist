@@ -1473,7 +1473,8 @@ def _step_model(
         if is_supported(provider):
             api_key = _get_api_key_from_config(config, provider)
             base_url = _get_base_url_from_config(config, provider)
-            console.print("  [dim]Fetching model list...[/dim]", end="\r")
+            _FETCH_MSG = "  Fetching model list..."
+            console.print(f"[dim]{_FETCH_MSG}[/dim]", end="\r")
             dynamic_ids = fetch_models(
                 provider, api_key=api_key or None, base_url=base_url, force=force
             )
@@ -1482,8 +1483,8 @@ def _step_model(
                     f"\r  [green]✓ {len(dynamic_ids)} model(s) available[/green]      "
                 )
             else:
-                # Clear the "Fetching…" line
-                console.print("\r" + " " * 40 + "\r", end="")
+                # Clear the fetch-status line
+                console.print("\r" + " " * len(_FETCH_MSG) + "\r", end="")
 
         # Build choice list.  Dynamic models (if any) take precedence; the
         # static registry is used as a fallback.

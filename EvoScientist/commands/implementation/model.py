@@ -131,13 +131,15 @@ class ModelCommand(Command):
                         for mid in dynamic_ids
                         if mid not in static_ids_for_provider
                     ]
-                    # Insert dynamic-only entries right after existing provider entries
+                    # Insert dynamic-only entries right after existing provider entries,
+                    # or append to the end of the list when no static entries exist.
                     provider_end = max(
                         (i for i, (_, _, p) in enumerate(entries) if p == current_provider),
-                        default=-1,
+                        default=None,
                     )
+                    insert_at = len(entries) if provider_end is None else provider_end + 1
                     for offset, entry in enumerate(new_dynamic):
-                        entries.insert(provider_end + 1 + offset, entry)
+                        entries.insert(insert_at + offset, entry)
 
             # Refresh sentinel for the current provider
             entries.append((_REFRESH_SENTINEL, _REFRESH_SENTINEL, current_provider))
