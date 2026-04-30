@@ -100,9 +100,29 @@ def _save_manifest(dest_dir: str | Path, manifest: dict[str, str]) -> None:
     path = _manifest_path(dest_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(manifest, sort_keys=True))
     except OSError as exc:
         _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+        return
+
+    # Atomic write: stage to a sibling temp file, fsync, then os.replace into
+    # place. Prevents a half-written manifest from breaking detection if the
+    # process dies mid-write.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(manifest, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def _record_install(dest_dir: str | Path, name: str, source: str | None) -> None:
