@@ -68,6 +68,79 @@ def _normalize_tags(raw: object) -> list[str]:
     return []
 
 
+_MANIFEST_FILENAME = ".installed.yaml"
+
+
+# Per-tier sidecar at ``<dest_dir>/.installed.yaml`` mapping installed skill
+# directory name → original install source (URL, shorthand, or local path).
+# This lets onboarding detect already-installed packs whose child skills don't
+# share a name with the source (e.g. ``EvoScientist/EvoSkills@skills`` explodes
+# into ``paper-writing/``, ``evo-memory/`` etc.).
+def _manifest_path(dest_dir: str | Path) -> Path:
+    return Path(dest_dir) / _MANIFEST_FILENAME
+
+
+def _load_manifest(dest_dir: str | Path) -> dict[str, str]:
+    """Read the install manifest from *dest_dir*. Returns ``{}`` on any error
+    so a corrupt file never breaks installation or detection."""
+    path = _manifest_path(dest_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        _logger.warning("Failed to read skills manifest at %s: %s", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+
+
+def _save_manifest(dest_dir: str | Path, manifest: dict[str, str]) -> None:
+    path = _manifest_path(dest_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(manifest, sort_keys=True))
+    except OSError as exc:
+        _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+
+
+def _record_install(dest_dir: str | Path, name: str, source: str | None) -> None:
+    """Add or update a manifest entry. No-op when *source* is empty."""
+    if not source:
+        return
+    manifest = _load_manifest(dest_dir)
+    if manifest.get(name) == source:
+        return
+    manifest[name] = source
+    _save_manifest(dest_dir, manifest)
+
+
+def _record_uninstall(dest_dir: str | Path, name: str) -> None:
+    manifest = _load_manifest(dest_dir)
+    if name in manifest:
+        del manifest[name]
+        _save_manifest(dest_dir, manifest)
+
+
+def installed_sources() -> set[str]:
+    """Return install sources recorded for currently-installed skills.
+
+    Reads the manifest in both ``USER_SKILLS_DIR`` and ``GLOBAL_SKILLS_DIR``
+    and only returns entries whose target directories still exist on disk —
+    so a manually-removed skill stops appearing as installed.
+    """
+    sources: set[str] = set()
+    for dest_dir in (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR):
+        dest = Path(dest_dir)
+        if not dest.exists():
+            continue
+        for name, source in _load_manifest(dest).items():
+            if (dest / name).is_dir():
+                sources.add(source)
+    return sources
+
+
 def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     """Parse SKILL.md frontmatter to extract name, description, and tags.
 
@@ -323,7 +396,11 @@ def install_skill(
                         _logger.info(
                             f"Skill '{source}' found in remote index. Installing..."
                         )
-                        return _install_from_github(skill["install_source"], dest_dir)
+                        # Record under the user-facing source (the shorthand
+                        # name they typed) so detection works on re-runs.
+                        return _install_from_github(
+                            skill["install_source"], dest_dir, record_as=source
+                        )
             except Exception as e:
                 _logger.warning(f"Failed to fetch remote index for fallback: {e}")
 
@@ -351,16 +428,28 @@ def _install_from_local(source: str, dest_dir: str) -> dict:
     if not _validate_skill_dir(source_path):
         found = _scan_skill_dirs(source_path)
         if len(found) == 1:
-            return _install_single_local(found[0], dest_dir)
+            return _install_single_local(found[0], dest_dir, record_as=source)
         if found:
-            return _batch_install_local(found, dest_dir)
+            return _batch_install_local(found, dest_dir, record_as=source)
         return {"success": False, "error": f"No SKILL.md found in: {source}"}
 
-    return _install_single_local(source_path, dest_dir)
+    return _install_single_local(source_path, dest_dir, record_as=source)
 
 
-def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -> dict:
-    """Install one skill directory into *dest_dir*."""
+def _install_single_local(
+    source_path: Path,
+    dest_dir: str,
+    *,
+    ignore_fn=None,
+    record_as: str | None = None,
+) -> dict:
+    """Install one skill directory into *dest_dir*.
+
+    *record_as*, when provided, is recorded in the install manifest so later
+    detection can match against the user-facing source string (URL, shorthand,
+    or path) — important for packs where the installed dir name doesn't
+    resemble the source.
+    """
     skill_info = _parse_skill_md(source_path / "SKILL.md")
     skill_name = _sanitize_name(skill_info.name)
     if not skill_name:
@@ -380,6 +469,7 @@ def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -
         shutil.rmtree(target_path)
 
     shutil.copytree(source_path, target_path, ignore=ignore_fn)
+    _record_install(dest_dir, skill_name, record_as)
 
     return {
         "success": True,
@@ -390,14 +480,20 @@ def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -
 
 
 def _batch_install_local(
-    skill_dirs: list[Path], dest_dir: str, *, ignore_fn=None
+    skill_dirs: list[Path],
+    dest_dir: str,
+    *,
+    ignore_fn=None,
+    record_as: str | None = None,
 ) -> dict:
     """Install multiple skill directories and return a batch result."""
     installed: list[dict] = []
     failed: list[dict] = []
 
     for sd in skill_dirs:
-        result = _install_single_local(sd, dest_dir, ignore_fn=ignore_fn)
+        result = _install_single_local(
+            sd, dest_dir, ignore_fn=ignore_fn, record_as=record_as
+        )
         if result["success"]:
             installed.append(result)
         else:
@@ -411,8 +507,16 @@ def _batch_install_local(
     }
 
 
-def _install_from_github(source: str, dest_dir: str) -> dict:
-    """Install a skill from a GitHub URL or shorthand."""
+def _install_from_github(
+    source: str, dest_dir: str, *, record_as: str | None = None
+) -> dict:
+    """Install a skill from a GitHub URL or shorthand.
+
+    *record_as* overrides what gets written to the install manifest. By default
+    we record the same URL/shorthand the caller passed as *source* so detection
+    works against the user-facing string.
+    """
+    record_as = record_as or source
     try:
         repo, ref, path = _parse_github_url(source)
     except ValueError as e:
@@ -444,7 +548,10 @@ def _install_from_github(source: str, dest_dir: str) -> dict:
                     skill_source = found_dirs[0]
                 elif found_dirs:
                     return _batch_install_local(
-                        found_dirs, dest_dir, ignore_fn=ignore_git
+                        found_dirs,
+                        dest_dir,
+                        ignore_fn=ignore_git,
+                        record_as=record_as,
                     )
 
             # Still not resolved — try tree search by name hint
@@ -466,7 +573,9 @@ def _install_from_github(source: str, dest_dir: str) -> dict:
                     }
 
         # Single skill — install it
-        result = _install_single_local(skill_source, dest_dir, ignore_fn=ignore_git)
+        result = _install_single_local(
+            skill_source, dest_dir, ignore_fn=ignore_git, record_as=record_as
+        )
         if result.get("success"):
             result["source"] = source
         return result
@@ -559,6 +668,7 @@ def uninstall_skill(name: str) -> dict:
             return {"success": False, "error": f"Invalid skill path: {name}"}
 
         shutil.rmtree(target_path)
+        _record_uninstall(search_dir, target_path.name)
         return {"success": True, "name": name}
 
     # Check if it's a built-in skill (read-only, cannot be uninstalled)

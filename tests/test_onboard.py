@@ -568,6 +568,49 @@ class TestStepSkills:
             with pytest.raises(KeyboardInterrupt):
                 _step_skills()
 
+    def test_detects_pack_via_manifest(self, tmp_path):
+        """A pack source recorded in the manifest is detected as installed
+        even when none of the unpacked child dir names match the source."""
+        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+
+        # Recreate the EvoSkills-style layout: child dirs in GLOBAL_SKILLS_DIR
+        # whose names share nothing with the pack source URL.
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        for child in ("paper-writing", "evo-memory", "research-survey"):
+            (global_dir / child).mkdir()
+            (global_dir / child / "SKILL.md").write_text(
+                f"---\nname: {child}\ndescription: x\n---\n"
+            )
+        pack_source = _RECOMMENDED_SKILLS[0]["source"]
+        (global_dir / ".installed.yaml").write_text(
+            f"paper-writing: {pack_source}\n"
+            f"evo-memory: {pack_source}\n"
+            f"research-survey: {pack_source}\n"
+        )
+        empty_user = tmp_path / "user"
+        empty_user.mkdir()
+
+        captured: list = []
+
+        def _capture(choices, _msg, **_kw):
+            captured.extend(choices)
+            return []
+
+        with (
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
+            patch("EvoScientist.config.onboard._checkbox_ask", side_effect=_capture),
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            _step_skills()
+
+        pack_choice = next(c for c in captured if c.value == pack_source)
+        assert pack_choice.disabled, (
+            "EvoSkills pack should be detected as installed via the manifest "
+            "even though no child dir name matches the pack source string"
+        )
+
 
 class TestStepChannels:
     def test_returns_disabled_when_skip(self):

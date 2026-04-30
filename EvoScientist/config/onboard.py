@@ -1952,13 +1952,18 @@ def _step_skills() -> list[str]:
     Returns:
         List of skill sources that were selected (empty if skipped).
     """
-    from ..paths import USER_SKILLS_DIR
+    from ..paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+    from ..tools.skills_manager import installed_sources
 
-    # Collect names of already-installed user skills
-    skills_dir = Path(USER_SKILLS_DIR)
+    # Collect installed-skill dir names across both tiers. The dir-name match
+    # is a best-effort fallback for legacy installs without manifests; the
+    # source set below is the authoritative signal (handles packs that
+    # explode into many child directories with unrelated names).
     installed_names: set[str] = set()
-    if skills_dir.exists():
-        installed_names = {e.name for e in skills_dir.iterdir() if e.is_dir()}
+    for skills_dir in (Path(USER_SKILLS_DIR), Path(GLOBAL_SKILLS_DIR)):
+        if skills_dir.exists():
+            installed_names.update(e.name for e in skills_dir.iterdir() if e.is_dir())
+    installed_src = installed_sources()
 
     def _hint_name(source: str) -> str:
         """Derive expected skill directory name from source URL."""
@@ -1966,9 +1971,12 @@ def _step_skills() -> list[str]:
             return source.split("@", 1)[1].strip()
         return source.rstrip("/").rsplit("/", 1)[-1]
 
+    def _is_installed(source: str) -> bool:
+        return source in installed_src or _hint_name(source) in installed_names
+
     choices = []
     for skill in _RECOMMENDED_SKILLS:
-        if _hint_name(skill["source"]) in installed_names:
+        if _is_installed(skill["source"]):
             choices.append(
                 Choice(
                     title=[
@@ -1982,9 +1990,7 @@ def _step_skills() -> list[str]:
         else:
             choices.append(Choice(title=skill["label"], value=skill["source"]))
 
-    all_installed = all(
-        _hint_name(skill["source"]) in installed_names for skill in _RECOMMENDED_SKILLS
-    )
+    all_installed = all(_is_installed(skill["source"]) for skill in _RECOMMENDED_SKILLS)
     if all_installed:
         console.print(
             "  [green]✓ All recommended skills are already installed.[/green]"

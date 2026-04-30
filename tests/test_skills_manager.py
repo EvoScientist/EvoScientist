@@ -7,12 +7,14 @@ import pytest
 
 from EvoScientist.tools.skills_manager import (
     _is_github_url,
+    _load_manifest,
     _parse_github_url,
     _parse_skill_md,
     _validate_skill_dir,
     fetch_remote_skill_index,
     get_all_tags,
     install_skill,
+    installed_sources,
     list_skills,
     list_skills_by_tag,
     uninstall_skill,
@@ -344,6 +346,82 @@ class TestUninstallSkill:
 
             assert result["success"] is False
             assert "not found" in result["error"]
+
+
+# =============================================================================
+# Tests for install manifest
+# =============================================================================
+
+
+class TestInstallManifest:
+    """Tests for the per-tier .installed.yaml manifest."""
+
+    def _make_skill(self, parent: Path, name: str) -> Path:
+        d = parent / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} description\n---\n\n# {name}\n"
+        )
+        return d
+
+    def test_local_install_records_source(self, sample_skill_dir, temp_skills_dir):
+        result = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        assert result["success"]
+
+        manifest = _load_manifest(temp_skills_dir)
+        assert manifest == {"sample-skill": str(sample_skill_dir)}
+
+    def test_pack_install_records_one_source_for_all_children(
+        self, tmp_path, temp_skills_dir
+    ):
+        """A pack (root has no SKILL.md, multiple child skills) should record
+        the same user-facing source for every child skill, so detection by
+        source still works."""
+        repo = tmp_path / "evoskills-fake"
+        repo.mkdir()
+        self._make_skill(repo, "paper-writing")
+        self._make_skill(repo, "evo-memory")
+        self._make_skill(repo, "research-survey")
+
+        result = install_skill(str(repo), str(temp_skills_dir))
+        assert result["success"]
+        assert result["batch"]
+
+        manifest = _load_manifest(temp_skills_dir)
+        assert set(manifest) == {"paper-writing", "evo-memory", "research-survey"}
+        # All three child skills carry the same source string.
+        assert set(manifest.values()) == {str(repo)}
+
+    def test_uninstall_clears_manifest_entry(self, sample_skill_dir, temp_skills_dir):
+        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        assert "sample-skill" in _load_manifest(temp_skills_dir)
+
+        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
+            result = uninstall_skill("sample-skill")
+
+        assert result["success"]
+        assert "sample-skill" not in _load_manifest(temp_skills_dir)
+
+    def test_installed_sources_filters_missing_dirs(
+        self, sample_skill_dir, temp_skills_dir, tmp_path
+    ):
+        """If a skill dir was removed manually but the manifest entry lingers,
+        installed_sources() must not report it as installed."""
+        empty_global = tmp_path / "empty_global"
+        empty_global.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global),
+        ):
+            install_skill(str(sample_skill_dir), str(temp_skills_dir))
+            assert installed_sources() == {str(sample_skill_dir)}
+
+            # Manually wipe the dir, manifest still has the entry.
+            import shutil as _shutil
+
+            _shutil.rmtree(temp_skills_dir / "sample-skill")
+            assert "sample-skill" in _load_manifest(temp_skills_dir)
+            assert installed_sources() == set()
 
 
 # =============================================================================
