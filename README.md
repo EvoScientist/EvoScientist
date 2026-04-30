@@ -271,6 +271,9 @@ What the mounts are for:
 | `./workspace:/workspace` | The agent's working directory |
 | `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` |
 
+> [!IMPORTANT]
+> The image runs as a non-root user (`evosci`, UID `1000`). For the `./workspace` bind mount, the host directory must be writable by that UID. If your host user ID differs, either `chown -R 1000:1000 ./workspace` once, or pass `--user "$(id -u):$(id -g)"` on every `docker run` so the container takes on your UID.
+
 Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included):
 
 ```bash
@@ -297,6 +300,10 @@ docker build -t evoscientist:dev .
 > USER evosci
 >
 > # TinyTeX
+> # The official install method is `curl | sh`; if you'd rather not
+> # pipe an unpinned remote script into a shell, fetch a specific TinyTeX
+> # release tarball from https://github.com/rstudio/tinytex-releases, verify
+> # its checksum, and extract to /home/evosci/.TinyTeX instead.
 > RUN curl -sL https://yihui.org/tinytex/install-bin-unix.sh | sh \
 >  && /home/evosci/.TinyTeX/bin/*/tlmgr install latexmk
 > ```
