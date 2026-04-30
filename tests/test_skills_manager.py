@@ -402,9 +402,7 @@ class TestInstallManifest:
         assert result["success"]
         assert "sample-skill" not in _load_manifest(temp_skills_dir)
 
-    def test_save_is_atomic_and_leaves_no_temp(
-        self, sample_skill_dir, temp_skills_dir
-    ):
+    def test_save_is_atomic_and_leaves_no_temp(self, sample_skill_dir, temp_skills_dir):
         """_save_manifest must rename a temp file into place, not overwrite,
         so a crash mid-write can't leave a half-written manifest behind."""
         install_skill(str(sample_skill_dir), str(temp_skills_dir))
