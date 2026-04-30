@@ -1467,7 +1467,12 @@ def _step_model(
         """Build the choice list and show the picker.  Returns ``_REFRESH_SENTINEL``
         when the user wants to refresh, or the selected model name/id.
         """
-        from ..llm.model_cache import fetch_models, is_supported
+        from ..llm.model_cache import (
+            fetch_models,
+            format_fetched_at,
+            get_cached_fetched_at,
+            is_supported,
+        )
 
         dynamic_ids: list[str] | None = None
         if is_supported(provider):
@@ -1479,9 +1484,15 @@ def _step_model(
                 provider, api_key=api_key or None, base_url=base_url, force=force
             )
             if dynamic_ids:
-                console.print(
-                    f"\r  [green]✓ {len(dynamic_ids)} model(s) available[/green]      "
+                fetched_at = get_cached_fetched_at(provider, base_url=base_url)
+                time_info = (
+                    f" (last refresh: {format_fetched_at(fetched_at)})"
+                    if fetched_at is not None
+                    else ""
                 )
+                plain_status = f"  ✓ {len(dynamic_ids)} model(s) available{time_info}"
+                padding = " " * max(0, len(_FETCH_MSG) - len(plain_status))
+                console.print(f"\r[green]{plain_status}[/green]{padding}", end="\r")
             else:
                 # Clear the fetch-status line
                 console.print("\r" + " " * len(_FETCH_MSG) + "\r", end="")

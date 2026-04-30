@@ -66,7 +66,7 @@ class TestGetCachedModels:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
-        data = {"deepseek": {"models": ["deepseek-chat", "deepseek-reasoner"], "fetched_at": time.time()}}
+        data = {"deepseek::https://api.deepseek.com/v1": {"models": ["deepseek-chat", "deepseek-reasoner"], "fetched_at": time.time()}}
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -79,7 +79,7 @@ class TestGetCachedModels:
 
         cache_path = tmp_path / "model_cache.json"
         stale_time = time.time() - model_cache.CACHE_TTL - 1
-        data = {"deepseek": {"models": ["deepseek-chat"], "fetched_at": stale_time}}
+        data = {"deepseek::https://api.deepseek.com/v1": {"models": ["deepseek-chat"], "fetched_at": stale_time}}
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -91,7 +91,7 @@ class TestGetCachedModels:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
-        data = {"openai": {"models": ["gpt-4o"], "fetched_at": time.time()}}
+        data = {"openai::https://api.openai.com/v1": {"models": ["gpt-4o"], "fetched_at": time.time()}}
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -123,7 +123,7 @@ class TestFetchModels:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
-        data = {"deepseek": {"models": ["deepseek-chat"], "fetched_at": time.time()}}
+        data = {"deepseek::https://api.deepseek.com/v1": {"models": ["deepseek-chat"], "fetched_at": time.time()}}
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -166,14 +166,14 @@ class TestFetchModels:
             )
 
         written = json.loads(cache_path.read_text())
-        assert "deepseek" in written
-        assert written["deepseek"]["models"] == ["deepseek-chat"]
+        assert "deepseek::https://api.deepseek.com/v1" in written
+        assert written["deepseek::https://api.deepseek.com/v1"]["models"] == ["deepseek-chat"]
 
     def test_force_bypasses_fresh_cache(self, tmp_path):
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
-        data = {"deepseek": {"models": ["old-model"], "fetched_at": time.time()}}
+        data = {"deepseek::https://api.deepseek.com/v1": {"models": ["old-model"], "fetched_at": time.time()}}
         cache_path.write_text(json.dumps(data))
 
         with (
@@ -272,7 +272,7 @@ class TestFetchModelsAsync:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
-        data = {"openai": {"models": ["gpt-4o"], "fetched_at": time.time()}}
+        data = {"openai::https://api.openai.com/v1": {"models": ["gpt-4o"], "fetched_at": time.time()}}
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -304,7 +304,7 @@ class TestFetchModelsAsync:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
-        data = {"openai": {"models": ["old-model"], "fetched_at": time.time()}}
+        data = {"openai::https://api.openai.com/v1": {"models": ["old-model"], "fetched_at": time.time()}}
         cache_path.write_text(json.dumps(data))
 
         async def fake_get(self, url, **kwargs):
@@ -410,8 +410,8 @@ class TestFetchModelsAsync:
             )
 
         written = json.loads(cache_path.read_text())
-        assert "moonshot" in written
-        assert written["moonshot"]["models"] == ["moonshot-v1-8k"]
+        assert "moonshot::https://api.moonshot.cn/v1" in written
+        assert written["moonshot::https://api.moonshot.cn/v1"]["models"] == ["moonshot-v1-8k"]
 
 
 if __name__ == "__main__":

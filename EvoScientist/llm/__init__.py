@@ -25,6 +25,8 @@ __getattr__, __dir__, __all__ = _lazy.attach(
             "CACHE_TTL",
             "fetch_models",
             "fetch_models_async",
+            "format_fetched_at",
+            "get_cached_fetched_at",
             "get_cached_models",
             "is_supported",
         ],

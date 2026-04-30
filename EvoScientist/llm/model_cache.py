@@ -78,21 +78,83 @@ def _save_cache(cache: dict) -> None:
         pass
 
 
-def get_cached_models(provider: str) -> list[str] | None:
+def _cache_key(provider: str, resolved_base_url: str | None) -> str:
+    """Compute the cache dictionary key for a ``(provider, endpoint)`` pair.
+
+    Embedding the resolved URL means different endpoints for the same provider
+    name (e.g. two distinct ``custom-openai`` setups) maintain independent
+    cache entries.
+    """
+    if resolved_base_url:
+        return f"{provider}::{resolved_base_url}"
+    return provider
+
+
+def get_cached_models(provider: str, *, base_url: str | None = None) -> list[str] | None:
     """Return cached model IDs for *provider* if still within the TTL.
 
     Args:
         provider: Provider name (e.g. ``"openai"``, ``"deepseek"``).
+        base_url: Base URL override used to distinguish between different
+            endpoints for the same provider (e.g. multiple ``custom-openai``
+            setups with different servers).
 
     Returns:
         A list of model ID strings when the cache is valid, otherwise ``None``.
     """
-    entry = _load_cache().get(provider)
+    resolved_base_url, _ = _resolve(provider, base_url=base_url)
+    key = _cache_key(provider, resolved_base_url)
+    entry = _load_cache().get(key)
     if not entry:
         return None
     if time.time() - entry.get("fetched_at", 0) > CACHE_TTL:
         return None
     return entry.get("models") or None
+
+
+def get_cached_fetched_at(provider: str, *, base_url: str | None = None) -> float | None:
+    """Return the ``fetched_at`` timestamp for a fresh cache entry, or ``None``.
+
+    Args:
+        provider: Provider name.
+        base_url: Base URL override (same semantics as :func:`get_cached_models`).
+
+    Returns:
+        Unix timestamp (float) of the last successful fetch when the entry is
+        still within the TTL, otherwise ``None``.
+    """
+    resolved_base_url, _ = _resolve(provider, base_url=base_url)
+    key = _cache_key(provider, resolved_base_url)
+    entry = _load_cache().get(key)
+    if not entry:
+        return None
+    fetched_at = entry.get("fetched_at", 0)
+    if time.time() - fetched_at > CACHE_TTL:
+        return None
+    return fetched_at
+
+
+def format_fetched_at(fetched_at: float) -> str:
+    """Format a ``fetched_at`` Unix timestamp as a human-readable elapsed string.
+
+    Args:
+        fetched_at: Unix timestamp returned by :func:`get_cached_fetched_at`.
+
+    Returns:
+        A short string such as ``"just now"``, ``"3m ago"``, ``"5h ago"``,
+        or ``"2d ago"``.
+    """
+    elapsed = time.time() - fetched_at
+    if elapsed < 60:
+        return "just now"
+    minutes = int(elapsed / 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = int(elapsed / 3600)
+    if hours < 24:
+        return f"{hours}h ago"
+    days = int(elapsed / 86400)
+    return f"{days}d ago"
 
 
 # =============================================================================
@@ -164,7 +226,7 @@ def fetch_models(
         return None
 
     if not force:
-        cached = get_cached_models(provider)
+        cached = get_cached_models(provider, base_url=base_url)
         if cached is not None:
             return cached
 
@@ -188,8 +250,9 @@ def fetch_models(
         if not models:
             return None
 
+        key = _cache_key(provider, resolved_base_url)
         cache = _load_cache()
-        cache[provider] = {"models": models, "fetched_at": time.time()}
+        cache[key] = {"models": models, "fetched_at": time.time()}
         _save_cache(cache)
         return models
     except Exception:
@@ -220,7 +283,7 @@ async def fetch_models_async(
         return None
 
     if not force:
-        cached = get_cached_models(provider)
+        cached = get_cached_models(provider, base_url=base_url)
         if cached is not None:
             return cached
 
@@ -244,8 +307,9 @@ async def fetch_models_async(
         if not models:
             return None
 
+        key = _cache_key(provider, resolved_base_url)
         cache = _load_cache()
-        cache[provider] = {"models": models, "fetched_at": time.time()}
+        cache[key] = {"models": models, "fetched_at": time.time()}
         _save_cache(cache)
         return models
     except Exception:
