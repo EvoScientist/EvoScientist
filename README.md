@@ -249,10 +249,9 @@ git pull && uv sync --dev
 
 A pre-built image is published to [GitHub Container Registry](https://github.com/EvoScientist/EvoScientist/pkgs/container/evoscientist) with everything `evosci onboard` would otherwise install for you:
 
-- Python 3.11, EvoScientist, and all messaging-channel extras (`telegram`, `discord`, `slack`, `wechat`, `feishu`, `qq`)
+- Python 3.11, EvoScientist, and all messaging-channel extras
 - **`uv`** — used by the MCP registry to install Python MCP servers on demand
-- **Node.js 24 LTS + `npx`** — required by the majority of MCP servers (filesystem, sequential-thinking, brave-search, context7, …)
-- `git`, `curl`, `tini` for sane container behavior
+- **Node.js 24 LTS + `npx`** — required by the majority of MCP servers
 
 Running EvoScientist in a container also **sandboxes the agent's shell access** — file edits and shell commands stay confined to volumes you explicitly mount.
 
@@ -269,13 +268,13 @@ What the mounts are for:
 | Mount | Purpose |
 | --- | --- |
 | `--env-file .env` | API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) |
-| `./workspace:/workspace` | Run outputs, user skills, media — the agent's working directory |
-| `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` (under `.config/evoscientist/` inside the volume) |
+| `./workspace:/workspace` | The agent's working directory |
+| `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` |
 
 Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included):
 
 ```bash
-docker compose run --rm evoscientist chat
+docker compose run --rm evoscientist
 ```
 
 To build the image locally instead of pulling:
@@ -291,9 +290,13 @@ docker build -t evoscientist:dev .
 >
 > ```dockerfile
 > FROM ghcr.io/evoscientist/evoscientist:latest
+>
 > # Python extras
+> USER root
 > RUN uv pip install --python /opt/venv/bin/python "EvoScientist[stt,oauth]"
-> # TinyTeX (Linux)
+> USER evosci
+>
+> # TinyTeX
 > RUN curl -sL https://yihui.org/tinytex/install-bin-unix.sh | sh \
 >  && /home/evosci/.TinyTeX/bin/*/tlmgr install latexmk
 > ```
