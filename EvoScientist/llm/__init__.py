@@ -14,12 +14,19 @@ import lazy_loader as _lazy
 
 __getattr__, __dir__, __all__ = _lazy.attach(
     __name__,
-    submodules=["context_window", "models", "patches"],
+    submodules=["context_window", "model_cache", "models", "patches"],
     submod_attrs={
         "context_window": [
             "DEFAULT_CONTEXT_WINDOW_FALLBACK",
             "get_context_window",
             "resolve_context_window",
+        ],
+        "model_cache": [
+            "CACHE_TTL",
+            "fetch_models",
+            "fetch_models_async",
+            "get_cached_models",
+            "is_supported",
         ],
         "models": [
             "DEFAULT_MODEL",

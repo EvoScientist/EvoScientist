@@ -66,6 +66,7 @@ class ModelCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...EvoScientist import _ensure_config
+        from ...llm.model_cache import fetch_models_async, is_supported
         from ...llm.models import list_models_by_provider
 
         cfg = _ensure_config()
@@ -97,41 +98,95 @@ class ModelCommand(Command):
             )
             return
 
-        entries = list_models_by_provider()
+        _REFRESH_SENTINEL = "__refresh__"
 
-        # Ollama models are locally-installed — probe the daemon for the list
-        # the user has actually pulled. Gated on ollama_base_url being set
-        # (issue non-goal forbids implicit localhost detection).
-        ollama_base_url = getattr(cfg, "ollama_base_url", None)
-        if ollama_base_url:
-            from ...llm.ollama_discovery import discover_ollama_models
+        async def _build_entries(*, force: bool = False) -> list[tuple[str, str, str]]:
+            """Build the (name, model_id, provider) entry list.
 
-            detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
-            for detected_name in detected:
-                entries.append((detected_name, detected_name, "ollama"))
-            # Always append the sentinel so users can type a name even when
-            # the daemon is down or no models have been pulled yet. The widget
-            # swaps the sentinel name for the typed value before posting Picked.
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+            For the current provider, dynamic models from the API are merged
+            into the list (prepended so they appear first).  A sentinel entry
+            for manual refresh is appended at the end of the current-provider
+            section.
+            """
+            entries = list_models_by_provider()
 
-        result = await ctx.ui.wait_for_model_pick(
-            entries,
-            current_model=current_model,
-            current_provider=current_provider,
-        )
-        if result is None:
+            # Fetch dynamic models for the current provider
+            if is_supported(current_provider):
+                api_key = None  # use env vars already applied by apply_config_to_env
+                base_url = getattr(cfg, "custom_openai_base_url", None) or None
+                dynamic_ids = await fetch_models_async(
+                    current_provider,
+                    api_key=api_key,
+                    base_url=base_url,
+                    force=force,
+                )
+                if dynamic_ids:
+                    # Build set of model_ids already in static entries
+                    static_ids_for_provider = {
+                        mid for nm, mid, prov in entries if prov == current_provider
+                    }
+                    # Prepend new dynamic models (not in static list) for provider
+                    new_dynamic = [
+                        (mid, mid, current_provider)
+                        for mid in dynamic_ids
+                        if mid not in static_ids_for_provider
+                    ]
+                    # Insert dynamic-only entries right after existing provider entries
+                    provider_end = max(
+                        (i for i, (_, _, p) in enumerate(entries) if p == current_provider),
+                        default=-1,
+                    )
+                    for offset, entry in enumerate(new_dynamic):
+                        entries.insert(provider_end + 1 + offset, entry)
+
+            # Refresh sentinel for the current provider
+            entries.append((_REFRESH_SENTINEL, _REFRESH_SENTINEL, current_provider))
+
+            # Ollama models are locally-installed — probe the daemon for the list
+            # the user has actually pulled. Gated on ollama_base_url being set
+            # (issue non-goal forbids implicit localhost detection).
+            ollama_base_url = getattr(cfg, "ollama_base_url", None)
+            if ollama_base_url:
+                from ...llm.ollama_discovery import discover_ollama_models
+
+                detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
+                for detected_name in detected:
+                    entries.append((detected_name, detected_name, "ollama"))
+                # Always append the sentinel so users can type a name even when
+                # the daemon is down or no models have been pulled yet.
+                entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+
+            return entries
+
+        force_refresh = False
+        while True:
+            entries = await _build_entries(force=force_refresh)
+            force_refresh = False
+
+            result = await ctx.ui.wait_for_model_pick(
+                entries,
+                current_model=current_model,
+                current_provider=current_provider,
+            )
+            if result is None:
+                return
+
+            name, provider = result
+
+            if provider == current_provider and name == _REFRESH_SENTINEL:
+                force_refresh = True
+                continue
+
+            # Defense-in-depth: the widget should have replaced the sentinel with
+            # the user-typed name. If it didn't, treat as cancel rather than try
+            # to switch to a literal "__custom_ollama__" model.
+            if provider == "ollama" and name in (
+                "Custom Ollama model...",
+                "__custom_ollama__",
+            ):
+                return
+            await self._apply_model(ctx, name, provider, save=save)
             return
-
-        name, provider = result
-        # Defense-in-depth: the widget should have replaced the sentinel with
-        # the user-typed name. If it didn't, treat as cancel rather than try
-        # to switch to a literal "__custom_ollama__" model.
-        if provider == "ollama" and name in (
-            "Custom Ollama model...",
-            "__custom_ollama__",
-        ):
-            return
-        await self._apply_model(ctx, name, provider, save=save)
 
     async def _apply_model(
         self,
