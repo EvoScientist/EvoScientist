@@ -41,18 +41,23 @@ def test_hook_updates_holder_on_agent_swap():
 def test_hook_syncs_channel_runtime():
     """Other readers (the bus) look at ``ChannelRuntime.agent``; the
     hook keeps the runtime in sync with the holder update."""
-    holder = {"agent": "original-agent"}
+    holder = {"agent": "original-agent", "thread_id": "t"}
     runtime = ChannelRuntime(agent="original-agent", thread_id="t")
     hook = _make_serve_cmd_completed_hook(holder, runtime)
 
     ctx = MagicMock()
     ctx.agent = "new-agent"
+    # Pin ctx.thread_id explicitly — a bare MagicMock would let the
+    # hook's getattr fall through to a fresh MagicMock attribute and
+    # silently mutate runtime.thread_id, hiding regressions.
+    ctx.thread_id = "t"
     cmd = MagicMock()
     cmd.name = "/model"
 
     _run(hook(ctx, "original-agent", cmd))
 
     assert runtime.agent == "new-agent"
+    assert runtime.thread_id == "t"
 
 
 def test_hook_noop_when_agent_unchanged():

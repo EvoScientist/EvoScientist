@@ -836,8 +836,22 @@ def cmd_interactive(
                             state["status_base_snapshot"] = make_empty_status_snapshot(
                                 model
                             )
-                            if _channels_is_running():
-                                channel_runtime.bind(ctx.agent, state["thread_id"])
+
+                        # Rebind the runtime whenever the agent OR
+                        # thread_id may have moved — ``/new`` and
+                        # ``/resume`` rotate ``state["thread_id"]``
+                        # without swapping the agent, and the bus
+                        # expects both to stay in sync (matches the
+                        # serve-mode hook contract).
+                        if _channels_is_running():
+                            runtime_agent = (
+                                ctx.agent
+                                if ctx.agent is not None
+                                else agent_loader.agent
+                            )
+                            if runtime_agent is not None:
+                                channel_runtime.bind(runtime_agent, state["thread_id"])
+
                         # ``/new`` rotates ``state["thread_id"]`` / workspace,
                         # ``/compact`` reduces token usage — both need the
                         # status snapshot re-rendered even when the agent
@@ -1065,8 +1079,22 @@ def cmd_interactive(
                                 state["status_base_snapshot"] = (
                                     make_empty_status_snapshot(model)
                                 )
-                                if _channels_is_running():
-                                    channel_runtime.bind(ctx.agent, state["thread_id"])
+
+                            # Rebind the runtime whenever the agent OR
+                            # thread_id may have moved — ``/new`` /
+                            # ``/resume`` rotate ``state["thread_id"]``
+                            # without swapping the agent, and the bus
+                            # expects both to stay in sync.
+                            if _channels_is_running():
+                                runtime_agent = (
+                                    ctx.agent
+                                    if ctx.agent is not None
+                                    else agent_loader.agent
+                                )
+                                if runtime_agent is not None:
+                                    channel_runtime.bind(
+                                        runtime_agent, state["thread_id"]
+                                    )
 
                             # Commands that mutate status fields need an
                             # async refresh here (/compact + /new use sync

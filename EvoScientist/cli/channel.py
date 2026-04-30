@@ -1097,15 +1097,16 @@ def _auto_start_channel(
     if not config.channel_enabled:
         return
 
-    if runtime is not None:
-        runtime.bind(agent, thread_id)
-
     _start_channels_bus_mode(
         config,
         agent,
         thread_id,
         send_thinking=send_thinking,
     )
+    # Bind only after startup succeeds; a failure above must not leave
+    # a stale runtime binding pointing at channels that never started.
+    if runtime is not None:
+        runtime.bind(agent, thread_id)
     types = [t.strip() for t in config.channel_enabled.split(",") if t.strip()]
     results = [(ct, True, "connected (bus)") for ct in types]
     _print_channel_panel(results)

@@ -13,9 +13,11 @@ pytest.importorskip("textual")
 class _Loader:
     def __init__(self) -> None:
         self.adopt_calls: list[object] = []
+        self.agent: object | None = None
 
     def adopt(self, agent: object) -> None:
         self.adopt_calls.append(agent)
+        self.agent = agent
 
 
 class _StubApp:
@@ -88,3 +90,28 @@ def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypatch):
     assert app._agent_loader.adopt_calls == []
     assert app.model_updates == []
     assert app.refresh_calls == [True]
+
+
+def test_sync_tui_rebinds_runtime_on_thread_rotation_without_agent_swap(monkeypatch):
+    """Regression: ``/new`` and ``/resume`` rotate ``app._conversation_tid``
+    without swapping the agent.  The runtime must still pick up the new
+    thread id so the bus contract stays consistent with serve mode."""
+    import EvoScientist.cli.tui_interactive as tui_mod
+
+    app = _StubApp()
+    app._conversation_tid = "rotated-thread"
+    app._agent_loader.agent = "same-agent"
+    app._channel_runtime.bind("same-agent", "old-thread")
+    ctx = CommandContext(
+        agent="same-agent",
+        thread_id="rotated-thread",
+        ui=SimpleNamespace(),
+    )
+    cmd = SimpleNamespace(name="/new")
+
+    monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: True)
+
+    _run(tui_mod._sync_tui_command_completion(app, ctx, "same-agent", cmd))
+
+    assert app._channel_runtime.agent == "same-agent"
+    assert app._channel_runtime.thread_id == "rotated-thread"

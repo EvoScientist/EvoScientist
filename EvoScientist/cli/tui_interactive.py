@@ -207,8 +207,15 @@ async def _sync_tui_command_completion(
         update_model = getattr(app, "update_status_after_model_change", None)
         if callable(update_model):
             update_model(cfg.model, cfg.provider)
-        if _channels_is_running():
-            app._channel_runtime.bind(ctx.agent, app._conversation_tid)
+
+    # Rebind the runtime whenever the agent OR thread_id may have moved
+    # — ``/new`` and ``/resume`` rotate ``app._conversation_tid``
+    # without swapping the agent, and the bus expects both to stay in
+    # sync (matches the serve-mode hook contract).
+    if _channels_is_running():
+        runtime_agent = ctx.agent if ctx.agent is not None else app._agent_loader.agent
+        if runtime_agent is not None:
+            app._channel_runtime.bind(runtime_agent, app._conversation_tid)
 
     await app._refresh_status_snapshot(reset_streaming_text=True)
 
