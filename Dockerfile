@@ -46,9 +46,9 @@ ARG GID=1000
 RUN groupadd --gid ${GID} evosci \
     && useradd  --uid ${UID} --gid ${GID} --create-home --shell /bin/bash evosci
 
-COPY --from=builder --chown=${UID}:${GID} /opt/venv /opt/venv
+COPY --from=builder /opt/venv /opt/venv
 
-ENV PATH="/home/evosci/.evoscientist/.local/bin:/opt/venv/bin:${PATH}" \
+ENV PATH="/opt/venv/bin:/home/evosci/.evoscientist/.local/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     EVOSCIENTIST_WORKSPACE_DIR=/workspace \
