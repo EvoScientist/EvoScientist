@@ -10,13 +10,16 @@ from EvoScientist.tools.skills_manager import (
     _load_manifest,
     _parse_github_url,
     _parse_skill_md,
+    _record_install,
     _validate_skill_dir,
     fetch_remote_skill_index,
     get_all_tags,
     install_skill,
+    installed_provenance,
     installed_sources,
     list_skills,
     list_skills_by_tag,
+    resolve_remote_head,
     uninstall_skill,
 )
 
@@ -369,7 +372,8 @@ class TestInstallManifest:
         assert result["success"]
 
         manifest = _load_manifest(temp_skills_dir)
-        assert manifest == {"sample-skill": str(sample_skill_dir)}
+        # Local installs have no upstream commit — record source only.
+        assert manifest == {"sample-skill": {"source": str(sample_skill_dir)}}
 
     def test_pack_install_records_one_source_for_all_children(
         self, tmp_path, temp_skills_dir
@@ -389,8 +393,8 @@ class TestInstallManifest:
 
         manifest = _load_manifest(temp_skills_dir)
         assert set(manifest) == {"paper-writing", "evo-memory", "research-survey"}
-        # All three child skills carry the same source string.
-        assert set(manifest.values()) == {str(repo)}
+        sources = {entry["source"] for entry in manifest.values()}
+        assert sources == {str(repo)}
 
     def test_uninstall_clears_manifest_entry(self, sample_skill_dir, temp_skills_dir):
         install_skill(str(sample_skill_dir), str(temp_skills_dir))
@@ -434,6 +438,62 @@ class TestInstallManifest:
             _shutil.rmtree(temp_skills_dir / "sample-skill")
             assert "sample-skill" in _load_manifest(temp_skills_dir)
             assert installed_sources() == set()
+
+    def test_record_install_persists_commit(self, temp_skills_dir, sample_skill_dir):
+        """When _record_install gets a commit SHA it makes it through the
+        normalize-on-write pass and is readable as provenance."""
+        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        # Simulate a github install by manually recording a commit.
+        _record_install(
+            temp_skills_dir,
+            "sample-skill",
+            "owner/repo@skill",
+            commit="abc123def456",
+        )
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir),
+            patch(
+                "EvoScientist.paths.GLOBAL_SKILLS_DIR",
+                temp_skills_dir.parent / "missing",
+            ),
+        ):
+            prov = installed_provenance()
+        assert prov == {"owner/repo@skill": {"commit": "abc123def456"}}
+
+
+class TestResolveRemoteHead:
+    """Tests for resolve_remote_head — the upstream-SHA helper used by onboard."""
+
+    def test_returns_none_for_local_path(self):
+        assert resolve_remote_head("/tmp/some/local/path") is None
+
+    def test_returns_none_when_git_unavailable(self):
+        with patch("EvoScientist.tools.skills_manager.subprocess.run") as run:
+            run.side_effect = FileNotFoundError("git not on PATH")
+            assert resolve_remote_head("owner/repo@skill") is None
+
+    def test_returns_none_on_timeout(self):
+        import subprocess as _sp
+
+        with patch("EvoScientist.tools.skills_manager.subprocess.run") as run:
+            run.side_effect = _sp.TimeoutExpired(cmd="git", timeout=5)
+            assert resolve_remote_head("owner/repo@skill") is None
+
+    def test_parses_first_sha_from_ls_remote_output(self):
+        proc = type(
+            "P",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "deadbeef0000000000000000000000000000abcd\trefs/heads/main\n",
+                "stderr": "",
+            },
+        )()
+        with patch(
+            "EvoScientist.tools.skills_manager.subprocess.run", return_value=proc
+        ):
+            sha = resolve_remote_head("owner/repo@skill")
+        assert sha == "deadbeef0000000000000000000000000000abcd"
 
 
 # =============================================================================

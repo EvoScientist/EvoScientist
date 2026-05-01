@@ -70,19 +70,25 @@ def _normalize_tags(raw: object) -> list[str]:
 
 _MANIFEST_FILENAME = ".installed.yaml"
 
+# Per-tier sidecar at ``<dest_dir>/.installed.yaml``. Each entry records the
+# install source plus optional provenance (the upstream commit SHA at install
+# time, omitted for non-git sources). Schema:
+#
+#     <skill-dir-name>:
+#       source: <URL | shorthand | local path>
+#       commit: <git SHA>
+_ManifestEntry = dict[str, str]
 
-# Per-tier sidecar at ``<dest_dir>/.installed.yaml`` mapping installed skill
-# directory name → original install source (URL, shorthand, or local path).
-# This lets onboarding detect already-installed packs whose child skills don't
-# share a name with the source (e.g. ``EvoScientist/EvoSkills@skills`` explodes
-# into ``paper-writing/``, ``evo-memory/`` etc.).
+
 def _manifest_path(dest_dir: str | Path) -> Path:
     return Path(dest_dir) / _MANIFEST_FILENAME
 
 
-def _load_manifest(dest_dir: str | Path) -> dict[str, str]:
-    """Read the install manifest from *dest_dir*. Returns ``{}`` on any error
-    so a corrupt file never breaks installation or detection."""
+def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
+    """Read the install manifest from *dest_dir*. Malformed entries are
+    skipped, and any read error returns ``{}`` so a corrupt file never breaks
+    installation or detection.
+    """
     path = _manifest_path(dest_dir)
     if not path.exists():
         return {}
@@ -93,10 +99,19 @@ def _load_manifest(dest_dir: str | Path) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+    out: dict[str, _ManifestEntry] = {}
+    for k, v in data.items():
+        if not isinstance(v, dict) or not isinstance(v.get("source"), str):
+            continue
+        entry: _ManifestEntry = {"source": v["source"]}
+        commit = v.get("commit")
+        if isinstance(commit, str) and commit:
+            entry["commit"] = commit
+        out[str(k)] = entry
+    return out
 
 
-def _save_manifest(dest_dir: str | Path, manifest: dict[str, str]) -> None:
+def _save_manifest(dest_dir: str | Path, manifest: dict[str, _ManifestEntry]) -> None:
     path = _manifest_path(dest_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,14 +140,27 @@ def _save_manifest(dest_dir: str | Path, manifest: dict[str, str]) -> None:
             pass
 
 
-def _record_install(dest_dir: str | Path, name: str, source: str | None) -> None:
-    """Add or update a manifest entry. No-op when *source* is empty."""
+def _record_install(
+    dest_dir: str | Path,
+    name: str,
+    source: str | None,
+    *,
+    commit: str | None = None,
+) -> None:
+    """Add or update a manifest entry. No-op when *source* is empty.
+
+    *commit*, when provided, is recorded alongside the source so onboarding
+    can detect when an upstream version has moved past what's installed.
+    """
     if not source:
         return
     manifest = _load_manifest(dest_dir)
-    if manifest.get(name) == source:
+    new_entry: _ManifestEntry = {"source": source}
+    if commit:
+        new_entry["commit"] = commit
+    if manifest.get(name) == new_entry:
         return
-    manifest[name] = source
+    manifest[name] = new_entry
     _save_manifest(dest_dir, manifest)
 
 
@@ -150,15 +178,31 @@ def installed_sources() -> set[str]:
     and only returns entries whose target directories still exist on disk —
     so a manually-removed skill stops appearing as installed.
     """
-    sources: set[str] = set()
+    return set(installed_provenance())
+
+
+def installed_provenance() -> dict[str, dict[str, str | None]]:
+    """Per-source provenance for currently-installed skills.
+
+    Maps source URL/shorthand → ``{"commit": <sha or None>}``. When several
+    children share a source (a pack), the first observed commit is returned —
+    packs install all children from a single clone so this is unambiguous in
+    practice. Used by onboarding to surface "update available" when the
+    recorded commit no longer matches upstream.
+    """
+    out: dict[str, dict[str, str | None]] = {}
     for dest_dir in (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR):
         dest = Path(dest_dir)
         if not dest.exists():
             continue
-        for name, source in _load_manifest(dest).items():
-            if (dest / name).is_dir():
-                sources.add(source)
-    return sources
+        for name, entry in _load_manifest(dest).items():
+            if not (dest / name).is_dir():
+                continue
+            source = entry["source"]
+            if source in out:
+                continue
+            out[source] = {"commit": entry.get("commit")}
+    return out
 
 
 def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
@@ -255,6 +299,7 @@ def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
 
 
 _CLONE_TIMEOUT = 120  # seconds
+_LS_REMOTE_TIMEOUT = 5  # seconds — bounded, runs once per recommended pack
 
 
 def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
@@ -275,6 +320,63 @@ def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
         ) from e
     if result.returncode != 0:
         raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
+
+
+def _resolve_local_head(clone_dir: str) -> str | None:
+    """Return the HEAD commit SHA of a freshly cloned working tree, or None
+    when ``git rev-parse`` is unavailable or the call fails."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", clone_dir, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha or None
+
+
+def resolve_remote_head(
+    source: str, *, timeout: float = _LS_REMOTE_TIMEOUT
+) -> str | None:
+    """Resolve the upstream commit SHA for *source* via ``git ls-remote``.
+
+    Returns ``None`` for non-git sources, parse failures, network errors, or
+    timeouts — callers should treat ``None`` as "unknown" and never infer
+    "out of date" from it. Used by onboarding to detect upstream updates
+    without re-cloning the repo.
+    """
+    if not _is_github_url(source):
+        return None
+    try:
+        repo, ref, _ = _parse_github_url(source)
+    except ValueError:
+        return None
+
+    target = ref or "HEAD"
+    repo_url = f"https://github.com/{repo}.git"
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--exit-code", repo_url, target],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    # Output: "<sha>\t<refname>" lines. Take the first SHA.
+    for line in proc.stdout.splitlines():
+        sha, _, _ = line.partition("\t")
+        sha = sha.strip()
+        if sha:
+            return sha
+    return None
 
 
 def _is_github_url(source: str) -> bool:
@@ -462,6 +564,7 @@ def _install_single_local(
     *,
     ignore_fn=None,
     record_as: str | None = None,
+    record_commit: str | None = None,
 ) -> dict:
     """Install one skill directory into *dest_dir*.
 
@@ -469,6 +572,10 @@ def _install_single_local(
     detection can match against the user-facing source string (URL, shorthand,
     or path) — important for packs where the installed dir name doesn't
     resemble the source.
+
+    *record_commit*, when provided, captures the upstream git SHA at install
+    time so onboarding can compare against the current upstream and surface
+    "update available" without re-cloning.
     """
     skill_info = _parse_skill_md(source_path / "SKILL.md")
     skill_name = _sanitize_name(skill_info.name)
@@ -489,7 +596,7 @@ def _install_single_local(
         shutil.rmtree(target_path)
 
     shutil.copytree(source_path, target_path, ignore=ignore_fn)
-    _record_install(dest_dir, skill_name, record_as)
+    _record_install(dest_dir, skill_name, record_as, commit=record_commit)
 
     return {
         "success": True,
@@ -505,6 +612,7 @@ def _batch_install_local(
     *,
     ignore_fn=None,
     record_as: str | None = None,
+    record_commit: str | None = None,
 ) -> dict:
     """Install multiple skill directories and return a batch result."""
     installed: list[dict] = []
@@ -512,7 +620,11 @@ def _batch_install_local(
 
     for sd in skill_dirs:
         result = _install_single_local(
-            sd, dest_dir, ignore_fn=ignore_fn, record_as=record_as
+            sd,
+            dest_dir,
+            ignore_fn=ignore_fn,
+            record_as=record_as,
+            record_commit=record_commit,
         )
         if result["success"]:
             installed.append(result)
@@ -550,6 +662,10 @@ def _install_from_github(
         except RuntimeError as e:
             return {"success": False, "error": str(e)}
 
+        # Capture HEAD now, before any fallback paths might re-enter — every
+        # child of a pack share the same upstream SHA so we record it once.
+        commit = _resolve_local_head(clone_dir)
+
         # Exclude .git from copies
         def ignore_git(dir_name: str, files: list[str]) -> list[str]:
             return [f for f in files if f == ".git"]
@@ -572,6 +688,7 @@ def _install_from_github(
                         dest_dir,
                         ignore_fn=ignore_git,
                         record_as=record_as,
+                        record_commit=commit,
                     )
 
             # Still not resolved — try tree search by name hint
@@ -594,7 +711,11 @@ def _install_from_github(
 
         # Single skill — install it
         result = _install_single_local(
-            skill_source, dest_dir, ignore_fn=ignore_git, record_as=record_as
+            skill_source,
+            dest_dir,
+            ignore_fn=ignore_git,
+            record_as=record_as,
+            record_commit=commit,
         )
         if result.get("success"):
             result["source"] = source

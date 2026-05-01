@@ -1952,18 +1952,21 @@ def _step_skills() -> list[str]:
     Returns:
         List of skill sources that were selected (empty if skipped).
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from ..paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
-    from ..tools.skills_manager import installed_sources
+    from ..tools.skills_manager import installed_provenance, resolve_remote_head
 
     # Collect installed-skill dir names across both tiers. The dir-name match
     # is a best-effort fallback for legacy installs without manifests; the
-    # source set below is the authoritative signal (handles packs that
+    # provenance map below is the authoritative signal (handles packs that
     # explode into many child directories with unrelated names).
     installed_names: set[str] = set()
     for skills_dir in (Path(USER_SKILLS_DIR), Path(GLOBAL_SKILLS_DIR)):
         if skills_dir.exists():
             installed_names.update(e.name for e in skills_dir.iterdir() if e.is_dir())
-    installed_src = installed_sources()
+    provenance = installed_provenance()
+    installed_src = set(provenance)
 
     def _hint_name(source: str) -> str:
         """Derive expected skill directory name from source URL."""
@@ -1974,21 +1977,53 @@ def _step_skills() -> list[str]:
     def _is_installed(source: str) -> bool:
         return source in installed_src or _hint_name(source) in installed_names
 
+    # For installed packs with a stored commit, ask GitHub if upstream has
+    # moved. Bounded parallel calls so onboard stays snappy; failures are
+    # silently treated as "unknown" (label falls back to plain "installed").
+    sources_to_check = [
+        skill["source"]
+        for skill in _RECOMMENDED_SKILLS
+        if _is_installed(skill["source"])
+        and provenance.get(skill["source"], {}).get("commit")
+    ]
+    upstream_heads: dict[str, str | None] = {}
+    if sources_to_check:
+        with ThreadPoolExecutor(max_workers=min(6, len(sources_to_check))) as ex:
+            futures = {
+                ex.submit(resolve_remote_head, src): src for src in sources_to_check
+            }
+            for fut in as_completed(futures):
+                src = futures[fut]
+                try:
+                    upstream_heads[src] = fut.result()
+                except Exception:
+                    upstream_heads[src] = None
+
+    def _has_update(source: str) -> bool:
+        head = upstream_heads.get(source)
+        recorded = provenance.get(source, {}).get("commit")
+        return bool(head and recorded and head != recorded)
+
     choices = []
     for skill in _RECOMMENDED_SKILLS:
-        if _is_installed(skill["source"]):
+        src = skill["source"]
+        if _is_installed(src):
+            hint = (
+                "  (installed — update available, re-select to sync)"
+                if _has_update(src)
+                else "  (installed — re-select to sync)"
+            )
             choices.append(
                 Choice(
                     title=[
                         ("", skill["label"]),
-                        ("class:instruction", "  (already installed)"),
+                        ("class:instruction", hint),
                     ],
-                    value=skill["source"],
-                    disabled=True,
+                    value=src,
                 )
             )
         else:
-            choices.append(Choice(title=skill["label"], value=skill["source"]))
+            choices.append(Choice(title=skill["label"], value=src))
 
     all_installed = all(_is_installed(skill["source"]) for skill in _RECOMMENDED_SKILLS)
     if all_installed:
