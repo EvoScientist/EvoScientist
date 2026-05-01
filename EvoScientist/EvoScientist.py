@@ -23,7 +23,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
 
 from . import paths as _paths_mod
 from .config import apply_config_to_env, get_effective_config
@@ -503,16 +503,16 @@ def create_cli_agent(
 
         mw.insert(0, AskUserMiddleware())
 
+    # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
+    # would propagate it to every subagent, breaking parallel execute calls
+    # (multi-pending-interrupt LangGraph error).
+    if not cfg.auto_approve:
+        mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
+
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(be, mw, on_mcp_progress=on_mcp_progress)
-
-    # HITL: gate shell execution for user approval
-    _interrupt_on: dict[str, bool] | None = None
-    if not cfg.auto_approve:
-        _interrupt_on = {"execute": True}
 
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-        interrupt_on=_interrupt_on,
     ).with_config({"recursion_limit": 1000})
