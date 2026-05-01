@@ -87,6 +87,47 @@ class EvoScientistConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5"
 
+    # Async Sub-agent Settings
+    # When True (default), the EvoSci CLI auto-starts a langgraph dev subprocess
+    # so any sub-agent flagged ``async: true`` in subagents/<name>.yaml runs
+    # non-blocking via AsyncSubAgent. Currently affects writing-agent and
+    # data-analysis-agent. Adds ~10-15s to CLI startup (langgraph dev cold
+    # start, mostly MCP server spawn time).
+    #
+    # Set False to run fully in-process — saves the startup cost in scenarios
+    # where async isn't useful: short scripted EvoSci runs (CI / one-shot
+    # ``-p "..."``), low-RAM environments, or workflows that only need the
+    # synchronous sub-agents (planner / research / code / debug).
+    enable_async_subagents: bool = True
+
+    # Port for the auto-started langgraph dev subprocess. 6174 is Kaprekar's
+    # constant — a memorable EvoScientist-themed default that avoids collisions
+    # with common dev ports (3000/5000/8000/8080) and the langgraph CLI default
+    # 2024. Override if it conflicts with another local service.
+    langgraph_dev_port: int = 6174
+
+    # Whether langgraph dev persists its runtime state to .langgraph_api/ next
+    # to the subprocess cwd. True (default) keeps async-task, scheduler, and
+    # Store API state across subprocess restarts — useful for future
+    # cross-session async, cron, and Store features. Set False to suppress
+    # writes (workspace stays cleaner; state is in-memory only and lost on
+    # CLI exit). EvoScientist's main thread persistence uses sessions.db
+    # regardless of this setting.
+    langgraph_dev_file_persistence: bool = True
+
+    # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
+    # each count as 1) before raising GraphRecursionError. Resets on every
+    # ``agent.invoke()`` — i.e., this is per-turn, NOT per-conversation. For
+    # long conversations the relevant mechanisms are checkpointer persistence
+    # (sessions.db), ContextEditingMiddleware (window management), and
+    # EvoMemoryMiddleware (cross-turn memory).
+    #
+    # 1,000,000 is "effectively unlimited" — typical research turns use
+    # 200-1000 steps; reaching 1M would cost ~$10K in tokens, by which point
+    # rate limits, context overflow, or API quota errors would trip first.
+    # Lower (e.g., 5000) if you want a tighter safety net against runaway loops.
+    recursion_limit: int = 1_000_000
+
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
     default_workdir: str = ""

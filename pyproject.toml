@@ -97,7 +97,11 @@ build-backend = "setuptools.build_meta"
 include = ["EvoScientist*"]
 
 [tool.setuptools.package-data]
-EvoScientist = ["subagent.yaml", "skills/**/*"]
+EvoScientist = [
+    "subagents/*.yaml",
+    "langgraph_dev/*.json",
+    "skills/**/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

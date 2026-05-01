@@ -121,7 +121,16 @@ def load_subagents(
     from files - they're normally defined inline in the create_deep_agent() call.
     We externalize to YAML here to keep configuration separate from code.
 
-    Supported YAML schemas:
+    Two layouts supported:
+
+    1) **Directory layout (preferred):** ``config_path`` is a directory
+       containing one ``<name>.yaml`` per sub-agent. All ``*.yaml`` files are
+       merged into a single mapping. Files starting with ``_`` are ignored.
+
+    2) **Single file layout (legacy):** ``config_path`` is a yaml file with
+       all sub-agents under one mapping.
+
+    Supported YAML schemas (within each file):
 
     1) Mapping style (recommended):
        planner-agent:
@@ -144,11 +153,44 @@ def load_subagents(
     """
     prompt_refs = prompt_refs or {}
 
-    with config_path.open(encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+    config: dict[str, Any] = {}
+    if config_path.is_dir():
+        # Accept both .yaml and .yml. Skip files starting with ``_`` (private
+        # / disabled) or ``.`` (dotfiles, editor swap files like .foo.yaml.swp).
+        # Dedupe via ``seen`` so a file matching both globs is loaded once.
+        seen: set[Path] = set()
+        for pattern in ("*.yaml", "*.yml"):
+            for yml in sorted(config_path.glob(pattern)):
+                if (
+                    yml in seen
+                    or yml.name.startswith(".")
+                    or yml.name.startswith("_")
+                ):
+                    continue
+                seen.add(yml)
+                with yml.open(encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                if not isinstance(data, dict):
+                    raise ValueError(
+                        f"{yml}: top-level must be a mapping (one entry per sub-agent)"
+                    )
+                # Detect duplicate keys across files
+                for key in data:
+                    if key in config:
+                        raise ValueError(
+                            f"Sub-agent {key!r} defined in multiple files; "
+                            f"second occurrence in {yml.name}"
+                        )
+                config.update(data)
+    else:
+        with config_path.open(encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
 
     if not isinstance(config, dict) or not config:
-        raise ValueError("subagent.yaml must be a mapping or contain 'subagents:'")
+        raise ValueError(
+            f"{config_path}: no sub-agent definitions found "
+            f"(expected mapping or 'subagents:' list)"
+        )
 
     subagents: list[dict[str, Any]] = []
 

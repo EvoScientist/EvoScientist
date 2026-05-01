@@ -868,6 +868,13 @@ def serve(
     set_workspace_root(ws)
     ensure_dirs()
 
+    # Auto-start langgraph dev (after workspace resolution, so deployed
+    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    if getattr(config, "enable_async_subagents", False):
+        from ..langgraph_dev.manager import ensure_langgraph_dev
+
+        ensure_langgraph_dev(config, workspace_dir=ws)
+
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
     from ..sessions import generate_thread_id
@@ -1573,6 +1580,13 @@ def _main_callback(
 
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
+
+    # Auto-start langgraph dev (after workspace resolution, so deployed
+    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    if getattr(config, "enable_async_subagents", False):
+        from ..langgraph_dev.manager import ensure_langgraph_dev
+
+        ensure_langgraph_dev(config, workspace_dir=workspace_dir)
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer

@@ -661,6 +661,78 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
     return backend
 
 
+def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
+    """Step 0.5: Choose the local TCP port for the langgraph dev subprocess.
+
+    EvoSci auto-starts a ``langgraph dev`` server in the background to host
+    deployed sub-agents (writing-agent, data-analysis-agent) when
+    ``enable_async_subagents`` is True. This step lets the user pick a free
+    port, with a live conflict check on the configured default.
+
+    Returns the chosen port; caller assigns it to ``config.langgraph_dev_port``.
+    """
+    if not getattr(config, "enable_async_subagents", True):
+        # User has async disabled — port is irrelevant, no prompt.
+        return getattr(config, "langgraph_dev_port", 6174)
+
+    from ..langgraph_dev.manager import _is_port_occupied
+
+    current_port = getattr(config, "langgraph_dev_port", 6174)
+    current_occupied = _is_port_occupied(current_port)
+
+    # Bake the live status into the prompt label so the user sees it WITH
+    # the question, not as a side-effect line that prints before input.
+    # Single set of parens, no nesting (mirrors ccproxy's prompt style).
+    if current_occupied:
+        prompt_label = (
+            f"Enter port for EvoScientist server "
+            f"(Current: {current_port}, occupied, pick another):"
+        )
+    else:
+        prompt_label = (
+            f"Enter port for EvoScientist server "
+            f"(Current: {current_port}, available, Enter to keep):"
+        )
+
+    def valid_port(value: str) -> bool:
+        if not value:
+            # Allow keeping the default only if it's actually free; otherwise
+            # require the user to pick something else.
+            return not current_occupied
+        try:
+            port = int(value)
+        except (ValueError, TypeError):
+            return False
+        return 1024 < port < 65536
+
+    raw = questionary.text(
+        prompt_label,
+        validate=valid_port,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+    ).ask()
+
+    if raw is None:
+        raise KeyboardInterrupt()
+
+    port = int(raw) if raw else current_port
+
+    # Final probe — warn (don't fail) if the chosen port is still occupied
+    # so the user knows EvoSci may not start cleanly. They can always change
+    # later via: EvoSci config set langgraph_dev_port <port>
+    if _is_port_occupied(port):
+        console.print(
+            f"  [yellow]⚠ Port {port} is occupied. EvoSci may fail to start its "
+            f"server. Free the port or change later with: "
+            f"EvoSci config set langgraph_dev_port <other-port>[/yellow]"
+        )
+    else:
+        console.print(
+            f"  [green]✓ EvoScientist will run on http://127.0.0.1:{port}[/green]"
+        )
+    return port
+
+
 def _step_provider(config: EvoScientistConfig) -> str:
     """Step 1: Select LLM provider.
 
@@ -2851,6 +2923,9 @@ def run_onboard(skip_validation: bool = False) -> bool:
         # Step 0: UI Backend
         ui_backend = _step_ui_backend(config)
         config.ui_backend = ui_backend
+
+        # Step 0.5: langgraph dev port (with live conflict check)
+        config.langgraph_dev_port = _step_langgraph_dev_port(config)
 
         # Step 1: Provider
         provider = _step_provider(config)

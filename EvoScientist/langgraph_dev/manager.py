@@ -1,0 +1,434 @@
+"""langgraph dev lifecycle management for async sub-agent support.
+
+Provides functions to start/stop/health-check a ``langgraph dev`` subprocess
+that hosts the EvoScientist main agent and async sub-agents (e.g.
+``writing-agent``). The CLI calls ``ensure_langgraph_dev(config, ...)`` at
+startup so users can run ``EvoSci -p "..."`` without manually managing the
+langgraph dev server.
+
+Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+import httpx
+
+from EvoScientist.config import EvoScientistConfig
+
+logger = logging.getLogger(__name__)
+
+
+# Default port (Kaprekar's constant — see config/settings.py for the rationale).
+# Overridable per-call via ``start_langgraph_dev(port=...)`` /
+# ``ensure_langgraph_dev`` (which reads ``config.langgraph_dev_port``) and the
+# corresponding url= field on AsyncSubAgent specs.
+_DEFAULT_PORT = 6174
+
+
+def _base_url(port: int = _DEFAULT_PORT) -> str:
+    return f"http://localhost:{port}"
+_PID_DIR = Path.home() / ".config" / "evoscientist"
+_PID_FILE = _PID_DIR / "langgraph_dev.pid"
+_LOG_FILE = _PID_DIR / "langgraph_dev.log"
+
+# Module-level handle to the langgraph dev subprocess we started, if any.
+# Stays None when we reused an existing process (managed by the user).
+_PROCESS: subprocess.Popen | None = None
+
+# Whether async sub-agents are usable in this CLI process. Only True after
+# ``ensure_langgraph_dev`` confirms the subprocess is healthy (or already
+# running). Stays False on startup failure so ``_maybe_swap_async_subagents``
+# can fall back to in-process sync delegation instead of routing tool calls
+# at a dead URL.
+_ASYNC_SUBAGENTS_AVAILABLE: bool = False
+
+
+def is_async_subagents_available() -> bool:
+    """Return True if the langgraph dev subprocess is up and reachable.
+
+    Used by ``_maybe_swap_async_subagents`` to decide whether to swap dict
+    sub-agents to ``AsyncSubAgent`` references. False means a graceful
+    fallback to synchronous in-process delegation.
+    """
+    return _ASYNC_SUBAGENTS_AVAILABLE
+
+
+# =============================================================================
+# Availability & health
+# =============================================================================
+
+
+def _langgraph_exe() -> str | None:
+    """Return the path to the langgraph CLI binary, or None if not found."""
+    found = shutil.which("langgraph")
+    if found:
+        return found
+    import sys as _sys
+
+    candidate = os.path.join(os.path.dirname(_sys.executable), "langgraph")
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return None
+
+
+def is_langgraph_dev_available() -> bool:
+    """Check whether the ``langgraph`` CLI binary is available."""
+    return _langgraph_exe() is not None
+
+
+def is_langgraph_dev_running(
+    base_url: str | None = None,
+    *,
+    port: int = _DEFAULT_PORT,
+) -> bool:
+    """Check whether a langgraph dev API is already serving at ``base_url``.
+
+    ``base_url`` overrides ``port`` when given.
+    """
+    url = base_url or _base_url(port)
+    try:
+        return httpx.get(f"{url}/ok", timeout=1.0).status_code == 200
+    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        return False
+
+
+def _is_port_occupied(port: int) -> bool:
+    """Return True if anything is listening on ``port`` (TCP, IPv4)."""
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.settimeout(0.5)
+        # connect_ex returns 0 on success (something accepted), nonzero otherwise
+        return s.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        s.close()
+
+
+def _list_pids_on_port(port: int) -> list[int]:
+    """Return list of PIDs bound to ``port``, or empty list on lookup failure.
+
+    Read-only; never sends signals. Use this to *inspect* port state before
+    deciding what (if anything) to clean up.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return [int(p) for p in result.stdout.split() if p.strip().isdigit()]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+
+def _kill_owned_stale_process(port: int) -> bool:
+    """Kill ONLY a previously-owned langgraph dev process bound to ``port``.
+
+    "Owned" means the PID written to ``_PID_FILE`` by an earlier
+    ``start_langgraph_dev`` invocation in this user account. Returns True if
+    a stale-but-owned process was cleaned up; returns False (without sending
+    any signals) if the port is occupied by an unowned process — caller
+    should treat that as a hard conflict and refuse to start.
+
+    Why this matters: lsof may report any process bound to the port, including
+    user-run dev servers that legitimately took 6174. SIGKILL'ing those is a
+    data-loss event. Ownership verification keeps the cleanup safe.
+    """
+    if not _PID_FILE.exists():
+        return False
+    try:
+        owned_pid = int(_PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+
+    occupiers = _list_pids_on_port(port)
+    if owned_pid not in occupiers:
+        return False  # Port is held by a different process now.
+
+    try:
+        os.kill(owned_pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        _PID_FILE.unlink()
+    except OSError:
+        pass
+    return True
+
+
+def _packaged_langgraph_config() -> Path:
+    """Return path to the package-shipped ``langgraph.json``.
+
+    Lives at ``EvoScientist/langgraph_dev/langgraph.json`` and is included
+    in the wheel via ``pyproject.toml`` ``package-data`` so it's available
+    regardless of how EvoScientist was installed (pip / editable / source).
+    """
+    import EvoScientist.langgraph_dev as _pkg
+
+    return Path(_pkg.__file__).resolve().parent / "langgraph.json"
+
+
+# =============================================================================
+# Process management
+# =============================================================================
+
+
+def start_langgraph_dev(
+    workspace_dir: Path | None = None,
+    *,
+    port: int = _DEFAULT_PORT,
+    file_persistence: bool = True,
+) -> subprocess.Popen:
+    """Start langgraph dev as a background subprocess.
+
+    Args:
+        workspace_dir: Working directory for the subprocess (subprocess ``cwd``).
+            Determines where deployed agents' filesystem operations land
+            (``CustomSandboxBackend`` derives its workspace root from cwd via
+            ``paths.WORKSPACE_ROOT``). Defaults to ``Path.cwd()``.
+        port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
+        file_persistence: When True (default), langgraph dev writes its full
+            ``.langgraph_api/`` cache so async-task / Store / scheduler state
+            survives subprocess restarts. Set False to suppress periodic
+            flushes (workspace stays cleaner; state is in-memory only).
+
+    Returns:
+        The Popen handle for the langgraph dev process.
+
+    Raises:
+        FileNotFoundError: If the langgraph CLI or packaged ``langgraph.json``
+            is missing.
+        RuntimeError: If langgraph dev exits early or never becomes healthy.
+    """
+    global _PROCESS
+
+    exe = _langgraph_exe()
+    if exe is None:
+        raise FileNotFoundError(
+            "langgraph CLI not found. Reinstall EvoScientist (langgraph-cli is "
+            "a hard dependency): pip install -e '.[dev]'"
+        )
+
+    config_file = _packaged_langgraph_config()
+    if not config_file.exists():
+        raise FileNotFoundError(
+            f"Packaged langgraph.json not found at {config_file}. "
+            "This indicates a broken EvoScientist installation — reinstall."
+        )
+
+    workspace_dir = workspace_dir or Path.cwd()
+
+    # Defensive: handle a port that's occupied but not serving /ok.
+    # Two cases:
+    #   (a) Our own previous langgraph dev (PID matches _PID_FILE) — kill it.
+    #   (b) Someone else's process — refuse with a clear error rather than
+    #       SIGKILL'ing an unowned PID (could be the user's dev server).
+    if not is_langgraph_dev_running(port=port) and _is_port_occupied(port):
+        if _kill_owned_stale_process(port):
+            logger.warning(
+                "Cleaned up stale langgraph dev (pid from %s) on port %d",
+                _PID_FILE,
+                port,
+            )
+            time.sleep(1)
+        else:
+            raise RuntimeError(
+                f"Port {port} is occupied by a non-langgraph process. "
+                f"Free the port (e.g., `lsof -ti:{port}` to find the owner) "
+                f"or change ports with: "
+                f"`EvoSci config set langgraph_dev_port <other-port>`"
+            )
+
+    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    log_handle = open(_LOG_FILE, "ab")  # file handle handed to subprocess
+
+    # Propagate workspace to the subprocess so deployed sub-agents resolve
+    # paths.WORKSPACE_ROOT to the same dir as the CLI's main agent. cwd alone
+    # is fragile (relative paths in MCP configs etc.); env var is explicit.
+    sub_env = os.environ.copy()
+    sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
+
+    # By default, let langgraph dev write its full ``.langgraph_api/`` cache
+    # so future use cases — cross-session async tasks, Store API persistence,
+    # cron job state across CLI restarts — work without further changes. Users
+    # who want a clean workspace can opt out via:
+    #   EvoSci config set langgraph_dev_file_persistence false
+    if not file_persistence:
+        sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
+
+    # Skip MCP loading inside the langgraph dev subprocess. The CLI's main
+    # agent already loaded MCP servers in the foreground process; without
+    # this guard, ``main_graph.py`` would import ``EvoScientist_agent`` and
+    # trigger ``_get_default_agent`` → ``load_mcp_and_build_kwargs`` →
+    # spawning a SECOND copy of every MCP server in the subprocess.
+    # The deployed main agent is currently only reachable via HTTP (for
+    # future Web UI / SDK clients), and none of those are in use, so the
+    # duplicate MCP pool is pure waste. Async sub-agents don't load MCP at
+    # all (their factory bypasses ``load_mcp_and_build_kwargs``), so they
+    # are unaffected.
+    sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+
+    proc = subprocess.Popen(
+        [
+            exe, "dev",
+            "--config", str(config_file),
+            "--port", str(port),
+            "--n-jobs-per-worker", "10",
+            "--no-browser",
+        ],
+        cwd=str(workspace_dir),
+        stdout=log_handle,
+        stderr=log_handle,
+        env=sub_env,
+        start_new_session=True,
+    )
+    _PID_FILE.write_text(str(proc.pid))
+    _PROCESS = proc
+
+    # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP
+    # servers can push this to 30-60s while npm fetches packages, so the budget
+    # is generous. Subsequent runs are much faster thanks to npm cache.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            tail = ""
+            try:
+                tail = _LOG_FILE.read_text()[-2000:]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"langgraph dev exited immediately with code {proc.returncode}.\n"
+                f"Log tail:\n{tail}"
+            )
+        if is_langgraph_dev_running(port=port):
+            logger.info(
+                "langgraph dev started on %s (pid=%d)", _base_url(port), proc.pid
+            )
+            return proc
+        time.sleep(0.5)
+
+    stop_langgraph_dev(proc)
+    raise RuntimeError(
+        f"langgraph dev did not become healthy within 30 seconds. "
+        f"Check {_LOG_FILE}"
+    )
+
+
+def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
+    """Gracefully stop a langgraph dev process.
+
+    Sends SIGTERM to the process group (langgraph dev spawns worker children),
+    falling back to SIGKILL after 5 seconds. Safe to call with ``None``.
+    """
+    global _PROCESS
+    proc = proc if proc is not None else _PROCESS
+    if proc is None:
+        return
+
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=5)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    if proc is _PROCESS:
+        _PROCESS = None
+    if _PID_FILE.exists():
+        try:
+            _PID_FILE.unlink()
+        except OSError:
+            pass
+
+    # Note: ``.langgraph_api/`` is intentionally NOT removed — it holds
+    # langgraph dev's persisted async-task / scheduler / Store state that
+    # may be useful across CLI restarts. Users who want a clean workspace
+    # can ``rm -rf .langgraph_api/`` manually or set
+    # ``langgraph_dev_file_persistence: false`` in config to suppress writes.
+
+
+# =============================================================================
+# High-level orchestration
+# =============================================================================
+
+
+def ensure_langgraph_dev(
+    config: EvoScientistConfig,
+    workspace_dir: Path | str | None = None,
+) -> subprocess.Popen | None:
+    """Conditionally start langgraph dev based on ``config.enable_async_subagents``.
+
+    Behavior:
+    - flag false: no-op, returns None
+    - flag true + already running on :2024: reuse, returns None (we don't own it)
+    - flag true + not running: start subprocess, register atexit cleanup, return Popen
+
+    Args:
+        config: Active EvoScientistConfig.
+        workspace_dir: Workspace to inherit on the subprocess. Set to the CLI's
+            resolved workspace so deployed async sub-agents see the same files
+            as the main in-process agent. If None, the subprocess uses its
+            own ``Path.cwd()`` (the CLI's launch directory).
+
+    Errors during startup are logged but don't abort the CLI — the user can
+    still chat with sync sub-agents; only async sub-agent calls will fail.
+    """
+    global _ASYNC_SUBAGENTS_AVAILABLE
+    if not getattr(config, "enable_async_subagents", False):
+        return None
+
+    port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+    file_persistence = bool(
+        getattr(config, "langgraph_dev_file_persistence", True)
+    )
+
+    if is_langgraph_dev_running(port=port):
+        logger.info("langgraph dev already running on %s, reusing", _base_url(port))
+        _ASYNC_SUBAGENTS_AVAILABLE = True
+        return None
+
+    ws_path = Path(workspace_dir) if workspace_dir is not None else None
+    try:
+        proc = start_langgraph_dev(
+            workspace_dir=ws_path,
+            port=port,
+            file_persistence=file_persistence,
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        # Startup failed — keep async subagents disabled so the main agent
+        # falls back to in-process sync delegation rather than routing tool
+        # calls at a dead URL.
+        _ASYNC_SUBAGENTS_AVAILABLE = False
+        logger.warning(
+            "Failed to start langgraph dev — async sub-agents disabled, "
+            "falling back to in-process sync delegation. %s",
+            exc,
+        )
+        return None
+
+    _ASYNC_SUBAGENTS_AVAILABLE = True
+    atexit.register(stop_langgraph_dev, proc)
+    return proc
