@@ -305,10 +305,18 @@ def start_langgraph_dev(
     workspace_dir = workspace_dir or Path.cwd()
 
     # Defensive: handle a port that's occupied but not serving /ok.
-    # Two cases:
+    # Three cases:
     #   (a) Our own previous langgraph dev (PID matches _PID_FILE) — kill it.
-    #   (b) Someone else's process — refuse with a clear error rather than
-    #       SIGKILL'ing an unowned PID (could be the user's dev server).
+    #   (b) Our own previous langgraph dev exited but the kernel still holds
+    #       the socket in TIME_WAIT — no live PID for lsof to match, and the
+    #       PID file may already be gone (stop_langgraph_dev unlinks it). The
+    #       bind poll below correctly waits this out.
+    #   (c) Foreign process legitimately holds the port — we must NOT kill it.
+    #       The bind poll will keep failing and raise an actionable error.
+    # We don't try to disambiguate (b) vs (c) here: ``_kill_owned_stale_process``
+    # only verifies PID-file ownership, so absence of a match conflates "stale
+    # TIME_WAIT" with "foreign process". Falling through to the bind poll
+    # disambiguates by behavior — TIME_WAIT clears, foreign listeners don't.
     if not is_langgraph_dev_running(port=port) and _is_port_occupied(port):
         if _kill_owned_stale_process(port):
             logger.warning(
@@ -322,11 +330,13 @@ def start_langgraph_dev(
             # half-released socket and crash with "Port already in use".
             _wait_for_port_release(port)
         else:
-            raise RuntimeError(
-                f"Port {port} is occupied by a non-langgraph process. "
-                f"Free the port (e.g., `lsof -ti:{port}` to find the owner) "
-                f"or change ports with: "
-                f"`EvoSci config set langgraph_dev_port <other-port>`"
+            # No owned stale PID — could be foreign or kernel-only TIME_WAIT
+            # from a previous subprocess. Defer to the bind poll below.
+            logger.info(
+                "Port %d occupied with no owned stale PID — waiting for "
+                "kernel TIME_WAIT release (or bind-poll timeout if a "
+                "foreign process holds it).",
+                port,
             )
 
     # Final defense: poll until a real ``bind()`` to ``port`` succeeds before
@@ -344,7 +354,13 @@ def start_langgraph_dev(
         )
 
     _PID_DIR.mkdir(parents=True, exist_ok=True)
-    log_handle = open(_LOG_FILE, "ab")  # file handle handed to subprocess
+    # Open the log file once and hand it to subprocess.Popen as stdout/stderr.
+    # Popen duplicates the fd into the child via fork+exec, so closing our
+    # parent-side handle in the finally below releases this process's fd
+    # without affecting the child. Without the close, every restart leaks
+    # one fd — a problem on heavy ``/resume`` cycling that could eventually
+    # exhaust the process's open-file limit.
+    log_handle = open(_LOG_FILE, "ab")  # closed in finally below
 
     # Propagate workspace to the subprocess so deployed sub-agents resolve
     # paths.WORKSPACE_ROOT to the same dir as the CLI's main agent. cwd alone
@@ -380,24 +396,32 @@ def start_langgraph_dev(
     # are unaffected.
     sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
 
-    proc = subprocess.Popen(
-        [
-            exe,
-            "dev",
-            "--config",
-            str(config_file),
-            "--port",
-            str(port),
-            "--n-jobs-per-worker",
-            "10",
-            "--no-browser",
-        ],
-        cwd=str(workspace_dir),
-        stdout=log_handle,
-        stderr=log_handle,
-        env=sub_env,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            [
+                exe,
+                "dev",
+                "--config",
+                str(config_file),
+                "--port",
+                str(port),
+                "--n-jobs-per-worker",
+                "10",
+                "--no-browser",
+            ],
+            cwd=str(workspace_dir),
+            stdout=log_handle,
+            stderr=log_handle,
+            env=sub_env,
+            start_new_session=True,
+        )
+    finally:
+        # The child has its own copy of the fd; closing ours prevents an
+        # accumulating leak across restarts. Run even if Popen raises.
+        try:
+            log_handle.close()
+        except Exception:
+            pass
     _PID_FILE.write_text(str(proc.pid))
     global _PROCESS_WORKSPACE
     _PROCESS = proc
@@ -414,6 +438,14 @@ def start_langgraph_dev(
                 tail = _LOG_FILE.read_text()[-2000:]
             except Exception:
                 pass
+            # Subprocess died on its own — clear our module-level bookkeeping
+            # (``_PROCESS``, ``_PROCESS_WORKSPACE``, ``_PID_FILE``) before
+            # raising. Without this, ``_PROCESS`` would keep pointing at the
+            # dead handle and ``_PID_FILE`` at a non-existent PID, leading
+            # the next ``ensure_langgraph_dev`` to misjudge state. Pass
+            # ``proc`` directly so ``stop_langgraph_dev`` works against the
+            # one we just spawned even if the global state was overwritten.
+            stop_langgraph_dev(proc)
             raise RuntimeError(
                 f"langgraph dev exited immediately with code {proc.returncode}.\n"
                 f"Log tail:\n{tail}"
