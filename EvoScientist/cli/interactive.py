@@ -321,6 +321,10 @@ def cmd_interactive(
         "status_last_input_tokens": None,
     }
 
+    from ..commands.base import ChannelRuntime
+
+    channel_runtime = ChannelRuntime()
+
     progress_tracker = MCPProgressTracker()
 
     def _on_mcp_progress(event: str, server: str, detail: str) -> None:
@@ -386,8 +390,7 @@ def cmd_interactive(
             raise
         await _refresh_status_snapshot(reset_streaming_text=True)
         if _channels_is_running():
-            _ch_mod._cli_agent = agent
-            _ch_mod._cli_thread_id = state["thread_id"]
+            channel_runtime.bind(agent, state["thread_id"])
         return agent
 
     def _rebuild_status_snapshot() -> None:
@@ -833,9 +836,22 @@ def cmd_interactive(
                             state["status_base_snapshot"] = make_empty_status_snapshot(
                                 model
                             )
-                            if _channels_is_running():
-                                _ch_mod._cli_agent = ctx.agent
-                                _ch_mod._cli_thread_id = state["thread_id"]
+
+                        # Rebind the runtime whenever the agent OR
+                        # thread_id may have moved — ``/new`` and
+                        # ``/resume`` rotate ``state["thread_id"]``
+                        # without swapping the agent, and the bus
+                        # expects both to stay in sync (matches the
+                        # serve-mode hook contract).
+                        if _channels_is_running():
+                            runtime_agent = (
+                                ctx.agent
+                                if ctx.agent is not None
+                                else agent_loader.agent
+                            )
+                            if runtime_agent is not None:
+                                channel_runtime.bind(runtime_agent, state["thread_id"])
+
                         # ``/new`` rotates ``state["thread_id"]`` / workspace,
                         # ``/compact`` reduces token usage — both need the
                         # status snapshot re-rendered even when the agent
@@ -858,6 +874,7 @@ def cmd_interactive(
                         handle_session_resume_cb=_on_handle_session_resume,
                         await_agent_ready=_await_agent_ready,
                         on_cmd_completed=_on_channel_cmd_completed,
+                        channel_runtime=channel_runtime,
                     )
                     if _slash_handled:
                         _print_separator()
@@ -956,6 +973,7 @@ def cmd_interactive(
                             state["thread_id"],
                             cfg,
                             send_thinking=channel_send_thinking,
+                            runtime=channel_runtime,
                         )
 
                 _auto_start_task = asyncio.create_task(
@@ -1036,6 +1054,7 @@ def cmd_interactive(
                                 checkpointer=checkpointer,
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),
+                                channel_runtime=channel_runtime,
                             )
                             await cmd_manager.execute(user_input, ctx)
 
@@ -1046,7 +1065,7 @@ def cmd_interactive(
 
                             # Agent swap (e.g. /model successfully built a
                             # new agent): adopt into loader + reset status
-                            # snapshot + sync channel globals.
+                            # snapshot + sync channel runtime.
                             agent_swapped = (
                                 ctx.agent is not None
                                 and ctx.agent is not _agent_for_ctx
@@ -1060,9 +1079,22 @@ def cmd_interactive(
                                 state["status_base_snapshot"] = (
                                     make_empty_status_snapshot(model)
                                 )
-                                if _channels_is_running():
-                                    _ch_mod._cli_agent = ctx.agent
-                                    _ch_mod._cli_thread_id = state["thread_id"]
+
+                            # Rebind the runtime whenever the agent OR
+                            # thread_id may have moved — ``/new`` /
+                            # ``/resume`` rotate ``state["thread_id"]``
+                            # without swapping the agent, and the bus
+                            # expects both to stay in sync.
+                            if _channels_is_running():
+                                runtime_agent = (
+                                    ctx.agent
+                                    if ctx.agent is not None
+                                    else agent_loader.agent
+                                )
+                                if runtime_agent is not None:
+                                    channel_runtime.bind(
+                                        runtime_agent, state["thread_id"]
+                                    )
 
                             # Commands that mutate status fields need an
                             # async refresh here (/compact + /new use sync

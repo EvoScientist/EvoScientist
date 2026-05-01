@@ -3,37 +3,23 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from tests.conftest import run_async as _run
 
 
-@pytest.fixture(autouse=True)
-def _reset_channel_globals():
-    """Reset module-level ``_cli_agent``/``_cli_thread_id`` around every test.
-
-    These globals are written by the start / add-to-running paths and would
-    otherwise leak between tests (and into unrelated suites).
-    """
-    import EvoScientist.cli.channel as _ch
-
-    _ch._cli_agent = None
-    _ch._cli_thread_id = None
-    try:
-        yield
-    finally:
-        _ch._cli_agent = None
-        _ch._cli_thread_id = None
-
-
 def _ctx():
-    from EvoScientist.commands.base import CommandContext
+    from EvoScientist.commands.base import ChannelRuntime, CommandContext
 
     ui = MagicMock()
     ui.supports_interactive = True
-    return CommandContext(
-        agent=object(), thread_id="tid-42", ui=ui, workspace_dir="/ws"
-    ), ui
+    runtime = ChannelRuntime()
+    ctx = CommandContext(
+        agent=object(),
+        thread_id="tid-42",
+        ui=ui,
+        workspace_dir="/ws",
+        channel_runtime=runtime,
+    )
+    return ctx, ui
 
 
 class TestNeedsAgent:
@@ -69,8 +55,7 @@ class TestNeedsAgent:
 class TestStartPath:
     """Start flow must propagate agent/thread_id globals."""
 
-    def test_start_sets_cli_agent_globals(self):
-        import EvoScientist.cli.channel as _ch_mod
+    def test_start_binds_channel_runtime(self):
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
         ctx, _ui = _ctx()
@@ -93,8 +78,8 @@ class TestStartPath:
             ),
         ):
             _run(ChannelCommand().execute(ctx, ["telegram"]))
-        assert _ch_mod._cli_agent is ctx.agent
-        assert _ch_mod._cli_thread_id == "tid-42"
+        assert ctx.channel_runtime.agent is ctx.agent
+        assert ctx.channel_runtime.thread_id == "tid-42"
 
     def test_start_propagates_send_thinking(self):
         """send_thinking flag must reach _start_channels_bus_mode."""
@@ -133,8 +118,7 @@ class TestStartPath:
 
 
 class TestAddToRunningPath:
-    def test_add_to_running_sets_cli_agent_globals(self):
-        import EvoScientist.cli.channel as _ch_mod
+    def test_add_to_running_binds_channel_runtime(self):
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
         ctx, _ui = _ctx()
@@ -157,8 +141,8 @@ class TestAddToRunningPath:
             ),
         ):
             _run(ChannelCommand().execute(ctx, ["discord"]))
-        assert _ch_mod._cli_agent is ctx.agent
-        assert _ch_mod._cli_thread_id == "tid-42"
+        assert ctx.channel_runtime.agent is ctx.agent
+        assert ctx.channel_runtime.thread_id == "tid-42"
 
     def test_add_to_running_propagates_send_thinking(self):
         """Adding to a running bus must honor config.channel_send_thinking."""

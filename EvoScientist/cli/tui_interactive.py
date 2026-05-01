@@ -207,9 +207,15 @@ async def _sync_tui_command_completion(
         update_model = getattr(app, "update_status_after_model_change", None)
         if callable(update_model):
             update_model(cfg.model, cfg.provider)
-        if _channels_is_running():
-            _ch_mod._cli_agent = ctx.agent
-            _ch_mod._cli_thread_id = app._conversation_tid
+
+    # Rebind the runtime whenever the agent OR thread_id may have moved
+    # — ``/new`` and ``/resume`` rotate ``app._conversation_tid``
+    # without swapping the agent, and the bus expects both to stay in
+    # sync (matches the serve-mode hook contract).
+    if _channels_is_running():
+        runtime_agent = ctx.agent if ctx.agent is not None else app._agent_loader.agent
+        if runtime_agent is not None:
+            app._channel_runtime.bind(runtime_agent, app._conversation_tid)
 
     await app._refresh_status_snapshot(reset_streaming_text=True)
 
@@ -391,6 +397,9 @@ def run_textual_interactive(
             self._history_index: int = -1  # -1 = not browsing history
             self._history_saved_input: str = ""  # saved current input before browsing
             self._background_tasks: set[asyncio.Task] = set()
+            from ..commands.base import ChannelRuntime
+
+            self._channel_runtime = ChannelRuntime()
             self._quit_pending: bool = False
             self._current_model: str | None = model
             self._current_provider: str | None = provider
@@ -425,8 +434,7 @@ def run_textual_interactive(
 
         def _on_agent_load_success(self, agent: Any) -> None:
             if _channels_is_running():
-                _ch_mod._cli_agent = agent
-                _ch_mod._cli_thread_id = self._conversation_tid
+                self._channel_runtime.bind(agent, self._conversation_tid)
             self._finish_loader_widget()
             self._render_status()
 
@@ -730,6 +738,7 @@ def run_textual_interactive(
                         self._conversation_tid,
                         cfg,
                         send_thinking=self._channel_send_thinking,
+                        runtime=self._channel_runtime,
                     )
                     types = [
                         t.strip() for t in cfg.channel_enabled.split(",") if t.strip()
@@ -1915,6 +1924,7 @@ def run_textual_interactive(
                     handle_session_resume_cb=self.handle_session_resume,
                     await_agent_ready=self._await_agent_ready,
                     on_cmd_completed=self._on_channel_cmd_completed,
+                    channel_runtime=self._channel_runtime,
                 )
                 if _slash_handled:
                     return  # outer finally handles _busy / widget cleanup
@@ -2372,6 +2382,7 @@ def run_textual_interactive(
                     workspace_dir=self._workspace_dir,
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
+                    channel_runtime=self._channel_runtime,
                 )
 
                 if await cmd_manager.execute(command, ctx):
@@ -2500,7 +2511,7 @@ def run_textual_interactive(
             self._started_channel_types.clear()
             if _channels_is_running():
                 try:
-                    _channels_stop()
+                    _channels_stop(runtime=self._channel_runtime)
                 except Exception:
                     pass
             self.exit()
