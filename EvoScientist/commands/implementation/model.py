@@ -217,14 +217,10 @@ class ModelCommand(Command):
             set_config_value("model", model_name)
             set_config_value("provider", provider)
 
-        # Propagate to channel module if channels are running
-        try:
-            import EvoScientist.cli.channel as _ch_mod
-
-            if getattr(_ch_mod, "_cli_agent", None) is not None:
-                _ch_mod._cli_agent = new_agent
-        except Exception:
-            pass
+        # Propagate to the channel runtime if channels are running so the
+        # bus picks up the new agent on the next inbound message.
+        if ctx.channel_runtime is not None and ctx.channel_runtime.agent is not None:
+            ctx.channel_runtime.agent = new_agent
 
         # Update status bar if available
         update_model_fn = getattr(ctx.ui, "update_status_after_model_change", None)

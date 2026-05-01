@@ -501,7 +501,10 @@ async def compact_conversation(
 _serve_logger = logging.getLogger(__name__)
 
 
-def _make_serve_start_new_session_cb(agent_holder: dict[str, Any]):
+def _make_serve_start_new_session_cb(
+    agent_holder: dict[str, Any],
+    channel_runtime: Any | None = None,
+):
     """Build the ``start_new_session_cb`` used by serve mode.
 
     ``/new`` delegates session rotation entirely to this callback: it
@@ -510,8 +513,8 @@ def _make_serve_start_new_session_cb(agent_holder: dict[str, Any]):
     fresh thread id.  Without a wired callback the channel user gets
     ``ChannelCommandUI``'s fallback "restart the channel link" message
     and nothing actually rotates.  This helper generates a new thread
-    id, updates the shared holder, and syncs the channel-module global
-    so subsequent messages land on the new thread.
+    id, updates the shared holder, and syncs the channel runtime so
+    subsequent messages land on the new thread.
     """
 
     def _cb() -> None:
@@ -519,25 +522,23 @@ def _make_serve_start_new_session_cb(agent_holder: dict[str, Any]):
 
         new_tid = generate_thread_id()
         agent_holder["thread_id"] = new_tid
-        try:
-            import EvoScientist.cli.channel as _ch_mod
-
-            _ch_mod._cli_thread_id = new_tid
-        except Exception:  # pragma: no cover — defensive
-            pass
+        if channel_runtime is not None:
+            channel_runtime.thread_id = new_tid
         console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
 
     return _cb
 
 
-def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
+def _make_serve_cmd_completed_hook(
+    agent_holder: dict[str, Any],
+    channel_runtime: Any | None = None,
+):
     """Build the ``on_cmd_completed`` hook used by serve mode.
 
     Adopts ``/model`` agent swaps and ``/resume`` thread/workspace
     swaps back into ``agent_holder`` so the outer poll loop picks up
     the new handles on subsequent messages.  Also keeps
-    ``EvoScientist.cli.channel`` globals in sync so other readers
-    (e.g. the bus) see the new values.
+    ``channel_runtime`` in sync so the bus sees the new values.
 
     For ``/resume`` specifically, surface a user-visible warning via
     ``ctx.ui``: serve uses ``InMemorySaver`` (not the SQLite
@@ -551,14 +552,10 @@ def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
     """
 
     async def _hook(ctx: Any, original_agent: Any, cmd: Any) -> None:
-        import EvoScientist.cli.channel as _ch_mod
-
         if ctx.agent is not None and ctx.agent is not original_agent:
             agent_holder["agent"] = ctx.agent
-            try:
-                _ch_mod._cli_agent = ctx.agent
-            except Exception:  # pragma: no cover — defensive
-                pass
+            if channel_runtime is not None:
+                channel_runtime.agent = ctx.agent
 
         # ``/resume`` mutates ``ctx.thread_id`` directly (its UI callback
         # is a no-op in serve mode since there's no REPL to reset).  Pick
@@ -572,10 +569,8 @@ def _make_serve_cmd_completed_hook(agent_holder: dict[str, Any]):
         thread_changed = bool(new_tid) and new_tid != agent_holder.get("thread_id")
         if thread_changed:
             agent_holder["thread_id"] = new_tid
-            try:
-                _ch_mod._cli_thread_id = new_tid
-            except Exception:  # pragma: no cover — defensive
-                pass
+            if channel_runtime is not None:
+                channel_runtime.thread_id = new_tid
 
         new_workspace = getattr(ctx, "workspace_dir", None)
         if new_workspace and new_workspace != agent_holder.get("workspace_dir"):
@@ -608,6 +603,7 @@ def _serve_process_message(
     show_thinking: bool,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     start_new_session_cb: Callable[[], None] | None = None,
+    channel_runtime: Any | None = None,
 ) -> None:
     """Process a single channel message in headless serve mode.
 
@@ -728,9 +724,10 @@ def _serve_process_message(
                     checkpointer=None,
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
-                    or _make_serve_start_new_session_cb(agent_holder),
+                    or _make_serve_start_new_session_cb(agent_holder, channel_runtime),
                     on_cmd_completed=on_cmd_completed
-                    or _make_serve_cmd_completed_hook(agent_holder),
+                    or _make_serve_cmd_completed_hook(agent_holder, channel_runtime),
+                    channel_runtime=channel_runtime,
                 )
             )
         except Exception as exc:
@@ -887,11 +884,19 @@ def serve(
         "workspace_dir": ws,
     }
 
+    from ..commands.base import ChannelRuntime
+
+    channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
+
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message
     # would allocate a fresh closure pair.
-    _serve_on_cmd_completed = _make_serve_cmd_completed_hook(agent_holder)
-    _serve_start_new_session_cb = _make_serve_start_new_session_cb(agent_holder)
+    _serve_on_cmd_completed = _make_serve_cmd_completed_hook(
+        agent_holder, channel_runtime
+    )
+    _serve_start_new_session_cb = _make_serve_start_new_session_cb(
+        agent_holder, channel_runtime
+    )
 
     _start_channels_bus_mode(
         config,
@@ -946,6 +951,7 @@ def serve(
                     show_thinking=effective_channel_thinking,
                     on_cmd_completed=_serve_on_cmd_completed,
                     start_new_session_cb=_serve_start_new_session_cb,
+                    channel_runtime=channel_runtime,
                 )
             except KeyboardInterrupt:
                 shutdown_event.set()
@@ -956,7 +962,7 @@ def serve(
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
-        _channels_stop()
+        _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
 
 
