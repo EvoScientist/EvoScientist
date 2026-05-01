@@ -1,0 +1,20 @@
+services:
+  evoscientist:
+    image: ghcr.io/evoscientist/evoscientist:latest
+    # To build the image from this checkout instead of pulling, comment out
+    # the `image:` line above and uncomment the block below:
+    # build:
+    #   context: .
+    container_name: evoscientist
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    volumes:
+      # Working directory for the agent
+      - ./workspace:/workspace
+      # Persistent app data: sessions, global skills, memories, config
+      - evosci-data:/home/evosci/.evoscientist
+
+volumes:
+  evosci-data:

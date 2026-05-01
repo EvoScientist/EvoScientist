@@ -68,6 +68,143 @@ def _normalize_tags(raw: object) -> list[str]:
     return []
 
 
+_MANIFEST_FILENAME = ".installed.yaml"
+
+# Per-tier sidecar at ``<dest_dir>/.installed.yaml``. Each entry records the
+# install source plus optional provenance (the upstream commit SHA at install
+# time, omitted for non-git sources). Schema:
+#
+#     <skill-dir-name>:
+#       source: <URL | shorthand | local path>
+#       commit: <git SHA>
+_ManifestEntry = dict[str, str]
+
+
+def _manifest_path(dest_dir: str | Path) -> Path:
+    return Path(dest_dir) / _MANIFEST_FILENAME
+
+
+def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
+    """Read the install manifest from *dest_dir*. Malformed entries are
+    skipped, and any read error returns ``{}`` so a corrupt file never breaks
+    installation or detection.
+    """
+    path = _manifest_path(dest_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        _logger.warning("Failed to read skills manifest at %s: %s", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, _ManifestEntry] = {}
+    for k, v in data.items():
+        if not isinstance(v, dict) or not isinstance(v.get("source"), str):
+            continue
+        entry: _ManifestEntry = {"source": v["source"]}
+        commit = v.get("commit")
+        if isinstance(commit, str) and commit:
+            entry["commit"] = commit
+        out[str(k)] = entry
+    return out
+
+
+def _save_manifest(dest_dir: str | Path, manifest: dict[str, _ManifestEntry]) -> None:
+    path = _manifest_path(dest_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+        return
+
+    # Atomic write: stage to a sibling temp file, fsync, then os.replace into
+    # place. Prevents a half-written manifest from breaking detection if the
+    # process dies mid-write.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(manifest, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _record_install(
+    dest_dir: str | Path,
+    name: str,
+    source: str | None,
+    *,
+    commit: str | None = None,
+) -> None:
+    """Add or update a manifest entry. No-op when *source* is empty.
+
+    *commit*, when provided, is recorded alongside the source so onboarding
+    can detect when an upstream version has moved past what's installed.
+    """
+    if not source:
+        return
+    manifest = _load_manifest(dest_dir)
+    new_entry: _ManifestEntry = {"source": source}
+    if commit:
+        new_entry["commit"] = commit
+    if manifest.get(name) == new_entry:
+        return
+    manifest[name] = new_entry
+    _save_manifest(dest_dir, manifest)
+
+
+def _record_uninstall(dest_dir: str | Path, name: str) -> None:
+    manifest = _load_manifest(dest_dir)
+    if name in manifest:
+        del manifest[name]
+        _save_manifest(dest_dir, manifest)
+
+
+def installed_sources() -> set[str]:
+    """Return install sources recorded for currently-installed skills.
+
+    Reads the manifest in both ``USER_SKILLS_DIR`` and ``GLOBAL_SKILLS_DIR``
+    and only returns entries whose target directories still exist on disk —
+    so a manually-removed skill stops appearing as installed.
+    """
+    return set(installed_provenance())
+
+
+def installed_provenance() -> dict[str, dict[str, str | None]]:
+    """Per-source provenance for currently-installed skills.
+
+    Maps source URL/shorthand → ``{"commit": <sha or None>}``. When several
+    children share a source (a pack), the first observed commit is returned —
+    packs install all children from a single clone so this is unambiguous in
+    practice. Used by onboarding to surface "update available" when the
+    recorded commit no longer matches upstream.
+    """
+    out: dict[str, dict[str, str | None]] = {}
+    for dest_dir in (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR):
+        dest = Path(dest_dir)
+        if not dest.exists():
+            continue
+        for name, entry in _load_manifest(dest).items():
+            if not (dest / name).is_dir():
+                continue
+            source = entry["source"]
+            if source in out:
+                continue
+            out[source] = {"commit": entry.get("commit")}
+    return out
+
+
 def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     """Parse SKILL.md frontmatter to extract name, description, and tags.
 
@@ -162,6 +299,7 @@ def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
 
 
 _CLONE_TIMEOUT = 120  # seconds
+_LS_REMOTE_TIMEOUT = 5  # seconds — bounded, runs once per recommended pack
 
 
 def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
@@ -182,6 +320,63 @@ def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
         ) from e
     if result.returncode != 0:
         raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
+
+
+def _resolve_local_head(clone_dir: str) -> str | None:
+    """Return the HEAD commit SHA of a freshly cloned working tree, or None
+    when ``git rev-parse`` is unavailable or the call fails."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", clone_dir, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha or None
+
+
+def resolve_remote_head(
+    source: str, *, timeout: float = _LS_REMOTE_TIMEOUT
+) -> str | None:
+    """Resolve the upstream commit SHA for *source* via ``git ls-remote``.
+
+    Returns ``None`` for non-git sources, parse failures, network errors, or
+    timeouts — callers should treat ``None`` as "unknown" and never infer
+    "out of date" from it. Used by onboarding to detect upstream updates
+    without re-cloning the repo.
+    """
+    if not _is_github_url(source):
+        return None
+    try:
+        repo, ref, _ = _parse_github_url(source)
+    except ValueError:
+        return None
+
+    target = ref or "HEAD"
+    repo_url = f"https://github.com/{repo}.git"
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--exit-code", repo_url, target],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    # Output: "<sha>\t<refname>" lines. Take the first SHA.
+    for line in proc.stdout.splitlines():
+        sha, _, _ = line.partition("\t")
+        sha = sha.strip()
+        if sha:
+            return sha
+    return None
 
 
 def _is_github_url(source: str) -> bool:
@@ -323,7 +518,11 @@ def install_skill(
                         _logger.info(
                             f"Skill '{source}' found in remote index. Installing..."
                         )
-                        return _install_from_github(skill["install_source"], dest_dir)
+                        # Record under the user-facing source (the shorthand
+                        # name they typed) so detection works on re-runs.
+                        return _install_from_github(
+                            skill["install_source"], dest_dir, record_as=source
+                        )
             except Exception as e:
                 _logger.warning(f"Failed to fetch remote index for fallback: {e}")
 
@@ -351,16 +550,33 @@ def _install_from_local(source: str, dest_dir: str) -> dict:
     if not _validate_skill_dir(source_path):
         found = _scan_skill_dirs(source_path)
         if len(found) == 1:
-            return _install_single_local(found[0], dest_dir)
+            return _install_single_local(found[0], dest_dir, record_as=source)
         if found:
-            return _batch_install_local(found, dest_dir)
+            return _batch_install_local(found, dest_dir, record_as=source)
         return {"success": False, "error": f"No SKILL.md found in: {source}"}
 
-    return _install_single_local(source_path, dest_dir)
+    return _install_single_local(source_path, dest_dir, record_as=source)
 
 
-def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -> dict:
-    """Install one skill directory into *dest_dir*."""
+def _install_single_local(
+    source_path: Path,
+    dest_dir: str,
+    *,
+    ignore_fn=None,
+    record_as: str | None = None,
+    record_commit: str | None = None,
+) -> dict:
+    """Install one skill directory into *dest_dir*.
+
+    *record_as*, when provided, is recorded in the install manifest so later
+    detection can match against the user-facing source string (URL, shorthand,
+    or path) — important for packs where the installed dir name doesn't
+    resemble the source.
+
+    *record_commit*, when provided, captures the upstream git SHA at install
+    time so onboarding can compare against the current upstream and surface
+    "update available" without re-cloning.
+    """
     skill_info = _parse_skill_md(source_path / "SKILL.md")
     skill_name = _sanitize_name(skill_info.name)
     if not skill_name:
@@ -380,6 +596,7 @@ def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -
         shutil.rmtree(target_path)
 
     shutil.copytree(source_path, target_path, ignore=ignore_fn)
+    _record_install(dest_dir, skill_name, record_as, commit=record_commit)
 
     return {
         "success": True,
@@ -390,14 +607,25 @@ def _install_single_local(source_path: Path, dest_dir: str, *, ignore_fn=None) -
 
 
 def _batch_install_local(
-    skill_dirs: list[Path], dest_dir: str, *, ignore_fn=None
+    skill_dirs: list[Path],
+    dest_dir: str,
+    *,
+    ignore_fn=None,
+    record_as: str | None = None,
+    record_commit: str | None = None,
 ) -> dict:
     """Install multiple skill directories and return a batch result."""
     installed: list[dict] = []
     failed: list[dict] = []
 
     for sd in skill_dirs:
-        result = _install_single_local(sd, dest_dir, ignore_fn=ignore_fn)
+        result = _install_single_local(
+            sd,
+            dest_dir,
+            ignore_fn=ignore_fn,
+            record_as=record_as,
+            record_commit=record_commit,
+        )
         if result["success"]:
             installed.append(result)
         else:
@@ -411,8 +639,16 @@ def _batch_install_local(
     }
 
 
-def _install_from_github(source: str, dest_dir: str) -> dict:
-    """Install a skill from a GitHub URL or shorthand."""
+def _install_from_github(
+    source: str, dest_dir: str, *, record_as: str | None = None
+) -> dict:
+    """Install a skill from a GitHub URL or shorthand.
+
+    *record_as* overrides what gets written to the install manifest. By default
+    we record the same URL/shorthand the caller passed as *source* so detection
+    works against the user-facing string.
+    """
+    record_as = record_as or source
     try:
         repo, ref, path = _parse_github_url(source)
     except ValueError as e:
@@ -425,6 +661,10 @@ def _install_from_github(source: str, dest_dir: str) -> dict:
             _clone_repo(repo, ref, clone_dir)
         except RuntimeError as e:
             return {"success": False, "error": str(e)}
+
+        # Capture HEAD now, before any fallback paths might re-enter — every
+        # child of a pack share the same upstream SHA so we record it once.
+        commit = _resolve_local_head(clone_dir)
 
         # Exclude .git from copies
         def ignore_git(dir_name: str, files: list[str]) -> list[str]:
@@ -444,7 +684,11 @@ def _install_from_github(source: str, dest_dir: str) -> dict:
                     skill_source = found_dirs[0]
                 elif found_dirs:
                     return _batch_install_local(
-                        found_dirs, dest_dir, ignore_fn=ignore_git
+                        found_dirs,
+                        dest_dir,
+                        ignore_fn=ignore_git,
+                        record_as=record_as,
+                        record_commit=commit,
                     )
 
             # Still not resolved — try tree search by name hint
@@ -466,7 +710,13 @@ def _install_from_github(source: str, dest_dir: str) -> dict:
                     }
 
         # Single skill — install it
-        result = _install_single_local(skill_source, dest_dir, ignore_fn=ignore_git)
+        result = _install_single_local(
+            skill_source,
+            dest_dir,
+            ignore_fn=ignore_git,
+            record_as=record_as,
+            record_commit=commit,
+        )
         if result.get("success"):
             result["source"] = source
         return result
@@ -559,6 +809,7 @@ def uninstall_skill(name: str) -> dict:
             return {"success": False, "error": f"Invalid skill path: {name}"}
 
         shutil.rmtree(target_path)
+        _record_uninstall(search_dir, target_path.name)
         return {"success": True, "name": name}
 
     # Check if it's a built-in skill (read-only, cannot be uninstalled)

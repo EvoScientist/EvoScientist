@@ -7,14 +7,19 @@ import pytest
 
 from EvoScientist.tools.skills_manager import (
     _is_github_url,
+    _load_manifest,
     _parse_github_url,
     _parse_skill_md,
+    _record_install,
     _validate_skill_dir,
     fetch_remote_skill_index,
     get_all_tags,
     install_skill,
+    installed_provenance,
+    installed_sources,
     list_skills,
     list_skills_by_tag,
+    resolve_remote_head,
     uninstall_skill,
 )
 
@@ -344,6 +349,151 @@ class TestUninstallSkill:
 
             assert result["success"] is False
             assert "not found" in result["error"]
+
+
+# =============================================================================
+# Tests for install manifest
+# =============================================================================
+
+
+class TestInstallManifest:
+    """Tests for the per-tier .installed.yaml manifest."""
+
+    def _make_skill(self, parent: Path, name: str) -> Path:
+        d = parent / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} description\n---\n\n# {name}\n"
+        )
+        return d
+
+    def test_local_install_records_source(self, sample_skill_dir, temp_skills_dir):
+        result = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        assert result["success"]
+
+        manifest = _load_manifest(temp_skills_dir)
+        # Local installs have no upstream commit — record source only.
+        assert manifest == {"sample-skill": {"source": str(sample_skill_dir)}}
+
+    def test_pack_install_records_one_source_for_all_children(
+        self, tmp_path, temp_skills_dir
+    ):
+        """A pack (root has no SKILL.md, multiple child skills) should record
+        the same user-facing source for every child skill, so detection by
+        source still works."""
+        repo = tmp_path / "evoskills-fake"
+        repo.mkdir()
+        self._make_skill(repo, "paper-writing")
+        self._make_skill(repo, "evo-memory")
+        self._make_skill(repo, "research-survey")
+
+        result = install_skill(str(repo), str(temp_skills_dir))
+        assert result["success"]
+        assert result["batch"]
+
+        manifest = _load_manifest(temp_skills_dir)
+        assert set(manifest) == {"paper-writing", "evo-memory", "research-survey"}
+        sources = {entry["source"] for entry in manifest.values()}
+        assert sources == {str(repo)}
+
+    def test_uninstall_clears_manifest_entry(self, sample_skill_dir, temp_skills_dir):
+        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        assert "sample-skill" in _load_manifest(temp_skills_dir)
+
+        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
+            result = uninstall_skill("sample-skill")
+
+        assert result["success"]
+        assert "sample-skill" not in _load_manifest(temp_skills_dir)
+
+    def test_save_is_atomic_and_leaves_no_temp(self, sample_skill_dir, temp_skills_dir):
+        """_save_manifest must rename a temp file into place, not overwrite,
+        so a crash mid-write can't leave a half-written manifest behind."""
+        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+
+        manifest_files = sorted(p.name for p in temp_skills_dir.iterdir())
+        # Only the manifest itself should remain — no leftover .tmp siblings.
+        assert ".installed.yaml" in manifest_files
+        assert not any(name.endswith(".tmp") for name in manifest_files), (
+            f"unexpected temp file left behind: {manifest_files}"
+        )
+
+    def test_installed_sources_filters_missing_dirs(
+        self, sample_skill_dir, temp_skills_dir, tmp_path
+    ):
+        """If a skill dir was removed manually but the manifest entry lingers,
+        installed_sources() must not report it as installed."""
+        empty_global = tmp_path / "empty_global"
+        empty_global.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global),
+        ):
+            install_skill(str(sample_skill_dir), str(temp_skills_dir))
+            assert installed_sources() == {str(sample_skill_dir)}
+
+            # Manually wipe the dir, manifest still has the entry.
+            import shutil as _shutil
+
+            _shutil.rmtree(temp_skills_dir / "sample-skill")
+            assert "sample-skill" in _load_manifest(temp_skills_dir)
+            assert installed_sources() == set()
+
+    def test_record_install_persists_commit(self, temp_skills_dir, sample_skill_dir):
+        """When _record_install gets a commit SHA it makes it through the
+        normalize-on-write pass and is readable as provenance."""
+        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        # Simulate a github install by manually recording a commit.
+        _record_install(
+            temp_skills_dir,
+            "sample-skill",
+            "owner/repo@skill",
+            commit="abc123def456",
+        )
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir),
+            patch(
+                "EvoScientist.paths.GLOBAL_SKILLS_DIR",
+                temp_skills_dir.parent / "missing",
+            ),
+        ):
+            prov = installed_provenance()
+        assert prov == {"owner/repo@skill": {"commit": "abc123def456"}}
+
+
+class TestResolveRemoteHead:
+    """Tests for resolve_remote_head — the upstream-SHA helper used by onboard."""
+
+    def test_returns_none_for_local_path(self):
+        assert resolve_remote_head("/tmp/some/local/path") is None
+
+    def test_returns_none_when_git_unavailable(self):
+        with patch("EvoScientist.tools.skills_manager.subprocess.run") as run:
+            run.side_effect = FileNotFoundError("git not on PATH")
+            assert resolve_remote_head("owner/repo@skill") is None
+
+    def test_returns_none_on_timeout(self):
+        import subprocess as _sp
+
+        with patch("EvoScientist.tools.skills_manager.subprocess.run") as run:
+            run.side_effect = _sp.TimeoutExpired(cmd="git", timeout=5)
+            assert resolve_remote_head("owner/repo@skill") is None
+
+    def test_parses_first_sha_from_ls_remote_output(self):
+        proc = type(
+            "P",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "deadbeef0000000000000000000000000000abcd\trefs/heads/main\n",
+                "stderr": "",
+            },
+        )()
+        with patch(
+            "EvoScientist.tools.skills_manager.subprocess.run", return_value=proc
+        ):
+            sha = resolve_remote_head("owner/repo@skill")
+        assert sha == "deadbeef0000000000000000000000000000abcd"
 
 
 # =============================================================================

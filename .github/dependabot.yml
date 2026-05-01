@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Base images in Dockerfile (BASE_IMAGE / NODE_IMAGE ARG defaults).
+  # Dependabot reads `FROM`, `COPY --from=`, and ARG-bound base refs, and
+  # bumps both the @sha256 digest and the trailing # vX.Y.Z comment.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(docker)"
+    labels:
+      - "dependencies"
+      - "docker"
+    # Single PR per cadence rather than one per image — keeps reviewer load low
+    # and lets us validate trixie/uv/node bumps as a coherent set.
+    groups:
+      base-images:
+        patterns: ["*"]

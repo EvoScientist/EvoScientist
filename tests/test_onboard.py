@@ -568,6 +568,143 @@ class TestStepSkills:
             with pytest.raises(KeyboardInterrupt):
                 _step_skills()
 
+    def test_detects_pack_via_manifest(self, tmp_path):
+        """A pack source recorded in the manifest is detected as installed
+        even when none of the unpacked child dir names match the source."""
+        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+
+        # Recreate the EvoSkills-style layout: child dirs in GLOBAL_SKILLS_DIR
+        # whose names share nothing with the pack source URL.
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        for child in ("paper-writing", "evo-memory", "research-survey"):
+            (global_dir / child).mkdir()
+            (global_dir / child / "SKILL.md").write_text(
+                f"---\nname: {child}\ndescription: x\n---\n"
+            )
+        pack_source = _RECOMMENDED_SKILLS[0]["source"]
+        (global_dir / ".installed.yaml").write_text(
+            f"paper-writing:\n  source: {pack_source}\n"
+            f"evo-memory:\n  source: {pack_source}\n"
+            f"research-survey:\n  source: {pack_source}\n"
+        )
+        empty_user = tmp_path / "user"
+        empty_user.mkdir()
+
+        captured: list = []
+
+        def _capture(choices, _msg, **_kw):
+            captured.extend(choices)
+            return []
+
+        with (
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
+            patch("EvoScientist.config.onboard._checkbox_ask", side_effect=_capture),
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            _step_skills()
+
+        pack_choice = next(c for c in captured if c.value == pack_source)
+        # Detection signal: an "installed" hint appears in the choice title,
+        # but the choice stays selectable so users can re-sync (important for
+        # packs where one child was deleted but the rest keep the entry).
+        title_text = "".join(seg[1] for seg in pack_choice.title)
+        assert "installed" in title_text, (
+            "EvoSkills pack should be marked as installed via the manifest "
+            "even though no child dir name matches the pack source string"
+        )
+        assert not pack_choice.disabled, (
+            "Installed packs must remain selectable so users can re-sync them"
+        )
+
+    def test_surfaces_update_available_when_upstream_moved(self, tmp_path):
+        """When a pack records an install-time commit and `git ls-remote`
+        reports a different SHA, the choice label should call out the update."""
+        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+
+        pack_source = _RECOMMENDED_SKILLS[0]["source"]
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        (global_dir / "paper-writing").mkdir()
+        (global_dir / "paper-writing" / "SKILL.md").write_text(
+            "---\nname: paper-writing\ndescription: x\n---\n"
+        )
+        # Recorded install-time commit.
+        (global_dir / ".installed.yaml").write_text(
+            f"paper-writing:\n  source: {pack_source}\n  commit: aaa111\n"
+        )
+        empty_user = tmp_path / "user"
+        empty_user.mkdir()
+
+        captured: list = []
+
+        def _capture(choices, _msg, **_kw):
+            captured.extend(choices)
+            return []
+
+        with (
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
+            # Upstream moved past the recorded commit.
+            patch(
+                "EvoScientist.tools.skills_manager.resolve_remote_head",
+                return_value="bbb222",
+            ),
+            patch("EvoScientist.config.onboard._checkbox_ask", side_effect=_capture),
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            _step_skills()
+
+        pack_choice = next(c for c in captured if c.value == pack_source)
+        title_text = "".join(seg[1] for seg in pack_choice.title)
+        assert "update available" in title_text, (
+            f"expected an 'update available' hint in the label, got: {title_text!r}"
+        )
+
+    def test_no_update_hint_when_remote_check_fails(self, tmp_path):
+        """If `git ls-remote` returns None (offline, timeout, etc.), the label
+        must fall back to plain 'installed' — never falsely claim 'update'."""
+        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+
+        pack_source = _RECOMMENDED_SKILLS[0]["source"]
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        (global_dir / "paper-writing").mkdir()
+        (global_dir / "paper-writing" / "SKILL.md").write_text(
+            "---\nname: paper-writing\ndescription: x\n---\n"
+        )
+        (global_dir / ".installed.yaml").write_text(
+            f"paper-writing:\n  source: {pack_source}\n  commit: aaa111\n"
+        )
+        empty_user = tmp_path / "user"
+        empty_user.mkdir()
+
+        captured: list = []
+
+        def _capture(choices, _msg, **_kw):
+            captured.extend(choices)
+            return []
+
+        with (
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
+            patch(
+                "EvoScientist.tools.skills_manager.resolve_remote_head",
+                return_value=None,
+            ),
+            patch("EvoScientist.config.onboard._checkbox_ask", side_effect=_capture),
+            patch("EvoScientist.config.onboard.console"),
+        ):
+            _step_skills()
+
+        pack_choice = next(c for c in captured if c.value == pack_source)
+        title_text = "".join(seg[1] for seg in pack_choice.title)
+        assert "update available" not in title_text, (
+            f"must not claim 'update available' when remote check fails: {title_text!r}"
+        )
+        assert "installed" in title_text
+
 
 class TestStepChannels:
     def test_returns_disabled_when_skip(self):

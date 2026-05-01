@@ -148,7 +148,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 ## 📦 Installation
 
 > [!TIP]
-> Requires **Python 3.11+** (**< 3.14**). We recommend [**uv**](https://docs.astral.sh/uv/) or **conda** for dependency management and virtual environments.
+> Requires **Python 3.11+** (**< 3.14**). We recommend [**uv**](https://docs.astral.sh/uv/) or **conda** for dependency management and virtual environments. Prefer to skip a local Python install entirely? Jump to [🐳 Docker](#-docker).
 
 <details>
 <summary> 🪛 Install uv (if you don't have it)</summary>
@@ -244,6 +244,71 @@ git pull && uv sync --dev
 ```
 
 </details>
+
+### 🐳 Docker
+
+A pre-built image is published to [GitHub Container Registry](https://github.com/EvoScientist/EvoScientist/pkgs/container/evoscientist) with everything `evosci onboard` would otherwise install for you:
+
+- Python 3.11, EvoScientist, and the cross-platform messaging channels (i.e., `EvoScientist[all-channels]`)
+- **`uv`** — used by the MCP registry to install Python MCP servers on demand
+- **Node.js 24 LTS + `npx`** — required by the majority of MCP servers
+
+The **iMessage** channel isn't usable from the container — it requires the `imsg` CLI talking to macOS's Messages.app, which is host-OS-specific. Run EvoScientist directly on macOS if you need iMessage.
+
+Running EvoScientist in a container also **sandboxes the agent's shell access** — file edits and shell commands stay confined to volumes you explicitly mount.
+
+```bash
+docker run -it --rm \
+  --env-file .env \
+  -v "$(pwd)/workspace:/workspace" \
+  -v evosci-data:/home/evosci/.evoscientist \
+  ghcr.io/evoscientist/evoscientist:latest
+```
+
+What the mounts are for:
+
+| Mount | Purpose |
+| --- | --- |
+| `--env-file .env` | API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) |
+| `./workspace:/workspace` | The agent's working directory |
+| `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` |
+
+> [!IMPORTANT]
+> The image runs as a non-root user (`evosci`, UID `1000`). For the `./workspace` bind mount, the host directory must be writable by that UID. If your host user ID differs, either `chown -R 1000:1000 ./workspace` once, or pass `--user "$(id -u):$(id -g)"` on every `docker run` so the container takes on your UID.
+
+Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included):
+
+```bash
+docker compose run --rm evoscientist
+```
+
+To build the image locally instead of pulling:
+
+```bash
+docker build -t evoscientist:dev .
+```
+
+> [!NOTE]
+> Not bundled — install on demand by deriving from the image:
+> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`)
+> - **TinyTeX / LaTeX** (`pdflatex`, `latexmk`) for paper-writing skills
+>
+> ```dockerfile
+> FROM ghcr.io/evoscientist/evoscientist:latest
+>
+> # Python extras
+> USER root
+> RUN uv pip install --python /opt/venv/bin/python "EvoScientist[stt,oauth]"
+> USER evosci
+>
+> # TinyTeX
+> # The official install method is `curl | sh`; if you'd rather not
+> # pipe an unpinned remote script into a shell, fetch a specific TinyTeX
+> # release tarball from https://github.com/rstudio/tinytex-releases, verify
+> # its checksum, and extract to /home/evosci/.TinyTeX instead.
+> RUN curl -sL https://yihui.org/tinytex/install-bin-unix.sh | sh \
+>  && /home/evosci/.TinyTeX/bin/*/tlmgr install latexmk
+> ```
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 
