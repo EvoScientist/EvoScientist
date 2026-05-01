@@ -261,11 +261,7 @@ def _maybe_swap_async_subagents(subs: list) -> list:
         seen: set[Path] = set()
         for pattern in ("*.yaml", "*.yml"):
             for yml in sorted(SUBAGENTS_CONFIG.glob(pattern)):
-                if (
-                    yml in seen
-                    or yml.name.startswith(".")
-                    or yml.name.startswith("_")
-                ):
+                if yml in seen or yml.name.startswith(".") or yml.name.startswith("_"):
                     continue
                 seen.add(yml)
                 yaml_files.append(yml)
@@ -293,12 +289,14 @@ def _maybe_swap_async_subagents(subs: list) -> list:
     for s in subs:
         name = s.get("name")
         if name in async_specs:
-            out.append(AsyncSubAgent(
-                name=name,
-                description=async_specs[name],
-                graph_id=name,
-                url=f"http://localhost:{port}",
-            ))
+            out.append(
+                AsyncSubAgent(
+                    name=name,
+                    description=async_specs[name],
+                    graph_id=name,
+                    url=f"http://localhost:{port}",
+                )
+            )
         else:
             out.append(s)
     return out

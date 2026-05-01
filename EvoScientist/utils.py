@@ -161,11 +161,7 @@ def load_subagents(
         seen: set[Path] = set()
         for pattern in ("*.yaml", "*.yml"):
             for yml in sorted(config_path.glob(pattern)):
-                if (
-                    yml in seen
-                    or yml.name.startswith(".")
-                    or yml.name.startswith("_")
-                ):
+                if yml in seen or yml.name.startswith(".") or yml.name.startswith("_"):
                     continue
                 seen.add(yml)
                 with yml.open(encoding="utf-8") as f:

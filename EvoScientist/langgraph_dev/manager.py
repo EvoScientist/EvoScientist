@@ -36,6 +36,8 @@ _DEFAULT_PORT = 6174
 
 def _base_url(port: int = _DEFAULT_PORT) -> str:
     return f"http://localhost:{port}"
+
+
 _PID_DIR = Path.home() / ".config" / "evoscientist"
 _PID_FILE = _PID_DIR / "langgraph_dev.pid"
 _LOG_FILE = _PID_DIR / "langgraph_dev.log"
@@ -281,10 +283,14 @@ def start_langgraph_dev(
 
     proc = subprocess.Popen(
         [
-            exe, "dev",
-            "--config", str(config_file),
-            "--port", str(port),
-            "--n-jobs-per-worker", "10",
+            exe,
+            "dev",
+            "--config",
+            str(config_file),
+            "--port",
+            str(port),
+            "--n-jobs-per-worker",
+            "10",
             "--no-browser",
         ],
         cwd=str(workspace_dir),
@@ -320,8 +326,7 @@ def start_langgraph_dev(
 
     stop_langgraph_dev(proc)
     raise RuntimeError(
-        f"langgraph dev did not become healthy within 30 seconds. "
-        f"Check {_LOG_FILE}"
+        f"langgraph dev did not become healthy within 30 seconds. Check {_LOG_FILE}"
     )
 
 
@@ -401,9 +406,7 @@ def ensure_langgraph_dev(
         return None
 
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
-    file_persistence = bool(
-        getattr(config, "langgraph_dev_file_persistence", True)
-    )
+    file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
 
     if is_langgraph_dev_running(port=port):
         logger.info("langgraph dev already running on %s, reusing", _base_url(port))
