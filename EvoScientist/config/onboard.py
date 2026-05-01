@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import questionary
@@ -1469,33 +1470,70 @@ def _step_model(
         """
         from ..llm.model_cache import (
             fetch_models,
+<<<<<<< HEAD
             format_fetched_at,
             get_cached_fetched_at,
+=======
+            get_cached_models_entry,
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
             is_supported,
         )
 
         dynamic_ids: list[str] | None = None
+        status_line = ""
+        warning_line = ""
         if is_supported(provider):
             api_key = _get_api_key_from_config(config, provider)
             base_url = _get_base_url_from_config(config, provider)
-            _FETCH_MSG = "  Fetching model list..."
-            console.print(f"[dim]{_FETCH_MSG}[/dim]", end="\r")
-            dynamic_ids = fetch_models(
-                provider, api_key=api_key or None, base_url=base_url, force=force
-            )
+            cache_entry = get_cached_models_entry(provider, base_url=base_url)
+
+            if cache_entry is not None and not force:
+                dynamic_ids = cache_entry.get("models")
+                status_prefix = "Loading cached model list..."
+            else:
+                status_prefix = (
+                    "↻ Refresh model list..." if force else "Fetching model list..."
+                )
+                dynamic_ids = fetch_models(
+                    provider, api_key=api_key or None, base_url=base_url, force=force
+                )
+                cache_entry = get_cached_models_entry(provider, base_url=base_url)
+
             if dynamic_ids:
+<<<<<<< HEAD
                 fetched_at = get_cached_fetched_at(provider, base_url=base_url)
                 time_info = (
                     f" (last refresh: {format_fetched_at(fetched_at)})"
                     if fetched_at is not None
                     else ""
+=======
+                if cache_entry is not None:
+                    age_seconds = time.time() - cache_entry.get("fetched_at", 0)
+                    if age_seconds < 10:
+                        age = "just now"
+                    elif age_seconds < 60:
+                        age = f"{int(age_seconds)}s ago"
+                    elif age_seconds < 3600:
+                        age = f"{int(age_seconds // 60)}m ago"
+                    elif age_seconds < 86400:
+                        age = f"{int(age_seconds // 3600)}h ago"
+                    else:
+                        age = f"{int(age_seconds // 86400)}d ago"
+                else:
+                    age = "just now"
+                status_line = (
+                    f"{status_prefix}  ✓ {len(dynamic_ids)} model(s) available "
+                    f"(last refresh: {age})"
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
                 )
                 plain_status = f"  ✓ {len(dynamic_ids)} model(s) available{time_info}"
                 padding = " " * max(0, len(_FETCH_MSG) - len(plain_status))
                 console.print(f"\r[green]{plain_status}[/green]{padding}", end="\r")
             else:
-                # Clear the fetch-status line
-                console.print("\r" + " " * len(_FETCH_MSG) + "\r", end="")
+                warning_line = "⚠ Unable to fetch model list (check API key/base URL)."
+                if provider == "custom-openai":
+                    console.print(f"  [yellow]{warning_line}[/yellow]")
+                    return None
 
         # Build choice list.  Dynamic models (if any) take precedence; the
         # static registry is used as a fallback.
@@ -1521,11 +1559,22 @@ def _step_model(
         choices.append(Choice(title="↻ Refresh model list", value=_REFRESH_SENTINEL))
         choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
-        # Determine default selection
-        all_values = [c.value for c in choices]
-        default = all_values[0]
-        if config.model in all_values:
+        selectable_values = [c.value for c in choices]
+        if not selectable_values:
+            return None
+
+        default = selectable_values[0]
+        if config.model in selectable_values:
             default = config.model
+
+        instruction = "(Use arrow keys)"
+        extra_lines = []
+        if status_line:
+            extra_lines.append(status_line)
+        if warning_line:
+            extra_lines.append(warning_line)
+        if extra_lines:
+            instruction = "(Use arrow keys)\n" + "\n".join(extra_lines)
 
         selected = questionary.select(
             "Select model:",
@@ -1534,6 +1583,7 @@ def _step_model(
             style=WIZARD_STYLE,
             qmark=QMARK,
             use_indicator=True,
+            instruction=instruction,
         ).ask()
         if selected is None:
             raise KeyboardInterrupt()
@@ -1567,6 +1617,8 @@ def _step_model(
             break
 
         if selected == _REFRESH_SENTINEL:
+            sys.stdout.write("\033[A\033[2K\r")
+            sys.stdout.flush()
             force_fetch = True
             continue
 

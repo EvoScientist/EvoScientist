@@ -16,7 +16,6 @@ import pytest
 
 from tests.conftest import run_async as _run
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -59,14 +58,25 @@ class TestGetCachedModels:
     def test_no_cache_file_returns_none(self, tmp_path):
         from EvoScientist.llm import model_cache
 
-        with patch.object(model_cache, "_get_cache_path", return_value=tmp_path / "model_cache.json"):
+        with patch.object(
+            model_cache, "_get_cache_path", return_value=tmp_path / "model_cache.json"
+        ):
             assert model_cache.get_cached_models("deepseek") is None
 
     def test_fresh_cache_returns_models(self, tmp_path):
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
+<<<<<<< HEAD
         data = {"deepseek::https://api.deepseek.com/v1": {"models": ["deepseek-chat", "deepseek-reasoner"], "fetched_at": time.time()}}
+=======
+        data = {
+            "deepseek|https://api.deepseek.com/v1": {
+                "models": ["deepseek-chat", "deepseek-reasoner"],
+                "fetched_at": time.time(),
+            }
+        }
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -79,7 +89,16 @@ class TestGetCachedModels:
 
         cache_path = tmp_path / "model_cache.json"
         stale_time = time.time() - model_cache.CACHE_TTL - 1
+<<<<<<< HEAD
         data = {"deepseek::https://api.deepseek.com/v1": {"models": ["deepseek-chat"], "fetched_at": stale_time}}
+=======
+        data = {
+            "deepseek|https://api.deepseek.com/v1": {
+                "models": ["deepseek-chat"],
+                "fetched_at": stale_time,
+            }
+        }
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -91,7 +110,16 @@ class TestGetCachedModels:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
+<<<<<<< HEAD
         data = {"openai::https://api.openai.com/v1": {"models": ["gpt-4o"], "fetched_at": time.time()}}
+=======
+        data = {
+            "openai|https://api.openai.com/v1": {
+                "models": ["gpt-4o"],
+                "fetched_at": time.time(),
+            }
+        }
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -123,7 +151,16 @@ class TestFetchModels:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
+<<<<<<< HEAD
         data = {"deepseek::https://api.deepseek.com/v1": {"models": ["deepseek-chat"], "fetched_at": time.time()}}
+=======
+        data = {
+            "deepseek|https://api.deepseek.com/v1": {
+                "models": ["deepseek-chat"],
+                "fetched_at": time.time(),
+            }
+        }
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -140,7 +177,9 @@ class TestFetchModels:
             patch.object(model_cache, "_get_cache_path", return_value=cache_path),
             patch(
                 "httpx.get",
-                return_value=_make_models_response("deepseek-chat", "deepseek-reasoner"),
+                return_value=_make_models_response(
+                    "deepseek-chat", "deepseek-reasoner"
+                ),
             ),
         ):
             result = model_cache.fetch_models(
@@ -166,14 +205,30 @@ class TestFetchModels:
             )
 
         written = json.loads(cache_path.read_text())
+<<<<<<< HEAD
         assert "deepseek::https://api.deepseek.com/v1" in written
         assert written["deepseek::https://api.deepseek.com/v1"]["models"] == ["deepseek-chat"]
+=======
+        assert "deepseek|https://api.deepseek.com/v1" in written
+        assert written["deepseek|https://api.deepseek.com/v1"]["models"] == [
+            "deepseek-chat"
+        ]
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
 
     def test_force_bypasses_fresh_cache(self, tmp_path):
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
+<<<<<<< HEAD
         data = {"deepseek::https://api.deepseek.com/v1": {"models": ["old-model"], "fetched_at": time.time()}}
+=======
+        data = {
+            "deepseek|https://api.deepseek.com/v1": {
+                "models": ["old-model"],
+                "fetched_at": time.time(),
+            }
+        }
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         cache_path.write_text(json.dumps(data))
 
         with (
@@ -256,6 +311,25 @@ class TestFetchModels:
 
         assert result is None
 
+    def test_custom_openai_cache_isolated_by_base_url(self, tmp_path):
+        from EvoScientist.llm import model_cache
+
+        cache_path = tmp_path / "model_cache.json"
+        data = {
+            "custom-openai|https://example.com/v1": {
+                "models": ["old-model"],
+                "fetched_at": time.time(),
+            }
+        }
+        cache_path.write_text(json.dumps(data))
+
+        with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
+            result = model_cache.get_cached_models(
+                "custom-openai", base_url="https://other.example.com/v1"
+            )
+
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # fetch_models_async
@@ -272,7 +346,16 @@ class TestFetchModelsAsync:
         from EvoScientist.llm import model_cache
 
         cache_path = tmp_path / "model_cache.json"
+<<<<<<< HEAD
         data = {"openai::https://api.openai.com/v1": {"models": ["gpt-4o"], "fetched_at": time.time()}}
+=======
+        data = {
+            "openai|https://api.openai.com/v1": {
+                "models": ["gpt-4o"],
+                "fetched_at": time.time(),
+            }
+        }
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         cache_path.write_text(json.dumps(data))
 
         with patch.object(model_cache, "_get_cache_path", return_value=cache_path):
@@ -339,7 +422,9 @@ class TestFetchModelsAsync:
         ):
             result = _run(
                 model_cache.fetch_models_async(
-                    "deepseek", api_key="sk-test", base_url="https://api.deepseek.com/v1"
+                    "deepseek",
+                    api_key="sk-test",
+                    base_url="https://api.deepseek.com/v1",
                 )
             )
 
@@ -359,7 +444,9 @@ class TestFetchModelsAsync:
         ):
             result = _run(
                 model_cache.fetch_models_async(
-                    "deepseek", api_key="sk-test", base_url="https://api.deepseek.com/v1"
+                    "deepseek",
+                    api_key="sk-test",
+                    base_url="https://api.deepseek.com/v1",
                 )
             )
 
@@ -410,8 +497,15 @@ class TestFetchModelsAsync:
             )
 
         written = json.loads(cache_path.read_text())
+<<<<<<< HEAD
         assert "moonshot::https://api.moonshot.cn/v1" in written
         assert written["moonshot::https://api.moonshot.cn/v1"]["models"] == ["moonshot-v1-8k"]
+=======
+        assert "moonshot|https://api.moonshot.cn/v1" in written
+        assert written["moonshot|https://api.moonshot.cn/v1"]["models"] == [
+            "moonshot-v1-8k"
+        ]
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
 
 
 if __name__ == "__main__":

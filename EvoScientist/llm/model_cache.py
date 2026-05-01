@@ -78,6 +78,7 @@ def _save_cache(cache: dict) -> None:
         pass
 
 
+<<<<<<< HEAD
 def _cache_key(provider: str, resolved_base_url: str | None) -> str:
     """Compute the cache dictionary key for a ``(provider, endpoint)`` pair.
 
@@ -91,20 +92,54 @@ def _cache_key(provider: str, resolved_base_url: str | None) -> str:
 
 
 def get_cached_models(provider: str, *, base_url: str | None = None) -> list[str] | None:
+=======
+def _cache_key(provider: str, base_url: str | None) -> str | None:
+    resolved_base_url, _ = _resolve(provider, base_url=base_url)
+    if not resolved_base_url:
+        return None
+    return f"{provider}|{resolved_base_url}"
+
+
+def _get_cache_entry(provider: str, base_url: str | None = None) -> dict | None:
+    key = _cache_key(provider, base_url)
+    if not key:
+        return None
+    return _load_cache().get(key)
+
+
+def _save_cache_entry(provider: str, base_url: str | None, models: list[str]) -> None:
+    key = _cache_key(provider, base_url)
+    if not key:
+        return
+    cache = _load_cache()
+    cache[key] = {"models": models, "fetched_at": time.time()}
+    _save_cache(cache)
+
+
+def get_cached_models(provider: str, base_url: str | None = None) -> list[str] | None:
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
     """Return cached model IDs for *provider* if still within the TTL.
 
     Args:
         provider: Provider name (e.g. ``"openai"``, ``"deepseek"``).
+<<<<<<< HEAD
         base_url: Base URL override used to distinguish between different
             endpoints for the same provider (e.g. multiple ``custom-openai``
             setups with different servers).
+=======
+        base_url: Override the provider base URL used for cache partitioning.
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
 
     Returns:
         A list of model ID strings when the cache is valid, otherwise ``None``.
     """
+<<<<<<< HEAD
     resolved_base_url, _ = _resolve(provider, base_url=base_url)
     key = _cache_key(provider, resolved_base_url)
     entry = _load_cache().get(key)
+=======
+    entry = _get_cache_entry(provider, base_url)
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
     if not entry:
         return None
     if time.time() - entry.get("fetched_at", 0) > CACHE_TTL:
@@ -112,6 +147,7 @@ def get_cached_models(provider: str, *, base_url: str | None = None) -> list[str
     return entry.get("models") or None
 
 
+<<<<<<< HEAD
 def get_cached_fetched_at(provider: str, *, base_url: str | None = None) -> float | None:
     """Return the ``fetched_at`` timestamp for a fresh cache entry, or ``None``.
 
@@ -155,6 +191,22 @@ def format_fetched_at(fetched_at: float) -> str:
         return f"{hours}h ago"
     days = int(elapsed / 86400)
     return f"{days}d ago"
+=======
+def get_cached_models_entry(provider: str, base_url: str | None = None) -> dict | None:
+    """Return the current cache entry for *provider* and *base_url*.
+
+    The return value is ``None`` when there is no valid cache entry or the
+    entry is stale.
+    """
+    entry = _get_cache_entry(provider, base_url)
+    if not entry:
+        return None
+    if time.time() - entry.get("fetched_at", 0) > CACHE_TTL:
+        return None
+    if not entry.get("models"):
+        return None
+    return entry
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
 
 
 # =============================================================================
@@ -250,10 +302,14 @@ def fetch_models(
         if not models:
             return None
 
+<<<<<<< HEAD
         key = _cache_key(provider, resolved_base_url)
         cache = _load_cache()
         cache[key] = {"models": models, "fetched_at": time.time()}
         _save_cache(cache)
+=======
+        _save_cache_entry(provider, base_url, models)
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         return models
     except Exception:
         return None
@@ -307,10 +363,14 @@ async def fetch_models_async(
         if not models:
             return None
 
+<<<<<<< HEAD
         key = _cache_key(provider, resolved_base_url)
         cache = _load_cache()
         cache[key] = {"models": models, "fetched_at": time.time()}
         _save_cache(cache)
+=======
+        _save_cache_entry(provider, base_url, models)
+>>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         return models
     except Exception:
         return None
