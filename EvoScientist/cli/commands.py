@@ -187,6 +187,23 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
+def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
+    """Conditionally start the langgraph dev subprocess for async sub-agents.
+
+    Shared by both the interactive entry and the serve entry — keeps the
+    user-visible status message and the conditional in one place.
+    """
+    if not getattr(config, "enable_async_subagents", False):
+        return
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+
+    with console.status(
+        "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+        spinner="dots",
+    ):
+        ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+
+
 def _resolve_context_window(
     model: Any, fallback: int = _COMPACT_CONTEXT_WINDOW_FALLBACK
 ) -> int:
@@ -870,16 +887,7 @@ def serve(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    # Wrap in console.status so the user sees progress during cold starts and
-    # the up-to-60s TIME_WAIT poll on tight CLI exit + restart cycles.
-    if getattr(config, "enable_async_subagents", False):
-        from ..langgraph_dev.manager import ensure_langgraph_dev
-
-        with console.status(
-            "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
-            spinner="dots",
-        ):
-            ensure_langgraph_dev(config, workspace_dir=ws)
+    _ensure_async_subagent_server(config, workspace_dir=ws)
 
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
@@ -1589,16 +1597,7 @@ def _main_callback(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    # Wrap in console.status so the user sees progress during cold starts and
-    # the up-to-60s TIME_WAIT poll on tight CLI exit + restart cycles.
-    if getattr(config, "enable_async_subagents", False):
-        from ..langgraph_dev.manager import ensure_langgraph_dev
-
-        with console.status(
-            "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
-            spinner="dots",
-        ):
-            ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+    _ensure_async_subagent_server(config, workspace_dir=workspace_dir)
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer

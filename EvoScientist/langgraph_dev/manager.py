@@ -349,6 +349,14 @@ def start_langgraph_dev(
     # Propagate workspace to the subprocess so deployed sub-agents resolve
     # paths.WORKSPACE_ROOT to the same dir as the CLI's main agent. cwd alone
     # is fragile (relative paths in MCP configs etc.); env var is explicit.
+    #
+    # Note: ``EVOSCIENTIST_WORKSPACE_DIR`` serves a dual role in this codebase.
+    # config/settings.py:_ENV_MAPPINGS reads it as a user-facing override of
+    # ``default_workdir`` (parent process). Here we WRITE it on the subprocess
+    # env to propagate the resolved workspace into langgraph dev. Both
+    # purposes mean "this is the user's workspace", so they don't conflict;
+    # the explicit write below always wins for the subprocess regardless of
+    # what the parent had inherited from its own environment.
     sub_env = os.environ.copy()
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
 

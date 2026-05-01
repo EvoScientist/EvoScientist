@@ -434,6 +434,10 @@ _ENV_MAPPINGS = {
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
+    "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
+    "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
+    "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
 }
 
 
