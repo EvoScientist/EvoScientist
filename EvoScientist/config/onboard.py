@@ -703,7 +703,12 @@ def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
             port = int(value)
         except (ValueError, TypeError):
             return False
-        return 1024 < port < 65536
+        if not (1024 < port < 65536):
+            return False
+        # Also reject a user-typed port that's already occupied — without this
+        # the user could complete onboarding with a port that will fail at
+        # runtime when the CLI tries to bind langgraph dev.
+        return not _is_port_occupied(port)
 
     raw = questionary.text(
         prompt_label,

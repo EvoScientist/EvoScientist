@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -25,6 +26,14 @@ import httpx
 from EvoScientist.config import EvoScientistConfig
 
 logger = logging.getLogger(__name__)
+
+
+# Reentrant lock guarding ``_PROCESS`` / ``_PROCESS_WORKSPACE`` /
+# ``_ASYNC_SUBAGENTS_AVAILABLE`` mutations and the ``ensure_langgraph_dev``
+# decision/start/stop flow. Reentrant because ``ensure_langgraph_dev`` can call
+# ``stop_langgraph_dev`` from inside its own critical section during a
+# workspace-driven restart, and both mutate the same module-level state.
+_LOCK = threading.RLock()
 
 
 # Default port (Kaprekar's constant — see config/settings.py for the rationale).
@@ -45,6 +54,12 @@ _LOG_FILE = _PID_DIR / "langgraph_dev.log"
 # Module-level handle to the langgraph dev subprocess we started, if any.
 # Stays None when we reused an existing process (managed by the user).
 _PROCESS: subprocess.Popen | None = None
+
+# Workspace directory the running subprocess was launched with. Used by
+# ``ensure_langgraph_dev`` to detect a workspace switch (e.g., on /resume of
+# a thread from a different workspace) and trigger a restart so the deployed
+# sub-agents' cwd / EVOSCIENTIST_WORKSPACE_DIR env match the new workspace.
+_PROCESS_WORKSPACE: Path | None = None
 
 # Whether async sub-agents are usable in this CLI process. Only True after
 # ``ensure_langgraph_dev`` confirms the subprocess is healthy (or already
@@ -114,6 +129,64 @@ def _is_port_occupied(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
     finally:
         s.close()
+
+
+def _wait_for_port_release(port: int, timeout: float = 10.0) -> bool:
+    """Poll until ``port`` is released or ``timeout`` elapses.
+
+    Used after ``stop_langgraph_dev`` / ``_kill_owned_stale_process`` to
+    bridge the kernel's TIME_WAIT delay before we try to bind again. Returns
+    True if the port is free, False on timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while _is_port_occupied(port) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    return not _is_port_occupied(port)
+
+
+def _can_bind_port(port: int) -> bool:
+    """Return True if a fresh ``bind()`` to ``port`` succeeds right now.
+
+    More reliable than ``_is_port_occupied`` when the previous listener has
+    just exited: ``connect_ex`` can already report "free" while ``bind()``
+    still fails because the kernel hasn't fully released the socket
+    (TIME_WAIT for accepted connections, SO_REUSEADDR rules, etc.). This
+    actually attempts the bind that langgraph dev would attempt, then
+    closes immediately.
+    """
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _wait_for_port_bindable(port: int, timeout: float = 60.0) -> bool:
+    """Poll until a real ``bind()`` to ``port`` can succeed, or timeout.
+
+    Use this immediately before ``subprocess.Popen("langgraph dev")`` —
+    matches the strictness of the bind langgraph dev itself will perform,
+    so we don't pass the lighter ``_is_port_occupied`` gate only to fail
+    on the actual bind a few seconds later.
+
+    Default 60s timeout matches macOS's TCP TIME_WAIT duration — a port
+    held by an exited listener is genuinely unbindable for up to that long
+    on a tight CLI exit + restart cycle. Shorter timeouts give up too early.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _can_bind_port(port):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _list_pids_on_port(port: int) -> list[int]:
@@ -243,7 +316,11 @@ def start_langgraph_dev(
                 _PID_FILE,
                 port,
             )
-            time.sleep(1)
+            # After SIGKILL the kernel may keep the port in TIME_WAIT for
+            # several seconds before fully releasing it. Poll until the port
+            # is genuinely free so the upcoming bind() doesn't race a
+            # half-released socket and crash with "Port already in use".
+            _wait_for_port_release(port)
         else:
             raise RuntimeError(
                 f"Port {port} is occupied by a non-langgraph process. "
@@ -251,6 +328,20 @@ def start_langgraph_dev(
                 f"or change ports with: "
                 f"`EvoSci config set langgraph_dev_port <other-port>`"
             )
+
+    # Final defense: poll until a real ``bind()`` to ``port`` succeeds before
+    # spawning langgraph dev. ``_is_port_occupied`` (connect-based) can report
+    # the port as "free" while langgraph dev's stricter bind still fails —
+    # that mismatch is what makes back-to-back CLI exit + restart show
+    # "Port already in use" even though our pre-checks passed. By probing
+    # the same operation langgraph dev will do, we either wait it out or
+    # fail clearly with an actionable message. 60s covers macOS TIME_WAIT.
+    if not _wait_for_port_bindable(port):
+        raise RuntimeError(
+            f"Port {port} cannot be bound after waiting 60s (kernel TIME_WAIT "
+            f"or another process holds it). Free the port with `lsof -ti:{port}`, "
+            f"or change ports with: `EvoSci config set langgraph_dev_port <other-port>`"
+        )
 
     _PID_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = open(_LOG_FILE, "ab")  # file handle handed to subprocess
@@ -300,7 +391,9 @@ def start_langgraph_dev(
         start_new_session=True,
     )
     _PID_FILE.write_text(str(proc.pid))
+    global _PROCESS_WORKSPACE
     _PROCESS = proc
+    _PROCESS_WORKSPACE = workspace_dir
 
     # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP
     # servers can push this to 30-60s while npm fetches packages, so the budget
@@ -326,7 +419,7 @@ def start_langgraph_dev(
 
     stop_langgraph_dev(proc)
     raise RuntimeError(
-        f"langgraph dev did not become healthy within 30 seconds. Check {_LOG_FILE}"
+        f"langgraph dev did not become healthy within 60 seconds. Check {_LOG_FILE}"
     )
 
 
@@ -335,33 +428,39 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
 
     Sends SIGTERM to the process group (langgraph dev spawns worker children),
     falling back to SIGKILL after 5 seconds. Safe to call with ``None``.
-    """
-    global _PROCESS
-    proc = proc if proc is not None else _PROCESS
-    if proc is None:
-        return
 
-    if proc.poll() is None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            proc.wait(timeout=5)
-        except (ProcessLookupError, OSError):
+    Acquires ``_LOCK`` (reentrant) before mutating ``_PROCESS`` /
+    ``_PROCESS_WORKSPACE`` so concurrent ``ensure_langgraph_dev`` callers
+    (which also hold ``_LOCK``) don't observe partially-cleared state.
+    """
+    global _PROCESS, _PROCESS_WORKSPACE
+    with _LOCK:
+        proc = proc if proc is not None else _PROCESS
+        if proc is None:
+            return
+
+        if proc.poll() is None:
             try:
-                proc.terminate()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait(timeout=5)
-            except Exception:
-                pass
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 try:
-                    proc.kill()
+                    proc.terminate()
+                    proc.wait(timeout=5)
                 except Exception:
                     pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
 
-    if proc is _PROCESS:
-        _PROCESS = None
+        if proc is _PROCESS:
+            _PROCESS = None
+            _PROCESS_WORKSPACE = None
     if _PID_FILE.exists():
         try:
             _PID_FILE.unlink()
@@ -388,7 +487,8 @@ def ensure_langgraph_dev(
 
     Behavior:
     - flag false: no-op, returns None
-    - flag true + already running on :2024: reuse, returns None (we don't own it)
+    - flag true + already running on the configured port: reuse, returns None
+      (we don't own it; warns if the workspace can't be verified)
     - flag true + not running: start subprocess, register atexit cleanup, return Popen
 
     Args:
@@ -405,15 +505,74 @@ def ensure_langgraph_dev(
     if not getattr(config, "enable_async_subagents", False):
         return None
 
+    # Serialize concurrent callers (e.g., rapid /resume in succession, channel
+    # threads, future parallel CLI sessions) so the check / start / stop flow
+    # and the module-level state mutations don't interleave.
+    with _LOCK:
+        return _ensure_langgraph_dev_locked(config, workspace_dir)
+
+
+def _ensure_langgraph_dev_locked(
+    config: EvoScientistConfig,
+    workspace_dir: Path | str | None,
+) -> subprocess.Popen | None:
+    """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
+    global _ASYNC_SUBAGENTS_AVAILABLE
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
 
+    ws_path = Path(workspace_dir) if workspace_dir is not None else None
+
+    # If a subprocess we own is running with a *different* workspace than what
+    # was just requested (typical trigger: user just /resumed a thread from a
+    # different workspace), the deployed sub-agents' cwd / EVOSCIENTIST_WORKSPACE_DIR
+    # are stale. Stop it so the start-fresh path below relaunches with the right
+    # workspace. We only act when WE own the process — never kill an externally-
+    # managed langgraph dev.
+    if (
+        ws_path is not None
+        and _PROCESS is not None
+        and _PROCESS.poll() is None
+        and _PROCESS_WORKSPACE is not None
+        and _PROCESS_WORKSPACE.resolve() != ws_path.resolve()
+    ):
+        logger.info(
+            "Workspace changed (%s -> %s); restarting langgraph dev so deployed "
+            "sub-agents pick up the new workspace.",
+            _PROCESS_WORKSPACE,
+            ws_path,
+        )
+        stop_langgraph_dev()
+        # Crucial: stop_langgraph_dev unlinks the PID file. If we then fell
+        # through with the port still in TIME_WAIT, the next defensive
+        # ``_kill_owned_stale_process`` call inside start_langgraph_dev would
+        # see no PID file, treat the lingering socket as a foreign process,
+        # and abort with a hard "non-langgraph process" error — turning a
+        # clean owned restart into a permanent async-disable. Wait inline for
+        # the kernel to release the port before continuing.
+        _wait_for_port_release(port)
+        _ASYNC_SUBAGENTS_AVAILABLE = False  # cleared until restart succeeds
+
     if is_langgraph_dev_running(port=port):
-        logger.info("langgraph dev already running on %s, reusing", _base_url(port))
+        # If WE own the running process, workspace was already verified above
+        # via _PROCESS_WORKSPACE comparison. If we DON'T own it (some other
+        # langgraph dev started by the user / another CLI), we have no way to
+        # confirm its workspace matches what was just requested — async
+        # sub-agents could end up operating on a different project's files.
+        # Warn loudly so the user notices.
+        if _PROCESS is None and ws_path is not None:
+            logger.warning(
+                "Reusing externally-managed langgraph dev on %s — cannot verify "
+                "its workspace matches the requested %s. Async sub-agents may "
+                "operate on a different workspace's files.",
+                _base_url(port),
+                ws_path,
+            )
+        else:
+            logger.info("langgraph dev already running on %s, reusing", _base_url(port))
         _ASYNC_SUBAGENTS_AVAILABLE = True
         return None
 
-    ws_path = Path(workspace_dir) if workspace_dir is not None else None
     try:
         proc = start_langgraph_dev(
             workspace_dir=ws_path,

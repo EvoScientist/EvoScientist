@@ -870,10 +870,16 @@ def serve(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    # Wrap in console.status so the user sees progress during cold starts and
+    # the up-to-60s TIME_WAIT poll on tight CLI exit + restart cycles.
     if getattr(config, "enable_async_subagents", False):
         from ..langgraph_dev.manager import ensure_langgraph_dev
 
-        ensure_langgraph_dev(config, workspace_dir=ws)
+        with console.status(
+            "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+            spinner="dots",
+        ):
+            ensure_langgraph_dev(config, workspace_dir=ws)
 
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
@@ -1583,10 +1589,16 @@ def _main_callback(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    # Wrap in console.status so the user sees progress during cold starts and
+    # the up-to-60s TIME_WAIT poll on tight CLI exit + restart cycles.
     if getattr(config, "enable_async_subagents", False):
         from ..langgraph_dev.manager import ensure_langgraph_dev
 
-        ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+        with console.status(
+            "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+            spinner="dots",
+        ):
+            ensure_langgraph_dev(config, workspace_dir=workspace_dir)
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer

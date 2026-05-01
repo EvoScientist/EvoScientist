@@ -628,6 +628,28 @@ def cmd_interactive(
                 renders conversation history."""
                 if workspace_dir:
                     state["workspace_dir"] = workspace_dir
+                    # Sync the langgraph dev subprocess to the resumed
+                    # workspace so deployed sub-agents (writing-agent etc.)
+                    # don't operate on the previous workspace's files. The
+                    # manager auto-detects the change and restarts; no-ops
+                    # if async subagents are disabled or workspace unchanged.
+                    # Restart can take 10-15s — show a spinner so the user
+                    # doesn't think the CLI is frozen, and run the sync call
+                    # in a worker thread so the asyncio event loop keeps
+                    # serving channel polls / MCP heartbeats during the wait.
+                    if getattr(config, "enable_async_subagents", False):
+                        from ..langgraph_dev.manager import ensure_langgraph_dev
+
+                        with console.status(
+                            "[dim]Syncing async sub-agent server to resumed "
+                            "workspace...[/dim]",
+                            spinner="dots",
+                        ):
+                            await asyncio.to_thread(
+                                ensure_langgraph_dev,
+                                config,
+                                workspace_dir=workspace_dir,
+                            )
                 state["thread_id"] = thread_id
                 state["resumed"] = True
                 state["status_started_at"] = datetime.now()
@@ -675,6 +697,25 @@ def cmd_interactive(
                     state["status_last_input_tokens"] = None
                     if ws:
                         state["workspace_dir"] = ws
+                        # CLI-startup --resume path: sync langgraph dev
+                        # subprocess to the thread's saved workspace if it
+                        # differs from the one we initially launched it with.
+                        # Show a spinner during the 10-15s restart, and run
+                        # the sync call in a worker thread so the asyncio
+                        # event loop stays responsive.
+                        if getattr(config, "enable_async_subagents", False):
+                            from ..langgraph_dev.manager import ensure_langgraph_dev
+
+                            with console.status(
+                                "[dim]Syncing async sub-agent server to "
+                                "resumed workspace...[/dim]",
+                                spinner="dots",
+                            ):
+                                await asyncio.to_thread(
+                                    ensure_langgraph_dev,
+                                    config,
+                                    workspace_dir=ws,
+                                )
                 else:
                     # Resolution failed (ambiguous/not-found); the user's raw
                     # input is still seeded in state["thread_id"] from init.
