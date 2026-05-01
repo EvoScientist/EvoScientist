@@ -977,8 +977,17 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     """Display approval prompt and get user decision.
 
     Returns list of decisions if approved, None if rejected.
+
+    Uses ``questionary.select()`` for arrow-key navigation, matching the
+    style used by ``_resolve_ask_user_prompt``. Imports are lazy so the
+    auto-approve / shell-allow-list fast paths in ``_resolve_hitl_approval``
+    don't pay for them.
     """
     global _session_auto_approve
+
+    import questionary  # type: ignore[import-untyped]
+
+    from ..cli.widgets.thread_selector import PICKER_STYLE as _PICKER_STYLE
 
     console.print()
     panel_text = Text()
@@ -993,10 +1002,6 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
         if panel_text.plain:
             panel_text.append("\n")
         panel_text.append(f"  {i + 1}. {desc}", style="yellow")
-    panel_text.append("\n\n")
-    panel_text.append(
-        "  [1] Approve  [2] Reject  [3] Approve all (session)", style="dim"
-    )
 
     console.print(
         Panel(
@@ -1007,20 +1012,36 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
         )
     )
 
+    n = len(action_requests)
+    if n <= 1:
+        approve_label = "Approve"
+        reject_label = "Reject"
+    else:
+        approve_label = f"Approve all {n}"
+        reject_label = f"Reject all {n}"
+    auto_label = "Approve all (session)"
+
     try:
-        choice = input("  Choose [1/2/3, Enter=Approve]: ").strip() or "1"
+        selected = questionary.select(
+            "Approval required",
+            choices=[approve_label, reject_label, auto_label],
+            style=_PICKER_STYLE,
+        ).ask()
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]  Rejected.[/dim]")
         return None
 
-    if choice == "1":
-        return [{"type": "approve"} for _ in action_requests]
-    elif choice == "3":
-        _session_auto_approve = True
-        return [{"type": "approve"} for _ in action_requests]
-    else:
+    if selected is None:  # Ctrl+C inside questionary
         console.print("[dim]  Rejected.[/dim]")
         return None
+
+    if selected == approve_label:
+        return [{"type": "approve"} for _ in action_requests]
+    if selected == auto_label:
+        _session_auto_approve = True
+        return [{"type": "approve"} for _ in action_requests]
+    console.print("[dim]  Rejected.[/dim]")
+    return None
 
 
 # ---------------------------------------------------------------------------
