@@ -249,9 +249,11 @@ git pull && uv sync --dev
 
 A pre-built image is published to [GitHub Container Registry](https://github.com/EvoScientist/EvoScientist/pkgs/container/evoscientist) with everything `evosci onboard` would otherwise install for you:
 
-- Python 3.11, EvoScientist, and all messaging-channel extras
+- Python 3.11, EvoScientist, and the cross-platform messaging channels (i.e., `EvoScientist[all-channels]`)
 - **`uv`** — used by the MCP registry to install Python MCP servers on demand
 - **Node.js 24 LTS + `npx`** — required by the majority of MCP servers
+
+The **iMessage** channel isn't usable from the container — it requires the `imsg` CLI talking to macOS's Messages.app, which is host-OS-specific. Run EvoScientist directly on macOS if you need iMessage.
 
 Running EvoScientist in a container also **sandboxes the agent's shell access** — file edits and shell commands stay confined to volumes you explicitly mount.
 
