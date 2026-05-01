@@ -40,6 +40,7 @@ class AssistantMessage(TimestampClickMixin, Vertical):
         yield Markdown("")
 
     def on_mount(self) -> None:
+        """Render ``initial_content`` once the widget enters the DOM."""
         if self._content:
             self.query_one(Markdown).update(
                 _fix_markdown_heading_spacing(self._content)
@@ -53,12 +54,7 @@ class AssistantMessage(TimestampClickMixin, Vertical):
             self.set_timer(0.1, self._flush_markdown)
 
     def _flush_markdown(self) -> None:
-        """Flush accumulated content to the Markdown widget.
-
-        Apply heading-spacing fix on a display copy only — never mutate
-        ``self._content`` or partial chunks would corrupt heading levels at
-        chunk boundaries (see ``_fix_markdown_heading_spacing`` docstring).
-        """
+        """Flush accumulated content to the Markdown widget on a display copy."""
         self._flush_pending = False
         self.query_one(Markdown).update(_fix_markdown_heading_spacing(self._content))
 

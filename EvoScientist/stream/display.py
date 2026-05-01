@@ -48,32 +48,19 @@ from .utils import (
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
 
-# CommonMark requires a space after `#` for ATX headings. LLM output sometimes
-# omits it (e.g. "###文件系统"), so Rich's strict Markdown parser renders the
-# line as raw text. Apply at render time on a display copy only — never write
-# back to the streaming buffer (would corrupt heading levels at chunk boundaries).
-#
-# Lookahead `(?=[^ \t#\r\n])` requires the next character to:
-#   - exist (guards EOS — a bare trailing `#` mid-stream is left alone)
-#   - not be space/tab (already-spaced heading — idempotent)
-#   - not be `#` (avoids matching a prefix of a longer level, e.g. `####foo`
-#     should match the whole `####` once, not the leading `#` separately)
-#   - not be `\n` or `\r` (empty heading line, including CRLF endings)
+# LLM output sometimes omits the CommonMark-required space after `#` (e.g.
+# "###文件系统"), which makes Rich render the line as raw text. The lookahead
+# `(?=[^ \t#\r\n])` requires a real non-excluded next char, so the helper is
+# idempotent and leaves bare `#` at EOS / CRLF boundaries alone.
 _HEADING_FIX_RE = re.compile(r"^(#{1,6})(?=[^ \t#\r\n])", flags=re.MULTILINE)
 
 
 def _fix_markdown_heading_spacing(text: str) -> str:
     """Insert a space after `#`+ ATX heading markers missing one.
 
-    Idempotent: positive lookahead requires a real non-excluded char to
-    follow the `#`s, so once a space (or any other excluded char) is in
-    place the rule no longer matches. Re-running on every Live frame is
-    safe and a no-op once the source has the space.
-
-    Known limitation: the regex is context-free, so `###define` at column
-    zero inside a fenced code block will still get a space inserted in the
-    display copy. Acceptable trade-off for EvoScientist's typical output
-    (Python/shell code uses `# foo` comments which already have space).
+    Apply to a display copy only — never write the result back into the
+    streaming buffer. Known limitation: `###define` at column zero inside
+    a fenced code block still gets a space (context-free regex).
     """
     return _HEADING_FIX_RE.sub(r"\1 ", text)
 

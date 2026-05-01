@@ -7,23 +7,23 @@ from EvoScientist.stream.display import (
 
 
 def test_resolve_final_status_footer_hides_footer_for_interactive_cli():
+    """Interactive CLI hides the final status footer (the prompt redraws it)."""
     assert resolve_final_status_footer(True, lambda: "footer") is None
 
 
 def test_resolve_final_status_footer_keeps_footer_for_noninteractive():
+    """Non-interactive output keeps the footer so callers see the trailing status."""
     assert resolve_final_status_footer(False, lambda: "footer") == "footer"
 
 
 class TestFixMarkdownHeadingSpacing:
-    """`_fix_markdown_heading_spacing` inserts a space after ATX heading markers
-    that are missing one (Rich's CommonMark parser is strict). Critical
-    invariant: the helper only operates on display copies — it must never be
-    applied to the streaming buffer, or partial chunks would corrupt heading
-    levels at chunk boundaries (e.g. "#" → "# ", then "+#" → "# #" instead of
-    "##"). The helper must be idempotent so re-running per frame is safe.
+    """Pure-helper tests: heading levels, idempotence, EOS / CRLF / fenced
+    code. The display-copy-only contract at call sites is covered by
+    ``TestAssistantMessageBufferContract``.
     """
 
     def test_inserts_missing_space(self):
+        """Inserts a space after `#`-marker for all 6 ATX heading levels."""
         assert _fix_markdown_heading_spacing("#Bar") == "# Bar"
         assert _fix_markdown_heading_spacing("##Bar") == "## Bar"
         assert _fix_markdown_heading_spacing("###Bar") == "### Bar"
@@ -32,6 +32,7 @@ class TestFixMarkdownHeadingSpacing:
         assert _fix_markdown_heading_spacing("######Bar") == "###### Bar"
 
     def test_idempotent_on_valid_headings(self):
+        """Already-spaced markers are unchanged; ``f(f(x)) == f(x)``."""
         assert _fix_markdown_heading_spacing("### Foo") == "### Foo"
         assert _fix_markdown_heading_spacing("# Bar\n## Baz") == "# Bar\n## Baz"
         # Running twice gives the same result as running once.
@@ -39,33 +40,13 @@ class TestFixMarkdownHeadingSpacing:
         twice = _fix_markdown_heading_spacing(once)
         assert once == twice == "### Foo\n## Bar"
 
-    def test_does_not_modify_buffer_under_chunked_streaming(self):
-        """The load-bearing test: simulate chunk-by-chunk accumulation and
-        confirm (a) the raw buffer is never mutated by the helper, and (b)
-        applying the helper at every frame produces the correct display
-        without corrupting heading levels at chunk boundaries.
-        """
-        chunks = ["#", "##", "#", "F", "o", "o", "\n"]
-        raw_buffer = ""
-        expected_concat = ""
-        for chunk in chunks:
-            raw_buffer += chunk
-            expected_concat += chunk
-            # Invariant 1: raw buffer equals naive concatenation (untouched).
-            assert raw_buffer == expected_concat
-            # Invariant 2: helper produces a display copy without mutating raw.
-            display = _fix_markdown_heading_spacing(raw_buffer)
-            assert raw_buffer == expected_concat  # still untouched
-            # The helper is pure — calling it doesn't change its argument.
-            assert isinstance(display, str)
-        assert raw_buffer == "####Foo\n"
-        assert _fix_markdown_heading_spacing(raw_buffer) == "#### Foo\n"
-
     def test_multiline_mixed(self):
+        """Each line of a multiline string is normalised independently."""
         src = "###A\n## B\n#C\n#### D"
         assert _fix_markdown_heading_spacing(src) == "### A\n## B\n# C\n#### D"
 
     def test_indented_and_blockquote_unchanged(self):
+        """Lines whose `#` is not at column 0 are left alone (`^` requires col 0)."""
         # Indented lines (treated as code by CommonMark) — `^` only matches
         # column 0, so the helper leaves them alone.
         assert _fix_markdown_heading_spacing("   ###Indented") == "   ###Indented"
@@ -110,3 +91,48 @@ class TestFixMarkdownHeadingSpacing:
         src = "```c\n###define X 1\n```"
         # Currently DOES alter the line inside the fence.
         assert _fix_markdown_heading_spacing(src) == "```c\n### define X 1\n```"
+
+
+class TestAssistantMessageBufferContract:
+    """Regression guard: ``AssistantMessage`` flush/mount must apply the
+    heading fix to a display copy and leave ``self._content`` untouched.
+    """
+
+    def _make_widget(self, initial: str = ""):
+        from unittest.mock import MagicMock
+
+        from EvoScientist.cli.widgets.assistant_message import AssistantMessage
+
+        msg = AssistantMessage(initial_content=initial)
+        fake_md = MagicMock()
+        msg.query_one = MagicMock(return_value=fake_md)
+        return msg, fake_md
+
+    def test_flush_markdown_does_not_mutate_buffer(self):
+        msg, fake_md = self._make_widget()
+        msg._content = "###Foo\n##Bar"
+
+        msg._flush_markdown()
+
+        # Raw streaming buffer is preserved verbatim.
+        assert msg._content == "###Foo\n##Bar"
+        # The Textual Markdown widget receives the fixed display copy.
+        fake_md.update.assert_called_once_with("### Foo\n## Bar")
+        # Flush latch is cleared.
+        assert msg._flush_pending is False
+
+    def test_on_mount_does_not_mutate_initial_content(self):
+        msg, fake_md = self._make_widget(initial="###Hello")
+
+        msg.on_mount()
+
+        assert msg._content == "###Hello"
+        fake_md.update.assert_called_once_with("### Hello")
+
+    def test_on_mount_no_op_when_initial_empty(self):
+        msg, fake_md = self._make_widget(initial="")
+
+        msg.on_mount()
+
+        assert msg._content == ""
+        fake_md.update.assert_not_called()
