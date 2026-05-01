@@ -1,7 +1,8 @@
 """Stream state tracking for CLI display.
 
 Contains SubAgentState, StreamState, and todo-item parsing helpers.
-No Rich dependencies — stdlib only.
+Rich is only imported lazily inside ``StreamState.get_response_markdown``
+so the bulk of the module stays import-cheap and free of UI dependencies.
 """
 
 import ast
@@ -130,10 +131,14 @@ class StreamState:
         """Return cached Markdown object, only re-parsing when text changes."""
         from rich.markdown import Markdown  # type: ignore[import-untyped]
 
+        from .display import _fix_markdown_heading_spacing
+
         text = (self.response_text or "").strip()
         if text != self._cached_md_text:
             self._cached_md_text = text
-            self._cached_md = Markdown(text) if text else None
+            self._cached_md = (
+                Markdown(_fix_markdown_heading_spacing(text)) if text else None
+            )
         return self._cached_md
 
     def _get_or_create_subagent(

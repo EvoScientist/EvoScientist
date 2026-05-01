@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -46,6 +47,36 @@ from .utils import (
 
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+
+# CommonMark requires a space after `#` for ATX headings. LLM output sometimes
+# omits it (e.g. "###文件系统"), so Rich's strict Markdown parser renders the
+# line as raw text. Apply at render time on a display copy only — never write
+# back to the streaming buffer (would corrupt heading levels at chunk boundaries).
+#
+# Lookahead `(?=[^ \t#\r\n])` requires the next character to:
+#   - exist (guards EOS — a bare trailing `#` mid-stream is left alone)
+#   - not be space/tab (already-spaced heading — idempotent)
+#   - not be `#` (avoids matching a prefix of a longer level, e.g. `####foo`
+#     should match the whole `####` once, not the leading `#` separately)
+#   - not be `\n` or `\r` (empty heading line, including CRLF endings)
+_HEADING_FIX_RE = re.compile(r"^(#{1,6})(?=[^ \t#\r\n])", flags=re.MULTILINE)
+
+
+def _fix_markdown_heading_spacing(text: str) -> str:
+    """Insert a space after `#`+ ATX heading markers missing one.
+
+    Idempotent: positive lookahead requires a real non-excluded char to
+    follow the `#`s, so once a space (or any other excluded char) is in
+    place the rule no longer matches. Re-running on every Live frame is
+    safe and a no-op once the source has the space.
+
+    Known limitation: the regex is context-free, so `###define` at column
+    zero inside a fenced code block will still get a space inserted in the
+    display copy. Acceptable trade-off for EvoScientist's typical output
+    (Python/shell code uses `# foo` comments which already have space).
+    """
+    return _HEADING_FIX_RE.sub(r"\1 ", text)
+
 
 formatter = ToolResultFormatter()
 
@@ -696,7 +727,10 @@ def create_streaming_display(
                 clean_response = clean_response.rstrip().removesuffix("...").rstrip()
             if clean_response:
                 elements.append(Text(""))  # blank separator
-                elements.append(response_markdown or Markdown(clean_response))
+                elements.append(
+                    response_markdown
+                    or Markdown(_fix_markdown_heading_spacing(clean_response))
+                )
 
         # Token usage stats (right-aligned)
         if total_input_tokens or total_output_tokens:
@@ -749,7 +783,10 @@ def create_streaming_display(
         # Stream response in real-time as tokens arrive (all tools done)
         if response_text and all_done:
             elements.append(Text(""))  # blank separator
-            elements.append(response_markdown or Markdown(response_text))
+            elements.append(
+                response_markdown
+                or Markdown(_fix_markdown_heading_spacing(response_text))
+            )
 
     if not elements:
         elements.append(Spinner("dots", text=" Processing...", style="cyan"))
@@ -877,7 +914,11 @@ def display_final_results(
         while clean_response.endswith("\n...") or clean_response.rstrip() == "...":
             clean_response = clean_response.rstrip().removesuffix("...").rstrip()
         console.print()
-        console.print(Markdown(clean_response or state.response_text))
+        console.print(
+            Markdown(
+                _fix_markdown_heading_spacing(clean_response or state.response_text)
+            )
+        )
 
     # Token usage stats (right-aligned)
     if state.total_input_tokens or state.total_output_tokens:
@@ -1613,7 +1654,9 @@ async def _astream_to_console(
         while clean.endswith("\n...") or clean.rstrip() == "...":
             clean = clean.rstrip().removesuffix("...").rstrip()
         console.print()
-        console.print(Markdown(clean or state.response_text))
+        console.print(
+            Markdown(_fix_markdown_heading_spacing(clean or state.response_text))
+        )
         console.print()
 
     return (state.response_text or "").strip()

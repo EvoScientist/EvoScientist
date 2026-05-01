@@ -42,6 +42,7 @@ from ..sessions import (
     thread_exists,
 )
 from ..stream.console import console
+from ..stream.display import _fix_markdown_heading_spacing
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .agent import _create_session_workspace, _load_agent, _shorten_path
@@ -582,7 +583,7 @@ def cmd_interactive(
 
                 # AI response — full Markdown rendering
                 if text_content:
-                    console.print(Markdown(text_content))
+                    console.print(Markdown(_fix_markdown_heading_spacing(text_content)))
 
             # Skip tool messages — verbose and not useful in replay
 
