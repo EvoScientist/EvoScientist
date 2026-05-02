@@ -5,6 +5,7 @@ from __future__ import annotations
 from textual.containers import Vertical
 from textual.widgets import Markdown
 
+from ...stream.display import _fix_markdown_heading_spacing
 from .timestamp_mixin import TimestampClickMixin
 
 
@@ -39,8 +40,11 @@ class AssistantMessage(TimestampClickMixin, Vertical):
         yield Markdown("")
 
     def on_mount(self) -> None:
+        """Render ``initial_content`` once the widget enters the DOM."""
         if self._content:
-            self.query_one(Markdown).update(self._content)
+            self.query_one(Markdown).update(
+                _fix_markdown_heading_spacing(self._content)
+            )
 
     async def append_content(self, text: str) -> None:
         """Append text and schedule a debounced Markdown re-render."""
@@ -50,12 +54,14 @@ class AssistantMessage(TimestampClickMixin, Vertical):
             self.set_timer(0.1, self._flush_markdown)
 
     def _flush_markdown(self) -> None:
-        """Flush accumulated content to the Markdown widget."""
+        """Flush accumulated content to the Markdown widget on a display copy."""
         self._flush_pending = False
-        self.query_one(Markdown).update(self._content)
+        self.query_one(Markdown).update(_fix_markdown_heading_spacing(self._content))
 
     async def stop_stream(self) -> None:
         """Finalize the stream — ensure final content is rendered."""
         self._flush_pending = False
         if self._content:
-            self.query_one(Markdown).update(self._content)
+            self.query_one(Markdown).update(
+                _fix_markdown_heading_spacing(self._content)
+            )
