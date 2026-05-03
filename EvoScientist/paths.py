@@ -58,6 +58,9 @@ GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
 # Global memories: shared across all workspaces (~/.evoscientist/memories/)
 GLOBAL_MEMORIES_DIR: Path = _global_memories_dir()
 
+# Per-session audit logs: ~/.evoscientist/sessions/<thread_id>/audit.jsonl
+SESSIONS_DIR: Path = DATA_DIR / "sessions"
+
 # Memories dir: global by default, overridable via env var.
 # Supports both new (EVOSCIENTIST_MEMORIES_DIR) and old (EVOSCIENTIST_MEMORY_DIR) env vars.
 MEMORIES_DIR: Path = (

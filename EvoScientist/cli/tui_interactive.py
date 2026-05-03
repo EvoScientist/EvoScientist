@@ -21,6 +21,7 @@ from rich.text import Text
 import EvoScientist.cli.channel as _ch_mod
 from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
+from ..audit import AuditLogger
 from ..commands import CommandContext
 from ..commands import manager as cmd_manager
 from ..paths import DATA_DIR
@@ -1057,6 +1058,8 @@ def run_textual_interactive(
 
             # 2. Event-driven widget rendering
             state = StreamState()
+            audit = AuditLogger(thread_id=self._conversation_tid)
+            audit.log_session_start(model=self._current_model or "unknown")
             loading_removed = False
             thinking_w: ThinkingWidget | None = None
             summarization_w: SummarizationWidget | None = None
@@ -1418,6 +1421,7 @@ def run_textual_interactive(
                                         await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
+                            audit.log_event("tool_call", event)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -1477,6 +1481,7 @@ def run_textual_interactive(
                                     Text("\u25cf Analyzing results...", style="cyan"),
                                 )
                                 await container.mount(processing_w)
+                            audit.log_event("tool_result", event)
 
                         elif event_type == "subagent_start":
                             sa_name = event.get("name", "sub-agent")
@@ -1486,6 +1491,7 @@ def run_textual_interactive(
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
                                 subagent_widgets[sa_name] = sa_w
+                            audit.log_event("subagent_start", event)
 
                         elif event_type == "subagent_tool_call":
                             sa_name = event.get("subagent", "sub-agent")
@@ -1519,6 +1525,7 @@ def run_textual_interactive(
                             sa_w = _find_or_rename_sa_widget(sa_name)
                             if sa_w is not None:
                                 sa_w.finalize()
+                            audit.log_event("subagent_end", event)
 
                         elif event_type == "ask_user":
                             questions = event.get("questions", [])
@@ -1651,6 +1658,7 @@ def run_textual_interactive(
                                 )
 
                         elif event_type == "done":
+                            audit.log_session_end()
                             # Clean up transient indicators
                             await _remove_w(narration_w)
                             narration_w = None
