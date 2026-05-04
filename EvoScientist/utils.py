@@ -122,9 +122,10 @@ def load_subagents(
     We externalize to YAML here to keep configuration separate from code.
 
     ``config_path`` must be a directory containing one ``<name>.yaml`` per
-    sub-agent. All ``*.yaml`` and ``*.yml`` files are merged into a single
-    mapping. Files starting with ``.`` (dotfiles, editor swap files) or
-    ``_`` (private/disabled) are ignored.
+    sub-agent. All ``*.yaml`` files are merged into a single mapping. Files
+    starting with ``.`` (dotfiles, editor swap files) or ``_`` (private /
+    disabled) are ignored. ``.yml`` is intentionally not supported — keeps
+    one canonical extension and avoids the dev-vs-wheel packaging mismatch.
 
     Each file's top level must be a mapping ``{<agent-name>: <spec>}``::
 
@@ -146,30 +147,30 @@ def load_subagents(
             f"containing one <name>.yaml per agent"
         )
 
-    # Accept both .yaml and .yml. Skip files starting with ``_`` (private
-    # / disabled) or ``.`` (dotfiles, editor swap files like .foo.yaml.swp).
-    # Dedupe via ``seen`` so a file matching both globs is loaded once.
+    # Only ``.yaml`` is supported (canonical extension). Skip files starting
+    # with ``_`` (private / disabled) or ``.`` (dotfiles, editor swap files
+    # like ``.foo.yaml.swp``). ``.yml`` is intentionally not loaded — keeps
+    # one canonical extension across the project, simplifies packaging
+    # (no need for a parallel ``subagents/*.yml`` entry in ``pyproject.toml``
+    # ``package-data``), and matches every existing yaml file in this repo.
     config: dict[str, Any] = {}
-    seen: set[Path] = set()
-    for pattern in ("*.yaml", "*.yml"):
-        for yml in sorted(config_path.glob(pattern)):
-            if yml in seen or yml.name.startswith(".") or yml.name.startswith("_"):
-                continue
-            seen.add(yml)
-            with yml.open(encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
+    for yml in sorted(config_path.glob("*.yaml")):
+        if yml.name.startswith(".") or yml.name.startswith("_"):
+            continue
+        with yml.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{yml}: top-level must be a mapping (one entry per sub-agent)"
+            )
+        # Detect duplicate keys across files
+        for key in data:
+            if key in config:
                 raise ValueError(
-                    f"{yml}: top-level must be a mapping (one entry per sub-agent)"
+                    f"Sub-agent {key!r} defined in multiple files; "
+                    f"second occurrence in {yml.name}"
                 )
-            # Detect duplicate keys across files
-            for key in data:
-                if key in config:
-                    raise ValueError(
-                        f"Sub-agent {key!r} defined in multiple files; "
-                        f"second occurrence in {yml.name}"
-                    )
-            config.update(data)
+        config.update(data)
 
     if not config:
         raise ValueError(
