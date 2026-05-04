@@ -277,6 +277,18 @@ def _maybe_swap_async_subagents(subs: list) -> list:
 
     port = int(getattr(cfg, "langgraph_dev_port", 6174))
     out = []
+    # KNOWN LIMITATION: MCP tools attached to async sub-agents in the parent
+    # process (via ``_inject_subagent_middleware`` / MCP injection earlier in
+    # ``load_mcp_and_build_kwargs``) do NOT propagate to the deployed graph.
+    # Reason: ``AsyncSubAgent`` is an HTTP reference — tools live in the
+    # langgraph dev subprocess's graph, built independently by
+    # ``subagents/_factory.py:build_async_subagent_graph``, which doesn't load
+    # MCP (gated by ``EVOSCIENTIST_DEPLOYED_NO_MCP=true`` to avoid duplicating
+    # MCP server connections from the parent process). User-configured
+    # ``expose_to: <async-agent-name>`` MCP routings are silently dropped for
+    # async sub-agents. Tracked in #210 for design discussion; workaround for
+    # now is to keep MCP-needing sub-agents synchronous (``async: false`` in
+    # their yaml).
     for s in subs:
         name = s.get("name")
         if name in async_specs:

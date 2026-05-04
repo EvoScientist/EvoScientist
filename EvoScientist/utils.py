@@ -216,7 +216,16 @@ def load_subagents(
         # ``_maybe_swap_async_subagents`` so the swap doesn't need a second
         # yaml pass to discover async-flagged agents. Underscore prefix marks
         # it as internal — must be popped before passing to deepagents.
-        subagent["_async"] = bool(spec.get("async", False))
+        async_val = spec.get("async", False)
+        if not isinstance(async_val, bool):
+            # Reject quoted-string yaml values like ``async: "false"`` —
+            # ``bool("false")`` is ``True`` (non-empty string), which silently
+            # flips the agent into async mode. Fail loud instead.
+            raise ValueError(
+                f"Subagent {name!r}: 'async' must be a boolean, "
+                f"got {type(async_val).__name__}: {async_val!r}"
+            )
+        subagent["_async"] = async_val
 
         return subagent
 
