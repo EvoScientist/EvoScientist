@@ -23,13 +23,14 @@ def build_async_subagent_graph(name: str) -> Any:
     """Build a deployable graph for the ``name`` sub-agent defined in yaml.
 
     Args:
-        name: The sub-agent's key in ``subagent.yaml`` (e.g. ``"writing-agent"``).
+        name: The sub-agent's key in one of the ``EvoScientist/subagents/*.yaml``
+            files (e.g. ``"writing-agent"``).
 
     Returns:
         A compiled ``langgraph`` graph ready for registration in ``langgraph.json``.
 
     Raises:
-        ValueError: If ``name`` is not present in ``subagent.yaml``.
+        ValueError: If ``name`` is not defined under ``EvoScientist/subagents/``.
     """
     # Lazy imports — the factory is invoked at langgraph dev startup time, so
     # all heavy modules (deepagents, llm, MCP) are pulled in here rather than
@@ -80,6 +81,12 @@ def build_async_subagent_graph(name: str) -> Any:
     # approve. The user-visible HITL boundary is the parent's
     # ``start_async_task`` decision; restrict the child's reach by limiting
     # ``tools`` in ``subagents/<name>.yaml`` instead.
+    # Memory middleware is included so async sub-agents can READ
+    # /memory/MEMORY.md, but the extraction trigger (20+ human messages,
+    # see middleware/memory.py) never fires here — sub-agents only receive
+    # the parent's task delegation as a system prompt, not human messages.
+    # Net effect: sub-agents have read-only memory access. Memory writes
+    # happen exclusively from the main agent's user-facing conversation.
     return create_deep_agent(
         name=name,
         model=_ensure_chat_model(),

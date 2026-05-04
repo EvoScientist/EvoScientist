@@ -675,10 +675,14 @@ def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
         # User has async disabled — port is irrelevant, no prompt.
         return getattr(config, "langgraph_dev_port", 6174)
 
-    from ..langgraph_dev.manager import _is_port_occupied
+    from ..langgraph_dev.manager import _is_port_occupied, is_langgraph_dev_running
 
     current_port = getattr(config, "langgraph_dev_port", 6174)
     current_occupied = _is_port_occupied(current_port)
+    if current_occupied and is_langgraph_dev_running(port=current_port):
+        # Another EvoSci shell is already serving on this port — reuse, don't
+        # force the user to renumber.
+        current_occupied = False
 
     # Bake the live status into the prompt label so the user sees it WITH
     # the question, not as a side-effect line that prints before input.
@@ -705,10 +709,12 @@ def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
             return False
         if not (1024 < port < 65536):
             return False
-        # Also reject a user-typed port that's already occupied — without this
-        # the user could complete onboarding with a port that will fail at
-        # runtime when the CLI tries to bind langgraph dev.
-        return not _is_port_occupied(port)
+        # Reject user-typed ports that are already occupied UNLESS the
+        # occupier is our own langgraph dev (e.g., another EvoSci shell) —
+        # in that case the runtime will reuse it.
+        if not _is_port_occupied(port):
+            return True
+        return is_langgraph_dev_running(port=port)
 
     raw = questionary.text(
         prompt_label,
@@ -723,9 +729,10 @@ def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
     port = int(raw) if raw else current_port
 
     # Final probe — warn (don't fail) if the chosen port is still occupied
-    # so the user knows EvoSci may not start cleanly. They can always change
-    # later via: EvoSci config set langgraph_dev_port <port>
-    if _is_port_occupied(port):
+    # by something OTHER than our own langgraph dev. Reuse of an existing
+    # EvoSci server on that port is fine. They can always change later via:
+    # EvoSci config set langgraph_dev_port <port>
+    if _is_port_occupied(port) and not is_langgraph_dev_running(port=port):
         console.print(
             f"  [yellow]⚠ Port {port} is occupied. EvoSci may fail to start its "
             f"server. Free the port or change later with: "

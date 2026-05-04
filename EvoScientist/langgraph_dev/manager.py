@@ -15,13 +15,15 @@ import atexit
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import threading
 import time
 from pathlib import Path
 
 import httpx
+import psutil
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from EvoScientist.config import EvoScientistConfig
 
@@ -50,6 +52,16 @@ def _base_url(port: int = _DEFAULT_PORT) -> str:
 _PID_DIR = Path.home() / ".config" / "evoscientist"
 _PID_FILE = _PID_DIR / "langgraph_dev.pid"
 _LOG_FILE = _PID_DIR / "langgraph_dev.log"
+
+# Cross-process file lock for ``ensure_langgraph_dev``. Without this, two
+# concurrent CLI shells racing on the cold-start window can SIGKILL each
+# other's still-booting subprocesses (Shell B sees Shell A's port-bound but
+# not-yet-/ok subprocess as a "stale process to clean up"). With the lock,
+# Shell B blocks until Shell A's health-check finishes, then sees the
+# healthy server and reuses it. ``threading.RLock`` is process-local and
+# can't coordinate across CLI invocations.
+_FILE_LOCK_PATH = _PID_DIR / "langgraph_dev.lock"
+_FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
 
 # Module-level handle to the langgraph dev subprocess we started, if any.
 # Stays None when we reused an existing process (managed by the user).
@@ -194,16 +206,19 @@ def _list_pids_on_port(port: int) -> list[int]:
 
     Read-only; never sends signals. Use this to *inspect* port state before
     deciding what (if anything) to clean up.
+
+    Cross-platform via ``psutil.net_connections`` — works on POSIX and Windows
+    without depending on ``lsof`` / ``netstat`` shell tools.
     """
     try:
-        result = subprocess.run(
-            ["lsof", "-ti", f":{port}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        return list(
+            {
+                conn.pid
+                for conn in psutil.net_connections(kind="inet")
+                if conn.laddr and conn.laddr.port == port and conn.pid is not None
+            }
         )
-        return [int(p) for p in result.stdout.split() if p.strip().isdigit()]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (psutil.AccessDenied, psutil.Error):
         return []
 
 
@@ -211,14 +226,20 @@ def _kill_owned_stale_process(port: int) -> bool:
     """Kill ONLY a previously-owned langgraph dev process bound to ``port``.
 
     "Owned" means the PID written to ``_PID_FILE`` by an earlier
-    ``start_langgraph_dev`` invocation in this user account. Returns True if
-    a stale-but-owned process was cleaned up; returns False (without sending
-    any signals) if the port is occupied by an unowned process — caller
+    ``start_langgraph_dev`` invocation in this user account, AND the live
+    process at that PID still has ``langgraph`` in its command line (defense
+    against PID recycling). Returns True if a stale-but-owned process was
+    cleaned up; returns False (without sending any signals) if the port is
+    occupied by an unowned process or the PID has been recycled — caller
     should treat that as a hard conflict and refuse to start.
 
-    Why this matters: lsof may report any process bound to the port, including
-    user-run dev servers that legitimately took 6174. SIGKILL'ing those is a
-    data-loss event. Ownership verification keeps the cleanup safe.
+    Why this matters:
+      1. ``net_connections`` may report any process bound to the port,
+         including user-run dev servers that legitimately took 6174.
+         SIGKILL'ing those is a data-loss event.
+      2. Even with PID-file ownership, the OS may have recycled the PID
+         to an unrelated process between sessions (e.g., after a SIGKILL'd
+         CLI left the PID file behind). The cmdline check rules that out.
     """
     if not _PID_FILE.exists():
         return False
@@ -231,9 +252,44 @@ def _kill_owned_stale_process(port: int) -> bool:
     if owned_pid not in occupiers:
         return False  # Port is held by a different process now.
 
+    # Defense-in-depth: PID could have been recycled to an unrelated process.
+    # Verify the live process at that PID still looks like langgraph dev
+    # before sending any signals.
     try:
-        os.kill(owned_pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
+        proc = psutil.Process(owned_pid)
+        cmdline = proc.cmdline()
+    except psutil.NoSuchProcess:
+        # PID file points at a dead process — clean up the file but don't
+        # try to kill anything.
+        try:
+            _PID_FILE.unlink()
+        except OSError:
+            pass
+        return False
+    except psutil.AccessDenied:
+        return False
+
+    # Loose substring match by design: PID-file ownership is the primary
+    # guard; this check only hardens against PID recycling between sessions.
+    # A foreign process happening to have "langgraph" in its argv (e.g., a
+    # text editor with langgraph_dev.py open) would slip through, but the
+    # ownership check above already excluded externally-owned PIDs, so the
+    # window is the narrow case where our exact PID was reused. Keeping the
+    # match loose avoids version skew with langgraph CLI invocation styles.
+    if not any("langgraph" in arg for arg in cmdline):
+        # PID was recycled by an unrelated process. Refuse to kill it.
+        logger.warning(
+            "PID file %s claims pid %d for langgraph dev, but that pid now "
+            "points at a different process (cmdline=%s). Refusing to kill.",
+            _PID_FILE,
+            owned_pid,
+            cmdline,
+        )
+        return False
+
+    try:
+        proc.kill()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     try:
         _PID_FILE.unlink()
@@ -480,23 +536,33 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
             return
 
         if proc.poll() is None:
+            # Cross-platform process-tree shutdown: walk children explicitly
+            # because POSIX process groups (``os.killpg``) don't exist on
+            # Windows. ``psutil.Process.children(recursive=True)`` works on
+            # both — we mirror the previous SIGTERM-then-SIGKILL escalation.
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                parent = psutil.Process(proc.pid)
+                descendants = parent.children(recursive=True)
+                for child in descendants:
+                    try:
+                        child.terminate()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                parent.terminate()
                 proc.wait(timeout=5)
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+            except psutil.NoSuchProcess:
+                pass
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    parent = psutil.Process(proc.pid)
+                    for child in parent.children(recursive=True):
+                        try:
+                            child.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    parent.kill()
+                except psutil.NoSuchProcess:
+                    pass
 
         if proc is _PROCESS:
             _PROCESS = None
@@ -545,11 +611,32 @@ def ensure_langgraph_dev(
     if not getattr(config, "enable_async_subagents", False):
         return None
 
-    # Serialize concurrent callers (e.g., rapid /resume in succession, channel
-    # threads, future parallel CLI sessions) so the check / start / stop flow
-    # and the module-level state mutations don't interleave.
-    with _LOCK:
-        return _ensure_langgraph_dev_locked(config, workspace_dir)
+    # Two layers of locking:
+    #   1. ``FileLock`` — cross-process coordination. Without it, two CLI
+    #      shells (TUI + ``-p`` + ``serve``) racing on the cold-start window
+    #      can SIGKILL each other's still-booting subprocesses via
+    #      ``_kill_owned_stale_process`` (Shell A's PID is in the file and
+    #      bound to the port, but ``/ok`` isn't responding yet, so Shell B
+    #      thinks it's stale).
+    #   2. ``_LOCK`` (in-process RLock) — serializes intra-process callers
+    #      (rapid ``/resume`` in succession, channel threads). Reentrant so
+    #      the workspace-restart path can call ``stop_langgraph_dev`` from
+    #      inside the critical section.
+    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with FileLock(str(_FILE_LOCK_PATH), timeout=_FILE_LOCK_TIMEOUT):
+            with _LOCK:
+                return _ensure_langgraph_dev_locked(config, workspace_dir)
+    except FileLockTimeout:
+        logger.warning(
+            "Timed out waiting %.0fs for cross-process langgraph dev lock at %s. "
+            "Another CLI shell may be stuck during cold-start. Falling back to "
+            "sync sub-agent delegation for this session.",
+            _FILE_LOCK_TIMEOUT,
+            _FILE_LOCK_PATH,
+        )
+        _ASYNC_SUBAGENTS_AVAILABLE = False
+        return None
 
 
 def _ensure_langgraph_dev_locked(

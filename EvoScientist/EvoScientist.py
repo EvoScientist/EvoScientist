@@ -222,9 +222,10 @@ def _build_prompt_refs() -> dict:
 
 
 def _maybe_swap_async_subagents(subs: list) -> list:
-    """Replace yaml-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
+    """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
 
-    Scans ``subagents/*.yaml`` for entries with ``async: true``. When
+    Reads the ``_async`` field carried through by ``utils.load_subagents._build_one``
+    (sourced from each yaml's ``async: true`` flag). When
     ``config.enable_async_subagents`` is also set, those sub-agents are
     swapped from synchronous in-process dicts to ``AsyncSubAgent`` references
     pointing at the langgraph dev graph of the same name.
@@ -234,9 +235,15 @@ def _maybe_swap_async_subagents(subs: list) -> list:
 
     Adding a new async sub-agent requires no change here — flip
     ``async: true`` in its yaml and create the matching deployment graph.
+
+    All return paths strip the internal ``_async`` field from sub-agent dicts
+    before handoff, since deepagents may schema-validate the kwarg.
     """
     cfg = _ensure_config()
     if not getattr(cfg, "enable_async_subagents", False):
+        # Async fully disabled — strip the internal flag before handoff.
+        for s in subs:
+            s.pop("_async", None)
         return subs
 
     # Guard: if the langgraph dev subprocess never came up (port conflict,
@@ -249,37 +256,21 @@ def _maybe_swap_async_subagents(subs: list) -> list:
             "enable_async_subagents=true but langgraph dev is not reachable; "
             "falling back to in-process sync delegation for all sub-agents."
         )
+        # Strip the internal ``_async`` flag (carried from ``load_subagents``)
+        # before sub-agents reach deepagents — it's never a deepagents key.
+        for s in subs:
+            s.pop("_async", None)
         return subs
 
-    import yaml as _yaml
-
-    # Collect (name, description) for every async-flagged yaml entry.
-    # Same dotfile/extension hygiene as utils.load_subagents.
-    async_specs: dict[str, str] = {}
-    if SUBAGENTS_CONFIG.is_dir():
-        yaml_files: list[Path] = []
-        seen: set[Path] = set()
-        for pattern in ("*.yaml", "*.yml"):
-            for yml in sorted(SUBAGENTS_CONFIG.glob(pattern)):
-                if yml in seen or yml.name.startswith(".") or yml.name.startswith("_"):
-                    continue
-                seen.add(yml)
-                yaml_files.append(yml)
-    else:
-        yaml_files = [SUBAGENTS_CONFIG]
-
-    for yml in yaml_files:
-        try:
-            data = _yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
-        except (OSError, _yaml.YAMLError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        for name, spec in data.items():
-            if isinstance(spec, dict) and spec.get("async"):
-                async_specs[name] = spec.get("description", "")
+    # The ``_async`` flag was set by ``utils.load_subagents._build_one`` from
+    # each yaml's ``async:`` field. No need to re-parse the yaml files here.
+    async_specs: dict[str, str] = {
+        s["name"]: s.get("description", "") for s in subs if s.get("_async")
+    }
 
     if not async_specs:
+        for s in subs:
+            s.pop("_async", None)
         return subs
 
     from deepagents import AsyncSubAgent
@@ -298,6 +289,8 @@ def _maybe_swap_async_subagents(subs: list) -> list:
                 )
             )
         else:
+            # Strip the internal flag before handoff to deepagents.
+            s.pop("_async", None)
             out.append(s)
     return out
 
