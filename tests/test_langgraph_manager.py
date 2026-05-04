@@ -137,6 +137,9 @@ class TestKillOwnedStaleProcess:
         ):
             assert manager._kill_owned_stale_process(6174) is False
             fake_proc.kill.assert_not_called()
+            # PID file should be removed — the entry is stale (our process is
+            # gone, PID was recycled by an unrelated process).
+            assert not pid_file.exists()
 
     def test_kills_when_cmdline_matches_langgraph(self, tmp_path):
         """Owned PID + cmdline contains 'langgraph' → kill + cleanup PID file."""

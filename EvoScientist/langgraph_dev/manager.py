@@ -277,14 +277,23 @@ def _kill_owned_stale_process(port: int) -> bool:
     # window is the narrow case where our exact PID was reused. Keeping the
     # match loose avoids version skew with langgraph CLI invocation styles.
     if not any("langgraph" in arg for arg in cmdline):
-        # PID was recycled by an unrelated process. Refuse to kill it.
+        # PID was recycled by an unrelated process. Refuse to kill it, but
+        # still clean up the PID file — our original langgraph dev with that
+        # PID is definitely gone (PIDs are only recycled after the original
+        # process exits), so the file's claim is stale. Mirrors the cleanup
+        # in the NoSuchProcess branch above.
         logger.warning(
             "PID file %s claims pid %d for langgraph dev, but that pid now "
-            "points at a different process (cmdline=%s). Refusing to kill.",
+            "points at a different process (cmdline=%s). Refusing to kill, "
+            "removing stale PID file.",
             _PID_FILE,
             owned_pid,
             cmdline,
         )
+        try:
+            _PID_FILE.unlink()
+        except OSError:
+            pass
         return False
 
     try:
