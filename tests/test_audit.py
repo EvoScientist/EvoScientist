@@ -56,10 +56,29 @@ class TestSessionMetadata:
         assert end_entry["kind"] == "session_end"
         assert "ts" in end_entry
 
+    def test_session_start_is_written_once(self, logger, tmp_sessions_dir):
+        logger.log_session_start(model="claude-sonnet-4-6")
+        logger.log_session_start(model="claude-sonnet-4-6")
+        lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert [json.loads(line)["kind"] for line in lines] == ["session_start"]
+
+    def test_session_end_is_written_once(self, logger, tmp_sessions_dir):
+        logger.log_session_start(model="claude-sonnet-4-6")
+        logger.log_session_end()
+        logger.log_session_end()
+        lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert [json.loads(line)["kind"] for line in lines] == [
+            "session_start",
+            "session_end",
+        ]
+
 
 class TestToolCallLogging:
     def test_tool_call_logged(self, logger, tmp_sessions_dir):
-        logger.log_event("tool_call", {"name": "read_file", "args": {"path": "/tmp/x"}, "id": "tc-1"})
+        logger.log_event(
+            "tool_call",
+            {"name": "read_file", "args": {"path": "/tmp/x"}, "id": "tc-1"},
+        )
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         entry = json.loads(lines[0])
         assert entry["kind"] == "tool_call"
@@ -67,6 +86,35 @@ class TestToolCallLogging:
         assert entry["args"] == {"path": "/tmp/x"}
         assert entry["tool_id"] == "tc-1"
         assert "ts" in entry
+
+    def test_tool_call_with_empty_args_then_full_args_logs_full_args_once(
+        self, logger, tmp_sessions_dir
+    ):
+        logger.log_event("tool_call", {"name": "read_file", "args": {}, "id": "tc-1"})
+        logger.log_event(
+            "tool_call",
+            {"name": "read_file", "args": {"path": "/tmp/x"}, "id": "tc-1"},
+        )
+        lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["kind"] == "tool_call"
+        assert entry["args"] == {"path": "/tmp/x"}
+        assert entry["tool_id"] == "tc-1"
+
+    def test_tool_call_args_truncated_at_2000(self, logger, tmp_sessions_dir):
+        logger.log_event(
+            "tool_call",
+            {
+                "name": "write_file",
+                "args": {"path": "/tmp/x", "content": "x" * 3000},
+                "id": "tc-1",
+            },
+        )
+        lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        entry = json.loads(lines[0])
+        assert len(entry["args"]) == 2000
+        assert entry["args"].startswith('{"content":"')
 
     def test_tool_result_logged(self, logger, tmp_sessions_dir):
         logger.log_event("tool_result", {"name": "read_file", "content": "hello", "success": True})
@@ -93,18 +141,63 @@ class TestToolCallLogging:
 
 class TestSubagentLogging:
     def test_subagent_start_logged(self, logger, tmp_sessions_dir):
-        logger.log_event("subagent_start", {"name": "research-agent", "agent_id": "sa-1"})
+        event = {
+            "type": "subagent_start",
+            "name": "research-agent",
+            "description": "search papers",
+        }
+        logger.log_event("subagent_start", event)
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         entry = json.loads(lines[0])
         assert entry["kind"] == "subagent_start"
         assert entry["name"] == "research-agent"
-        assert entry["agent_id"] == "sa-1"
+        assert entry["description"] == "search papers"
+        assert "agent_id" not in entry
 
     def test_subagent_end_logged(self, logger, tmp_sessions_dir):
-        logger.log_event("subagent_end", {"name": "research-agent", "agent_id": "sa-1"})
+        event = {"type": "subagent_end", "name": "research-agent"}
+        logger.log_event("subagent_end", event)
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         entry = json.loads(lines[0])
         assert entry["kind"] == "subagent_end"
+        assert entry["name"] == "research-agent"
+        assert "agent_id" not in entry
+
+    def test_subagent_tool_call_logged(self, logger, tmp_sessions_dir):
+        event = {
+            "type": "subagent_tool_call",
+            "subagent": "research-agent",
+            "name": "read_file",
+            "args": {"path": "/tmp/x"},
+            "id": "tc-1",
+        }
+        logger.log_event("subagent_tool_call", event)
+        lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        entry = json.loads(lines[0])
+        assert entry["kind"] == "subagent_tool_call"
+        assert entry["subagent"] == "research-agent"
+        assert entry["tool"] == "read_file"
+        assert entry["args"] == {"path": "/tmp/x"}
+        assert entry["tool_id"] == "tc-1"
+
+    def test_subagent_tool_result_logged(self, logger, tmp_sessions_dir):
+        event = {
+            "type": "subagent_tool_result",
+            "subagent": "research-agent",
+            "name": "read_file",
+            "content": "hello",
+            "success": True,
+            "id": "tc-1",
+        }
+        logger.log_event("subagent_tool_result", event)
+        lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        entry = json.loads(lines[0])
+        assert entry["kind"] == "subagent_tool_result"
+        assert entry["subagent"] == "research-agent"
+        assert entry["tool"] == "read_file"
+        assert entry["content"] == "hello"
+        assert entry["success"] is True
+        assert entry["tool_id"] == "tc-1"
 
     def test_unknown_event_type_ignored(self, logger, tmp_sessions_dir):
         logger.log_event("thinking", {"content": "hmm"})
@@ -138,7 +231,10 @@ class TestMultipleEvents:
     def test_multiple_events_appended_in_order(self, logger, tmp_sessions_dir):
         logger.log_event("tool_call", {"name": "read_file", "args": {}, "id": "tc-1"})
         logger.log_event("tool_result", {"name": "read_file", "content": "data", "success": True})
-        logger.log_event("tool_call", {"name": "write_file", "args": {}, "id": "tc-2"})
+        logger.log_event(
+            "tool_call",
+            {"name": "write_file", "args": {"path": "/tmp/y"}, "id": "tc-2"},
+        )
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         assert len(lines) == 3
         assert json.loads(lines[0])["kind"] == "tool_call"
