@@ -199,12 +199,16 @@ class TestEnsureLanggraphDev:
             ) as mock_running,
             patch.object(manager, "start_langgraph_dev") as mock_start,
             patch.object(manager, "_FILE_LOCK_PATH", tmp_path / "lg.lock"),
+            # Isolate from real ``~/.config/evoscientist/`` — without this
+            # patch, the FileLock setup would mkdir the user's actual config
+            # dir as a test side-effect.
+            patch.object(manager, "_PID_DIR", tmp_path / "pids"),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
             # We didn't spawn anything — there's already a healthy server.
             mock_start.assert_not_called()
-            # And the result reflects "we don't own this; reusing".
-            assert result is None or hasattr(result, "poll")
+            # Reuse path returns None (we don't own the existing process).
+            assert result is None
             # is_async_subagents_available was flipped True.
             assert manager.is_async_subagents_available() is True
             # Health check was called at least once.
