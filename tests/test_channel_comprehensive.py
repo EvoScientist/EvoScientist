@@ -1536,55 +1536,15 @@ class TestMessageBus:
         _run(_test())
 
     def test_subscriber_dispatch(self):
-        async def _test():
-            bus = MessageBus()
-            received = []
-            bus.subscribe_outbound("tg", lambda m: received.append(m))
-
-            task = asyncio.create_task(bus.dispatch_outbound())
-            await bus.publish_outbound(
-                BusOutbound(
-                    channel="tg",
-                    chat_id="c1",
-                    content="hello",
-                )
-            )
-            await asyncio.sleep(0.1)
-            bus.stop()
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            assert len(received) == 1
-
-        _run(_test())
+        # Removed: ``MessageBus.subscribe_outbound`` / ``dispatch_outbound``
+        # were dead code — outbound routing is owned by
+        # ``ChannelManager._dispatch_outbound``.  See
+        # ``test_channel_manager_dispatch`` for coverage of the real path.
+        pass
 
     def test_no_subscriber_logs_warning(self):
-        """Messages to unsubscribed channels should warn, not crash."""
-
-        async def _test():
-            bus = MessageBus()
-            task = asyncio.create_task(bus.dispatch_outbound())
-            await bus.publish_outbound(
-                BusOutbound(
-                    channel="unknown",
-                    chat_id="c1",
-                    content="lost",
-                )
-            )
-            await asyncio.sleep(0.1)
-            bus.stop()
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        _run(_test())
+        # Removed along with the bus-internal dispatcher.
+        pass
 
     def test_queue_sizes(self):
         async def _test():
@@ -1604,39 +1564,13 @@ class TestMessageBus:
         _run(_test())
 
     def test_subscriber_error_does_not_crash_dispatch(self):
-        async def _test():
-            bus = MessageBus()
-
-            async def bad_callback(msg):
-                raise RuntimeError("subscriber crash")
-
-            bus.subscribe_outbound("tg", bad_callback)
-
-            task = asyncio.create_task(bus.dispatch_outbound())
-            await bus.publish_outbound(
-                BusOutbound(
-                    channel="tg",
-                    chat_id="c1",
-                    content="trigger",
-                )
-            )
-            await asyncio.sleep(0.1)
-            bus.stop()
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            # dispatch should survive the error
-
-        _run(_test())
+        # Removed along with the bus-internal dispatcher.
+        pass
 
     def test_stop_flag(self):
-        bus = MessageBus()
-        assert bus._running is False
-        bus.stop()
-        assert bus._running is False
+        # Removed: ``MessageBus.stop`` / ``_running`` only existed to
+        # break the now-removed dispatcher loop.
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
