@@ -248,10 +248,6 @@ def cmd_interactive(
         thread_id: Optional thread ID to resume a previous session
         ui_backend: UI backend ('cli' or 'tui')
     """
-    import nest_asyncio
-
-    nest_asyncio.apply()
-
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         from functools import partial

@@ -1383,31 +1383,14 @@ def _run_streaming(
                 )
             )
             # Determine how to run the async streaming coroutine.
-            # - In TUI mode (Textual), there's already a running event loop;
-            #   nest_asyncio is needed to allow run_until_complete inside it.
-            # - In serve/CLI mode, the main thread has no running loop;
-            #   use a fresh event loop directly (no nest_asyncio needed or wanted,
-            #   since nest_asyncio.apply() patches globally and breaks the bus
-            #   thread's event loop Task-context detection).
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-
-            if running_loop is not None:
-                # Already inside a running loop (TUI) — must use nest_asyncio.
-                # NOTE: nest_asyncio.apply() is global and irreversible within
-                # the process; avoid mixing TUI and serve modes in one process.
-                import nest_asyncio  # type: ignore[import-untyped]
-
-                nest_asyncio.apply()
-                loop = running_loop
-            else:
-                # No running loop (serve/CLI) — create a fresh one
-                try:
-                    loop = _get_event_loop()
-                except RuntimeError:
-                    loop = _create_event_loop()
+            # We always use a dedicated thread with its own event loop.
+            # This avoids nest_asyncio which corrupts anyio/sniffio detection
+            # inside MCP subprocess transports (stdio, streamable_http) when
+            # called from within an already-running asyncio event loop (TUI or
+            # serve mode).  A dedicated thread blocks the caller synchronously
+            # via thread.join() — the same wall-clock semantics as before —
+            # while keeping asyncio.run() / anyio / sniffio clean.
+            _thread_exc: BaseException | None = None
 
             async def _run_with_refresh() -> None:
                 async def _periodic_refresh() -> None:
@@ -1468,7 +1451,29 @@ def _run_streaming(
                     live.update(final_display)
                     live.refresh()
 
-            loop.run_until_complete(_run_with_refresh())
+            # Run the async coroutine in a dedicated thread with its own clean
+            # event loop.  This avoids nest_asyncio (which corrupts anyio/sniffio
+            # detection inside MCP stdio/http transports) while preserving the
+            # synchronous blocking semantics expected by callers.
+            _thread_exc = None
+
+            def _run_in_thread() -> None:
+                nonlocal _thread_exc
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(_run_with_refresh())
+                except BaseException as exc:
+                    _thread_exc = exc
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+
+            _t = threading.Thread(target=_run_in_thread, daemon=True)
+            _t.start()
+            _t.join()
+            if _thread_exc is not None:
+                raise _thread_exc
 
         # Flush any remaining thinking that wasn't sent during streaming.
         if on_thinking and state.thinking_text:

@@ -2808,12 +2808,4 @@ def run_textual_interactive(
                 except Exception:
                     _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
-    import nest_asyncio  # type: ignore[import-untyped]
-
-    nest_asyncio.apply()
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(_amain())
+    asyncio.run(_amain())

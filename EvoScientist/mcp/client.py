@@ -664,6 +664,23 @@ ProgressCallback = Callable[[str, str, str], None]
 """
 
 
+def _is_stderr_fileno_safe() -> bool:
+    """Return True if ``sys.stderr`` supports ``fileno()`` without raising.
+
+    The MCP SDK's ``stdio_client`` passes ``sys.stderr`` as the subprocess
+    ``stderr`` argument.  On Windows, ``subprocess.Popen`` calls
+    ``stderr.fileno()`` to obtain an OS handle.  When running inside Textual
+    (or any other TUI that replaces ``sys.stderr`` with an in-memory object),
+    ``fileno()`` raises ``UnsupportedOperation``, which propagates as
+    ``[Errno 9] Bad file descriptor``.
+    """
+    try:
+        fd = sys.stderr.fileno()
+        return fd >= 0
+    except Exception:
+        return False
+
+
 async def _load_tools(
     config: dict[str, Any],
     *,
@@ -684,51 +701,103 @@ async def _load_tools(
             "Install with: pip install langchain-mcp-adapters"
         ) from None
 
-    connections = _build_connections(config)
-    if not connections:
-        return {}
+    # Guard: on Windows the MCP SDK's stdio_client uses sys.stderr as the
+    # default errlog argument **captured at function-definition time** (Python
+    # binds default values once when the function object is created).  When the
+    # mcp package is first imported inside a Textual TUI, sys.stderr is already
+    # replaced with an in-memory object that has no valid file descriptor.
+    # subprocess.Popen then calls errlog.fileno() and raises
+    # "[Errno 9] Bad file descriptor".
+    #
+    # Fix: temporarily patch the stdio_client function's default errlog to a
+    # real file backed by os.devnull for the duration of this load, then
+    # restore the original default.  This is thread-safe because Python's GIL
+    # serialises the tuple assignment and because this function is only ever
+    # called from a single worker thread per load.
+    _devnull_file: object = None
+    _stdio_client_orig_defaults: tuple | None = None
+    try:
+        from mcp.client.stdio import stdio_client as _stdio_client_fn
 
-    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
+        _inner = getattr(_stdio_client_fn, "__wrapped__", None)
+        if _inner is not None and not _is_stderr_fileno_safe():
+            _orig_defaults = _inner.__defaults__  # typically (sys.stderr,)
+            if _orig_defaults and not _is_stderr_fileno_safe():
+                try:
+                    _devnull_file = open(os.devnull, "w")  # noqa: SIM115
+                    _stdio_client_orig_defaults = _orig_defaults
+                    _inner.__defaults__ = (_devnull_file,)
+                except Exception:
+                    pass  # best-effort
+    except Exception:
+        pass  # mcp may not be installed; handled below
 
-    def _report(event: str, name: str, detail: str = "") -> None:
-        if on_progress is None:
-            return
-        try:
-            on_progress(event, name, detail)
-        except Exception:
-            # Progress callbacks are UI glue — never let their bugs break
-            # the actual MCP load.
-            logger.debug("MCP progress callback raised", exc_info=True)
+    try:
+        connections = _build_connections(config)
+        if not connections:
+            return {}
 
-    # Cap in-flight connections so a user with many servers doesn't
-    # spawn all their stdio subprocesses at once (fd/ulimit pressure,
-    # load spikes).  The cap still parallelizes ~an order of magnitude
-    # better than the old serial loop.
-    sem = asyncio.Semaphore(_MAX_CONCURRENT_CONNECTIONS)
+        client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
 
-    async def _fetch(name: str) -> tuple[str, list]:
-        async with sem:
-            _report("start", name)
+        def _report(event: str, name: str, detail: str = "") -> None:
+            if on_progress is None:
+                return
             try:
-                tools = await client.get_tools(server_name=name)
-                logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
-                _report("success", name, str(len(tools)))
-                return name, tools
-            except Exception as exc:
-                # When the caller wired up ``on_progress`` they own the
-                # user-facing display; downgrade the logger so we don't
-                # double-print.
-                if on_progress is None:
-                    logger.warning("MCP server %r: failed to load tools: %s", name, exc)
-                else:
-                    logger.debug("MCP server %r: failed to load tools: %s", name, exc)
-                _report("error", name, str(exc))
-                return name, []
+                on_progress(event, name, detail)
+            except Exception:
+                # Progress callbacks are UI glue — never let their bugs break
+                # the actual MCP load.
+                logger.debug("MCP progress callback raised", exc_info=True)
 
-    # ``return_exceptions=False`` is fine because ``_fetch`` already
-    # swallows errors per server.
-    results = await asyncio.gather(*(_fetch(name) for name in connections))
-    return dict(results)
+        # Cap in-flight connections so a user with many servers doesn't
+        # spawn all their stdio subprocesses at once (fd/ulimit pressure,
+        # load spikes).  The cap still parallelizes ~an order of magnitude
+        # better than the old serial loop.
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_CONNECTIONS)
+
+        async def _fetch(name: str) -> tuple[str, list]:
+            async with sem:
+                _report("start", name)
+                try:
+                    tools = await client.get_tools(server_name=name)
+                    logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
+                    _report("success", name, str(len(tools)))
+                    return name, tools
+                except Exception as exc:
+                    # When the caller wired up ``on_progress`` they own the
+                    # user-facing display; downgrade the logger so we don't
+                    # double-print.
+                    if on_progress is None:
+                        logger.warning(
+                            "MCP server %r: failed to load tools: %s", name, exc
+                        )
+                    else:
+                        logger.debug(
+                            "MCP server %r: failed to load tools: %s", name, exc
+                        )
+                    _report("error", name, str(exc))
+                    return name, []
+
+        # ``return_exceptions=False`` is fine because ``_fetch`` already
+        # swallows errors per server.
+        results = await asyncio.gather(*(_fetch(name) for name in connections))
+        return dict(results)
+    finally:
+        # Restore the original stdio_client errlog default and close devnull.
+        if _stdio_client_orig_defaults is not None:
+            try:
+                from mcp.client.stdio import stdio_client as _scfn
+
+                _inner2 = getattr(_scfn, "__wrapped__", None)
+                if _inner2 is not None:
+                    _inner2.__defaults__ = _stdio_client_orig_defaults
+            except Exception:
+                pass
+        if _devnull_file is not None:
+            try:
+                _devnull_file.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
 
 
 async def aload_mcp_tools(
@@ -790,17 +859,6 @@ def load_mcp_tools(
         return {}
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    try:
-        if loop and loop.is_running():
-            # Inside an already-running event loop (e.g. Jupyter) —
-            # nest_asyncio patches the loop so asyncio.run() works.
-            import nest_asyncio
-
-            nest_asyncio.apply()
         server_tools = asyncio.run(_load_tools(config, on_progress=on_progress))
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
