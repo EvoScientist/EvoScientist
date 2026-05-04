@@ -158,7 +158,10 @@ def load_subagents(
         if yml.name.startswith(".") or yml.name.startswith("_"):
             continue
         with yml.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.safe_load(f)
+        if data is None:
+            # Empty file — skip silently (matches dotfile/underscore skip behavior)
+            continue
         if not isinstance(data, dict):
             raise ValueError(
                 f"{yml}: top-level must be a mapping (one entry per sub-agent)"
@@ -169,6 +172,12 @@ def load_subagents(
                 raise ValueError(
                     f"Sub-agent {key!r} defined in multiple files; "
                     f"second occurrence in {yml.name}"
+                )
+        for key, spec in data.items():
+            if not isinstance(spec, dict):
+                raise ValueError(
+                    f"{yml}: sub-agent {key!r} must map to a spec dict, "
+                    f"got {type(spec).__name__}"
                 )
         config.update(data)
 
@@ -231,8 +240,6 @@ def load_subagents(
         return subagent
 
     for name, spec in config.items():
-        if not isinstance(spec, dict):
-            continue
         subagents.append(_build_one(name, spec))
 
     return subagents

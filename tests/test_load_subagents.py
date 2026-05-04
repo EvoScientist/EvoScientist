@@ -108,3 +108,34 @@ def test_async_flag_error_includes_agent_name(tmp_path):
     )
     with pytest.raises(ValueError, match=r"my-bad-agent"):
         load_subagents(config_path, tool_registry={})
+
+
+def test_non_dict_spec_raises(tmp_path):
+    """Yaml entries that aren't mappings must fail loud, not be silently dropped.
+
+    Previously ``_build_one`` had a ``if not isinstance(spec, dict): continue``
+    fallback that swallowed malformed entries — users would see their agent
+    quietly disappear with no error. Now caught during the merge loop.
+    """
+    config_path = _write_yaml(
+        tmp_path,
+        "bad.yaml",
+        """
+        bad-agent: 123
+        """,
+    )
+    with pytest.raises(ValueError, match=r"must map to a spec dict"):
+        load_subagents(config_path, tool_registry={})
+
+
+def test_non_dict_spec_error_includes_filename_and_name(tmp_path):
+    """Error must surface BOTH the offending file path and agent name."""
+    config_path = _write_yaml(
+        tmp_path,
+        "weird.yaml",
+        """
+        weird-agent: "just a string"
+        """,
+    )
+    with pytest.raises(ValueError, match=r"weird\.yaml.*weird-agent"):
+        load_subagents(config_path, tool_registry={})
