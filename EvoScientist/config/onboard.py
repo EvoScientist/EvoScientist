@@ -103,6 +103,7 @@ def _checkbox_ask(choices, message: str, **kwargs):
 
 STEPS = [
     "UI",
+    "LangGraph Port",
     "Provider",
     "API Key",
     "Model",
