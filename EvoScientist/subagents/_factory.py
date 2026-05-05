@@ -72,6 +72,15 @@ def build_async_subagent_graph(name: str) -> Any:
             f"Available: {[s.get('name') for s in specs]}"
         )
 
+    # Load MCP tools routed to THIS agent via ``expose_to: <name>`` in
+    # ``mcp.yaml``. Use the cached helper so multiple ``build_async_subagent_graph``
+    # calls in the same langgraph dev subprocess (one per registered async graph)
+    # share a single MCP connection set per server instead of re-spawning.
+    from EvoScientist.EvoScientist import _load_mcp_tools_cached
+
+    mcp_tools_by_agent = _load_mcp_tools_cached()
+    agent_mcp_tools = mcp_tools_by_agent.get(name, [])
+
     # NOTE on HITL: async sub-agents intentionally do NOT set ``interrupt_on``,
     # even though the deployed main agent does. They run as standalone graphs
     # on the langgraph dev subprocess; the parent (CLI main agent) only sees a
@@ -91,7 +100,7 @@ def build_async_subagent_graph(name: str) -> Any:
         name=name,
         model=_ensure_chat_model(),
         system_prompt=spec.get("system_prompt", ""),
-        tools=spec.get("tools", []),
+        tools=spec.get("tools", []) + agent_mcp_tools,
         skills=spec.get("skills"),
         backend=_get_default_backend(),
         middleware=_get_default_middleware(),
