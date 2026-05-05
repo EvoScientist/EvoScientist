@@ -1510,6 +1510,13 @@ class TestInboundConsumerErrorHandling:
 
 
 class TestMessageBus:
+    """Covers the bus as a pure pub/sub queue.
+
+    Outbound routing (subscriber dispatch, error handling, stop semantics)
+    is owned by ``ChannelManager._dispatch_outbound`` — see
+    ``TestChannelManagerDispatch`` for that coverage.
+    """
+
     def test_publish_consume_inbound(self):
         async def _test():
             bus = MessageBus()
@@ -1535,17 +1542,6 @@ class TestMessageBus:
 
         _run(_test())
 
-    def test_subscriber_dispatch(self):
-        # Removed: ``MessageBus.subscribe_outbound`` / ``dispatch_outbound``
-        # were dead code — outbound routing is owned by
-        # ``ChannelManager._dispatch_outbound``.  See
-        # ``test_channel_manager_dispatch`` for coverage of the real path.
-        pass
-
-    def test_no_subscriber_logs_warning(self):
-        # Removed along with the bus-internal dispatcher.
-        pass
-
     def test_queue_sizes(self):
         async def _test():
             bus = MessageBus()
@@ -1562,15 +1558,6 @@ class TestMessageBus:
             assert bus.inbound_size == 1
 
         _run(_test())
-
-    def test_subscriber_error_does_not_crash_dispatch(self):
-        # Removed along with the bus-internal dispatcher.
-        pass
-
-    def test_stop_flag(self):
-        # Removed: ``MessageBus.stop`` / ``_running`` only existed to
-        # break the now-removed dispatcher loop.
-        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
