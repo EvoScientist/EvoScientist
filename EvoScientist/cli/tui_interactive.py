@@ -415,6 +415,7 @@ def run_textual_interactive(
         def _start_audit_session(self) -> None:
             self._audit_logger.log_session_start(
                 model=self._current_model or "unknown",
+                provider=self._current_provider or "unknown",
             )
 
         def _end_audit_session(self) -> None:

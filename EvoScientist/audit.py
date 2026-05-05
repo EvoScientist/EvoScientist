@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,21 +53,23 @@ class AuditLogger:
         self._session_ended = False
         self._pending_tool_calls: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._logged_tool_calls: set[tuple[str, str, str]] = set()
+        self._result_to_tool_call_keys: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
 
     @property
     def log_path(self) -> Path:
         return self._log_path
 
-    def log_session_start(self, *, model: str) -> None:
+    def log_session_start(self, *, model: str, provider: str) -> None:
         if self._session_started:
             return
         self._session_started = True
         self._append(
             {
                 "kind": "session_start",
-                "ts": time.time(),
+                "ts": _now_iso(),
                 "thread_id": self._thread_id,
                 "model": model,
+                "provider": provider,
             }
         )
 
@@ -75,7 +78,7 @@ class AuditLogger:
             return
         self._flush_pending_tool_calls()
         self._session_ended = True
-        self._append({"kind": "session_end", "ts": time.time()})
+        self._append({"kind": "session_end", "ts": _now_iso()})
 
     def log_event(self, event_type: str, event: dict[str, Any]) -> None:
         if event_type not in _LOGGABLE_EVENTS:
@@ -87,12 +90,13 @@ class AuditLogger:
             return
         if event_type in ("tool_result", "subagent_tool_result"):
             self._flush_pending_tool_calls()
+            self._prune_logged_tool_call(event_type, event)
 
         entry = self._build_entry(event_type, event)
         self._append(entry)
 
     def _build_entry(self, event_type: str, event: dict[str, Any]) -> dict[str, Any]:
-        entry: dict[str, Any] = {"kind": event_type, "ts": time.time()}
+        entry: dict[str, Any] = {"kind": event_type, "ts": _now_iso()}
         if event_type in ("tool_call", "subagent_tool_call"):
             entry["tool"] = event.get("name", "unknown")
             entry["args"] = _cap_json_payload(event.get("args", {}), _ARGS_TRUNCATE)
@@ -124,14 +128,22 @@ class AuditLogger:
         if tool_id and key in self._logged_tool_calls:
             return
 
-        args = event.get("args", {})
-        if tool_id and not args:
+        args = event.get("args")
+        if tool_id and args is None:
             self._pending_tool_calls.setdefault(key, entry)
             return
 
         self._pending_tool_calls.pop(key, None)
         if tool_id:
             self._logged_tool_calls.add(key)
+            result_type = (
+                "subagent_tool_result"
+                if event_type == "subagent_tool_call"
+                else "tool_result"
+            )
+            self._result_to_tool_call_keys.setdefault(
+                (result_type, tool_id), set()
+            ).add(key)
         self._append(entry)
 
     def _flush_pending_tool_calls(self) -> None:
@@ -141,7 +153,28 @@ class AuditLogger:
             if key in self._logged_tool_calls:
                 continue
             self._logged_tool_calls.add(key)
+            event_type, _subagent, tool_id = key
+            result_type = (
+                "subagent_tool_result"
+                if event_type == "subagent_tool_call"
+                else "tool_result"
+            )
+            self._result_to_tool_call_keys.setdefault(
+                (result_type, tool_id), set()
+            ).add(key)
             self._append(entry)
+
+    def _prune_logged_tool_call(
+        self,
+        event_type: str,
+        event: dict[str, Any],
+    ) -> None:
+        tool_id = str(event.get("id", "") or "")
+        if not tool_id:
+            return
+        keys = self._result_to_tool_call_keys.pop((event_type, tool_id), set())
+        for key in keys:
+            self._logged_tool_calls.discard(key)
 
     def _append(self, entry: dict[str, Any]) -> None:
         try:
@@ -167,9 +200,17 @@ def _cap_json_payload(value: Any, limit: int) -> Any:
         serialized = str(value)
 
     if len(serialized) > limit:
-        return serialized[:limit]
+        return {
+            "truncated": True,
+            "original_type": type(value).__name__,
+            "serialized": serialized[:limit],
+        }
 
     try:
         return json.loads(serialized)
     except Exception:
         return serialized
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
