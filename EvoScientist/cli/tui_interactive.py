@@ -640,6 +640,35 @@ def run_textual_interactive(
         ) -> None:
             if workspace_dir:
                 self._workspace_dir = workspace_dir
+                # Mirror the Rich CLI fix: when a /resume restores a thread
+                # whose workspace differs from the one the langgraph dev
+                # subprocess was launched with, the deployed sub-agents
+                # would otherwise keep operating on the previous workspace.
+                # Sync the subprocess to the new workspace; the manager
+                # auto-detects the change and restarts (or no-ops if disabled
+                # or unchanged). Run in a worker thread so the Textual event
+                # loop keeps refreshing the UI during the up-to-60s wait, and
+                # show a live timer widget (like /compact) so the user sees
+                # progress instead of a frozen static line.
+                from ..config import load_config
+
+                _resume_cfg = load_config()
+                if getattr(_resume_cfg, "enable_async_subagents", False):
+                    from ..langgraph_dev.manager import ensure_langgraph_dev
+                    from .widgets.workspace_sync_widget import WorkspaceSyncWidget
+
+                    sync_widget = WorkspaceSyncWidget()
+                    container = self.query_one("#chat", VerticalScroll)
+                    await container.mount(sync_widget)
+                    container.scroll_end(animate=False)
+                    try:
+                        await asyncio.to_thread(
+                            ensure_langgraph_dev,
+                            _resume_cfg,
+                            workspace_dir=workspace_dir,
+                        )
+                    finally:
+                        await sync_widget.cleanup()
 
             self._conversation_tid = thread_id
             self._reset_audit_session()
@@ -2816,6 +2845,41 @@ def run_textual_interactive(
                     ws = (meta or {}).get("workspace_dir", "")
                     if ws:
                         effective_workspace = ws
+                        # Sync langgraph dev subprocess to the resumed
+                        # workspace BEFORE the Textual app takes over the
+                        # terminal. Mirrors interactive.py's Rich-CLI fix.
+                        # Without this, --resume against a thread from a
+                        # different workspace would leave deployed sub-agents
+                        # operating on the launch directory's files.
+                        try:
+                            from ..config import load_config
+                            from ..langgraph_dev.manager import ensure_langgraph_dev
+                            from ..stream.console import console as _resume_console
+
+                            _ws_cfg = load_config()
+                            if getattr(_ws_cfg, "enable_async_subagents", False):
+                                with _resume_console.status(
+                                    "[dim]Syncing async sub-agent server to "
+                                    "resumed workspace...[/dim]",
+                                    spinner="dots",
+                                ):
+                                    await asyncio.to_thread(
+                                        ensure_langgraph_dev,
+                                        _ws_cfg,
+                                        workspace_dir=ws,
+                                    )
+                        except Exception as _ws_sync_exc:
+                            # Non-fatal at startup — async sub-agents fall back
+                            # to sync via the manager's own availability flag.
+                            # Surface the exception so unexpected failures
+                            # (import errors, regressions in
+                            # ensure_langgraph_dev, etc.) don't hide silently.
+                            logging.getLogger(__name__).warning(
+                                "TUI startup workspace sync to langgraph dev "
+                                "failed: %s. Async sub-agents will fall back "
+                                "to in-process sync delegation for this session.",
+                                _ws_sync_exc,
+                            )
                     effective_thread_id = resolved
                     resumed = True
                 elif matches:

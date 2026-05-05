@@ -37,7 +37,7 @@ logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 # Constants
 # =============================================================================
 
-SUBAGENTS_CONFIG = Path(__file__).parent / "subagent.yaml"
+SUBAGENTS_CONFIG = Path(__file__).parent / "subagents"
 SKILLS_DIR = str(Path(__file__).parent / "skills")
 
 # =============================================================================
@@ -221,6 +221,85 @@ def _build_prompt_refs() -> dict:
     }
 
 
+def _maybe_swap_async_subagents(subs: list) -> list:
+    """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
+
+    Reads the ``_async`` field carried through by ``utils.load_subagents._build_one``
+    (sourced from each yaml's ``async: true`` flag). When
+    ``config.enable_async_subagents`` is also set, those sub-agents are
+    swapped from synchronous in-process dicts to ``AsyncSubAgent`` references
+    pointing at the langgraph dev graph of the same name.
+
+    The deployed graphs live in ``EvoScientist.langgraph_dev.graphs`` and
+    are registered in ``EvoScientist/langgraph_dev/langgraph.json``.
+
+    Adding a new async sub-agent requires no change here — flip
+    ``async: true`` in its yaml and create the matching deployment graph.
+
+    All return paths strip the internal ``_async`` field from sub-agent dicts
+    before handoff, since deepagents may schema-validate the kwarg.
+    """
+    cfg = _ensure_config()
+    if not getattr(cfg, "enable_async_subagents", False):
+        # Async fully disabled — strip the internal flag before handoff.
+        for s in subs:
+            s.pop("_async", None)
+        return subs
+
+    # Guard: if the langgraph dev subprocess never came up (port conflict,
+    # binary missing, etc.), routing sub-agents to a dead URL produces hangs
+    # and confusing tool errors. Fall back to in-process sync delegation.
+    from .langgraph_dev.manager import is_async_subagents_available
+
+    if not is_async_subagents_available():
+        logging.getLogger(__name__).warning(
+            "enable_async_subagents=true but langgraph dev is not reachable; "
+            "falling back to in-process sync delegation for all sub-agents."
+        )
+        # Strip the internal ``_async`` flag (carried from ``load_subagents``)
+        # before sub-agents reach deepagents — it's never a deepagents key.
+        for s in subs:
+            s.pop("_async", None)
+        return subs
+
+    # The ``_async`` flag was set by ``utils.load_subagents._build_one`` from
+    # each yaml's ``async:`` field. No need to re-parse the yaml files here.
+    async_specs: dict[str, str] = {
+        s["name"]: s.get("description", "") for s in subs if s.get("_async")
+    }
+
+    if not async_specs:
+        for s in subs:
+            s.pop("_async", None)
+        return subs
+
+    from deepagents import AsyncSubAgent
+
+    port = int(getattr(cfg, "langgraph_dev_port", 6174))
+    out = []
+    # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
+    # mcp.yaml) ARE delivered — the deployed factory
+    # ``subagents/_factory.py:build_async_subagent_graph`` loads its own MCP
+    # connection per server (cost: one extra MCP server subprocess per
+    # exposed server, since stdio transports can't share across processes).
+    for s in subs:
+        name = s.get("name")
+        if name in async_specs:
+            out.append(
+                AsyncSubAgent(
+                    name=name,
+                    description=async_specs[name],
+                    graph_id=name,
+                    url=f"http://localhost:{port}",
+                )
+            )
+        else:
+            # Strip the internal flag before handoff to deepagents.
+            s.pop("_async", None)
+            out.append(s)
+    return out
+
+
 def _build_base_kwargs(base_backend, base_middleware):
     """Build agent kwargs *without* MCP (fast, no subprocess spawning)."""
     from .tools import skill_manager, tavily_search, think_tool
@@ -237,6 +316,7 @@ def _build_base_kwargs(base_backend, base_middleware):
         prompt_refs=_build_prompt_refs(),
     )
     _inject_subagent_middleware(subs)
+    subs = _maybe_swap_async_subagents(subs)
     return {
         "name": "EvoScientist",
         "model": _ensure_chat_model(),
@@ -291,6 +371,10 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
     for sa in subs:
         if sa_tools := mcp_by_agent.get(sa["name"], []):
             sa.setdefault("tools", []).extend(sa_tools)
+
+    # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
+    # since async sub-agents are remote graphs that load their own tools).
+    subs = _maybe_swap_async_subagents(subs)
 
     return {
         "name": "EvoScientist",
@@ -373,17 +457,40 @@ def _get_default_middleware():
 
 
 def _get_default_agent():
-    """Build the default agent (with MCP, no checkpointer) on first access."""
+    """Build the default agent (with MCP, no checkpointer) on first access.
+
+    When invoked from the langgraph dev subprocess (env var
+    ``EVOSCIENTIST_DEPLOYED_NO_MCP=true``, set by
+    ``langgraph_dev.manager.start_langgraph_dev``), MCP loading is skipped to
+    avoid duplicating the CLI's MCP server pool — the deployed main agent
+    is currently only reachable via HTTP for Web UI / SDK clients (none in
+    use yet), so paying for a second copy of the same MCP servers is pure
+    waste. Re-enable later by removing the env var when MCP-needing remote
+    callers are introduced.
+    """
     global _EvoScientist_agent
     if _EvoScientist_agent is None:
         from deepagents import create_deep_agent
 
+        cfg = _ensure_config()
         be = _get_default_backend()
         mw = _get_default_middleware()
-        kwargs = load_mcp_and_build_kwargs(be, mw)
-        _EvoScientist_agent = create_deep_agent(**kwargs).with_config(
-            {"recursion_limit": 1000}
-        )
+
+        # HITL on main agent only (mirrors create_cli_agent). Use middleware,
+        # not interrupt_on= kwarg — the kwarg propagates to every subagent and
+        # breaks parallel execute calls (multi-pending-interrupt LangGraph
+        # error). See PR #202.
+        if not cfg.auto_approve:
+            mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
+
+        if os.environ.get("EVOSCIENTIST_DEPLOYED_NO_MCP", "").lower() == "true":
+            kwargs = _build_base_kwargs(be, mw)
+        else:
+            kwargs = load_mcp_and_build_kwargs(be, mw)
+
+        _EvoScientist_agent = create_deep_agent(
+            **kwargs,
+        ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
 
@@ -515,4 +622,4 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-    ).with_config({"recursion_limit": 1000})
+    ).with_config({"recursion_limit": cfg.recursion_limit})

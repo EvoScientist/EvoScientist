@@ -187,6 +187,23 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
+def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
+    """Conditionally start the langgraph dev subprocess for async sub-agents.
+
+    Shared by both the interactive entry and the serve entry — keeps the
+    user-visible status message and the conditional in one place.
+    """
+    if not getattr(config, "enable_async_subagents", False):
+        return
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+
+    with console.status(
+        "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+        spinner="dots",
+    ):
+        ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+
+
 def _resolve_context_window(
     model: Any, fallback: int = _COMPACT_CONTEXT_WINDOW_FALLBACK
 ) -> int:
@@ -867,6 +884,10 @@ def serve(
     os.makedirs(ws, exist_ok=True)
     set_workspace_root(ws)
     ensure_dirs()
+
+    # Auto-start langgraph dev (after workspace resolution, so deployed
+    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    _ensure_async_subagent_server(config, workspace_dir=ws)
 
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
@@ -1574,6 +1595,10 @@ def _main_callback(
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
 
+    # Auto-start langgraph dev (after workspace resolution, so deployed
+    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    _ensure_async_subagent_server(config, workspace_dir=workspace_dir)
+
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
@@ -1584,6 +1609,7 @@ def _main_callback(
             resolve_thread_id_prefix,
         )
         from .interactive import cmd_run
+        from .resume_hint import print_resume_hint
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
@@ -1613,15 +1639,21 @@ def _main_callback(
                     checkpointer=checkpointer,
                     config=config,
                 )
-                cmd_run(
-                    agent,
-                    prompt,
-                    thread_id=tid,
-                    show_thinking=show_thinking,
-                    workspace_dir=workspace_dir,
-                    model=config.model,
-                    ui_backend=config.ui_backend,
-                )
+                try:
+                    cmd_run(
+                        agent,
+                        prompt,
+                        thread_id=tid,
+                        show_thinking=show_thinking,
+                        workspace_dir=workspace_dir,
+                        model=config.model,
+                        ui_backend=config.ui_backend,
+                    )
+                finally:
+                    try:
+                        print_resume_hint(tid, console=console)
+                    except Exception:
+                        pass
 
         import nest_asyncio  # type: ignore[import-untyped]
 

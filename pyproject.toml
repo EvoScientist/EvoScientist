@@ -34,6 +34,8 @@ dependencies = [
     "langgraph-cli[inmem]>=0.4",
     "langgraph-checkpoint-sqlite>=3.0",
     "httpx>=0.28",
+    "psutil>=6.0",
+    "filelock>=3.16",
     "lazy-loader>=0.5",
     "markdownify>=1.2",
     "nest-asyncio>=1.6",
@@ -97,7 +99,11 @@ build-backend = "setuptools.build_meta"
 include = ["EvoScientist*"]
 
 [tool.setuptools.package-data]
-EvoScientist = ["subagent.yaml", "skills/**/*"]
+EvoScientist = [
+    "subagents/*.yaml",
+    "langgraph_dev/*.json",
+    "skills/**/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
