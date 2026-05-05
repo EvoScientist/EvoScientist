@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,9 +50,8 @@ class AuditLogger:
         self._dir_ready = False
         self._session_started = False
         self._session_ended = False
-        self._pending_tool_calls: dict[tuple[str, str, str], dict[str, Any]] = {}
-        self._logged_tool_calls: set[tuple[str, str, str]] = set()
-        self._result_to_tool_call_keys: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
+        self._pending_tool_calls: dict[str, dict[str, Any]] = {}
+        self._logged_tool_call_ids: set[str] = set()
 
     @property
     def log_path(self) -> Path:
@@ -85,11 +83,13 @@ class AuditLogger:
             return
         if self._session_ended:
             return
+        if event_type == "subagent_start" and _is_placeholder_subagent_start(event):
+            return
         if event_type in ("tool_call", "subagent_tool_call"):
             self._log_tool_call(event_type, event)
             return
         if event_type in ("tool_result", "subagent_tool_result"):
-            self._flush_pending_tool_calls()
+            self._flush_pending_tool_calls_for_result(event_type, event)
             self._prune_logged_tool_call(event_type, event)
 
         entry = self._build_entry(event_type, event)
@@ -100,7 +100,7 @@ class AuditLogger:
         if event_type in ("tool_call", "subagent_tool_call"):
             entry["tool"] = event.get("name", "unknown")
             entry["args"] = _cap_json_payload(event.get("args", {}), _ARGS_TRUNCATE)
-            entry["tool_id"] = event.get("id", "")
+            entry["tool_id"] = _tool_id(event)
             if event_type == "subagent_tool_call":
                 entry["subagent"] = event.get("subagent", "sub-agent")
         elif event_type in ("tool_result", "subagent_tool_result"):
@@ -108,7 +108,7 @@ class AuditLogger:
             entry["success"] = event.get("success", True)
             content = str(event.get("content", ""))
             entry["content"] = content[:_CONTENT_TRUNCATE]
-            tool_id = event.get("id", "")
+            tool_id = _tool_id(event)
             if tool_id:
                 entry["tool_id"] = tool_id
             if event_type == "subagent_tool_result":
@@ -123,58 +123,92 @@ class AuditLogger:
     def _log_tool_call(self, event_type: str, event: dict[str, Any]) -> None:
         entry = self._build_entry(event_type, event)
         tool_id = str(entry.get("tool_id", "") or "")
-        subagent = str(entry.get("subagent", "") or "")
-        key = (event_type, subagent, tool_id)
-        if tool_id and key in self._logged_tool_calls:
+        if tool_id in self._logged_tool_call_ids:
             return
 
         args = event.get("args")
-        if tool_id and args is None:
-            self._pending_tool_calls.setdefault(key, entry)
+        if tool_id and not _has_richer_args(args):
+            if tool_id in self._pending_tool_calls:
+                self._pending_tool_calls[tool_id] = _merge_pending_tool_call(
+                    self._pending_tool_calls[tool_id],
+                    entry,
+                )
+            else:
+                self._pending_tool_calls[tool_id] = entry
             return
 
-        self._pending_tool_calls.pop(key, None)
+        self._pending_tool_calls.pop(tool_id, None)
         if tool_id:
-            self._logged_tool_calls.add(key)
-            result_type = (
-                "subagent_tool_result"
-                if event_type == "subagent_tool_call"
-                else "tool_result"
-            )
-            self._result_to_tool_call_keys.setdefault(
-                (result_type, tool_id), set()
-            ).add(key)
+            self._track_logged_tool_call(tool_id)
         self._append(entry)
 
     def _flush_pending_tool_calls(self) -> None:
         pending = list(self._pending_tool_calls.items())
         self._pending_tool_calls.clear()
-        for key, entry in pending:
-            if key in self._logged_tool_calls:
-                continue
-            self._logged_tool_calls.add(key)
-            event_type, _subagent, tool_id = key
-            result_type = (
-                "subagent_tool_result"
-                if event_type == "subagent_tool_call"
-                else "tool_result"
+        for tool_id, entry in pending:
+            self._append_pending_tool_call(tool_id, entry)
+
+    def _flush_pending_tool_calls_for_result(
+        self,
+        event_type: str,
+        event: dict[str, Any],
+    ) -> None:
+        for tool_id in self._pending_tool_ids_for_result(event_type, event):
+            entry = self._pending_tool_calls.pop(tool_id)
+            self._append_pending_tool_call(tool_id, entry)
+
+    def _append_pending_tool_call(
+        self,
+        tool_id: str,
+        entry: dict[str, Any],
+    ) -> None:
+        if tool_id in self._logged_tool_call_ids:
+            return
+        self._track_logged_tool_call(tool_id)
+        self._append({**entry, "ts": _now_iso()})
+
+    def _track_logged_tool_call(self, tool_id: str) -> None:
+        self._logged_tool_call_ids.add(tool_id)
+
+    def _pending_tool_ids_for_result(
+        self,
+        event_type: str,
+        event: dict[str, Any],
+    ) -> list[str]:
+        call_type = (
+            "subagent_tool_call"
+            if event_type == "subagent_tool_result"
+            else "tool_call"
+        )
+        tool_id = _tool_id(event)
+        if tool_id:
+            return [tool_id] if tool_id in self._pending_tool_calls else []
+
+        tool_name = event.get("name", "unknown")
+        matching_ids = [
+            pending_id
+            for pending_id, entry in self._pending_tool_calls.items()
+            if entry.get("kind") == call_type
+            and entry.get("tool") == tool_name
+            and (
+                event_type != "subagent_tool_result"
+                or entry.get("subagent")
+                == str(event.get("subagent", "sub-agent") or "sub-agent")
             )
-            self._result_to_tool_call_keys.setdefault(
-                (result_type, tool_id), set()
-            ).add(key)
-            self._append(entry)
+        ]
+        if len(matching_ids) == 1:
+            return matching_ids
+        return []
 
     def _prune_logged_tool_call(
         self,
         event_type: str,
         event: dict[str, Any],
     ) -> None:
-        tool_id = str(event.get("id", "") or "")
+        tool_id = _tool_id(event)
         if not tool_id:
             return
-        keys = self._result_to_tool_call_keys.pop((event_type, tool_id), set())
-        for key in keys:
-            self._logged_tool_calls.discard(key)
+        self._logged_tool_call_ids.discard(tool_id)
 
     def _append(self, entry: dict[str, Any]) -> None:
         try:
@@ -214,3 +248,35 @@ def _cap_json_payload(value: Any, limit: int) -> Any:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _tool_id(event: dict[str, Any]) -> str:
+    return str(event.get("id") or event.get("tool_call_id") or "")
+
+
+def _has_richer_args(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return value != {}
+    return True
+
+
+def _merge_pending_tool_call(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(current)
+    if incoming.get("tool") and incoming.get("tool") != "unknown":
+        merged["tool"] = incoming["tool"]
+    if incoming.get("tool_id"):
+        merged["tool_id"] = incoming["tool_id"]
+    if incoming.get("subagent") and not merged.get("subagent"):
+        merged["subagent"] = incoming["subagent"]
+    return merged
+
+
+def _is_placeholder_subagent_start(event: dict[str, Any]) -> bool:
+    return event.get("name", "sub-agent") == "sub-agent" and not event.get(
+        "description", ""
+    )

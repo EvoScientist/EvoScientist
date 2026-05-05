@@ -14,12 +14,12 @@ import EvoScientist.paths as paths
 from EvoScientist.audit import AuditLogger
 
 
-@pytest.fixture()
+@pytest.fixture
 def tmp_sessions_dir(tmp_path):
     return tmp_path / "sessions"
 
 
-@pytest.fixture()
+@pytest.fixture
 def logger(tmp_sessions_dir):
     return AuditLogger(thread_id="test-thread-001", sessions_dir=tmp_sessions_dir)
 
@@ -105,7 +105,7 @@ class TestToolCallLogging:
         assert entry["tool_id"] == "tc-1"
         assert "ts" in entry
 
-    def test_tool_call_with_empty_args_then_full_args_keeps_empty_args_once(
+    def test_tool_call_with_empty_args_then_full_args_prefers_full_args_once(
         self, logger, tmp_sessions_dir
     ):
         logger.log_event("tool_call", {"name": "read_file", "args": {}, "id": "tc-1"})
@@ -117,8 +117,26 @@ class TestToolCallLogging:
         assert len(lines) == 1
         entry = json.loads(lines[0])
         assert entry["kind"] == "tool_call"
-        assert entry["args"] == {}
+        assert entry["args"] == {"path": "/tmp/x"}
         assert entry["tool_id"] == "tc-1"
+
+    def test_later_full_args_are_preserved_on_matching_tool_result(
+        self, logger, tmp_sessions_dir
+    ):
+        logger.log_event("tool_call", {"name": "read_file", "args": {}, "id": "tc-1"})
+        logger.log_event(
+            "tool_call",
+            {"name": "read_file", "args": {"path": "/tmp/x"}, "id": "tc-1"},
+        )
+        logger.log_event(
+            "tool_result",
+            {"name": "read_file", "content": "ok", "success": True, "id": "tc-1"},
+        )
+
+        entries = _read_entries(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert [entry["kind"] for entry in entries] == ["tool_call", "tool_result"]
+        assert entries[0]["args"] == {"path": "/tmp/x"}
+        assert "args" not in entries[1]
 
     def test_tool_call_with_empty_args_is_flushed_on_session_end(
         self, logger, tmp_sessions_dir
@@ -158,6 +176,45 @@ class TestToolCallLogging:
         assert len(entries) == 1
         assert entries[0]["args"] == {"path": "/tmp/x"}
 
+    def test_tool_result_flushes_only_matching_pending_call(
+        self, logger, tmp_sessions_dir
+    ):
+        logger.log_event("tool_call", {"name": "read_file", "id": "tc-1"})
+        logger.log_event("tool_call", {"name": "write_file", "id": "tc-2"})
+        logger.log_event(
+            "tool_result",
+            {"name": "read_file", "content": "ok", "success": True, "id": "tc-1"},
+        )
+
+        entries = _read_entries(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert [entry["kind"] for entry in entries] == ["tool_call", "tool_result"]
+        assert entries[0]["tool_id"] == "tc-1"
+        assert "tc-2" in logger._pending_tool_calls
+        assert all(isinstance(tool_id, str) for tool_id in logger._pending_tool_calls)
+
+    def test_pending_placeholder_updates_unknown_tool_name_before_flush(
+        self, logger, tmp_sessions_dir
+    ):
+        logger.log_event("tool_call", {"name": "", "args": {}, "id": "tc-1"})
+        logger.log_event("tool_call", {"name": "list_dir", "args": {}, "id": "tc-1"})
+        logger.log_event(
+            "tool_result",
+            {"name": "list_dir", "content": "ok", "success": True, "id": "tc-1"},
+        )
+
+        entries = _read_entries(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert entries[0]["tool"] == "list_dir"
+        assert entries[0]["args"] == {}
+
+    def test_tool_call_accepts_tool_call_id_alias(self, logger, tmp_sessions_dir):
+        logger.log_event(
+            "tool_call",
+            {"name": "read_file", "args": {"path": "/tmp/x"}, "tool_call_id": "tc-1"},
+        )
+
+        entries = _read_entries(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert entries[0]["tool_id"] == "tc-1"
+
     def test_tool_call_args_truncated_at_2000(self, logger, tmp_sessions_dir):
         logger.log_event(
             "tool_call",
@@ -175,7 +232,9 @@ class TestToolCallLogging:
         assert len(entry["args"]["serialized"]) == 2000
 
     def test_tool_result_logged(self, logger, tmp_sessions_dir):
-        logger.log_event("tool_result", {"name": "read_file", "content": "hello", "success": True})
+        logger.log_event(
+            "tool_result", {"name": "read_file", "content": "hello", "success": True}
+        )
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         entry = json.loads(lines[0])
         assert entry["kind"] == "tool_result"
@@ -185,13 +244,17 @@ class TestToolCallLogging:
 
     def test_tool_result_content_truncated_at_2000(self, logger, tmp_sessions_dir):
         long_content = "x" * 3000
-        logger.log_event("tool_result", {"name": "grep", "content": long_content, "success": True})
+        logger.log_event(
+            "tool_result", {"name": "grep", "content": long_content, "success": True}
+        )
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         entry = json.loads(lines[0])
         assert len(entry["content"]) == 2000
 
     def test_tool_result_short_content_not_truncated(self, logger, tmp_sessions_dir):
-        logger.log_event("tool_result", {"name": "grep", "content": "short", "success": True})
+        logger.log_event(
+            "tool_result", {"name": "grep", "content": "short", "success": True}
+        )
         lines = _read_lines(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
         entry = json.loads(lines[0])
         assert entry["content"] == "short"
@@ -211,6 +274,24 @@ class TestSubagentLogging:
         assert entry["name"] == "research-agent"
         assert entry["description"] == "search papers"
         assert "agent_id" not in entry
+
+    def test_placeholder_subagent_start_is_not_logged(self, logger, tmp_sessions_dir):
+        logger.log_event(
+            "subagent_start",
+            {"type": "subagent_start", "name": "sub-agent", "description": ""},
+        )
+        logger.log_event(
+            "subagent_start",
+            {
+                "type": "subagent_start",
+                "name": "research-agent",
+                "description": "search papers",
+            },
+        )
+
+        entries = _read_entries(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        assert [entry["kind"] for entry in entries] == ["subagent_start"]
+        assert entries[0]["name"] == "research-agent"
 
     def test_subagent_end_logged(self, logger, tmp_sessions_dir):
         event = {"type": "subagent_end", "name": "research-agent"}
@@ -282,13 +363,16 @@ class TestErrorHandling:
         blocker = tmp_path / "sessions"
         blocker.write_text("not a dir")
         audit = AuditLogger(thread_id="t1", sessions_dir=blocker)
+        audit.log_session_start(model="claude-sonnet-4-6", provider="anthropic")
         audit.log_session_end()
 
 
 class TestMultipleEvents:
     def test_multiple_events_appended_in_order(self, logger, tmp_sessions_dir):
         logger.log_event("tool_call", {"name": "read_file", "args": {}, "id": "tc-1"})
-        logger.log_event("tool_result", {"name": "read_file", "content": "data", "success": True})
+        logger.log_event(
+            "tool_result", {"name": "read_file", "content": "data", "success": True}
+        )
         logger.log_event(
             "tool_call",
             {"name": "write_file", "args": {"path": "/tmp/y"}, "id": "tc-2"},
@@ -320,7 +404,30 @@ class TestMultipleEvents:
         )
 
         assert logger._pending_tool_calls == {}
-        assert logger._logged_tool_calls == set()
+        assert logger._logged_tool_call_ids == set()
+
+    def test_flushed_pending_tool_call_uses_monotonic_append_timestamp(
+        self, logger, tmp_sessions_dir
+    ):
+        logger.log_event("tool_call", {"name": "task", "id": "tc-1"})
+        time.sleep(0.01)
+        logger.log_event(
+            "subagent_start",
+            {
+                "type": "subagent_start",
+                "name": "research-agent",
+                "description": "search papers",
+            },
+        )
+        time.sleep(0.01)
+        logger.log_event(
+            "tool_result",
+            {"name": "task", "content": "ok", "success": True, "id": "tc-1"},
+        )
+
+        entries = _read_entries(tmp_sessions_dir / "test-thread-001" / "audit.jsonl")
+        timestamps = [entry["ts"] for entry in entries]
+        assert timestamps == sorted(timestamps)
 
 
 def _read_lines(path: Path) -> list[str]:

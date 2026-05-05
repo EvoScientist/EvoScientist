@@ -172,15 +172,26 @@ def _build_welcome_banner(
 
 def _is_final_response(state: StreamState) -> bool:
     """Check if all tools are done and no sub-agents are active."""
-    n_visible = 0
-    n_done = 0
-    for i, tc in enumerate(state.tool_calls):
-        if tc.get("name") in _INTERNAL_TOOLS:
+    pending_tool_ids = set()
+    pending_tool_names: list[str] = []
+    for tc in state.tool_calls:
+        name = tc.get("name")
+        if name in _INTERNAL_TOOLS:
             continue
-        n_visible += 1
-        if i < len(state.tool_results):
-            n_done += 1
-    has_pending = n_visible > n_done
+        tool_id = tc.get("id", "")
+        if tool_id:
+            pending_tool_ids.add(tool_id)
+        elif name:
+            pending_tool_names.append(name)
+    for result in state.tool_results:
+        result_id = result.get("tool_call_id", "")
+        if result_id and result_id in pending_tool_ids:
+            pending_tool_ids.discard(result_id)
+            continue
+        result_name = result.get("name", "")
+        if result_name in pending_tool_names:
+            pending_tool_names.remove(result_name)
+    has_pending = bool(pending_tool_ids or pending_tool_names)
     any_active_sa = any(sa.is_active for sa in state.subagents)
     return not has_pending and not any_active_sa and not state.is_processing
 
@@ -1446,8 +1457,18 @@ def run_textual_interactive(
                             # Match via state's deduplicated tool_calls (uses tool_id)
                             matched = False
                             matched_tid = ""
+                            result_tool_id = event.get("id", "")
+                            if result_tool_id and result_tool_id in tool_widgets:
+                                tw = tool_widgets[result_tool_id]
+                                if tw._status == "running":
+                                    if result_success:
+                                        tw.set_success(result_content)
+                                    else:
+                                        tw.set_error(result_content)
+                                    matched = True
+                                    matched_tid = result_tool_id
                             result_idx = len(state.tool_results) - 1
-                            if 0 <= result_idx < len(state.tool_calls):
+                            if not matched and 0 <= result_idx < len(state.tool_calls):
                                 tc = state.tool_calls[result_idx]
                                 tid = tc.get("id", "")
                                 if tid and tid in tool_widgets:
@@ -1507,7 +1528,8 @@ def run_textual_interactive(
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
                                 subagent_widgets[sa_name] = sa_w
-                            self._audit_logger.log_event("subagent_start", event)
+                            if sa_name != "sub-agent" or sa_desc:
+                                self._audit_logger.log_event("subagent_start", event)
 
                         elif event_type == "subagent_tool_call":
                             sa_name = event.get("subagent", "sub-agent")

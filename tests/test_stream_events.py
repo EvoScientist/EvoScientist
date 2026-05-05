@@ -11,6 +11,7 @@ from EvoScientist.stream.events import (
     _extract_tool_content,
     _find_summarization_event_payload,
     _process_chunk_content,
+    _process_tool_result,
     stream_agent_events,
 )
 
@@ -95,6 +96,26 @@ class TestExtractToolContent:
         content, is_image = _extract_tool_content(msg)
         assert is_image is False
         assert content == "some result"
+
+
+class TestProcessToolResult:
+    def test_tool_result_event_includes_tool_call_id(self):
+        from EvoScientist.stream.emitter import StreamEventEmitter
+        from EvoScientist.stream.tracker import ToolCallTracker
+
+        emitter = StreamEventEmitter()
+        tracker = ToolCallTracker()
+        msg = SimpleNamespace(
+            content="ok",
+            name="read_file",
+            tool_call_id="tc-1",
+            additional_kwargs={},
+        )
+
+        events = list(_process_tool_result(msg, emitter, tracker))
+
+        assert events[-1].type == "tool_result"
+        assert events[-1].data["id"] == "tc-1"
 
 
 # =============================================================================
