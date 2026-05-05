@@ -126,7 +126,7 @@ def is_langgraph_dev_running(
     url = base_url or _base_url(port)
     try:
         return httpx.get(f"{url}/ok", timeout=1.0).status_code == 200
-    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+    except (httpx.TransportError, OSError):
         return False
 
 
@@ -572,6 +572,13 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
                             pass
                     parent.kill()
                 except psutil.NoSuchProcess:
+                    pass
+                # Reap the Popen handle so we don't leave a zombie until
+                # the CLI itself exits. Short timeout because parent.kill()
+                # above already issued SIGKILL to the process tree.
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
                     pass
 
         if proc is _PROCESS:
