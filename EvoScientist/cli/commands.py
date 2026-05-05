@@ -1609,6 +1609,7 @@ def _main_callback(
             resolve_thread_id_prefix,
         )
         from .interactive import cmd_run
+        from .resume_hint import print_resume_hint
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
@@ -1638,15 +1639,21 @@ def _main_callback(
                     checkpointer=checkpointer,
                     config=config,
                 )
-                cmd_run(
-                    agent,
-                    prompt,
-                    thread_id=tid,
-                    show_thinking=show_thinking,
-                    workspace_dir=workspace_dir,
-                    model=config.model,
-                    ui_backend=config.ui_backend,
-                )
+                try:
+                    cmd_run(
+                        agent,
+                        prompt,
+                        thread_id=tid,
+                        show_thinking=show_thinking,
+                        workspace_dir=workspace_dir,
+                        model=config.model,
+                        ui_backend=config.ui_backend,
+                    )
+                finally:
+                    try:
+                        print_resume_hint(tid, console=console)
+                    except Exception:
+                        pass
 
         import nest_asyncio  # type: ignore[import-untyped]
 

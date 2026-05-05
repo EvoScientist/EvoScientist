@@ -329,6 +329,7 @@ def start_langgraph_dev(
     *,
     port: int = _DEFAULT_PORT,
     file_persistence: bool = True,
+    jobs_per_worker: int = 10,
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -471,7 +472,7 @@ def start_langgraph_dev(
                 "--port",
                 str(port),
                 "--n-jobs-per-worker",
-                "10",
+                str(jobs_per_worker),
                 "--no-browser",
             ],
             cwd=str(workspace_dir),
@@ -656,6 +657,7 @@ def _ensure_langgraph_dev_locked(
     global _ASYNC_SUBAGENTS_AVAILABLE
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
+    jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
 
     ws_path = Path(workspace_dir) if workspace_dir is not None else None
 
@@ -714,6 +716,7 @@ def _ensure_langgraph_dev_locked(
             workspace_dir=ws_path,
             port=port,
             file_persistence=file_persistence,
+            jobs_per_worker=jobs_per_worker,
         )
     except (FileNotFoundError, RuntimeError) as exc:
         # Startup failed — keep async subagents disabled so the main agent

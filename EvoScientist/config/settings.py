@@ -115,6 +115,13 @@ class EvoScientistConfig:
     # regardless of this setting.
     langgraph_dev_file_persistence: bool = True
 
+    # Concurrency: how many runs each langgraph dev worker processes in parallel.
+    # 10 is the langgraph dev recommended default and works well on a typical
+    # dev machine. Lower it (e.g., 4) on memory-constrained or low-core
+    # machines if multiple async sub-agents in flight cause noticeable
+    # slowdown.
+    langgraph_dev_jobs_per_worker: int = 10
+
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
     # ``agent.invoke()`` — i.e., this is per-turn, NOT per-conversation. For
@@ -437,6 +444,7 @@ _ENV_MAPPINGS = {
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
+    "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
 }
 
