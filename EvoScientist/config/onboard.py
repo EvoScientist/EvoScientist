@@ -2560,18 +2560,69 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             enabled_channels.append("imessage")
             continue
 
-        # Prompt for required fields
-        for field_name, prompt_label in required_fields:
-            current = getattr(config, field_name, "")
-            value = questionary.text(
-                f"{prompt_label}:",
-                default=current,
+        # QQ: offer scan-to-configure before falling back to manual entry.
+        # The bot must already exist at q.qq.com — scanning binds the
+        # developer's QQ account to it and returns app_id + client_secret.
+        _qq_scanned = False
+        if ch_name == "qq":
+            scan_choices = [
+                Choice(
+                    title="Scan QR code  (recommended — auto-fill App ID & Secret)",
+                    value="scan",
+                ),
+                Choice(title="Enter App ID and Secret manually", value="manual"),
+            ]
+            scan_choice = questionary.select(
+                "Configure QQ Bot:",
+                choices=scan_choices,
+                default="scan",
                 style=WIZARD_STYLE,
                 qmark=f"  {QMARK}",
+                use_indicator=True,
             ).ask()
-            if value is None:
+            if scan_choice is None:
                 raise KeyboardInterrupt()
-            updates[field_name] = value.strip()
+
+            if scan_choice == "scan":
+                from ..channels.qq.onboard import qr_register
+
+                console.print(
+                    "  [dim]Make sure the bot is registered at"
+                    " https://q.qq.com first — scanning binds an"
+                    " existing app, it does not create one.[/dim]"
+                )
+                try:
+                    creds = qr_register()
+                except Exception as exc:
+                    console.print(f"  [red]✗ Scan failed: {exc}[/red]")
+                    creds = None
+
+                if creds:
+                    updates["qq_app_id"] = creds["app_id"]
+                    updates["qq_app_secret"] = creds["client_secret"]
+                    console.print(
+                        f"  [green]✓ Bound QQ Bot (App ID: {creds['app_id']})[/green]"
+                    )
+                    _qq_scanned = True
+                else:
+                    console.print(
+                        "  [yellow]⚠ Scan did not complete — falling"
+                        " back to manual entry.[/yellow]"
+                    )
+
+        # Prompt for required fields
+        if not _qq_scanned:
+            for field_name, prompt_label in required_fields:
+                current = getattr(config, field_name, "")
+                value = questionary.text(
+                    f"{prompt_label}:",
+                    default=current,
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                ).ask()
+                if value is None:
+                    raise KeyboardInterrupt()
+                updates[field_name] = value.strip()
 
         # Feishu: subscription mode + optional fields
         if ch_name == "feishu":
