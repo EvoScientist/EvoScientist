@@ -184,7 +184,7 @@ github:
 | `writing-agent` | Report writing |
 
 > [!NOTE]
-> Tools routed to sub-agents are injected automatically — no need to edit `subagent.yaml`.
+> Tools routed to sub-agents are injected automatically — no need to edit any `EvoScientist/subagents/*.yaml` file.
 
 ## 🔍 Tool Filtering with Wildcards
 

@@ -115,40 +115,77 @@ def load_subagents(
     tool_registry: dict[str, Any],
     prompt_refs: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Load subagent definitions from YAML and wire up tools.
+    """Load subagent definitions from a directory of YAML files and wire up tools.
 
     NOTE: This is a custom utility. deepagents does not natively load subagents
     from files - they're normally defined inline in the create_deep_agent() call.
     We externalize to YAML here to keep configuration separate from code.
 
-    Supported YAML schemas:
+    ``config_path`` must be a directory containing one ``<name>.yaml`` per
+    sub-agent. All ``*.yaml`` files are merged into a single mapping. Files
+    starting with ``.`` (dotfiles, editor swap files) or ``_`` (private /
+    disabled) are ignored. ``.yml`` is intentionally not supported — keeps
+    one canonical extension and avoids the dev-vs-wheel packaging mismatch.
 
-    1) Mapping style (recommended):
-       planner-agent:
-         description: "..."
-         tools: [think_tool]
-         system_prompt: |
-           ...
-       research-agent:
-         description: "..."
-         tools: [tavily_search, think_tool]
-         system_prompt_ref: RESEARCHER_INSTRUCTIONS
+    Each file's top level must be a mapping ``{<agent-name>: <spec>}``::
 
-    2) List style (legacy):
-       subagents:
-         - name: planner-agent
-           description: "..."
-           tools: [think_tool]
-           system_prompt: |
-             ...
+        planner-agent:
+          description: "..."
+          tools: [think_tool]
+          system_prompt: |
+            ...
+        research-agent:
+          description: "..."
+          tools: [tavily_search, think_tool]
+          system_prompt_ref: RESEARCHER_INSTRUCTIONS
     """
     prompt_refs = prompt_refs or {}
 
-    with config_path.open(encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+    if not config_path.is_dir():
+        raise ValueError(
+            f"{config_path}: sub-agent config must be a directory "
+            f"containing one <name>.yaml per agent"
+        )
 
-    if not isinstance(config, dict) or not config:
-        raise ValueError("subagent.yaml must be a mapping or contain 'subagents:'")
+    # Only ``.yaml`` is supported (canonical extension). Skip files starting
+    # with ``_`` (private / disabled) or ``.`` (dotfiles, editor swap files
+    # like ``.foo.yaml.swp``). ``.yml`` is intentionally not loaded — keeps
+    # one canonical extension across the project, simplifies packaging
+    # (no need for a parallel ``subagents/*.yml`` entry in ``pyproject.toml``
+    # ``package-data``), and matches every existing yaml file in this repo.
+    config: dict[str, Any] = {}
+    for yml in sorted(config_path.glob("*.yaml")):
+        if yml.name.startswith(".") or yml.name.startswith("_"):
+            continue
+        with yml.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            # Empty file — skip silently (matches dotfile/underscore skip behavior)
+            continue
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{yml}: top-level must be a mapping (one entry per sub-agent)"
+            )
+        # Detect duplicate keys across files
+        for key in data:
+            if key in config:
+                raise ValueError(
+                    f"Sub-agent {key!r} defined in multiple files; "
+                    f"second occurrence in {yml.name}"
+                )
+        for key, spec in data.items():
+            if not isinstance(spec, dict):
+                raise ValueError(
+                    f"{yml}: sub-agent {key!r} must map to a spec dict, "
+                    f"got {type(spec).__name__}"
+                )
+        config.update(data)
+
+    if not config:
+        raise ValueError(
+            f"{config_path}: no sub-agent definitions found "
+            f"(expected one or more <name>.yaml files)"
+        )
 
     subagents: list[dict[str, Any]] = []
 
@@ -185,26 +222,24 @@ def load_subagents(
                     )
             subagent["tools"] = resolved
 
+        # Internal field: carries the ``async:`` yaml flag through to
+        # ``_maybe_swap_async_subagents`` so the swap doesn't need a second
+        # yaml pass to discover async-flagged agents. Underscore prefix marks
+        # it as internal — must be popped before passing to deepagents.
+        async_val = spec.get("async", False)
+        if not isinstance(async_val, bool):
+            # Reject quoted-string yaml values like ``async: "false"`` —
+            # ``bool("false")`` is ``True`` (non-empty string), which silently
+            # flips the agent into async mode. Fail loud instead.
+            raise ValueError(
+                f"Subagent {name!r}: 'async' must be a boolean, "
+                f"got {type(async_val).__name__}: {async_val!r}"
+            )
+        subagent["_async"] = async_val
+
         return subagent
 
-    # Legacy list style
-    if "subagents" in config:
-        items = config.get("subagents")
-        if not isinstance(items, list) or not items:
-            raise ValueError("subagent.yaml must contain a non-empty 'subagents:' list")
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if not name:
-                raise ValueError("Each subagent entry must have a 'name'")
-            subagents.append(_build_one(name, item))
-        return subagents
-
-    # Mapping style: {<name>: <spec>}
     for name, spec in config.items():
-        if not isinstance(spec, dict):
-            continue
         subagents.append(_build_one(name, spec))
 
     return subagents

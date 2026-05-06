@@ -21,11 +21,12 @@ from EvoScientist.config.onboard import (
 
 
 class TestConstants:
-    def test_steps_has_eleven_items(self):
-        """Test that STEPS contains exactly 11 steps."""
-        assert len(STEPS) == 11
+    def test_steps_has_twelve_items(self):
+        """Test that STEPS contains exactly 12 steps."""
+        assert len(STEPS) == 12
         assert STEPS == [
             "UI",
+            "LangGraph Port",
             "Provider",
             "API Key",
             "Model",

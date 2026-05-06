@@ -1,0 +1,11 @@
+{
+    "dependencies": ["."],
+    "graphs": {
+        "EvoScientist": "EvoScientist.langgraph_dev.main_graph:EvoScientist_agent",
+        "writing-agent": "EvoScientist.langgraph_dev.graphs:writing_agent",
+        "data-analysis-agent": "EvoScientist.langgraph_dev.graphs:data_analysis_agent"
+    },
+    "config": {
+        "recursion_limit": 1000000
+    }
+}
