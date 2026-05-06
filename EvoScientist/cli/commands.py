@@ -798,6 +798,72 @@ def _serve_process_message(
 # =============================================================================
 
 
+def _serve_drain_notifications(
+    *,
+    agent_holder: dict,
+    model: str | None,
+    workspace_dir: str,
+    show_thinking: bool,
+) -> None:
+    """Drain the async-task notification queue in headless serve mode.
+
+    Mirrors the Rich CLI's ``_check_channel_queue`` notification path.
+    Uses a dedicated event loop (same pattern as serve mode's slash dispatch).
+    """
+    import asyncio as _aio
+
+    from EvoScientist.cli import async_notifier
+
+    from .tui_runtime import run_streaming
+
+    def _run_notification_message(text: str) -> None:
+        """Synchronous wrapper: run the agent on the synthetic notification text."""
+        console.print("[dim][async-notifier: auto][/dim]")
+        meta = build_metadata(workspace_dir, model)
+        try:
+            run_streaming(
+                ui_backend="cli",
+                agent=agent_holder["agent"],
+                message=text,
+                thread_id=agent_holder["thread_id"],
+                show_thinking=show_thinking,
+                interactive=True,
+                metadata=meta,
+            )
+        except Exception as exc:
+            _serve_logger.warning("Notification agent turn failed: %s", exc)
+
+    async def _run_notification_message_async(text: str) -> None:
+        await _aio.to_thread(_run_notification_message, text)
+
+    async def _read_async_tasks() -> dict:
+        agent = agent_holder.get("agent")
+        thread_id = agent_holder.get("thread_id")
+        if agent is None or not thread_id:
+            return {}
+        try:
+            snap = await agent.aget_state({"configurable": {"thread_id": thread_id}})
+            return (snap.values or {}).get("async_tasks") or {}
+        except Exception:
+            return {}
+
+    async def _consume() -> None:
+        await async_notifier.consume_notifications(
+            run_message=_run_notification_message_async,
+            read_async_tasks_state=_read_async_tasks,
+        )
+
+    _notif_loop: _aio.AbstractEventLoop | None = None
+    try:
+        _notif_loop = _aio.new_event_loop()
+        _notif_loop.run_until_complete(_consume())
+    except Exception as exc:
+        _serve_logger.warning("Notification drain failed: %s", exc)
+    finally:
+        if _notif_loop is not None:
+            _notif_loop.close()
+
+
 @app.command()
 def serve(
     no_thinking: bool = typer.Option(
@@ -960,23 +1026,35 @@ def serve(
             try:
                 msg = _message_queue.get(timeout=0.5)
             except queue.Empty:
-                continue
+                msg = None
             if shutdown_event.is_set():
                 break
-            try:
-                _serve_process_message(
-                    msg,
+            if msg is not None:
+                try:
+                    _serve_process_message(
+                        msg,
+                        agent_holder=agent_holder,
+                        model=config.model,
+                        workspace_dir=ws,
+                        show_thinking=effective_channel_thinking,
+                        on_cmd_completed=_serve_on_cmd_completed,
+                        start_new_session_cb=_serve_start_new_session_cb,
+                        channel_runtime=channel_runtime,
+                    )
+                except KeyboardInterrupt:
+                    shutdown_event.set()
+                    break
+
+            # Poll notification queue when idle (no channel message was pending).
+            from EvoScientist.cli import async_notifier
+
+            if not async_notifier._notification_queue.empty():
+                _serve_drain_notifications(
                     agent_holder=agent_holder,
                     model=config.model,
                     workspace_dir=ws,
                     show_thinking=effective_channel_thinking,
-                    on_cmd_completed=_serve_on_cmd_completed,
-                    start_new_session_cb=_serve_start_new_session_cb,
-                    channel_runtime=channel_runtime,
                 )
-            except KeyboardInterrupt:
-                shutdown_event.set()
-                break
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:

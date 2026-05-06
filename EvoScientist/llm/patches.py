@@ -522,3 +522,147 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
         return payload
 
     model._get_request_payload = _patched
+
+
+# ---------------------------------------------------------------------------
+# Patch: deepagents _build_start_tool to spawn an EvoSci watcher per launch.
+# The watcher monitors the async subagent's run stream and enqueues a
+# notification when it reaches a terminal state.
+# ---------------------------------------------------------------------------
+_async_watcher_patched = False
+
+
+def _patch_deepagents_async_watcher() -> None:
+    """Wrap deepagents._build_start_tool to spawn an EvoSci watcher per launch.
+
+    The patch is idempotent (applied once per process). It preserves the original
+    StructuredTool's return shape (Command); it only adds a side-effect: after
+    `runs.create()` returns, spawn `async_notifier.watch_run_and_notify()` so
+    the supervisor receives a push notification when the sub-agent terminates.
+
+    The watcher runs in the agent's asyncio event loop. It watches the run's
+    event stream asynchronously and enqueues a notification to the thread-safe
+    queue when the run reaches a terminal state (success, error, cancelled, etc).
+    """
+    global _async_watcher_patched
+    if _async_watcher_patched:
+        return
+
+    try:
+        import deepagents.middleware.async_subagents as ds_mod
+
+        orig_build = ds_mod._build_start_tool
+
+        def patched_build_start_tool(agent_map, clients, tool_description):
+            # Build the original tool
+            tool = orig_build(agent_map, clients, tool_description)
+            orig_coro = tool.coroutine
+
+            async def wrapped_coro(description, subagent_type, runtime):
+                # Call the original coroutine to launch the subagent
+                result = await orig_coro(description, subagent_type, runtime)
+
+                # If successful (returned a Command), extract task IDs and spawn watchers
+                if result is not None:
+                    from langgraph.types import Command
+
+                    if isinstance(result, Command):
+                        # The Command.update dict contains "async_tasks" keyed by task_id
+                        tasks_update = (result.update or {}).get(
+                            "async_tasks", {}
+                        ) or {}
+                        for task_id, task in tasks_update.items():
+                            try:
+                                from EvoScientist.cli import async_notifier
+
+                                # Get the async client for this subagent type
+                                client = clients.get_async(subagent_type)
+                                # Spawn the watcher (non-blocking, returns immediately).
+                                # Pass `description` so the watcher captures the
+                                # original prompt for friendlier completion display.
+                                async_notifier.spawn_watcher(
+                                    client,
+                                    task_id,
+                                    task["run_id"],
+                                    task["agent_name"],
+                                    prompt=description,
+                                )
+                            except Exception:
+                                import logging
+
+                                logging.getLogger(__name__).warning(
+                                    "Failed to spawn watcher for task %s",
+                                    task_id,
+                                    exc_info=True,
+                                )
+
+                return result
+
+            # Replace the tool's coroutine with the wrapped version
+            tool.coroutine = wrapped_coro
+            return tool
+
+        ds_mod._build_start_tool = patched_build_start_tool
+
+        # Also wrap _build_update_tool so that update_async_task (which creates
+        # a new run_id on the same thread_id) also spawns a replacement watcher.
+        orig_build_update = ds_mod._build_update_tool
+
+        def patched_build_update_tool(agent_map, clients):
+            tool = orig_build_update(agent_map, clients)
+            orig_coro = tool.coroutine
+
+            async def wrapped_coro(task_id, message, runtime):
+                # Cancel the existing watcher for this thread_id BEFORE
+                # awaiting orig_coro.  The update creates a new run on the
+                # same thread_id via runs.create(..., multitask_strategy=
+                # "interrupt"), which causes the old run's join_stream to
+                # close cleanly.  Without pre-cancellation the old watcher
+                # would observe a clean stream exit and default to
+                # status="success", enqueuing a STALE notification before
+                # spawn_watcher (called after orig_coro) can cancel it.
+                # Pre-cancellation is safe because task_id IS the thread_id
+                # in the deepagents async subagent protocol.
+                try:
+                    from EvoScientist.cli import async_notifier as _an
+
+                    old_task = _an._watcher_by_thread.get(task_id)
+                    if old_task is not None and not old_task.done():
+                        old_task.cancel()
+                except Exception:
+                    pass
+
+                result = await orig_coro(task_id, message, runtime)
+                from langgraph.types import Command
+
+                if isinstance(result, Command):
+                    tasks_update = (result.update or {}).get("async_tasks", {}) or {}
+                    for tid, task in tasks_update.items():
+                        try:
+                            from EvoScientist.cli import async_notifier
+
+                            client = clients.get_async(task["agent_name"])
+                            async_notifier.spawn_watcher(
+                                client,
+                                tid,
+                                task["run_id"],
+                                task["agent_name"],
+                                prompt=message,
+                            )
+                        except Exception:
+                            import logging
+
+                            logging.getLogger(__name__).warning(
+                                "Failed to spawn update watcher for task %s",
+                                tid,
+                                exc_info=True,
+                            )
+                return result
+
+            tool.coroutine = wrapped_coro
+            return tool
+
+        ds_mod._build_update_tool = patched_build_update_tool
+        _async_watcher_patched = True
+    except Exception:
+        pass

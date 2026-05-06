@@ -779,6 +779,7 @@ def create_streaming_display(
         elements.append(Spinner("dots", text=" Processing...", style="cyan"))
     if status_footer is not None:
         elements.append(status_footer)
+
     return Group(*elements)
 
 

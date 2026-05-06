@@ -380,6 +380,9 @@ def run_textual_interactive(
             self._channel_timer: Any = None
             self._started_channel_types: list[str] = []
             self._busy = False
+            self._notification_consuming: bool = (
+                False  # prevent overlapping consume coroutines
+            )
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -779,17 +782,91 @@ def run_textual_interactive(
             self._channel_timer = self.set_interval(0.1, self._poll_channel_queue)
 
         def _poll_channel_queue(self) -> None:
-            """Poll the channel message queue (called every 100ms)."""
+            """Poll the channel + notification queues (every 100ms)."""
+            from EvoScientist.cli import async_notifier
+
             try:
                 msg = _message_queue.get_nowait()
             except queue.Empty:
+                msg = None
+            if msg is not None:
+                if self._busy:
+                    _message_queue.put(msg)
+                    return
+                self.call_later(
+                    lambda m=msg: asyncio.ensure_future(
+                        self._process_channel_message(m)
+                    )
+                )
                 return
-            if self._busy:
-                _message_queue.put(msg)
-                return
-            self.call_later(
-                lambda m=msg: asyncio.ensure_future(self._process_channel_message(m))
+
+            # Notification path (only when idle and NOT already consuming).
+            # _notification_consuming is set synchronously at the schedule point
+            # so that the next poll tick cannot schedule a second consumer before
+            # the first one has a chance to run (fixes overlapping-turn bug).
+            if (
+                not async_notifier._notification_queue.empty()
+                and not self._busy
+                and not self._notification_consuming
+            ):
+                self._notification_consuming = True
+                self.call_later(
+                    lambda: asyncio.ensure_future(self._consume_notifications_tui())
+                )
+
+        async def _consume_notifications_tui(self) -> None:
+            """Drain the notification queue and inject a synthetic agent turn."""
+            from EvoScientist.cli import async_notifier
+
+            try:
+                await async_notifier.consume_notifications(
+                    run_message=self._inject_notification_tui,
+                    read_async_tasks_state=self._read_async_tasks_tui,
+                )
+            finally:
+                # Clear the guard flag regardless of success or exception so
+                # future notifications can schedule a new consume coroutine.
+                self._notification_consuming = False
+
+        async def _inject_notification_tui(self, text: str, notifs: list) -> None:
+            """Run a synthetic user turn for the batched async-task notification.
+
+            Renders one compact tool-result-style line per task (matching the
+            Rich CLI aesthetic) instead of a single breadcrumb. The LLM still
+            receives the full ``format_batch_message`` text; only the visual
+            representation changes.
+
+            Args:
+                text: Full structured LLM message from ``format_batch_message``.
+                notifs: Survivor notification list for per-task visual rendering.
+            """
+            from EvoScientist.cli.async_notifier import format_notification_lines
+
+            for line_text, line_style in format_notification_lines(notifs):
+                self._append_system(line_text, style=line_style)
+            # Fire-and-forget the turn as an INDEPENDENT task — matches the
+            # keyboard input path (line ~2113). Queue-triggered turns that
+            # `await _run_turn` from inside a nested call_later chain don't
+            # get viewport-follow during streaming (only after completion).
+            # Mark busy synchronously so the next poll tick doesn't re-enter.
+            self._busy = True
+            self._run_task = asyncio.ensure_future(
+                self._run_turn(text, skip_user_message=True)
             )
+
+        async def _read_async_tasks_tui(self) -> dict[str, dict]:
+            """Read async_tasks from current agent state for dedup."""
+            agent = self._agent_loader.agent
+            thread_id = self._conversation_tid
+            if agent is None or not thread_id:
+                return {}
+            try:
+                snap = await agent.aget_state(
+                    {"configurable": {"thread_id": thread_id}}
+                )
+                return (snap.values or {}).get("async_tasks") or {}
+            except Exception:
+                return {}
 
         async def _on_channel_cmd_completed(
             self,
@@ -1797,8 +1874,17 @@ def run_textual_interactive(
 
             return response
 
-        async def _run_turn(self, user_text: str) -> None:
-            """Handle a user turn: stream agent response with widgets."""
+        async def _run_turn(
+            self, user_text: str, *, skip_user_message: bool = False
+        ) -> None:
+            """Handle a user turn: stream agent response with widgets.
+
+            Args:
+                user_text: The user's message text.
+                skip_user_message: If True, suppress the UserMessage widget echo
+                    (caller has already displayed a visual representation of the
+                    input — e.g. async-notifier per-task lines).
+            """
             cancelled = False
             try:
                 self._busy = True
@@ -1824,6 +1910,7 @@ def run_textual_interactive(
                     message_to_send,
                     display_text=user_text,
                     file_warnings=file_warnings,
+                    skip_user_message=skip_user_message,
                 )
             except asyncio.CancelledError:
                 cancelled = True

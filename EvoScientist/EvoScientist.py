@@ -262,6 +262,11 @@ def _maybe_swap_async_subagents(subs: list) -> list:
             s.pop("_async", None)
         return subs
 
+    # Apply the watcher monkey-patch (idempotent) so launches spawn watchers.
+    from EvoScientist.llm.patches import _patch_deepagents_async_watcher
+
+    _patch_deepagents_async_watcher()
+
     # The ``_async`` flag was set by ``utils.load_subagents._build_one`` from
     # each yaml's ``async:`` field. No need to re-parse the yaml files here.
     async_specs: dict[str, str] = {

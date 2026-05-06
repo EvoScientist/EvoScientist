@@ -171,3 +171,34 @@ def test_swap_uses_configured_port():
     ):
         out = _maybe_swap_async_subagents(subs)
     assert out[0]["url"] == "http://localhost:9999"
+
+
+# =============================================================================
+# Watcher patch application
+# =============================================================================
+
+
+def test_maybe_swap_applies_watcher_patch_when_enabled():
+    """When async subagents are enabled, the watcher patch must be applied."""
+    from types import SimpleNamespace
+
+    import EvoScientist.llm.patches as patches_mod
+
+    cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+
+    called = {"n": 0}
+
+    def fake_patch():
+        called["n"] += 1
+
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ),
+        patch.object(patches_mod, "_patch_deepagents_async_watcher", fake_patch),
+    ):
+        subs = [_sub("writing-agent", async_flag=True)]
+        _maybe_swap_async_subagents(subs)
+        assert called["n"] == 1
