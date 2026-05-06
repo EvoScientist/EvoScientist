@@ -5,7 +5,6 @@ fix upstream bugs, applied at import time or on first use.
 
 Patches:
     - _patch_anthropic_proxy_compat: ccproxy dict→Pydantic model mismatch
-    - _patch_openrouter_reasoning_details: reasoning_details schema errors
     - _patch_openai_compat_content: list content→string for strict APIs
     - _patch_ccproxy_codex_compat: ccproxy model fixes + langchain None guard
     - _patch_ccproxy_system_to_developer: system→developer role for ccproxy
@@ -171,36 +170,6 @@ def _patch_ccproxy_codex_compat() -> None:
 
 
 _patch_ccproxy_codex_compat()
-
-
-# ---------------------------------------------------------------------------
-# Patch: langchain-openrouter v0.2.1 — _convert_message_to_dict() serializes
-# reasoning_details back to the API, but streaming chunks use wrong field
-# names per type (thinking→content, reasoning.summary→summary,
-# reasoning.encrypted→data), causing Pydantic errors on multi-turn.
-# Fix: wrap the function to drop reasoning_details from output.
-# ---------------------------------------------------------------------------
-_openrouter_patched = False
-
-
-def _patch_openrouter_reasoning_details() -> None:
-    global _openrouter_patched
-    if _openrouter_patched:
-        return
-    try:
-        import langchain_openrouter.chat_models as _mod
-
-        _orig = _mod._convert_message_to_dict
-
-        def _patched(message: Any) -> Any:
-            result = _orig(message)
-            result.pop("reasoning_details", None)
-            return result
-
-        _mod._convert_message_to_dict = _patched
-        _openrouter_patched = True
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
