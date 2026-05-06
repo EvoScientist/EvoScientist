@@ -152,6 +152,15 @@ class EvoScientistConfig:
     wechat_mp_app_secret: str = ""
     wechat_mp_token: str = ""
     wechat_mp_encoding_aes_key: str = ""
+    # Personal WeChat (iLink Bot) — credentials obtained via QR-code login.
+    # Run: python -m EvoScientist.channels.wechat.serve --qr-login
+    wechat_personal_account_id: str = ""
+    wechat_personal_token: str = ""
+    wechat_personal_base_url: str = ""
+    wechat_personal_cdn_base_url: str = ""
+    wechat_personal_dm_policy: str = "open"
+    wechat_personal_group_policy: str = "disabled"
+    wechat_personal_group_allowed: str = ""
 
     # DingTalk Settings
     dingtalk_client_id: str = ""
