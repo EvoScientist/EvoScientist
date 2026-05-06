@@ -166,7 +166,7 @@ ignore = [
 ]
 fixable = ["ALL"]
 unfixable = []
-allowed-confusables = ["–", "❯"]
+allowed-confusables = ["–", "❯", "：", "（", "）", "，"]
 
 [tool.ruff.format]
 quote-style = "double"

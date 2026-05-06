@@ -2493,7 +2493,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             "wechat",
             "WeChat",
             [],  # backend-specific fields prompted in the wechat branch below
-            "aiohttp",
+            ("aiohttp", "qrcode", "Crypto", "certifi"),
             "wechat",
         ),
         (
@@ -2569,9 +2569,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
         # Check pip dependency before proceeding
         if import_check:
+            _required_imports: tuple[str, ...] = (
+                (import_check,) if isinstance(import_check, str) else tuple(import_check)
+            )
             _pkg_ready = False
             try:
-                __import__(import_check)
+                for _module_name in _required_imports:
+                    __import__(_module_name)
                 _pkg_ready = True
             except ImportError:
                 console.print("  [yellow]✗ Required package not installed.[/yellow]")
@@ -2597,9 +2601,10 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     else:
                         _ok = install_library(f"evoscientist[{pip_extra}]")
                     if _ok:
-                        # Verify the import actually works now
+                        # Verify the imports actually work now
                         try:
-                            __import__(import_check)
+                            for _module_name in _required_imports:
+                                __import__(_module_name)
                             console.print("  [green]✓ Installed successfully.[/green]")
                             _pkg_ready = True
                         except ImportError:
@@ -2678,13 +2683,16 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
             if wechat_backend == "wecom":
                 wechat_fields = [
-                    ("wechat_wecom_corp_id", "WeCom Corp ID"),
-                    ("wechat_wecom_agent_id", "WeCom Agent ID"),
-                    ("wechat_wecom_secret", "WeCom Secret"),
+                    ("wechat_wecom_corp_id", "WeCom Corp ID", False),
+                    ("wechat_wecom_agent_id", "WeCom Agent ID", False),
+                    ("wechat_wecom_secret", "WeCom Secret", True),
                 ]
-                for field_name, prompt_label in wechat_fields:
+                for field_name, prompt_label, is_secret in wechat_fields:
                     current = getattr(config, field_name, "")
-                    value = questionary.text(
+                    prompt_fn = (
+                        questionary.password if is_secret else questionary.text
+                    )
+                    value = prompt_fn(
                         f"{prompt_label}:",
                         default=current,
                         style=WIZARD_STYLE,
@@ -2695,12 +2703,15 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     updates[field_name] = value.strip()
             elif wechat_backend == "wechatmp":
                 wechat_fields = [
-                    ("wechat_mp_app_id", "Official Account App ID"),
-                    ("wechat_mp_app_secret", "Official Account App Secret"),
+                    ("wechat_mp_app_id", "Official Account App ID", False),
+                    ("wechat_mp_app_secret", "Official Account App Secret", True),
                 ]
-                for field_name, prompt_label in wechat_fields:
+                for field_name, prompt_label, is_secret in wechat_fields:
                     current = getattr(config, field_name, "")
-                    value = questionary.text(
+                    prompt_fn = (
+                        questionary.password if is_secret else questionary.text
+                    )
+                    value = prompt_fn(
                         f"{prompt_label}:",
                         default=current,
                         style=WIZARD_STYLE,
@@ -2732,10 +2743,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     raise KeyboardInterrupt()
 
                 if personal_choice == "scan":
+                    from ..channels.wechat.personal import _account_dir as _wp_dir
+
+                    _accounts_path = _wp_dir()
                     console.print(
                         "  [dim]A QR code will be printed below — open WeChat on"
-                        " your phone and scan it. The session token is saved to"
-                        " ~/.evoscientist/wechat_personal/accounts/.[/dim]"
+                        " your phone and scan it. The session token is saved"
+                        f" to {_accounts_path}.[/dim]"
                     )
                     try:
                         import asyncio
@@ -2749,10 +2763,10 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
                     if creds:
                         updates["wechat_personal_account_id"] = creds["account_id"]
-                        # Token is persisted on disk; store it inline as a
-                        # convenience but the channel will fall back to the
-                        # disk copy if this is empty.
-                        updates["wechat_personal_token"] = creds.get("token", "")
+                        # Token is persisted on disk by qr_login(); the channel
+                        # reads it from the per-account store at runtime, so we
+                        # intentionally do NOT copy it into the main config here
+                        # (avoids stale duplicates and broader secret exposure).
                         console.print(
                             f"  [green]✓ Logged in (account_id: "
                             f"{creds['account_id'][:12]}…)[/green]"

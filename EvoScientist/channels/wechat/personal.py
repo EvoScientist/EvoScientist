@@ -34,7 +34,7 @@ import secrets
 import struct
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,7 +43,6 @@ from urllib.parse import quote, urlparse
 from ..base import Channel, ChannelError, RawIncoming, media_path
 from ..capabilities import WECHAT as WECHAT_CAPS
 from ..config import BaseChannelConfig
-from ..mixins import PollingMixin
 
 logger = logging.getLogger(__name__)
 
@@ -452,7 +451,7 @@ async def _get_updates(
             token=token,
             timeout_ms=timeout_ms,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
 
 
@@ -645,7 +644,7 @@ async def qr_login(
                     endpoint=f"{EP_GET_QR_STATUS}?qrcode={qrcode_value}",
                     timeout_ms=QR_TIMEOUT_MS,
                 )
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 await asyncio.sleep(1)
                 continue
 
@@ -761,10 +760,12 @@ class WeixinPersonalChannel(Channel):
         self._send_retry_delay = max(0.0, float(config.send_chunk_retry_delay_seconds))
         self._group_policy = (config.group_policy or "disabled").lower()
         self._group_allowed = config.group_allowed_senders or set()
+        self._dm_policy = (config.dm_policy or "open").lower()
 
         self._poll_session: Any = None
         self._send_session: Any = None
         self._poll_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task] = set()
         self._token_store: ContextTokenStore | None = (
             ContextTokenStore(self._account_id) if self._account_id else None
         )
@@ -783,7 +784,7 @@ class WeixinPersonalChannel(Channel):
 
     async def start(self) -> None:
         try:
-            import aiohttp  # noqa: F401
+            import aiohttp  # availability check
         except ImportError as exc:
             raise ChannelError(
                 "aiohttp is required for personal WeChat. "
@@ -901,7 +902,9 @@ class WeixinPersonalChannel(Channel):
                     _save_sync_buf(self._account_id, sync_buf)
 
                 for message in response.get("msgs") or []:
-                    asyncio.create_task(self._safe_process(message))
+                    task = asyncio.create_task(self._safe_process(message))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -956,13 +959,22 @@ class WeixinPersonalChannel(Channel):
                 and effective_chat_id not in self._group_allowed
             ):
                 return
+        else:
+            if self._dm_policy == "disabled":
+                return
+            if self._dm_policy == "allowlist":
+                allowed = getattr(self.config, "allowed_senders", None)
+                if allowed and sender_id not in allowed:
+                    return
 
         context_token = str(message.get("context_token") or "").strip()
         if context_token and self._token_store is not None:
             self._token_store.set(sender_id, context_token)
-        asyncio.create_task(
+        ticket_task = asyncio.create_task(
             self._maybe_fetch_typing_ticket(sender_id, context_token or None)
         )
+        self._background_tasks.add(ticket_task)
+        ticket_task.add_done_callback(self._background_tasks.discard)
 
         media_paths: list[str] = []
         annotations: list[str] = []
