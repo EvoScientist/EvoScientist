@@ -62,9 +62,7 @@ def create_from_config(config):
     port = int(getattr(config, "wechat_webhook_port", 9001) or 9001)
 
     if backend == "personal":
-        group_allowed = _parse_csv(
-            getattr(config, "wechat_personal_group_allowed", "")
-        )
+        group_allowed = _parse_csv(getattr(config, "wechat_personal_group_allowed", ""))
         cfg = WeixinPersonalConfig(
             account_id=getattr(config, "wechat_personal_account_id", ""),
             token=getattr(config, "wechat_personal_token", ""),

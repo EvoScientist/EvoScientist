@@ -2570,7 +2570,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         # Check pip dependency before proceeding
         if import_check:
             _required_imports: tuple[str, ...] = (
-                (import_check,) if isinstance(import_check, str) else tuple(import_check)
+                (import_check,)
+                if isinstance(import_check, str)
+                else tuple(import_check)
             )
             _pkg_ready = False
             try:
@@ -2689,9 +2691,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 ]
                 for field_name, prompt_label, is_secret in wechat_fields:
                     current = getattr(config, field_name, "")
-                    prompt_fn = (
-                        questionary.password if is_secret else questionary.text
-                    )
+                    prompt_fn = questionary.password if is_secret else questionary.text
                     value = prompt_fn(
                         f"{prompt_label}:",
                         default=current,
@@ -2708,9 +2708,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 ]
                 for field_name, prompt_label, is_secret in wechat_fields:
                     current = getattr(config, field_name, "")
-                    prompt_fn = (
-                        questionary.password if is_secret else questionary.text
-                    )
+                    prompt_fn = questionary.password if is_secret else questionary.text
                     value = prompt_fn(
                         f"{prompt_label}:",
                         default=current,

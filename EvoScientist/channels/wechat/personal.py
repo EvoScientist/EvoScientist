@@ -336,9 +336,7 @@ def _assert_weixin_cdn_url(url: str) -> None:
     if scheme not in ("http", "https"):
         raise ValueError(f"Media URL has disallowed scheme {scheme!r}")
     if host not in _WEIXIN_CDN_ALLOWLIST:
-        raise ValueError(
-            f"Media URL host {host!r} is not in the WeChat CDN allowlist."
-        )
+        raise ValueError(f"Media URL host {host!r} is not in the WeChat CDN allowlist.")
 
 
 def _media_reference(item: dict, key: str) -> dict:
@@ -421,9 +419,7 @@ async def _api_post(
         return json.loads(raw)
 
 
-async def _api_get(
-    session, *, base_url: str, endpoint: str, timeout_ms: int
-) -> dict:
+async def _api_get(session, *, base_url: str, endpoint: str, timeout_ms: int) -> dict:
     import aiohttp
 
     url = f"{base_url.rstrip('/')}/{endpoint}"
@@ -560,9 +556,7 @@ def _extract_text(item_list: list[dict]) -> str:
 
 
 def _guess_chat_type(message: dict, account_id: str) -> tuple[str, str]:
-    room_id = str(
-        message.get("room_id") or message.get("chat_room_id") or ""
-    ).strip()
+    room_id = str(message.get("room_id") or message.get("chat_room_id") or "").strip()
     to_user_id = str(message.get("to_user_id") or "").strip()
     is_group = bool(room_id) or (
         to_user_id
@@ -1162,9 +1156,7 @@ class WeixinPersonalChannel(Channel):
         if not self._send_session:
             raise RuntimeError("personal-wechat send session not initialized")
 
-        context_token = (
-            self._token_store.get(chat_id) if self._token_store else None
-        )
+        context_token = self._token_store.get(chat_id) if self._token_store else None
         text = formatted_text or raw_text
         last_error: Exception | None = None
         retried_without_token = False
@@ -1201,8 +1193,7 @@ class WeixinPersonalChannel(Channel):
                             )
                             continue
                         is_rate_limited = (
-                            ret == RATE_LIMIT_ERRCODE
-                            or errcode == RATE_LIMIT_ERRCODE
+                            ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE
                         )
                         if is_rate_limited:
                             last_error = RuntimeError(
