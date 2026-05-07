@@ -822,7 +822,7 @@ def _serve_drain_notifications(
         from EvoScientist.cli.async_notifier import format_notification_lines
 
         for line_text, line_style in format_notification_lines(notifs):
-            console.print(f"[{line_style}]{line_text}[/{line_style}]")
+            console.print(line_text, style=line_style, markup=False)
         meta = build_metadata(workspace_dir, model)
         try:
             run_streaming(

@@ -981,7 +981,7 @@ def cmd_interactive(
                 from EvoScientist.cli.async_notifier import format_notification_lines
 
                 for line_text, line_style in format_notification_lines(notifs):
-                    console.print(f"[{line_style}]{line_text}[/{line_style}]")
+                    console.print(line_text, style=line_style, markup=False)
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
                 run_streaming(

@@ -647,8 +647,15 @@ def _patch_deepagents_async_watcher() -> None:
                     old_task = _an._watcher_by_thread.get(task_id)
                     if old_task is not None and not old_task.done():
                         old_task.cancel()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "Pre-cancel of stale watcher for task %s failed; a "
+                        "stale success notification may be enqueued: %s",
+                        task_id,
+                        exc,
+                    )
 
                 result = await orig_coro(task_id, message, runtime)
                 from langgraph.types import Command

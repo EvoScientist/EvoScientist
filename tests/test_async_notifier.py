@@ -19,7 +19,6 @@ def test_notification_dataclass_fields():
         task_id="tid-1",
         agent_name="writing-agent",
         status="success",
-        summary="done",
         received_at="2026-05-06T12:00:00Z",
     )
     assert n.task_id == "tid-1"
@@ -33,8 +32,8 @@ def test_notification_queue_is_module_level_fifo():
             async_notifier._notification_queue.get_nowait()
         except queue.Empty:
             break
-    n1 = async_notifier.AsyncTaskNotification("a", "x", "success", "", "")
-    n2 = async_notifier.AsyncTaskNotification("b", "x", "success", "", "")
+    n1 = async_notifier.AsyncTaskNotification("a", "x", "success", "")
+    n2 = async_notifier.AsyncTaskNotification("b", "x", "success", "")
     async_notifier._notification_queue.put(n1)
     async_notifier._notification_queue.put(n2)
     assert async_notifier._notification_queue.get_nowait().task_id == "a"
@@ -50,7 +49,7 @@ def _drain_queue(q):
             return items
 
 
-def test_watcher_pushes_notification_on_stream_end():
+def test_watcher_pushes_notification_on_stream_end(run_async):
     # Stream yields one "values" chunk with the final state, then closes
     final_state = {
         "messages": [{"type": "ai", "content": "Quantum superposition is..."}]
@@ -66,97 +65,19 @@ def test_watcher_pushes_notification_on_stream_end():
     # runs.get is used to fetch terminal status when stream ends
     client.runs.get = AsyncMock(return_value={"status": "success"})
 
-    _drain_queue(async_notifier._notification_queue)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(
-            async_notifier.watch_run_and_notify(
-                client, "thr-1", "run-1", "writing-agent"
-            )
-        )
-    finally:
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+    _drain_all(async_notifier)
+    run_async(
+        async_notifier.watch_run_and_notify(client, "thr-1", "run-1", "writing-agent")
+    )
 
     notifs = _drain_queue(async_notifier._notification_queue)
     assert len(notifs) == 1
     assert notifs[0].task_id == "thr-1"
     assert notifs[0].agent_name == "writing-agent"
     assert notifs[0].status == "success"
-    assert "superposition" in notifs[0].summary
 
 
-def test_watcher_truncates_long_summary():
-    long_text = "x" * 1000
-    final_state = {"messages": [{"type": "ai", "content": long_text}]}
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(event="values", data=final_state)
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(return_value={"status": "success"})
-
-    _drain_queue(async_notifier._notification_queue)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(
-            async_notifier.watch_run_and_notify(client, "thr-2", "run-2", "agentX")
-        )
-    finally:
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert len(notif.summary) <= 500
-
-
-def test_watcher_handles_anthropic_content_blocks():
-    # Anthropic-style content: list of {type: text, text: "..."}
-    blocks = [{"type": "text", "text": "Hello"}, {"type": "text", "text": "world"}]
-    final_state = {"messages": [{"type": "ai", "content": blocks}]}
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(event="values", data=final_state)
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(return_value={"status": "success"})
-
-    _drain_queue(async_notifier._notification_queue)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(
-            async_notifier.watch_run_and_notify(client, "thr-3", "run-3", "agentY")
-        )
-    finally:
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert "Hello" in notif.summary
-    assert "world" in notif.summary
-
-
-def test_watcher_pushes_error_status_on_stream_exception():
+def test_watcher_pushes_error_status_on_stream_exception(run_async):
     async def fake_stream(*a, **kw):
         raise RuntimeError("network broken")
         yield  # unreachable; makes this an async generator
@@ -168,21 +89,8 @@ def test_watcher_pushes_error_status_on_stream_exception():
         return_value={"status": "error", "error": "network broken"}
     )
 
-    _drain_queue(async_notifier._notification_queue)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(
-            async_notifier.watch_run_and_notify(client, "thr-4", "run-4", "agentZ")
-        )
-    finally:
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thr-4", "run-4", "agentZ"))
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "error"
@@ -317,7 +225,6 @@ def test_format_notification_lines_renders_prompt_when_provided():
             task_id="019dfe2f-aaaa",
             agent_name="writing-agent",
             status="success",
-            summary="",
             received_at="",
             prompt="请用中文写一段关于量子叠加的简短介绍",
         ),
@@ -341,7 +248,6 @@ def test_format_notification_lines_truncates_long_prompt():
             task_id="t1",
             agent_name="agent",
             status="success",
-            summary="",
             received_at="",
             prompt=long_prompt,
         ),
@@ -359,7 +265,6 @@ def test_format_notification_lines_collapses_newlines_in_prompt():
             task_id="t1",
             agent_name="agent",
             status="success",
-            summary="",
             received_at="",
             prompt="line one\nline two\nline three",
         ),
@@ -455,7 +360,11 @@ def test_format_batch_message_single_notification():
     """format_batch_message produces compact JSON for a single notification."""
     notifs = [
         async_notifier.AsyncTaskNotification(
-            "tid-1", "writing-agent", "success", "Done writing.", ""
+            task_id="tid-1",
+            agent_name="writing-agent",
+            status="success",
+            received_at="2026-05-07T12:00:00Z",
+            prompt="Done writing.",
         )
     ]
     msg = format_batch_message(notifs)
@@ -471,9 +380,19 @@ def test_format_batch_message_single_notification():
 def test_format_batch_message_multiple():
     """format_batch_message handles multiple notifications as separate JSON lines."""
     notifs = [
-        async_notifier.AsyncTaskNotification("t1", "writing-agent", "success", "A", ""),
         async_notifier.AsyncTaskNotification(
-            "t2", "data-analysis-agent", "error", "B", ""
+            task_id="t1",
+            agent_name="writing-agent",
+            status="success",
+            received_at="2026-05-07T12:00:00Z",
+            prompt="A",
+        ),
+        async_notifier.AsyncTaskNotification(
+            task_id="t2",
+            agent_name="data-analysis-agent",
+            status="error",
+            received_at="2026-05-07T12:00:01Z",
+            prompt="B",
         ),
     ]
     msg = format_batch_message(notifs)

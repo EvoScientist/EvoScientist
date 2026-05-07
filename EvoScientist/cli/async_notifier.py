@@ -32,7 +32,6 @@ class AsyncTaskNotification:
     task_id: str
     agent_name: str
     status: str  # one of TERMINAL_STATUSES
-    summary: str  # last AI message, truncated to ≤500 chars; "" if none
     received_at: str  # ISO-8601 UTC timestamp
     prompt: str = ""  # original task description sent to the sub-agent
     # The CLI/main-agent thread_id under which the watcher was spawned. Used
@@ -123,46 +122,14 @@ def pending_thread_ids() -> set[str]:
         return {tid for tid, q in _notifications_by_thread.items() if not q.empty()}
 
 
-# ---------------------------------------------------------------------------
-# Watcher scheduling note (Fix #2 reverted).
-#
-# Watchers run on the CALLER's asyncio loop (CLI / TUI / serve turn loop).
-# In CLI/TUI that loop is long-lived, so watchers happily run for minutes.
-# In serve mode each turn runs under asyncio.run(...) and the loop closes
-# when the turn ends — watchers spawned inside die immediately. This is a
-# known limitation; the previous "background daemon loop" attempt broke
-# real CLI usage because langgraph SDK clients cache asyncio primitives
-# bound to the loop that first touches them, and giving the watcher a
-# fresh loop-local client made join_stream raise (cause TBD — httpx state
-# or langgraph SDK internals). See CLAUDE.md follow-up.
-#
-# A no-op shutdown_watcher_loop() is kept so existing callers (CLI atexit,
-# serve finally, TUI on_unmount) remain wired without dead-import errors.
-# ---------------------------------------------------------------------------
-
-
 def shutdown_watcher_loop(timeout: float = 2.0) -> None:
-    """No-op (background loop currently disabled — see module note)."""
+    """No-op stub kept as a stable shutdown hook for CLI / TUI / serve callers.
+
+    Watchers currently run on the caller's asyncio loop, so they have no
+    background loop to tear down. The function is preserved so existing
+    shutdown wiring continues to import without modification.
+    """
     return
-
-
-def _extract_summary(final_state: dict | None) -> str:
-    """Pull last AI message content (string or Anthropic blocks) → ≤500 chars."""
-    if not isinstance(final_state, dict):
-        return ""
-    msgs = final_state.get("messages") or []
-    last_ai = next(
-        (m for m in reversed(msgs) if isinstance(m, dict) and m.get("type") == "ai"),
-        None,
-    )
-    if not last_ai:
-        return ""
-    content = last_ai.get("content", "")
-    if isinstance(content, list):
-        content = " ".join(
-            str(b.get("text", "")) for b in content if isinstance(b, dict)
-        )
-    return str(content)[:500]
 
 
 async def watch_run_and_notify(
@@ -189,7 +156,6 @@ async def watch_run_and_notify(
     SSE stream signals close. Reading the in-band ``event="error"`` SSE
     part avoids that race entirely.
     """
-    final_values: dict | None = None
     stream_failed = False
     saw_error_event = False
     try:
@@ -198,9 +164,7 @@ async def watch_run_and_notify(
         ):
             ev = getattr(chunk, "event", None)
             data = getattr(chunk, "data", None)
-            if ev == "values" and isinstance(data, dict):
-                final_values = data
-            elif ev == "error":
+            if ev == "error":
                 # Authoritative in-band error signal from langgraph dev.
                 saw_error_event = True
                 logger.info("Watcher saw error event for task %s: %r", thread_id, data)
@@ -240,7 +204,6 @@ async def watch_run_and_notify(
         task_id=thread_id,
         agent_name=agent_name,
         status=status,
-        summary=_extract_summary(final_values),
         received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         prompt=prompt,
         origin_cli_thread_id=origin_cli_thread_id,
@@ -441,7 +404,10 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
                 ensure_ascii=False,
             )
         )
-    lines.append("(Use check_async_task(task_id=...) to fetch full results.)")
+    lines.append(
+        "(Signal only — fetch via check_async_task if relevant to current step, "
+        "else acknowledge & continue.)"
+    )
     return "\n".join(lines)
 
 
