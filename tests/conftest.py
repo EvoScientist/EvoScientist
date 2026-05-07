@@ -91,22 +91,3 @@ def tmp_workspace(tmp_path):
     ws = tmp_path / "workspace"
     ws.mkdir()
     return str(ws)
-
-
-@pytest.fixture
-def restore_async_watcher_patch():
-    """Snapshot deepagents async_subagents builders + EvoSci patch flag,
-    restore them on teardown so tests don't leak state into each other."""
-    import deepagents.middleware.async_subagents as ds_mod
-
-    from EvoScientist.llm import patches
-
-    saved_flag = patches._async_watcher_patched
-    saved_start = ds_mod._build_start_tool
-    saved_update = ds_mod._build_update_tool
-    try:
-        yield
-    finally:
-        patches._async_watcher_patched = saved_flag
-        ds_mod._build_start_tool = saved_start
-        ds_mod._build_update_tool = saved_update

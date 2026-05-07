@@ -122,16 +122,6 @@ def pending_thread_ids() -> set[str]:
         return {tid for tid, q in _notifications_by_thread.items() if not q.empty()}
 
 
-def shutdown_watcher_loop(timeout: float = 2.0) -> None:
-    """No-op stub kept as a stable shutdown hook for CLI / TUI / serve callers.
-
-    Watchers currently run on the caller's asyncio loop, so they have no
-    background loop to tear down. The function is preserved so existing
-    shutdown wiring continues to import without modification.
-    """
-    return
-
-
 async def watch_run_and_notify(
     client,
     thread_id: str,
@@ -148,13 +138,12 @@ async def watch_run_and_notify(
          has no timing race against the server-side run-state writeback.
       2. On clean stream exit with no error event → ``"success"``.
       3. On stream exception → fall back to ``client.runs.get`` (best-effort).
+         Non-terminal fallback statuses (``pending`` / ``running``) are
+         dropped — the run is still alive, no notification is enqueued.
 
-    NOTE on the "always-poll runs.get" variant we tried (Fix #1, then
-    reverted): immediately calling ``runs.get`` after the stream closes
-    sometimes returned ``status="error"`` for runs that actually succeeded
-    — server-side terminal status is not always written by the time the
-    SSE stream signals close. Reading the in-band ``event="error"`` SSE
-    part avoids that race entirely.
+    Reading the in-band ``event="error"`` SSE part instead of polling
+    ``runs.get`` after every clean close avoids a race where the server-side
+    terminal status hasn't been written by the time the stream closes.
     """
     stream_failed = False
     saw_error_event = False
@@ -236,11 +225,11 @@ def spawn_watcher(
     never executes for the cancelled watcher (no stale notification).
 
     ``origin_cli_thread_id`` tags the resulting notification so the consumer
-    only injects it back into the originating CLI session (see Fix #3).
+    only injects it back into the originating CLI session.
 
-    Caller must already be in a running asyncio event loop. (See module
-    note about Fix #2 revert — serve mode's ephemeral per-turn loop is a
-    known limitation.)
+    Caller must already be in a running asyncio event loop. Serve mode's
+    ephemeral per-turn loop kills watchers spawned during a turn — that
+    limitation is tracked separately.
     """
     old_task = _watcher_by_thread.get(thread_id)
     if old_task is not None and not old_task.done():

@@ -174,22 +174,70 @@ def test_swap_uses_configured_port():
 
 
 # =============================================================================
-# Watcher patch application
+# AsyncWatcherMiddleware appended on swap
 # =============================================================================
 
 
-def test_maybe_swap_applies_watcher_patch_when_enabled():
-    """When async subagents are enabled, the watcher patch must be applied."""
-    from types import SimpleNamespace
-
-    import EvoScientist.llm.patches as patches_mod
+def test_maybe_swap_appends_watcher_middleware_when_enabled():
+    """When async subagents are swapped, AsyncWatcherMiddleware must be appended."""
+    from EvoScientist.middleware.async_watcher import AsyncWatcherMiddleware
 
     cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
 
-    called = {"n": 0}
+    middleware: list = []
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ),
+    ):
+        subs = [_sub("writing-agent", async_flag=True)]
+        _maybe_swap_async_subagents(subs, middleware)
 
-    def fake_patch():
-        called["n"] += 1
+    assert len(middleware) == 1
+    assert isinstance(middleware[0], AsyncWatcherMiddleware)
+
+
+def test_maybe_swap_skips_middleware_when_no_async_flagged():
+    """Without any _async-flagged subagents, no middleware is appended."""
+    cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+
+    middleware: list = []
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ),
+    ):
+        subs = [_sub("planner-agent", async_flag=False)]
+        _maybe_swap_async_subagents(subs, middleware)
+
+    assert middleware == []
+
+
+def test_maybe_swap_skips_middleware_when_langgraph_unreachable():
+    """Fallback path must not append middleware (no watchers will fire)."""
+    cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+
+    middleware: list = []
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=False,
+        ),
+    ):
+        subs = [_sub("writing-agent", async_flag=True)]
+        _maybe_swap_async_subagents(subs, middleware)
+
+    assert middleware == []
+
+
+def test_maybe_swap_no_middleware_arg_does_not_crash():
+    """Backward-compat: middleware parameter is optional."""
+    cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
 
     with (
         patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
@@ -197,8 +245,9 @@ def test_maybe_swap_applies_watcher_patch_when_enabled():
             "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
             return_value=True,
         ),
-        patch.object(patches_mod, "_patch_deepagents_async_watcher", fake_patch),
     ):
         subs = [_sub("writing-agent", async_flag=True)]
-        _maybe_swap_async_subagents(subs)
-        assert called["n"] == 1
+        out = _maybe_swap_async_subagents(subs)
+
+    assert len(out) == 1
+    assert out[0]["graph_id"] == "writing-agent"

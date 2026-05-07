@@ -1339,16 +1339,6 @@ def cmd_interactive(
             print_resume_hint(state.get("resume_hint_thread_id"), console=console)
         except Exception:
             _channel_logger.debug("print_resume_hint failed", exc_info=True)
-        # Notifier shutdown hook (currently a no-op — see async_notifier
-        # module note about the Fix #2 background-loop revert). Kept wired
-        # so re-enabling a long-lived watcher loop later doesn't require
-        # touching every host again.
-        try:
-            from EvoScientist.cli import async_notifier as _an
-
-            _an.shutdown_watcher_loop()
-        except Exception:
-            _channel_logger.debug("shutdown_watcher_loop failed", exc_info=True)
 
 
 def cmd_run(

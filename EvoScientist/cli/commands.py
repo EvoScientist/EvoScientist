@@ -1067,12 +1067,6 @@ def serve(
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
         _channels_stop(runtime=channel_runtime)
-        try:
-            from EvoScientist.cli import async_notifier as _an
-
-            _an.shutdown_watcher_loop()
-        except Exception:
-            _serve_logger.debug("shutdown_watcher_loop failed", exc_info=True)
         console.print("[dim]Stopped.[/dim]")
 
 

@@ -221,7 +221,7 @@ def _build_prompt_refs() -> dict:
     }
 
 
-def _maybe_swap_async_subagents(subs: list) -> list:
+def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
     """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
 
     Reads the ``_async`` field carried through by ``utils.load_subagents._build_one``
@@ -238,6 +238,10 @@ def _maybe_swap_async_subagents(subs: list) -> list:
 
     All return paths strip the internal ``_async`` field from sub-agent dicts
     before handoff, since deepagents may schema-validate the kwarg.
+
+    When async subagents are actually swapped in and ``middleware`` is provided,
+    appends ``AsyncWatcherMiddleware`` so launches spawn an
+    ``async_notifier`` watcher.
     """
     cfg = _ensure_config()
     if not getattr(cfg, "enable_async_subagents", False):
@@ -262,11 +266,6 @@ def _maybe_swap_async_subagents(subs: list) -> list:
             s.pop("_async", None)
         return subs
 
-    # Apply the watcher monkey-patch (idempotent) so launches spawn watchers.
-    from EvoScientist.llm.patches import _patch_deepagents_async_watcher
-
-    _patch_deepagents_async_watcher()
-
     # The ``_async`` flag was set by ``utils.load_subagents._build_one`` from
     # each yaml's ``async:`` field. No need to re-parse the yaml files here.
     async_specs: dict[str, str] = {
@@ -282,6 +281,7 @@ def _maybe_swap_async_subagents(subs: list) -> list:
 
     port = int(getattr(cfg, "langgraph_dev_port", 6174))
     out = []
+    agent_specs: dict[str, AsyncSubAgent] = {}
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
     # mcp.yaml) ARE delivered — the deployed factory
     # ``subagents/_factory.py:build_async_subagent_graph`` loads its own MCP
@@ -290,18 +290,24 @@ def _maybe_swap_async_subagents(subs: list) -> list:
     for s in subs:
         name = s.get("name")
         if name in async_specs:
-            out.append(
-                AsyncSubAgent(
-                    name=name,
-                    description=async_specs[name],
-                    graph_id=name,
-                    url=f"http://localhost:{port}",
-                )
+            spec = AsyncSubAgent(
+                name=name,
+                description=async_specs[name],
+                graph_id=name,
+                url=f"http://localhost:{port}",
             )
+            agent_specs[name] = spec
+            out.append(spec)
         else:
             # Strip the internal flag before handoff to deepagents.
             s.pop("_async", None)
             out.append(s)
+
+    if agent_specs and middleware is not None:
+        from .middleware.async_watcher import AsyncWatcherMiddleware
+
+        middleware.append(AsyncWatcherMiddleware(agent_specs))
+
     return out
 
 
@@ -321,7 +327,7 @@ def _build_base_kwargs(base_backend, base_middleware):
         prompt_refs=_build_prompt_refs(),
     )
     _inject_subagent_middleware(subs)
-    subs = _maybe_swap_async_subagents(subs)
+    subs = _maybe_swap_async_subagents(subs, base_middleware)
     return {
         "name": "EvoScientist",
         "model": _ensure_chat_model(),
@@ -379,7 +385,7 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
 
     # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
     # since async sub-agents are remote graphs that load their own tools).
-    subs = _maybe_swap_async_subagents(subs)
+    subs = _maybe_swap_async_subagents(subs, base_middleware)
 
     return {
         "name": "EvoScientist",

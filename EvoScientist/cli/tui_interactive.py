@@ -2698,12 +2698,6 @@ def run_textual_interactive(
                     _channels_stop(runtime=self._channel_runtime)
                 except Exception:
                     pass
-            try:
-                from EvoScientist.cli import async_notifier as _an
-
-                _an.shutdown_watcher_loop()
-            except Exception:
-                pass
             self.exit()
 
         def action_request_quit(self) -> None:
