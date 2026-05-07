@@ -824,12 +824,17 @@ def run_textual_interactive(
             """
             from EvoScientist.cli import async_notifier
 
+            target_tid = self._conversation_tid
             try:
                 try:
                     await async_notifier.consume_notifications(
-                        run_message=self._inject_notification_tui,
-                        read_async_tasks_state=self._read_async_tasks_tui,
-                        current_thread_id=self._conversation_tid,
+                        run_message=lambda text, notifs: self._inject_notification_tui(
+                            text, notifs, target_thread_id=target_tid
+                        ),
+                        read_async_tasks_state=lambda: self._read_async_tasks_tui(
+                            target_tid
+                        ),
+                        current_thread_id=target_tid,
                     )
                 except Exception:
                     import logging
@@ -842,7 +847,13 @@ def run_textual_interactive(
                 # future notifications can schedule a new consume coroutine.
                 self._notification_consuming = False
 
-        async def _inject_notification_tui(self, text: str, notifs: list) -> None:
+        async def _inject_notification_tui(
+            self,
+            text: str,
+            notifs: list,
+            *,
+            target_thread_id: str | None = None,
+        ) -> None:
             """Run a synthetic user turn for the batched async-task notification.
 
             Renders one compact tool-result-style line per task (matching the
@@ -853,6 +864,9 @@ def run_textual_interactive(
             Args:
                 text: Full structured LLM message from ``format_batch_message``.
                 notifs: Survivor notification list for per-task visual rendering.
+                target_thread_id: Pinned thread id for the synthetic turn —
+                    forwarded to ``_run_turn`` so a mid-consume ``/new`` cannot
+                    misroute the notification into a different thread.
             """
             from EvoScientist.cli.async_notifier import format_notification_lines
 
@@ -865,18 +879,29 @@ def run_textual_interactive(
             # Mark busy synchronously so the next poll tick doesn't re-enter.
             self._busy = True
             self._run_task = asyncio.ensure_future(
-                self._run_turn(text, skip_user_message=True, resolve_mentions=False)
+                self._run_turn(
+                    text,
+                    skip_user_message=True,
+                    resolve_mentions=False,
+                    thread_id_override=target_thread_id,
+                )
             )
 
-        async def _read_async_tasks_tui(self) -> dict[str, dict]:
-            """Read async_tasks from current agent state for dedup."""
+        async def _read_async_tasks_tui(
+            self, target_thread_id: str | None
+        ) -> dict[str, dict]:
+            """Read async_tasks from agent state for dedup, against a frozen tid.
+
+            ``target_thread_id`` is captured by ``_consume_notifications_tui`` at
+            the start of the consume call so a mid-consume thread switch cannot
+            make us read the wrong thread's state.
+            """
             agent = self._agent_loader.agent
-            thread_id = self._conversation_tid
-            if agent is None or not thread_id:
+            if agent is None or not target_thread_id:
                 return {}
             try:
                 snap = await agent.aget_state(
-                    {"configurable": {"thread_id": thread_id}}
+                    {"configurable": {"thread_id": target_thread_id}}
                 )
                 return (snap.values or {}).get("async_tasks") or {}
             except Exception:
@@ -1136,6 +1161,7 @@ def run_textual_interactive(
             channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
             channel_ask_user_fn: Callable[[dict], dict] | None = None,
             cancel_scope: str | None = None,
+            thread_id_override: str | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -1344,7 +1370,7 @@ def run_textual_interactive(
                     async for event in stream_agent_events(
                         self._agent_loader.agent,
                         _stream_input,
-                        self._conversation_tid,
+                        thread_id_override or self._conversation_tid,
                         metadata=metadata,
                     ):
                         if is_stream_cancel_requested(cancel_scope):
@@ -1894,6 +1920,7 @@ def run_textual_interactive(
             *,
             skip_user_message: bool = False,
             resolve_mentions: bool = True,
+            thread_id_override: str | None = None,
         ) -> None:
             """Handle a user turn: stream agent response with widgets.
 
@@ -1906,6 +1933,11 @@ def run_textual_interactive(
                     Used by synthetic notifier turns whose payload is a fixed
                     JSON template — keeps the TUI path consistent with the
                     Rich CLI notifier path which never expands mentions.
+                thread_id_override: Pin the agent stream to this thread instead
+                    of the live ``self._conversation_tid``. Used by the async
+                    notifier path so a mid-consume ``/new`` cannot redirect a
+                    notification meant for thread A into thread B. Falls back
+                    to the live tid when ``None``.
             """
             cancelled = False
             try:
@@ -1937,6 +1969,7 @@ def run_textual_interactive(
                     display_text=user_text,
                     file_warnings=file_warnings,
                     skip_user_message=skip_user_message,
+                    thread_id_override=thread_id_override,
                 )
             except asyncio.CancelledError:
                 cancelled = True

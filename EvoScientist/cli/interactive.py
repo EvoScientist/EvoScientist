@@ -970,6 +970,8 @@ def cmd_interactive(
             async def _inject_notification_message(
                 text: str,
                 notifs: list,
+                *,
+                target_thread_id: str | None,
             ) -> None:
                 """Inject a batched async-task notification as a synthetic user message.
 
@@ -988,7 +990,12 @@ def cmd_interactive(
                     ui_backend=state["ui_backend"],
                     agent=await _await_agent_ready(),
                     message=text,
-                    thread_id=state["thread_id"],
+                    # Falls back to live state["thread_id"] if no override is
+                    # passed (legacy / direct-call paths). Dedup reader has no
+                    # fallback and returns {} for a falsey id; the asymmetry
+                    # is intentional — we'd rather inject into the live thread
+                    # than drop the notification entirely.
+                    thread_id=target_thread_id or state["thread_id"],
                     show_thinking=show_thinking,
                     interactive=True,
                     metadata=meta,
@@ -1001,21 +1008,22 @@ def cmd_interactive(
                 sys.stdout.write("\033[34;1m❯\033[0m ")
                 sys.stdout.flush()
 
-            async def _read_current_async_tasks() -> dict[str, dict]:
+            async def _read_current_async_tasks(
+                target_thread_id: str | None,
+            ) -> dict[str, dict]:
                 """Snapshot async_tasks from the active agent state for dedup.
 
                 Uses ``agent_loader.agent`` (the currently loaded agent) and
-                ``state["thread_id"]`` (the currently active thread). Both are
-                module-accessible via closure because this function is nested
-                inside ``_async_main_loop``.
+                ``target_thread_id`` (the thread id captured at the start of
+                ``consume_notifications`` — frozen so a mid-consume ``/new``
+                cannot make us read the wrong thread's state).
                 """
                 agent = agent_loader.agent
-                thread_id = state.get("thread_id")
-                if agent is None or not thread_id:
+                if agent is None or not target_thread_id:
                     return {}
                 try:
                     snap = await agent.aget_state(
-                        {"configurable": {"thread_id": thread_id}}
+                        {"configurable": {"thread_id": target_thread_id}}
                     )
                     return (snap.values or {}).get("async_tasks") or {}
                 except Exception:
@@ -1042,8 +1050,14 @@ def cmd_interactive(
                     if async_notifier.has_pending_notifications(current_tid):
                         try:
                             await async_notifier.consume_notifications(
-                                run_message=_inject_notification_message,
-                                read_async_tasks_state=_read_current_async_tasks,
+                                run_message=lambda text, notifs, _tid=current_tid: (
+                                    _inject_notification_message(
+                                        text, notifs, target_thread_id=_tid
+                                    )
+                                ),
+                                read_async_tasks_state=lambda _tid=current_tid: (
+                                    _read_current_async_tasks(_tid)
+                                ),
                                 current_thread_id=current_tid,
                             )
                         except Exception:

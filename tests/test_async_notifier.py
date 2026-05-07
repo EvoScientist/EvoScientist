@@ -117,14 +117,10 @@ def test_spawn_watcher_replaces_existing_for_same_thread(run_async):
     client.runs.get = AsyncMock(return_value={"status": "success"})
 
     async def scenario():
-        # Clear the queue and registry
+        # Clear all queues and the watcher registries
         async_notifier._active_watchers.clear()
         async_notifier._watcher_by_thread.clear()
-        while True:
-            try:
-                async_notifier._notification_queue.get_nowait()
-            except queue.Empty:
-                break
+        _drain_all(async_notifier)
 
         # First spawn for thread X, run R1
         t1 = async_notifier.spawn_watcher(client, "thr-X", "R1", "agent")
@@ -150,13 +146,11 @@ def test_spawn_watcher_replaces_existing_for_same_thread(run_async):
             pass
 
         # Cancelled watchers don't push notifications
-        notifs = []
-        while True:
-            try:
-                notifs.append(async_notifier._notification_queue.get_nowait())
-            except queue.Empty:
-                break
-        assert notifs == []
+        assert _drain_one_queue_helper(async_notifier._notification_queue) == []
+        assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
+        if hasattr(async_notifier, "_notifications_by_thread"):
+            for q in async_notifier._notifications_by_thread.values():
+                assert _drain_one_queue_helper(q) == []
 
     run_async(scenario())
 
