@@ -102,7 +102,8 @@ def get_fallback_chain() -> list[tuple[str, str]]:
     Returns:
         List of ``(model_name, provider)`` tuples in priority order.
     """
-    return list(_fallback_chain)
+    with _fallback_chain_lock:
+        return list(_fallback_chain)
 
 
 def set_fallback_chain(chain: list[tuple[str, str]]) -> None:
@@ -112,7 +113,8 @@ def set_fallback_chain(chain: list[tuple[str, str]]) -> None:
         chain: New list of ``(model_name, provider)`` tuples.
     """
     global _fallback_chain
-    _fallback_chain = list(chain)
+    with _fallback_chain_lock:
+        _fallback_chain = list(chain)
 
 
 def add_fallback(model: str, provider: str) -> bool:
@@ -143,9 +145,10 @@ def remove_fallback(model: str) -> bool:
         ``True`` if at least one entry was removed.
     """
     global _fallback_chain
-    before = len(_fallback_chain)
-    _fallback_chain = [(m, p) for m, p in _fallback_chain if m != model]
-    return len(_fallback_chain) < before
+    with _fallback_chain_lock:
+        before = len(_fallback_chain)
+        _fallback_chain = [(m, p) for m, p in _fallback_chain if m != model]
+        return len(_fallback_chain) < before
 
 
 def remove_fallback_at(index: int) -> tuple[str, str] | None:
@@ -157,16 +160,17 @@ def remove_fallback_at(index: int) -> tuple[str, str] | None:
     Returns:
         The removed ``(model, provider)`` tuple, or ``None`` if out of range.
     """
-    global _fallback_chain
-    if 0 <= index < len(_fallback_chain):
-        return _fallback_chain.pop(index)
-    return None
+    with _fallback_chain_lock:
+        if 0 <= index < len(_fallback_chain):
+            return _fallback_chain.pop(index)
+        return None
 
 
 def clear_fallbacks() -> None:
     """Remove every entry from the fallback chain."""
     global _fallback_chain
-    _fallback_chain = []
+    with _fallback_chain_lock:
+        _fallback_chain = []
 
 
 def serialize_fallback_chain() -> str:
@@ -175,7 +179,8 @@ def serialize_fallback_chain() -> str:
     Returns:
         Comma-separated ``"model:provider,model:provider"`` string.
     """
-    return ",".join(f"{m}:{p}" for m, p in _fallback_chain)
+    with _fallback_chain_lock:
+        return ",".join(f"{m}:{p}" for m, p in _fallback_chain)
 
 
 def load_fallback_chain(raw: str) -> None:
@@ -194,7 +199,8 @@ def load_fallback_chain(raw: str) -> None:
         if ":" in part:
             model, provider = part.rsplit(":", 1)
             chain.append((model.strip(), provider.strip()))
-    _fallback_chain = chain
+    with _fallback_chain_lock:
+        _fallback_chain = chain
 
 
 def _is_non_fallbackable(exc: Exception) -> str | None:
@@ -289,8 +295,9 @@ async def _try_fallbacks(
                 style="red",
             )
             logger.warning(
-                "Fallback %s failed: %s: %s",
+                "Fallback %s (provider=%s) failed: %s: %s",
                 model_name,
+                provider,
                 type(fb_exc).__name__,
                 fb_exc,
             )
