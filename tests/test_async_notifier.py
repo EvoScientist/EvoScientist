@@ -853,9 +853,7 @@ def test_watcher_unknown_status_treated_as_non_terminal(run_async):
     assert client.runs.get.await_count == 2
 
 
-def test_watcher_runs_get_persistent_failure_drops_notification(
-    run_async, monkeypatch
-):
+def test_watcher_runs_get_persistent_failure_drops_notification(run_async, monkeypatch):
     """If ``runs.get`` keeps raising, the watcher cannot verify terminal
     state and MUST drop the notification rather than default to
     ``"success"`` — otherwise a transient server outage reintroduces the
@@ -880,10 +878,7 @@ def test_watcher_runs_get_persistent_failure_drops_notification(
     # No notification — watcher exhausted the reconnect budget.
     assert async_notifier._notification_queue.empty()
     # 1 initial + _MAX_RECONNECT_ATTEMPTS retries = 11 calls total.
-    assert (
-        client.runs.get.await_count
-        == async_notifier._MAX_RECONNECT_ATTEMPTS + 1
-    )
+    assert client.runs.get.await_count == async_notifier._MAX_RECONNECT_ATTEMPTS + 1
 
 
 def test_watcher_runs_get_transient_failure_recovers(run_async, monkeypatch):
