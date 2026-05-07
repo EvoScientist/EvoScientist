@@ -363,9 +363,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
 
             import asyncio
 
-            return asyncio.run(
-                _guard_and_fallback(exc, request, _sync_invoke)
-            )
+            return asyncio.run(_guard_and_fallback(exc, request, _sync_invoke))
 
     async def awrap_model_call(
         self,

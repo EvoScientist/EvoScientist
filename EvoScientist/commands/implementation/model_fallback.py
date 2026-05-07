@@ -124,10 +124,15 @@ class ModelFallbackCommand(Command):
                 if picked is None:
                     return
                 model_name, provider = picked
+                live_chain = get_fallback_chain()
                 try:
-                    idx = chain.index((model_name, provider))
+                    idx = live_chain.index((model_name, provider))
                 except ValueError:
-                    idx = -1
+                    ctx.ui.append_system(
+                        f"{model_name} ({provider}) is no longer in the fallback chain",
+                        style="yellow",
+                    )
+                    return
                 remove_fallback_at(idx)
 
             ctx.ui.append_system(
