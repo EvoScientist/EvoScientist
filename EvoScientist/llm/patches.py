@@ -645,7 +645,9 @@ class _ClientProxy:
         if name == "runs":
             real_runs = self._real.runs
             return (
-                _AsyncRunsProxy(real_runs) if self._is_async else _SyncRunsProxy(real_runs)
+                _AsyncRunsProxy(real_runs)
+                if self._is_async
+                else _SyncRunsProxy(real_runs)
             )
         return getattr(self._real, name)
 
@@ -683,7 +685,9 @@ def _patch_deepagents_model_passthrough() -> None:
     orig_build_start = ds_mod._build_start_tool
     orig_build_update = ds_mod._build_update_tool
 
-    def _patched_build_start(agent_map: Any, clients: Any, tool_description: str) -> Any:
+    def _patched_build_start(
+        agent_map: Any, clients: Any, tool_description: str
+    ) -> Any:
         return orig_build_start(agent_map, _ClientCacheProxy(clients), tool_description)
 
     def _patched_build_update(agent_map: Any, clients: Any) -> Any:

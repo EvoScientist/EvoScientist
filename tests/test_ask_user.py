@@ -469,8 +469,7 @@ def test_for_async_subagent_omits_ask_user_middleware(
 
     # With for_async_subagent=True, ask_user is suppressed.
     async_names = [
-        type(m).__name__
-        for m in _get_default_middleware(for_async_subagent=True)
+        type(m).__name__ for m in _get_default_middleware(for_async_subagent=True)
     ]
     assert "AskUserMiddleware" not in async_names
     # Other middleware must remain — only ask_user is filtered.

@@ -195,7 +195,9 @@ class TestModelOverride:
             return "ok"
 
         with (
-            _patched_config({"model": "claude-opus-4-7", "model_provider": "anthropic"}),
+            _patched_config(
+                {"model": "claude-opus-4-7", "model_provider": "anthropic"}
+            ),
             patch(
                 "EvoScientist.llm.get_chat_model", return_value=new_model
             ) as mock_get,
