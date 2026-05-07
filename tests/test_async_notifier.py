@@ -651,6 +651,12 @@ def test_notification_consuming_flag_prevents_reentry(run_async):
 
 def _drain_all(an_mod):
     """Drain every queue (per-thread + unrouted) so tests start clean."""
+    if hasattr(an_mod, "_notification_queue"):
+        while True:
+            try:
+                an_mod._notification_queue.get_nowait()
+            except queue.Empty:
+                break
     if hasattr(an_mod, "_notifications_by_thread"):
         for q in list(an_mod._notifications_by_thread.values()):
             while True:
@@ -890,8 +896,12 @@ def test_watcher_skips_notification_on_stream_fail_with_nonterminal_status(run_a
     _drain_all(async_notifier)
     run_async(async_notifier.watch_run_and_notify(client, "thrP", "rP", "agentP"))
 
-    # No notification should have been enqueued for any thread.
+    # No notification should have been enqueued in any queue.
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
+    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
+    if hasattr(async_notifier, "_notifications_by_thread"):
+        for q in async_notifier._notifications_by_thread.values():
+            assert _drain_one_queue_helper(q) == []
 
 
 def _drain_one_queue_helper(q):
