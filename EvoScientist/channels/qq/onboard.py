@@ -239,17 +239,37 @@ def qr_register(timeout_seconds: int = 600) -> dict | None:
         print()
 
         # ── Poll loop ──
+        consecutive_errors = 0
         while time.monotonic() < deadline:
             try:
                 status, app_id, encrypted_secret, user_openid = _poll_bind_result(
                     task_id
                 )
-            except Exception:
+            except Exception as exc:
+                consecutive_errors += 1
+                logger.warning(
+                    "[QQ onboard] poll_bind_result failed (%d consecutive): %s",
+                    consecutive_errors,
+                    exc,
+                )
+                if consecutive_errors >= 5:
+                    print(
+                        "\n  Repeated polling failures — aborting."
+                        " See logs for details."
+                    )
+                    return None
                 time.sleep(ONBOARD_POLL_INTERVAL)
                 continue
+            consecutive_errors = 0
 
             if status == BindStatus.COMPLETED:
-                client_secret = decrypt_secret(encrypted_secret, aes_key)
+                try:
+                    client_secret = decrypt_secret(encrypted_secret, aes_key)
+                except Exception as exc:
+                    logger.warning(
+                        "[QQ onboard] decrypt_secret failed: %s", exc
+                    )
+                    return None
                 print()
                 print(f"  QR scan complete! (App ID: {app_id})")
                 if user_openid:

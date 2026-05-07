@@ -2352,7 +2352,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         "feishu": ["aiohttp>=3.9"],
         "dingtalk": ["aiohttp>=3.9"],
         "wechat": ["pycryptodome>=3.20", "aiohttp>=3.9"],
-        "qq": ["qq-botpy>=1.0"],
+        "qq": ["qq-botpy>=1.0", "cryptography>=41.0", "qrcode>=7.4"],
     }
 
     # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
@@ -2582,6 +2582,33 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             ).ask()
             if scan_choice is None:
                 raise KeyboardInterrupt()
+
+            if scan_choice == "scan":
+                # Preflight: AES-GCM decryption needs `cryptography`.
+                # `qrcode` is a soft dep — onboard.py degrades to URL-only display.
+                try:
+                    import cryptography  # noqa: F401
+                except ImportError:
+                    console.print(
+                        '  [yellow]✗ QR scan requires "cryptography".[/yellow]'
+                    )
+                    install_now = questionary.confirm(
+                        'Install "cryptography" now?',
+                        default=True,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if install_now is None:
+                        raise KeyboardInterrupt() from None
+                    if install_now and install_library("cryptography>=41.0"):
+                        console.print(
+                            "  [green]✓ Installed cryptography.[/green]"
+                        )
+                    else:
+                        console.print(
+                            "  [yellow]⚠ Falling back to manual entry.[/yellow]"
+                        )
+                        scan_choice = "manual"
 
             if scan_choice == "scan":
                 from ..channels.qq.onboard import qr_register
