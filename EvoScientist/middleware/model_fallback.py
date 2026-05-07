@@ -363,7 +363,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
 
             import asyncio
 
-            return asyncio.get_event_loop().run_until_complete(
+            return asyncio.run(
                 _guard_and_fallback(exc, request, _sync_invoke)
             )
 

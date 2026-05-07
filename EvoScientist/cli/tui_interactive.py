@@ -2539,7 +2539,10 @@ def run_textual_interactive(
             self._do_exit()
 
         def _do_exit(self) -> None:
-            """Clean up channels and exit."""
+            """Clean up channels, unregister callbacks, and exit."""
+            from ..middleware.model_fallback import set_ui_emit
+
+            set_ui_emit(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None

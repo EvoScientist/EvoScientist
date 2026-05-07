@@ -42,7 +42,6 @@ class ModelFallbackCommand(Command):
             add_fallback,
             clear_fallbacks,
             get_fallback_chain,
-            remove_fallback,
             remove_fallback_at,
             serialize_fallback_chain,
         )
@@ -125,7 +124,11 @@ class ModelFallbackCommand(Command):
                 if picked is None:
                     return
                 model_name, provider = picked
-                remove_fallback(model_name)
+                try:
+                    idx = chain.index((model_name, provider))
+                except ValueError:
+                    idx = -1
+                remove_fallback_at(idx)
 
             ctx.ui.append_system(
                 f"Removed {model_name} ({provider}) from fallback chain",
