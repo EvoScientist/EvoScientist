@@ -158,6 +158,7 @@ class TestTryFallbacks:
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
+        mock_gcm.assert_called_once_with(model="fb-model", provider="fb-provider")
 
     def test_skips_failing_fallback_tries_next(self):
         """When the first fallback fails, try the second."""
@@ -283,6 +284,7 @@ class TestGuardAndFallback:
             )
 
         assert result is AI_RESPONSE
+        invoke.assert_awaited_once()
 
 
 # ═════════════════════════════════════════════════════════════════
