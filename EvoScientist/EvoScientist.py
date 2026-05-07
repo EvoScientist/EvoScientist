@@ -448,8 +448,21 @@ def _get_default_backend():
     )
 
 
-def _get_default_middleware():
-    """Build the default middleware list."""
+def _get_default_middleware(*, for_async_subagent: bool = False):
+    """Build the default middleware list.
+
+    Args:
+        for_async_subagent: When True, omit middleware that would deadlock a
+            deployed async sub-agent. Specifically: ``AskUserMiddleware`` uses
+            ``interrupt()`` to pause the graph waiting for a user reply, but
+            async sub-agents run in the ``langgraph dev`` subprocess where
+            the parent only holds a ``task_id`` and has no UI path to surface
+            (or resume) an interrupt — the sub-agent would hang forever the
+            first time it called ``ask_user``. This mirrors the same reason
+            ``subagents/_factory.py`` deliberately skips ``interrupt_on=`` on
+            the deepagents level. Defaults to False (full middleware list)
+            for the CLI's in-process agent.
+    """
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
@@ -480,7 +493,7 @@ def _get_default_middleware():
         create_memory_middleware(memory_dir, extraction_model=model),
     ]
 
-    if cfg.enable_ask_user and not cfg.auto_mode:
+    if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
