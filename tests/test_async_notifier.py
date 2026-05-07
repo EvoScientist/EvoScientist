@@ -875,8 +875,14 @@ def test_watcher_runs_get_persistent_failure_drops_notification(run_async, monke
     _drain_all(async_notifier)
     run_async(async_notifier.watch_run_and_notify(client, "thrG", "rG", "agentG"))
 
-    # No notification — watcher exhausted the reconnect budget.
-    assert async_notifier._notification_queue.empty()
+    # No notification — watcher exhausted the reconnect budget. Check every
+    # queue routing could send to so a future routing change can't make this
+    # test silently false-pass.
+    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
+    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
+    if hasattr(async_notifier, "_notifications_by_thread"):
+        for q in async_notifier._notifications_by_thread.values():
+            assert _drain_one_queue_helper(q) == []
     # 1 initial + _MAX_RECONNECT_ATTEMPTS retries = 11 calls total.
     assert client.runs.get.await_count == async_notifier._MAX_RECONNECT_ATTEMPTS + 1
 
