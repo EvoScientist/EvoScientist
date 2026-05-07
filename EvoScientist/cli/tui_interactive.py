@@ -21,6 +21,7 @@ from rich.text import Text
 import EvoScientist.cli.channel as _ch_mod
 from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
+from ..audit import AuditLogger
 from ..commands import CommandContext
 from ..commands import manager as cmd_manager
 from ..paths import DATA_DIR
@@ -171,15 +172,26 @@ def _build_welcome_banner(
 
 def _is_final_response(state: StreamState) -> bool:
     """Check if all tools are done and no sub-agents are active."""
-    n_visible = 0
-    n_done = 0
-    for i, tc in enumerate(state.tool_calls):
-        if tc.get("name") in _INTERNAL_TOOLS:
+    pending_tool_ids = set()
+    pending_tool_names: list[str] = []
+    for tc in state.tool_calls:
+        name = tc.get("name")
+        if name in _INTERNAL_TOOLS:
             continue
-        n_visible += 1
-        if i < len(state.tool_results):
-            n_done += 1
-    has_pending = n_visible > n_done
+        tool_id = tc.get("id", "")
+        if tool_id:
+            pending_tool_ids.add(tool_id)
+        elif name:
+            pending_tool_names.append(name)
+    for result in state.tool_results:
+        result_id = result.get("tool_call_id", "")
+        if result_id and result_id in pending_tool_ids:
+            pending_tool_ids.discard(result_id)
+            continue
+        result_name = result.get("name", "")
+        if result_name in pending_tool_names:
+            pending_tool_names.remove(result_name)
+    has_pending = bool(pending_tool_ids or pending_tool_names)
     any_active_sa = any(sa.is_active for sa in state.subagents)
     return not has_pending and not any_active_sa and not state.is_processing
 
@@ -372,6 +384,7 @@ def run_textual_interactive(
             )
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value
+            self._audit_logger = AuditLogger(thread_id=self._conversation_tid)
             self._workspace_dir = workspace
             self._checkpointer = checkpointer
             self._channel_send_thinking = channel_send_thinking_value
@@ -409,6 +422,20 @@ def run_textual_interactive(
             self._status_streaming_text = ""
             self._status_last_input_tokens: int | None = None
             self._compacting_widget: CompactingWidget | None = None
+
+        def _start_audit_session(self) -> None:
+            self._audit_logger.log_session_start(
+                model=self._current_model or "unknown",
+                provider=self._current_provider or "unknown",
+            )
+
+        def _end_audit_session(self) -> None:
+            self._audit_logger.log_session_end()
+
+        def _reset_audit_session(self) -> None:
+            self._end_audit_session()
+            self._audit_logger = AuditLogger(thread_id=self._conversation_tid)
+            self._start_audit_session()
 
         # ── Background agent / MCP loading ───────────────────
 
@@ -593,6 +620,7 @@ def run_textual_interactive(
             if not workspace_fixed:
                 self._workspace_dir = create_session_workspace(run_name)
             self._conversation_tid = generate_thread_id()
+            self._reset_audit_session()
             # Background reload: next user message awaits it.
             self._start_background_agent_load(self._workspace_dir)
             self._status_started_at = datetime.now()
@@ -643,6 +671,7 @@ def run_textual_interactive(
                         await sync_widget.cleanup()
 
             self._conversation_tid = thread_id
+            self._reset_audit_session()
             # Background reload: history renders immediately; next turn awaits.
             self._start_background_agent_load(self._workspace_dir)
             self._status_started_at = datetime.now()
@@ -683,6 +712,7 @@ def run_textual_interactive(
         def on_mount(self) -> None:
             self._render_welcome()
             self._render_status()
+            self._start_audit_session()
             self.set_interval(1.0, self._render_status)
             # Kick off agent construction in the background so the TUI
             # appears instantly; MCP progress shows up in the status bar.
@@ -1447,6 +1477,7 @@ def run_textual_interactive(
                                         await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
+                            self._audit_logger.log_event("tool_call", event)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -1455,8 +1486,18 @@ def run_textual_interactive(
                             # Match via state's deduplicated tool_calls (uses tool_id)
                             matched = False
                             matched_tid = ""
+                            result_tool_id = event.get("id", "")
+                            if result_tool_id and result_tool_id in tool_widgets:
+                                tw = tool_widgets[result_tool_id]
+                                if tw._status == "running":
+                                    if result_success:
+                                        tw.set_success(result_content)
+                                    else:
+                                        tw.set_error(result_content)
+                                    matched = True
+                                    matched_tid = result_tool_id
                             result_idx = len(state.tool_results) - 1
-                            if 0 <= result_idx < len(state.tool_calls):
+                            if not matched and 0 <= result_idx < len(state.tool_calls):
                                 tc = state.tool_calls[result_idx]
                                 tid = tc.get("id", "")
                                 if tid and tid in tool_widgets:
@@ -1506,6 +1547,7 @@ def run_textual_interactive(
                                     Text("\u25cf Analyzing results...", style="cyan"),
                                 )
                                 await container.mount(processing_w)
+                            self._audit_logger.log_event("tool_result", event)
 
                         elif event_type == "subagent_start":
                             sa_name = event.get("name", "sub-agent")
@@ -1515,6 +1557,8 @@ def run_textual_interactive(
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
                                 subagent_widgets[sa_name] = sa_w
+                            if sa_name != "sub-agent" or sa_desc:
+                                self._audit_logger.log_event("subagent_start", event)
 
                         elif event_type == "subagent_tool_call":
                             sa_name = event.get("subagent", "sub-agent")
@@ -1529,6 +1573,10 @@ def run_textual_interactive(
                                 event.get("args", {}),
                                 event.get("id", ""),
                             )
+                            self._audit_logger.log_event(
+                                "subagent_tool_call",
+                                {**event, "subagent": sa_name},
+                            )
 
                         elif event_type == "subagent_tool_result":
                             sa_name = event.get("subagent", "sub-agent")
@@ -1541,6 +1589,10 @@ def run_textual_interactive(
                                     event.get("success", True),
                                     event.get("id", ""),
                                 )
+                            self._audit_logger.log_event(
+                                "subagent_tool_result",
+                                {**event, "subagent": sa_name},
+                            )
 
                         elif event_type == "subagent_end":
                             sa_name = event.get("name", "sub-agent")
@@ -1548,6 +1600,10 @@ def run_textual_interactive(
                             sa_w = _find_or_rename_sa_widget(sa_name)
                             if sa_w is not None:
                                 sa_w.finalize()
+                            self._audit_logger.log_event(
+                                "subagent_end",
+                                {**event, "name": sa_name},
+                            )
 
                         elif event_type == "ask_user":
                             questions = event.get("questions", [])
@@ -2534,6 +2590,7 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels and exit."""
+            self._end_audit_session()
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None
@@ -2853,6 +2910,7 @@ def run_textual_interactive(
             finally:
                 from .resume_hint import print_resume_hint
 
+                app._end_audit_session()
                 # Best-effort resume hint — guarded so failures here (e.g.
                 # DB teardown race during abnormal shutdown) cannot shadow
                 # the original run_async traceback.

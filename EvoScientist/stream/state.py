@@ -249,6 +249,7 @@ class StreamState:
                 {
                     "name": result_name,
                     "content": result_content,
+                    "tool_call_id": event.get("id", ""),
                 }
             )
             # Update todo list from write_todos / read_todos results (fallback)

@@ -490,6 +490,26 @@ class TestIsFinalResponse(unittest.TestCase):
         state.tool_results = [{"name": "read_file", "content": "[OK]"}]
         assert _is_final_response(state) is True
 
+    def test_out_of_order_tool_results_track_ids(self):
+        from EvoScientist.cli.tui_interactive import _is_final_response
+        from EvoScientist.stream.state import StreamState
+
+        state = StreamState()
+        state.tool_calls = [
+            {"id": "tc-1", "name": "read_file", "args": {}},
+            {"id": "tc-2", "name": "write_file", "args": {}},
+        ]
+        state.tool_results = [
+            {"name": "write_file", "content": "[OK]", "tool_call_id": "tc-2"}
+        ]
+
+        assert _is_final_response(state) is False
+
+        state.tool_results.append(
+            {"name": "read_file", "content": "[OK]", "tool_call_id": "tc-1"}
+        )
+        assert _is_final_response(state) is True
+
     def test_active_subagent_not_final(self):
         from EvoScientist.cli.tui_interactive import _is_final_response
         from EvoScientist.stream.state import StreamState, SubAgentState

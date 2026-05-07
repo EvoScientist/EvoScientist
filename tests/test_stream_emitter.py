@@ -29,6 +29,13 @@ class TestStreamEventEmitter:
         assert ev.data["name"] == "execute"
         assert ev.data["content"] == "[OK] done"
         assert ev.data["success"] is True
+        assert ev.data["id"] == ""
+
+    def test_tool_result_with_id(self):
+        ev = StreamEventEmitter.tool_result(
+            "execute", "[OK] done", success=True, tool_call_id="tc1"
+        )
+        assert ev.data["id"] == "tc1"
 
     def test_tool_result_failure(self):
         ev = StreamEventEmitter.tool_result("execute", "Error: fail", success=False)
