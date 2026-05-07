@@ -264,7 +264,7 @@ async def _try_fallbacks(
     )
 
     last_exc = primary_exc
-    for model_name, provider in _fallback_chain:
+    for model_name, provider in get_fallback_chain():
         _emit(
             f"  -> Falling back to {model_name} ({provider}) "
             f"due to: {type(last_exc).__name__}: {last_exc}",
