@@ -29,6 +29,7 @@ relied upon for config — only for diagnostics.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from collections.abc import Awaitable, Callable
@@ -163,7 +164,13 @@ class ConfigurableModelMiddleware(AgentMiddleware):
         if model_name is None:
             return await handler(request)
         try:
-            new_model = self._resolve(model_name, provider)
+            # Offload first-call SDK init off the event loop. ``_resolve`` calls
+            # ``get_chat_model`` on a cache miss, which can spend hundreds of ms
+            # building HTTP clients. Doing this synchronously inside an
+            # ``async def`` would block every other coroutine on the same
+            # langgraph dev event loop. Cache hits are still fast (a dict
+            # lookup); the thread-pool overhead is irrelevant once warm.
+            new_model = await asyncio.to_thread(self._resolve, model_name, provider)
         except Exception:
             logger.warning(
                 "ConfigurableModelMiddleware failed to resolve model=%r "

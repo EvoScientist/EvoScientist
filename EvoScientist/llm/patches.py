@@ -682,8 +682,14 @@ def _patch_deepagents_model_passthrough() -> None:
     except ImportError:
         return
 
-    orig_build_start = ds_mod._build_start_tool
-    orig_build_update = ds_mod._build_update_tool
+    # Defensive ``getattr`` lookups mirror the rest of this file (lines 254,
+    # 266, 279, 290, 339, 351, 362, 373, 473): a deepagents update that
+    # renames or removes either private helper degrades to a no-op instead
+    # of raising ``AttributeError`` at CLI startup.
+    orig_build_start = getattr(ds_mod, "_build_start_tool", None)
+    orig_build_update = getattr(ds_mod, "_build_update_tool", None)
+    if orig_build_start is None or orig_build_update is None:
+        return
 
     def _patched_build_start(
         agent_map: Any, clients: Any, tool_description: str

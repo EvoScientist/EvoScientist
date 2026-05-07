@@ -585,20 +585,8 @@ def create_cli_agent(
 
     from . import paths as _paths
     from .backends import CustomSandboxBackend, MergedSkillsBackend
-    from .middleware import (
-        ConfigurableModelMiddleware,
-        ContextOverflowMapperMiddleware,
-        ModelFallbackMiddleware,
-        ToolErrorHandlerMiddleware,
-        create_context_editing_middleware,
-        create_memory_middleware,
-        create_tool_selector_middleware,
-        load_fallback_chain,
-    )
 
     cfg = _ensure_config(config)
-    if cfg.model_fallbacks:
-        load_fallback_chain(cfg.model_fallbacks)
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
@@ -646,22 +634,10 @@ def create_cli_agent(
         },
     )
 
-    model = _ensure_chat_model()
-    # See ``_get_default_middleware`` for why ``ConfigurableModelMiddleware``
-    # leads the chain (wraps fallback so retries aren't redundantly overridden).
-    mw: list[AgentMiddleware] = [
-        ConfigurableModelMiddleware(),
-        create_context_editing_middleware(model),
-        ModelFallbackMiddleware(),
-        ContextOverflowMapperMiddleware(),
-        ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(model=model),
-        create_memory_middleware(_mem_dir, extraction_model=model),
-    ]
-    if cfg.enable_ask_user and not cfg.auto_mode:
-        from .middleware.ask_user import AskUserMiddleware
-
-        mw.insert(0, AskUserMiddleware())
+    # Delegate middleware construction to the single source of truth so the
+    # CLI agent never drifts from the default chain. Anything CLI-specific
+    # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
+    mw: list[AgentMiddleware] = _get_default_middleware()
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
     # would propagate it to every subagent, breaking parallel execute calls

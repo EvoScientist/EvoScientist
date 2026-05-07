@@ -97,6 +97,10 @@ class TestIdempotence:
         assert wrapped_twice is wrapped_once  # not double-wrapped
 
     def test_flag_set_after_apply(self, restore_model_passthrough_patch):
+        try:
+            from deepagents.middleware import async_subagents as _  # noqa: F401
+        except ImportError:
+            pytest.skip("deepagents not available")
         patches_mod._model_passthrough_patched = False
         patches_mod._patch_deepagents_model_passthrough()
         assert patches_mod._model_passthrough_patched is True
