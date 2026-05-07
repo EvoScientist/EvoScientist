@@ -24,6 +24,12 @@ TERMINAL_STATUSES: Final = frozenset({"success", "error", "timeout", "interrupte
 Cancel operations transition runs into ``interrupted`` (not ``cancelled``).
 """
 
+# How many times the watcher will re-join the SSE stream when it closes
+# cleanly but ``runs.get`` reports the run is still alive (typical cause:
+# HTTP keep-alive timeout on long static periods). Bounded to prevent an
+# unbounded loop if the server permanently misreports status.
+_MAX_RECONNECT_ATTEMPTS: Final = 10
+
 
 @dataclass(frozen=True)
 class AsyncTaskNotification:
@@ -132,62 +138,111 @@ async def watch_run_and_notify(
 ) -> None:
     """Subscribe to a run's event stream; enqueue notification when it terminates.
 
-    Status detection strategy:
-      1. Watch for an explicit ``event="error"`` SSE part — langgraph dev
-         emits one when the run fails. This is authoritative, in-band, and
-         has no timing race against the server-side run-state writeback.
-      2. On clean stream exit with no error event → ``"success"``.
-      3. On stream exception → fall back to ``client.runs.get`` (best-effort).
-         Non-terminal fallback statuses (``pending`` / ``running``) are
-         dropped — the run is still alive, no notification is enqueued.
+    Status detection strategy (priority order):
 
-    Reading the in-band ``event="error"`` SSE part instead of polling
-    ``runs.get`` after every clean close avoids a race where the server-side
-    terminal status hasn't been written by the time the stream closes.
+      1. **In-band ``event="error"`` SSE part** — authoritative error signal
+         from langgraph dev, no race against server-side state writeback.
+      2. **Server-side state via ``runs.get``** — invoked after the stream
+         closes (cleanly or with exception) to verify the run is actually
+         done. Required because SSE long-poll can close on HTTP keep-alive
+         timeout while the run is still running, which would otherwise be
+         misread as ``"success"`` (observed in production with long-running
+         literature search tasks under concurrency).
+      3. **Re-join loop** — if ``runs.get`` reports ``pending`` / ``running``,
+         the run is alive but we lost the stream; re-join up to
+         ``_MAX_RECONNECT_ATTEMPTS`` times before giving up.
+
+    The previous implementation trusted clean stream exits as success
+    without any verification, which produced false-positive notifications
+    when SSE keep-alive timeouts closed the stream early.
+
+    Race-safety note: ``runs.get`` returning ``"error"`` immediately after
+    a clean stream close can be a transient state for an actually-successful
+    run (server hasn't finalized the writeback). We trust the absence of
+    in-band error event over a stale ``runs.get="error"`` — see the
+    ``status == "error" and not saw_error_event`` branch below.
     """
-    stream_failed = False
-    saw_error_event = False
-    try:
-        async for chunk in client.runs.join_stream(
-            thread_id=thread_id, run_id=run_id, stream_mode="values"
-        ):
-            ev = getattr(chunk, "event", None)
-            data = getattr(chunk, "data", None)
-            if ev == "error":
-                # Authoritative in-band error signal from langgraph dev.
-                saw_error_event = True
-                logger.info("Watcher saw error event for task %s: %r", thread_id, data)
-    except Exception:
-        stream_failed = True
-        logger.warning("Watcher stream failed for task %s", thread_id, exc_info=True)
+    for attempt in range(_MAX_RECONNECT_ATTEMPTS + 1):
+        stream_failed = False
+        saw_error_event = False
+        try:
+            async for chunk in client.runs.join_stream(
+                thread_id=thread_id, run_id=run_id, stream_mode="values"
+            ):
+                ev = getattr(chunk, "event", None)
+                data = getattr(chunk, "data", None)
+                if ev == "error":
+                    saw_error_event = True
+                    logger.info(
+                        "Watcher saw error event for task %s: %r", thread_id, data
+                    )
+        except Exception:
+            stream_failed = True
+            logger.warning(
+                "Watcher stream failed for task %s", thread_id, exc_info=True
+            )
 
-    if saw_error_event:
-        status = "error"
-    elif not stream_failed:
-        # Clean stream exit, no error event → trust the server-side success.
-        status = "success"
-    else:
-        # Stream errored without delivering a final state — fall back to
-        # runs.get (best-effort). REJECT non-terminal statuses (pending /
-        # running / unknown): the run is still alive, we shouldn't notify
-        # at all. Returning early without enqueueing prevents the
-        # "⚠ pending" notification we observed when the stream failed
-        # mid-flight.
+        if saw_error_event:
+            status = "error"
+            break
+
+        # Verify with server before deciding the run is done — clean stream
+        # close does NOT guarantee terminal state.
         try:
             run = await client.runs.get(thread_id=thread_id, run_id=run_id)
-            raw_status = run.get("status", "")
-            if raw_status in TERMINAL_STATUSES:
-                status = raw_status
-            else:
-                logger.info(
-                    "Watcher fallback got non-terminal status %r for task %s; "
-                    "skipping notification (run still alive)",
-                    raw_status,
+            raw = run.get("status", "")
+        except Exception:
+            logger.warning(
+                "Watcher runs.get failed for task %s; falling back to "
+                "stream-derived status",
+                thread_id,
+                exc_info=True,
+            )
+            status = "error" if stream_failed else "success"
+            break
+
+        if raw not in TERMINAL_STATUSES:
+            # Non-terminal status — includes the documented ``pending`` /
+            # ``running`` values AND any future / unknown status the SDK may
+            # introduce. Stream closed early but run is not done; re-join
+            # unless we've exhausted attempts. Treating unknown statuses as
+            # non-terminal is the safe default — better to retry once more
+            # than to enqueue a false-positive on an unrecognized state.
+            if attempt >= _MAX_RECONNECT_ATTEMPTS:
+                logger.warning(
+                    "Watcher gave up on task %s after %d reconnects "
+                    "(server still reports %r); skipping notification",
                     thread_id,
+                    _MAX_RECONNECT_ATTEMPTS,
+                    raw,
                 )
                 return
-        except Exception:
-            status = "error"
+            logger.info(
+                "Watcher SSE closed for task %s but run reports %r; "
+                "re-joining (attempt %d)",
+                thread_id,
+                raw,
+                attempt + 1,
+            )
+            continue
+
+        if raw == "error":
+            # Race-safe interpretation: no in-band error event → trust the
+            # absence over the server-side ``error`` (likely transient
+            # writeback state for a successful run). Stream-failure path
+            # is the one case where we DO trust ``error`` — the stream
+            # blowing up usually means something genuinely went wrong.
+            status = "error" if stream_failed else "success"
+            break
+
+        # success / timeout / interrupted — trust authoritative terminal status.
+        status = raw
+        break
+    else:
+        # Loop exhausted without a break — should be unreachable because the
+        # re-join branch returns explicitly when attempts are exhausted, but
+        # guard against future refactors.
+        return
 
     notification = AsyncTaskNotification(
         task_id=thread_id,

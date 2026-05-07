@@ -737,8 +737,8 @@ def test_watcher_reports_error_on_in_band_error_event(run_async):
     client.runs.get.assert_not_awaited()
 
 
-def test_watcher_clean_exit_without_error_event_is_success(run_async):
-    """Clean stream exit with no error event → success (no runs.get poll)."""
+def test_watcher_clean_exit_with_runs_get_success_is_success(run_async):
+    """Clean stream exit + runs.get reports success → status=success."""
 
     async def fake_stream(*a, **kw):
         yield SimpleNamespace(
@@ -747,8 +747,35 @@ def test_watcher_clean_exit_without_error_event_is_success(run_async):
 
     client = MagicMock()
     client.runs.join_stream = fake_stream
-    # If we (wrongly) poll runs.get and it returned "error", the test would
-    # fail — proving we no longer have the timing race.
+    client.runs.get = AsyncMock(return_value={"status": "success"})
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrS", "rS", "agentS"))
+
+    notif = async_notifier._notification_queue.get_nowait()
+    assert notif.status == "success"
+    client.runs.get.assert_awaited_once()
+
+
+def test_watcher_clean_exit_with_runs_get_error_is_race_safe(run_async):
+    """Clean stream exit + no in-band error event + runs.get returns 'error'
+    → status=success (race-safe).
+
+    Server-side state writeback can transiently report 'error' for an
+    actually-successful run between SSE close and final-state finalization.
+    The absence of an in-band error event is authoritative — the run did
+    not actually error. This test guards against re-introducing the race
+    we hit when an earlier 'always-poll runs.get' attempt blindly trusted
+    the runs.get value.
+    """
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(
+            event="values", data={"messages": [{"type": "ai", "content": "ok"}]}
+        )
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
     client.runs.get = AsyncMock(return_value={"status": "error"})
 
     _drain_all(async_notifier)
@@ -756,7 +783,119 @@ def test_watcher_clean_exit_without_error_event_is_success(run_async):
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
-    client.runs.get.assert_not_awaited()
+
+
+def test_watcher_clean_exit_with_runs_get_running_drops_notification(run_async):
+    """Reproduces the production bug: clean SSE close while run is still
+    actually running (HTTP keep-alive timeout under concurrency).
+
+    Pre-fix: watcher trusted clean stream exit as 'success' and enqueued a
+    false-positive notification for a still-running task.
+
+    Post-fix: watcher verifies via runs.get and re-joins the stream until
+    either a terminal status arrives or the reconnect budget is exhausted.
+    With a mock that perpetually closes cleanly + reports 'running', the
+    watcher exhausts retries and enqueues nothing.
+    """
+
+    async def fake_stream(*a, **kw):
+        # SSE closes cleanly after one chunk — simulates HTTP keep-alive
+        # timeout where the server drops the long-poll without an error.
+        yield SimpleNamespace(event="values", data={"messages": []})
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    client.runs.get = AsyncMock(return_value={"status": "running"})
+
+    _drain_all(async_notifier)
+    run_async(
+        async_notifier.watch_run_and_notify(
+            client, "thr-bug", "rB", "data-analysis-agent"
+        )
+    )
+
+    # No notification should have been enqueued anywhere.
+    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
+    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
+    for q in async_notifier._notifications_by_thread.values():
+        assert _drain_one_queue_helper(q) == []
+    # runs.get must have been polled at least once (the verify step).
+    assert client.runs.get.await_count >= 1
+
+
+def test_watcher_unknown_status_treated_as_non_terminal(run_async):
+    """Future / unrecognized status values should trigger a re-join, not a
+    false-positive notification.
+
+    If the SDK introduces a new non-terminal status (e.g. ``queued``,
+    ``scheduled``) the watcher must NOT silently default to ``success`` —
+    that would re-introduce the same class of bug we just fixed. The
+    safe-default policy: anything outside ``TERMINAL_STATUSES`` is treated
+    as ``running``-equivalent and triggers re-join.
+    """
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(event="values", data={"messages": []})
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    # First call: hypothetical future status. Second call: actual completion.
+    client.runs.get = AsyncMock(
+        side_effect=[{"status": "queued"}, {"status": "success"}]
+    )
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrU", "rU", "agentU"))
+
+    notif = async_notifier._notification_queue.get_nowait()
+    assert notif.status == "success"
+    # Re-joined because the unknown status was not terminal.
+    assert client.runs.get.await_count == 2
+
+
+def test_watcher_runs_get_failure_falls_back_to_stream_state(run_async):
+    """If ``runs.get`` itself raises (network error, server down), the
+    watcher must fall back to the legacy stream-derived heuristic rather
+    than crashing or hanging in the reconnect loop."""
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(event="values", data={"messages": []})
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    client.runs.get = AsyncMock(side_effect=RuntimeError("server unreachable"))
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrG", "rG", "agentG"))
+
+    # Stream closed cleanly + runs.get failed → fall back to "success"
+    # (legacy behavior). This is intentionally permissive to avoid losing
+    # notifications when the server has a transient outage.
+    notif = async_notifier._notification_queue.get_nowait()
+    assert notif.status == "success"
+
+
+def test_watcher_re_joins_stream_until_terminal_status(run_async):
+    """When runs.get returns 'running' on attempt N but a terminal status
+    on attempt N+1, the watcher re-joins, observes the terminal status,
+    and enqueues the notification correctly."""
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(event="values", data={"messages": []})
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    # First call: still running. Second call: success.
+    client.runs.get = AsyncMock(
+        side_effect=[{"status": "running"}, {"status": "success"}]
+    )
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrR", "rR", "agentR"))
+
+    notif = async_notifier._notification_queue.get_nowait()
+    assert notif.status == "success"
+    assert client.runs.get.await_count == 2
 
 
 # ============================================================================
