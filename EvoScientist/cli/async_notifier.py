@@ -56,13 +56,33 @@ _unrouted_queue: queue.Queue[AsyncTaskNotification] = queue.Queue()
 # working unchanged. New code should call ``_enqueue`` instead.
 _notification_queue = _unrouted_queue
 
-# Track active watcher tasks/futures for clean shutdown
-_active_watchers: set = set()
+# Track active watcher tasks/futures for clean shutdown.
+# dict[handle, origin_cli_thread_id] so the consumer's batching grace loop
+# can filter for watchers tied to the current CLI thread (or unrouted)
+# without being delayed by sibling-thread watchers.
+_active_watchers: dict = {}
 # Map thread_id (sub-agent thread) → current watcher handle (supports
 # replacement on update_async_task). Value type widens from asyncio.Task
 # to "anything with .cancel()/.done()/.add_done_callback()" so we can
 # move watcher scheduling onto a background loop in a follow-up fix.
 _watcher_by_thread: dict[str, object] = {}
+
+
+def _has_relevant_active_watchers(current_thread_id: str | None) -> bool:
+    """Are there any in-flight watchers whose notifications would drain on
+    a ``consume_notifications`` call for ``current_thread_id``?
+
+    A watcher is relevant if its ``origin_cli_thread_id`` matches the
+    current CLI thread or is ``None`` (unrouted bucket drains for any
+    consumer). Sibling-thread watchers are ignored.
+    """
+    if current_thread_id is None:
+        return bool(_active_watchers)
+    return any(
+        origin == current_thread_id or origin is None
+        for origin in _active_watchers.values()
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -274,10 +294,10 @@ def spawn_watcher(
         )
     )
     _watcher_by_thread[thread_id] = task
-    _active_watchers.add(task)
+    _active_watchers[task] = origin_cli_thread_id
 
     def _cleanup(t: asyncio.Task) -> None:
-        _active_watchers.discard(t)
+        _active_watchers.pop(t, None)
         # Only remove if THIS task is still the registered one — could
         # have been replaced by a newer spawn_watcher call already.
         if _watcher_by_thread.get(thread_id) is t:
@@ -458,12 +478,13 @@ async def consume_notifications(
     notifs = drain_notifications(current_thread_id)
     if not notifs:
         return
-    # Adaptive grace: if other watchers are still in flight, wait briefly for
-    # them to settle so co-completing tasks batch into a single agent turn.
-    deadline = (
-        asyncio.get_event_loop().time() + NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS
-    )
-    while _active_watchers and asyncio.get_event_loop().time() < deadline:
+    # Adaptive grace: if other watchers tied to THIS thread (or unrouted) are
+    # still in flight, wait briefly for them to settle so co-completing tasks
+    # batch into a single agent turn. Sibling-thread watchers don't count —
+    # their notifications wouldn't drain on this tick anyway.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS
+    while _has_relevant_active_watchers(current_thread_id) and loop.time() < deadline:
         await asyncio.sleep(0.2)
         notifs.extend(drain_notifications(current_thread_id))
     # Final brief grace to catch arrivals enqueued just before this tick

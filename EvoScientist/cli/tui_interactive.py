@@ -865,7 +865,7 @@ def run_textual_interactive(
             # Mark busy synchronously so the next poll tick doesn't re-enter.
             self._busy = True
             self._run_task = asyncio.ensure_future(
-                self._run_turn(text, skip_user_message=True)
+                self._run_turn(text, skip_user_message=True, resolve_mentions=False)
             )
 
         async def _read_async_tasks_tui(self) -> dict[str, dict]:
@@ -1889,7 +1889,11 @@ def run_textual_interactive(
             return response
 
         async def _run_turn(
-            self, user_text: str, *, skip_user_message: bool = False
+            self,
+            user_text: str,
+            *,
+            skip_user_message: bool = False,
+            resolve_mentions: bool = True,
         ) -> None:
             """Handle a user turn: stream agent response with widgets.
 
@@ -1898,6 +1902,10 @@ def run_textual_interactive(
                 skip_user_message: If True, suppress the UserMessage widget echo
                     (caller has already displayed a visual representation of the
                     input — e.g. async-notifier per-task lines).
+                resolve_mentions: If False, skip ``@file`` mention expansion.
+                    Used by synthetic notifier turns whose payload is a fixed
+                    JSON template — keeps the TUI path consistent with the
+                    Rich CLI notifier path which never expands mentions.
             """
             cancelled = False
             try:
@@ -1907,9 +1915,13 @@ def run_textual_interactive(
                 # Resolve @file mentions — inject file contents before sending to agent.
                 # Use self._workspace_dir (current session) not the startup-captured
                 # workspace_dir closure, which becomes stale after /new or /resume.
-                _, message_to_send, file_warnings = await asyncio.to_thread(
-                    resolve_file_mentions, user_text, self._workspace_dir
-                )
+                if resolve_mentions:
+                    _, message_to_send, file_warnings = await asyncio.to_thread(
+                        resolve_file_mentions, user_text, self._workspace_dir
+                    )
+                else:
+                    message_to_send = user_text
+                    file_warnings = []
                 await self._refresh_status_snapshot(message_to_send)
 
                 # Block the turn on MCP tools finishing, if still in flight.

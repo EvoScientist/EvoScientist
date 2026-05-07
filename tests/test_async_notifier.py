@@ -901,3 +901,36 @@ def _drain_one_queue_helper(q):
             items.append(q.get_nowait())
         except queue.Empty:
             return items
+
+
+def test_active_watchers_grace_filters_by_thread():
+    """Verifies _has_relevant_active_watchers ignores sibling-thread watchers
+    (otherwise consume_notifications grace period would block thread A by up
+    to 3s waiting for thread B's unrelated watchers to finish)."""
+
+    async_notifier._active_watchers.clear()
+
+    # Sentinel handles — only their identity matters here, not their type
+    handle_a = object()
+    handle_b = object()
+    handle_unrouted = object()
+
+    async_notifier._active_watchers[handle_a] = "threadA"
+    async_notifier._active_watchers[handle_b] = "threadB"
+    async_notifier._active_watchers[handle_unrouted] = None
+
+    # Current thread A → A's own watcher + unrouted are relevant
+    assert async_notifier._has_relevant_active_watchers("threadA") is True
+    # Current thread C (no active watcher of its own) → only unrouted matters
+    assert async_notifier._has_relevant_active_watchers("threadC") is True
+    # Drop the unrouted handle → C now has nothing relevant
+    del async_notifier._active_watchers[handle_unrouted]
+    assert async_notifier._has_relevant_active_watchers("threadC") is False
+    # A still has its own watcher
+    assert async_notifier._has_relevant_active_watchers("threadA") is True
+    # Legacy: None argument falls back to "any active watcher counts"
+    assert async_notifier._has_relevant_active_watchers(None) is True
+
+    async_notifier._active_watchers.clear()
+    assert async_notifier._has_relevant_active_watchers("threadA") is False
+    assert async_notifier._has_relevant_active_watchers(None) is False
