@@ -741,8 +741,6 @@ def _channels_stop(
                 future.result(timeout=10)
             except Exception as e:
                 _channel_logger.debug(f"Error stopping channels: {e}")
-        if _manager:
-            _manager.bus.stop()
         if _bus_thread:
             _bus_thread.join(timeout=5)
         _manager = None
