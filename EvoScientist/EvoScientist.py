@@ -308,6 +308,15 @@ def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> l
 
         middleware.append(AsyncWatcherMiddleware(agent_specs))
 
+    # Forward the CLI's live (model, provider) into deepagents'
+    # start/update_async_task tool calls so the deployed graph can
+    # re-resolve its chat model per run via ConfigurableModelMiddleware.
+    # Idempotent — safe to call on every CLI startup.
+    if agent_specs:
+        from .llm.patches import _patch_deepagents_model_passthrough
+
+        _patch_deepagents_model_passthrough()
+
     return out
 
 
@@ -442,6 +451,7 @@ def _get_default_backend():
 def _get_default_middleware():
     """Build the default middleware list."""
     from .middleware import (
+        ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
@@ -456,7 +466,12 @@ def _get_default_middleware():
         load_fallback_chain(cfg.model_fallbacks)
     model = _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    # ``ConfigurableModelMiddleware`` is placed first so it wraps
+    # ``ModelFallbackMiddleware``: a configurable.model override sets the
+    # PRIMARY model only, leaving the fallback chain free to try its own
+    # alternatives instead of re-overriding every retry to the same model.
     mw = [
+        ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
@@ -558,6 +573,7 @@ def create_cli_agent(
     from . import paths as _paths
     from .backends import CustomSandboxBackend, MergedSkillsBackend
     from .middleware import (
+        ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
@@ -618,7 +634,10 @@ def create_cli_agent(
     )
 
     model = _ensure_chat_model()
+    # See ``_get_default_middleware`` for why ``ConfigurableModelMiddleware``
+    # leads the chain (wraps fallback so retries aren't redundantly overridden).
     mw: list[AgentMiddleware] = [
+        ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),

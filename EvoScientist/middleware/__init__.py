@@ -11,6 +11,7 @@ from .ask_user import (
     Choice,
     Question,
 )
+from .configurable_model import ConfigurableModelMiddleware
 from .context_editing import (
     compute_context_editing_trigger,
     create_context_editing_middleware,
@@ -32,6 +33,7 @@ __all__ = [
     "AskUserRequest",
     "AskUserWidgetResult",
     "Choice",
+    "ConfigurableModelMiddleware",
     "ContextOverflowMapperMiddleware",
     "EvoMemoryMiddleware",
     "EvoMemoryState",
