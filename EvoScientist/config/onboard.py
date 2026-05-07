@@ -2436,7 +2436,12 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         "slack": ["slack-sdk>=3.27", "aiohttp>=3.9"],
         "feishu": ["aiohttp>=3.9"],
         "dingtalk": ["aiohttp>=3.9"],
-        "wechat": ["pycryptodome>=3.20", "aiohttp>=3.9"],
+        "wechat": [
+            "pycryptodome>=3.20",
+            "aiohttp>=3.9",
+            "qrcode>=7.4",
+            "certifi>=2024.0",
+        ],
         "qq": ["qq-botpy>=1.0"],
     }
 
@@ -2487,12 +2492,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         (
             "wechat",
             "WeChat",
-            [
-                ("wechat_wecom_corp_id", "WeCom Corp ID"),
-                ("wechat_wecom_agent_id", "WeCom Agent ID"),
-                ("wechat_wecom_secret", "WeCom Secret"),
-            ],
-            "aiohttp",
+            [],  # backend-specific fields prompted in the wechat branch below
+            ("aiohttp", "qrcode", "Crypto", "certifi"),
             "wechat",
         ),
         (
@@ -2568,9 +2569,15 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
         # Check pip dependency before proceeding
         if import_check:
+            _required_imports: tuple[str, ...] = (
+                (import_check,)
+                if isinstance(import_check, str)
+                else tuple(import_check)
+            )
             _pkg_ready = False
             try:
-                __import__(import_check)
+                for _module_name in _required_imports:
+                    __import__(_module_name)
                 _pkg_ready = True
             except ImportError:
                 console.print("  [yellow]✗ Required package not installed.[/yellow]")
@@ -2596,9 +2603,10 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     else:
                         _ok = install_library(f"evoscientist[{pip_extra}]")
                     if _ok:
-                        # Verify the import actually works now
+                        # Verify the imports actually work now
                         try:
-                            __import__(import_check)
+                            for _module_name in _required_imports:
+                                __import__(_module_name)
                             console.print("  [green]✓ Installed successfully.[/green]")
                             _pkg_ready = True
                         except ImportError:
@@ -2644,6 +2652,141 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             updates["imessage_allowed_senders"] = senders.strip()
             enabled_channels.append("imessage")
             continue
+
+        # WeChat: pick backend (wecom / wechatmp / personal), then prompt
+        # backend-specific fields. Personal-WeChat has no static credentials —
+        # we offer an interactive QR-scan that obtains and persists them.
+        if ch_name == "wechat":
+            backend_choices = [
+                Choice(
+                    title="WeCom (企业微信应用) — most stable, official API",
+                    value="wecom",
+                ),
+                Choice(
+                    title="Official Account (微信公众号) — public-facing bots",
+                    value="wechatmp",
+                ),
+                Choice(
+                    title="Personal WeChat (个人微信, iLink) — QR-code scan login",
+                    value="personal",
+                ),
+            ]
+            wechat_backend = questionary.select(
+                "WeChat backend:",
+                choices=backend_choices,
+                default=getattr(config, "wechat_backend", "") or "wecom",
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+                use_indicator=True,
+            ).ask()
+            if wechat_backend is None:
+                raise KeyboardInterrupt()
+            updates["wechat_backend"] = wechat_backend
+
+            if wechat_backend == "wecom":
+                wechat_fields = [
+                    ("wechat_wecom_corp_id", "WeCom Corp ID", False),
+                    ("wechat_wecom_agent_id", "WeCom Agent ID", False),
+                    ("wechat_wecom_secret", "WeCom Secret", True),
+                ]
+                for field_name, prompt_label, is_secret in wechat_fields:
+                    current = getattr(config, field_name, "")
+                    prompt_fn = questionary.password if is_secret else questionary.text
+                    value = prompt_fn(
+                        f"{prompt_label}:",
+                        default=current,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    updates[field_name] = value.strip()
+            elif wechat_backend == "wechatmp":
+                wechat_fields = [
+                    ("wechat_mp_app_id", "Official Account App ID", False),
+                    ("wechat_mp_app_secret", "Official Account App Secret", True),
+                ]
+                for field_name, prompt_label, is_secret in wechat_fields:
+                    current = getattr(config, field_name, "")
+                    prompt_fn = questionary.password if is_secret else questionary.text
+                    value = prompt_fn(
+                        f"{prompt_label}:",
+                        default=current,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    updates[field_name] = value.strip()
+            else:  # personal
+                personal_choices = [
+                    Choice(
+                        title="Scan QR code now (recommended — login to a personal WeChat account)",
+                        value="scan",
+                    ),
+                    Choice(
+                        title="I already have an account_id — enter it manually",
+                        value="manual",
+                    ),
+                ]
+                personal_choice = questionary.select(
+                    "Personal WeChat login:",
+                    choices=personal_choices,
+                    default="scan",
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                    use_indicator=True,
+                ).ask()
+                if personal_choice is None:
+                    raise KeyboardInterrupt()
+
+                if personal_choice == "scan":
+                    from ..channels.wechat.personal import _account_dir as _wp_dir
+
+                    _accounts_path = _wp_dir()
+                    console.print(
+                        "  [dim]A QR code will be printed below — open WeChat on"
+                        " your phone and scan it. The session token is saved"
+                        f" to {_accounts_path}.[/dim]"
+                    )
+                    try:
+                        import asyncio
+
+                        from ..channels.wechat.personal import qr_login
+
+                        creds = asyncio.run(qr_login())
+                    except Exception as exc:
+                        console.print(f"  [red]✗ Scan failed: {exc}[/red]")
+                        creds = None
+
+                    if creds:
+                        updates["wechat_personal_account_id"] = creds["account_id"]
+                        # Token is persisted on disk by qr_login(); the channel
+                        # reads it from the per-account store at runtime, so we
+                        # intentionally do NOT copy it into the main config here
+                        # (avoids stale duplicates and broader secret exposure).
+                        console.print(
+                            f"  [green]✓ Logged in (account_id: "
+                            f"{creds['account_id'][:12]}…)[/green]"
+                        )
+                    else:
+                        console.print(
+                            "  [yellow]⚠ QR login did not complete — falling"
+                            " back to manual entry.[/yellow]"
+                        )
+                        personal_choice = "manual"
+
+                if personal_choice == "manual":
+                    current_id = getattr(config, "wechat_personal_account_id", "")
+                    account_id = questionary.text(
+                        "iLink account_id (from a previous --qr-login run):",
+                        default=current_id,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if account_id is None:
+                        raise KeyboardInterrupt()
+                    updates["wechat_personal_account_id"] = account_id.strip()
 
         # Prompt for required fields
         for field_name, prompt_label in required_fields:
@@ -2827,6 +2970,13 @@ def _probe_channel(
                     _val("wechat_mp_app_id"),
                     _val("wechat_mp_app_secret"),
                     _val("wechat_proxy") or None,
+                )
+            elif backend == "personal":
+                from ..channels.wechat.probe import validate_wechat_personal
+
+                return await validate_wechat_personal(
+                    _val("wechat_personal_account_id"),
+                    _val("wechat_personal_token"),
                 )
             else:
                 from ..channels.wechat.probe import validate_wecom

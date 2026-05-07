@@ -906,11 +906,13 @@ dependencies = [
 [package.optional-dependencies]
 all-channels = [
     { name = "aiohttp" },
+    { name = "certifi" },
     { name = "discord-py" },
     { name = "lark-oapi" },
     { name = "pycryptodome" },
     { name = "python-telegram-bot" },
     { name = "qq-botpy" },
+    { name = "qrcode" },
     { name = "slack-sdk" },
 ]
 dev = [
@@ -944,7 +946,10 @@ telegram = [
     { name = "python-telegram-bot" },
 ]
 wechat = [
+    { name = "aiohttp" },
+    { name = "certifi" },
     { name = "pycryptodome" },
+    { name = "qrcode" },
 ]
 
 [package.dev-dependencies]
@@ -961,8 +966,11 @@ dev = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'all-channels'", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9" },
+    { name = "aiohttp", marker = "extra == 'wechat'", specifier = ">=3.9" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.7" },
+    { name = "certifi", marker = "extra == 'all-channels'", specifier = ">=2024.0" },
+    { name = "certifi", marker = "extra == 'wechat'", specifier = ">=2024.0" },
     { name = "deepagents", specifier = ">=0.5.7" },
     { name = "discord-py", marker = "extra == 'all-channels'", specifier = ">=2.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3" },
@@ -998,6 +1006,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qq-botpy", marker = "extra == 'all-channels'", specifier = ">=1.0" },
     { name = "qq-botpy", marker = "extra == 'qq'", specifier = ">=1.0" },
+    { name = "qrcode", marker = "extra == 'all-channels'", specifier = ">=7.4" },
+    { name = "qrcode", marker = "extra == 'wechat'", specifier = ">=7.4" },
     { name = "questionary", specifier = ">=2.1" },
     { name = "rich", specifier = ">=15.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
@@ -3559,6 +3569,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1f/b7/1b13569f9cf784d1d37caa2d7bc27246922fe50adb62c3dac0d53d7d38ee/qq-botpy-1.2.1.tar.gz", hash = "sha256:442172a0557a9b43d2777d1c5e072090a9d1a54d588d1c5da8d3efc014f4887f", size = 38270, upload-time = "2024-03-22T10:57:27.075Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/2e/cf662566627f1c3508924ef5a0f8277ffc4ac033d6c3a05d1ead6e76f60b/qq_botpy-1.2.1-py3-none-any.whl", hash = "sha256:18b215690dfed88f711322136ec54b6760040b9b1608eb5db7a44e00f59e4f01", size = 51356, upload-time = "2024-03-22T10:57:24.695Z" },
+]
+
+[[package]]
+name = "qrcode"
+version = "8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d5f53b174e9cf701adbb35f39d69c2af63d4a39f81a9/qrcode-8.2.tar.gz", hash = "sha256:35c3f2a4172b33136ab9f6b3ef1c00260dd2f66f858f24d88418a015f446506c", size = 43317, upload-time = "2025-05-01T15:44:24.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
 ]
 
 [[package]]
