@@ -192,14 +192,29 @@ async def watch_run_and_notify(
             run = await client.runs.get(thread_id=thread_id, run_id=run_id)
             raw = run.get("status", "")
         except Exception:
+            # Cannot verify terminal state. Defaulting to "success" here would
+            # reintroduce the false-positive class this watcher exists to
+            # prevent (clean stream + transient runs.get failure → unverified
+            # success). Retry within the reconnect budget; on exhaustion drop
+            # the notification rather than guess.
+            if attempt >= _MAX_RECONNECT_ATTEMPTS:
+                logger.warning(
+                    "Watcher runs.get failed for task %s after %d reconnects; "
+                    "unable to verify terminal state, skipping notification",
+                    thread_id,
+                    _MAX_RECONNECT_ATTEMPTS,
+                    exc_info=True,
+                )
+                return
             logger.warning(
-                "Watcher runs.get failed for task %s; falling back to "
-                "stream-derived status",
+                "Watcher runs.get failed for task %s; retrying after backoff "
+                "(attempt %d)",
                 thread_id,
+                attempt + 1,
                 exc_info=True,
             )
-            status = "error" if stream_failed else "success"
-            break
+            await asyncio.sleep(min(0.25 * (attempt + 1), 2.0))
+            continue
 
         if raw not in TERMINAL_STATUSES:
             # Non-terminal status — includes the documented ``pending`` /

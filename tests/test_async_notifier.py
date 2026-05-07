@@ -853,10 +853,13 @@ def test_watcher_unknown_status_treated_as_non_terminal(run_async):
     assert client.runs.get.await_count == 2
 
 
-def test_watcher_runs_get_failure_falls_back_to_stream_state(run_async):
-    """If ``runs.get`` itself raises (network error, server down), the
-    watcher must fall back to the legacy stream-derived heuristic rather
-    than crashing or hanging in the reconnect loop."""
+def test_watcher_runs_get_persistent_failure_drops_notification(
+    run_async, monkeypatch
+):
+    """If ``runs.get`` keeps raising, the watcher cannot verify terminal
+    state and MUST drop the notification rather than default to
+    ``"success"`` — otherwise a transient server outage reintroduces the
+    same false-positive class this watcher exists to prevent."""
 
     async def fake_stream(*a, **kw):
         yield SimpleNamespace(event="values", data={"messages": []})
@@ -865,14 +868,51 @@ def test_watcher_runs_get_failure_falls_back_to_stream_state(run_async):
     client.runs.join_stream = fake_stream
     client.runs.get = AsyncMock(side_effect=RuntimeError("server unreachable"))
 
+    # Skip the backoff sleeps to keep this test fast.
+    async def _no_sleep(*a, **kw):
+        return None
+
+    monkeypatch.setattr(async_notifier.asyncio, "sleep", _no_sleep)
+
     _drain_all(async_notifier)
     run_async(async_notifier.watch_run_and_notify(client, "thrG", "rG", "agentG"))
 
-    # Stream closed cleanly + runs.get failed → fall back to "success"
-    # (legacy behavior). This is intentionally permissive to avoid losing
-    # notifications when the server has a transient outage.
+    # No notification — watcher exhausted the reconnect budget.
+    assert async_notifier._notification_queue.empty()
+    # 1 initial + _MAX_RECONNECT_ATTEMPTS retries = 11 calls total.
+    assert (
+        client.runs.get.await_count
+        == async_notifier._MAX_RECONNECT_ATTEMPTS + 1
+    )
+
+
+def test_watcher_runs_get_transient_failure_recovers(run_async, monkeypatch):
+    """A single ``runs.get`` failure followed by a successful response on
+    retry must produce a correct notification — verifies the bounded
+    retry path actually recovers from transient outages instead of just
+    eating notifications."""
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(event="values", data={"messages": []})
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    # First call raises (transient), second call returns terminal status.
+    client.runs.get = AsyncMock(
+        side_effect=[RuntimeError("blip"), {"status": "success"}]
+    )
+
+    async def _no_sleep(*a, **kw):
+        return None
+
+    monkeypatch.setattr(async_notifier.asyncio, "sleep", _no_sleep)
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrT", "rT", "agentT"))
+
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
+    assert client.runs.get.await_count == 2
 
 
 def test_watcher_re_joins_stream_until_terminal_status(run_async):
