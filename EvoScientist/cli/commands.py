@@ -823,7 +823,10 @@ def _serve_drain_notifications(
 
         for line_text, line_style in format_notification_lines(notifs):
             console.print(line_text, style=line_style, markup=False)
-        meta = build_metadata(workspace_dir, model)
+        # Use the current workspace from agent_holder (updated by /resume's
+        # session-rebind callback), falling back to the startup value.
+        runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
+        meta = build_metadata(runtime_workspace, model)
         try:
             run_streaming(
                 ui_backend="cli",

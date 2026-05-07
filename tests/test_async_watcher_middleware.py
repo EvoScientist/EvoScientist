@@ -35,6 +35,31 @@ def _drain_all_notifications():
                     break
 
 
+@pytest.fixture(autouse=True)
+def _clean_notifier_state():
+    """Reset shared module-level notifier state before and after every test.
+
+    Cleared here:
+      - All notification queues (per-thread, unrouted, legacy global)
+      - ``_watcher_by_thread`` (replacement-on-update registry)
+      - ``_active_watchers`` (in-flight watcher → origin-thread index used
+        by ``consume_notifications`` to gate the grace-window wait)
+
+    Without this, a test that touches any of these dicts/queues would
+    silently leak state into the next test. ``_active_watchers`` is cleared
+    even though current tests patch ``spawn_watcher`` (so they never insert
+    into it) — kept as a safeguard for future tests that exercise the real
+    spawn path.
+    """
+    _drain_all_notifications()
+    async_notifier._watcher_by_thread.clear()
+    async_notifier._active_watchers.clear()
+    yield
+    _drain_all_notifications()
+    async_notifier._watcher_by_thread.clear()
+    async_notifier._active_watchers.clear()
+
+
 def _build_request(tool_name: str, args: dict, *, thread_id: str | None = None):
     """Construct a minimal ToolCallRequest stand-in.
 
@@ -84,7 +109,6 @@ def test_middleware_spawns_watcher_on_start_async_task():
     """A successful start_async_task tool call must spawn one watcher per task."""
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _fake_client = _make_middleware()
 
     spawn_calls = []
@@ -130,7 +154,6 @@ def test_middleware_spawns_watcher_on_update_async_task():
     """A successful update_async_task call must also spawn a (replacement) watcher."""
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     spawn_calls = []
@@ -180,7 +203,6 @@ def test_middleware_pre_cancels_old_watcher_on_update():
     """
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     old_watcher = MagicMock()
@@ -208,7 +230,6 @@ def test_middleware_pre_cancels_old_watcher_on_update():
 
 def test_middleware_passes_through_unrelated_tools():
     """A non-launch tool call must not spawn any watcher and must return result unchanged."""
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     sentinel = object()
@@ -227,7 +248,6 @@ def test_middleware_passes_through_unrelated_tools():
 
 def test_middleware_handles_non_command_results_gracefully():
     """If the launch tool returns a string (validation error), no watcher is spawned."""
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     async def fake_handler(req):
@@ -250,7 +270,6 @@ def test_middleware_origin_thread_id_is_none_when_runtime_config_missing():
     """When runtime.config is empty, origin_cli_thread_id must be None (not crash)."""
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     captured = {}
@@ -289,7 +308,6 @@ def test_middleware_swallows_spawn_exceptions():
     """spawn_watcher errors must not propagate up — middleware logs and continues."""
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     def boom(*a, **kw):
@@ -342,7 +360,6 @@ def test_middleware_picks_correct_prompt_field_per_tool(tool_name, args, prompt_
     """start_async_task uses 'description'; update_async_task uses 'message'."""
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     captured_prompt = {}
@@ -382,7 +399,6 @@ def test_middleware_prompt_field_is_tool_name_gated_not_fallback_chained():
     """
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     captured_prompt = {}
@@ -425,7 +441,6 @@ def test_middleware_pre_cancel_swallows_unexpected_errors():
     """A faulty old-watcher handle must not block the handler from running."""
     from langgraph.types import Command
 
-    _drain_all_notifications()
     mw, _ = _make_middleware()
 
     bad_watcher = MagicMock()
