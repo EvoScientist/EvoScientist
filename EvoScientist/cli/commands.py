@@ -816,9 +816,13 @@ def _serve_drain_notifications(
 
     from .tui_runtime import run_streaming
 
-    def _run_notification_message(text: str) -> None:
+    def _run_notification_message(text: str, notifs: list) -> None:
         """Synchronous wrapper: run the agent on the synthetic notification text."""
-        console.print("[dim][async-notifier: auto][/dim]")
+        # Render the per-task visual frame (matches CLI/TUI aesthetic).
+        from EvoScientist.cli.async_notifier import format_notification_lines
+
+        for line_text, line_style in format_notification_lines(notifs):
+            console.print(f"[{line_style}]{line_text}[/{line_style}]")
         meta = build_metadata(workspace_dir, model)
         try:
             run_streaming(
@@ -833,8 +837,8 @@ def _serve_drain_notifications(
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
 
-    async def _run_notification_message_async(text: str) -> None:
-        await _aio.to_thread(_run_notification_message, text)
+    async def _run_notification_message_async(text: str, notifs: list) -> None:
+        await _aio.to_thread(_run_notification_message, text, notifs)
 
     async def _read_async_tasks() -> dict:
         agent = agent_holder.get("agent")
@@ -851,6 +855,7 @@ def _serve_drain_notifications(
         await async_notifier.consume_notifications(
             run_message=_run_notification_message_async,
             read_async_tasks_state=_read_async_tasks,
+            current_thread_id=agent_holder.get("thread_id"),
         )
 
     _notif_loop: _aio.AbstractEventLoop | None = None
@@ -1048,7 +1053,7 @@ def serve(
             # Poll notification queue when idle (no channel message was pending).
             from EvoScientist.cli import async_notifier
 
-            if not async_notifier._notification_queue.empty():
+            if async_notifier.has_pending_notifications(agent_holder.get("thread_id")):
                 _serve_drain_notifications(
                     agent_holder=agent_holder,
                     model=config.model,
@@ -1062,6 +1067,12 @@ def serve(
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
         _channels_stop(runtime=channel_runtime)
+        try:
+            from EvoScientist.cli import async_notifier as _an
+
+            _an.shutdown_watcher_loop()
+        except Exception:
+            _serve_logger.debug("shutdown_watcher_loop failed", exc_info=True)
         console.print("[dim]Stopped.[/dim]")
 
 

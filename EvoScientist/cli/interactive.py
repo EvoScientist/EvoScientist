@@ -1034,12 +1034,22 @@ def cmd_interactive(
                         await _process_channel_message(msg)
                         continue  # check queues again immediately
 
-                    # Notification path (only when no channel message was pending)
-                    if not async_notifier._notification_queue.empty():
-                        await async_notifier.consume_notifications(
-                            run_message=_inject_notification_message,
-                            read_async_tasks_state=_read_current_async_tasks,
-                        )
+                    # Notification path (only when no channel message was pending).
+                    # Wrap in try/except so an exception in dedup/inject can't
+                    # kill the poller task — channel + notification dispatch
+                    # would silently die otherwise (Fix #4).
+                    current_tid = state.get("thread_id")
+                    if async_notifier.has_pending_notifications(current_tid):
+                        try:
+                            await async_notifier.consume_notifications(
+                                run_message=_inject_notification_message,
+                                read_async_tasks_state=_read_current_async_tasks,
+                                current_thread_id=current_tid,
+                            )
+                        except Exception:
+                            _channel_logger.warning(
+                                "async-notifier consume failed", exc_info=True
+                            )
                         continue
 
                     await asyncio.sleep(0.1)
@@ -1315,6 +1325,16 @@ def cmd_interactive(
             print_resume_hint(state.get("resume_hint_thread_id"), console=console)
         except Exception:
             _channel_logger.debug("print_resume_hint failed", exc_info=True)
+        # Notifier shutdown hook (currently a no-op — see async_notifier
+        # module note about the Fix #2 background-loop revert). Kept wired
+        # so re-enabling a long-lived watcher loop later doesn't require
+        # touching every host again.
+        try:
+            from EvoScientist.cli import async_notifier as _an
+
+            _an.shutdown_watcher_loop()
+        except Exception:
+            _channel_logger.debug("shutdown_watcher_loop failed", exc_info=True)
 
 
 def cmd_run(

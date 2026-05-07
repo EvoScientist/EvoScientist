@@ -642,3 +642,262 @@ def test_notification_consuming_flag_prevents_reentry(run_async):
         assert state["consuming"] is False  # cleared despite exception
 
     run_async(scenario())
+
+
+# ============================================================================
+# Tests for Fix #3 — per-thread notification routing
+# ============================================================================
+
+
+def _drain_all(an_mod):
+    """Drain every queue (per-thread + unrouted) so tests start clean."""
+    if hasattr(an_mod, "_notifications_by_thread"):
+        for q in list(an_mod._notifications_by_thread.values()):
+            while True:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+    if hasattr(an_mod, "_unrouted_queue"):
+        while True:
+            try:
+                an_mod._unrouted_queue.get_nowait()
+            except queue.Empty:
+                break
+
+
+def test_consume_only_drains_matching_thread(run_async):
+    """Notifications tagged with origin_cli_thread_id only drain when the
+    consumer is invoked with the matching current_thread_id."""
+    from EvoScientist.cli import async_notifier as an
+
+    _drain_all(an)
+    n_a = an.AsyncTaskNotification(
+        "tA", "writing-agent", "success", "", "", origin_cli_thread_id="threadA"
+    )
+    n_b = an.AsyncTaskNotification(
+        "tB", "writing-agent", "success", "", "", origin_cli_thread_id="threadB"
+    )
+    an._enqueue(n_a)
+    an._enqueue(n_b)
+
+    captured: dict = {"runs": []}
+
+    async def runner(text: str, notifs: list) -> None:
+        captured["runs"].append([n.task_id for n in notifs])
+
+    async def state_reader() -> dict:
+        return {}
+
+    run_async(
+        an.consume_notifications(runner, state_reader, current_thread_id="threadA")
+    )
+    assert captured["runs"] == [["tA"]]
+    # B's notification should still be queued
+    assert an.has_pending_notifications("threadB")
+    _drain_all(an)
+
+
+def test_unrouted_notifications_drain_on_any_thread(run_async):
+    """Notifications without origin_cli_thread_id (legacy / direct put) drain
+    regardless of the current_thread_id arg."""
+    from EvoScientist.cli import async_notifier as an
+
+    _drain_all(an)
+    an._notification_queue.put(
+        an.AsyncTaskNotification("tU", "writing-agent", "success", "", "")
+    )
+
+    captured: dict = {}
+
+    async def runner(text: str, notifs: list) -> None:
+        captured["notifs"] = notifs
+
+    async def state_reader() -> dict:
+        return {}
+
+    run_async(
+        an.consume_notifications(runner, state_reader, current_thread_id="anything")
+    )
+    assert [n.task_id for n in captured["notifs"]] == ["tU"]
+    _drain_all(an)
+
+
+def test_thread_switch_drains_pending(run_async):
+    """Pending notifications for thread B are not delivered while consumer
+    asks for thread A; once consumer runs with thread B they drain."""
+    from EvoScientist.cli import async_notifier as an
+
+    _drain_all(an)
+    an._enqueue(
+        an.AsyncTaskNotification(
+            "tB", "writing-agent", "success", "", "", origin_cli_thread_id="threadB"
+        )
+    )
+
+    captured: dict = {"runs": []}
+
+    async def runner(text: str, notifs: list) -> None:
+        captured["runs"].append([n.task_id for n in notifs])
+
+    async def state_reader() -> dict:
+        return {}
+
+    # First consume in thread A → no drain, B's notif still queued
+    run_async(
+        an.consume_notifications(runner, state_reader, current_thread_id="threadA")
+    )
+    assert captured["runs"] == []
+    assert an.has_pending_notifications("threadB")
+
+    # Now switch to thread B → drains
+    run_async(
+        an.consume_notifications(runner, state_reader, current_thread_id="threadB")
+    )
+    assert captured["runs"] == [["tB"]]
+    _drain_all(an)
+
+
+def test_has_pending_notifications_respects_routing():
+    """has_pending_notifications returns true only for matching or unrouted."""
+    from EvoScientist.cli import async_notifier as an
+
+    _drain_all(an)
+    # Unrouted always counts
+    an._notification_queue.put(
+        an.AsyncTaskNotification("tU", "writing-agent", "success", "", "")
+    )
+    assert an.has_pending_notifications("threadA") is True
+    assert an.has_pending_notifications() is True
+    _drain_all(an)
+
+    # Routed only counts for the matching current thread
+    an._enqueue(
+        an.AsyncTaskNotification(
+            "tA", "writing-agent", "success", "", "", origin_cli_thread_id="threadA"
+        )
+    )
+    assert an.has_pending_notifications("threadA") is True
+    assert an.has_pending_notifications("threadB") is False
+    assert an.has_pending_notifications() is False  # no unrouted, no current_thread
+    _drain_all(an)
+
+
+# ============================================================================
+# Tests for Fix #1 (v2) — in-band error detection from SSE stream.
+#
+# We don't poll runs.get after a clean stream close (it had a server-side
+# write-back race that returned "error" for successful runs). Instead we
+# watch for ``event="error"`` SSE parts which langgraph dev emits when a
+# run fails — that signal is authoritative and arrives in-band before the
+# stream closes.
+# ============================================================================
+
+
+def test_watcher_reports_error_on_in_band_error_event(run_async):
+    """SSE error event in the stream → notification.status == 'error'."""
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(
+            event="values", data={"messages": [{"type": "ai", "content": "partial"}]}
+        )
+        yield SimpleNamespace(event="error", data={"message": "subagent crashed"})
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    client.runs.get = AsyncMock(
+        return_value={"status": "success"}
+    )  # would mislead — should NOT be consulted
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrE", "rE", "agentE"))
+
+    notif = async_notifier._notification_queue.get_nowait()
+    assert notif.status == "error"
+    # We must NOT have polled runs.get — the in-band signal is authoritative.
+    client.runs.get.assert_not_awaited()
+
+
+def test_watcher_clean_exit_without_error_event_is_success(run_async):
+    """Clean stream exit with no error event → success (no runs.get poll)."""
+
+    async def fake_stream(*a, **kw):
+        yield SimpleNamespace(
+            event="values", data={"messages": [{"type": "ai", "content": "ok"}]}
+        )
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    # If we (wrongly) poll runs.get and it returned "error", the test would
+    # fail — proving we no longer have the timing race.
+    client.runs.get = AsyncMock(return_value={"status": "error"})
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrS", "rS", "agentS"))
+
+    notif = async_notifier._notification_queue.get_nowait()
+    assert notif.status == "success"
+    client.runs.get.assert_not_awaited()
+
+
+# ============================================================================
+# Tests for Fix #4 — consume_notifications surfaces exceptions to caller
+# (callers wrap the await in try/except — verify the inner contract is to
+# propagate so the wrapper sees + logs).
+# ============================================================================
+
+
+def test_consume_notifications_propagates_inject_exception(run_async):
+    """If the run_message callback raises, consume_notifications propagates
+    the exception to the caller — pollers wrap it in try/except so the
+    poller task does not die."""
+    import pytest
+
+    from EvoScientist.cli import async_notifier as an
+
+    _drain_all(an)
+    an._notification_queue.put(
+        an.AsyncTaskNotification("tX", "writing-agent", "success", "", "")
+    )
+
+    async def boom_runner(text: str, notifs: list) -> None:
+        raise RuntimeError("kaboom")
+
+    async def state_reader() -> dict:
+        return {}
+
+    with pytest.raises(RuntimeError, match="kaboom"):
+        run_async(an.consume_notifications(boom_runner, state_reader))
+    _drain_all(an)
+
+
+def test_watcher_skips_notification_on_stream_fail_with_nonterminal_status(run_async):
+    """When the SSE stream errors AND runs.get returns a non-terminal status
+    (e.g. ``pending`` because the run is still alive), the watcher must
+    NOT enqueue a notification — otherwise the user sees a confusing
+    ``⚠ pending`` line for a task that's still working. This is the early-
+    return guard added alongside the Fix #2 revert."""
+
+    async def fake_stream(*a, **kw):
+        # Simulate transient transport error mid-stream.
+        raise RuntimeError("connection reset")
+        yield  # unreachable; makes this an async generator
+
+    client = MagicMock()
+    client.runs.join_stream = fake_stream
+    client.runs.get = AsyncMock(return_value={"status": "pending"})
+
+    _drain_all(async_notifier)
+    run_async(async_notifier.watch_run_and_notify(client, "thrP", "rP", "agentP"))
+
+    # No notification should have been enqueued for any thread.
+    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
+
+
+def _drain_one_queue_helper(q):
+    items = []
+    while True:
+        try:
+            items.append(q.get_nowait())
+        except queue.Empty:
+            return items

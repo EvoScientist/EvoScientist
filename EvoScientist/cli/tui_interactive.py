@@ -805,7 +805,7 @@ def run_textual_interactive(
             # so that the next poll tick cannot schedule a second consumer before
             # the first one has a chance to run (fixes overlapping-turn bug).
             if (
-                not async_notifier._notification_queue.empty()
+                async_notifier.has_pending_notifications(self._conversation_tid)
                 and not self._busy
                 and not self._notification_consuming
             ):
@@ -815,14 +815,28 @@ def run_textual_interactive(
                 )
 
         async def _consume_notifications_tui(self) -> None:
-            """Drain the notification queue and inject a synthetic agent turn."""
+            """Drain the notification queue and inject a synthetic agent turn.
+
+            Wraps the consume call in a swallowing try/except (Fix #4) so an
+            exception inside dedup/inject doesn't bubble out of the
+            ``asyncio.ensure_future(...)`` scheduled by ``_poll_channel_queue``
+            and silently kill notification + channel dispatch.
+            """
             from EvoScientist.cli import async_notifier
 
             try:
-                await async_notifier.consume_notifications(
-                    run_message=self._inject_notification_tui,
-                    read_async_tasks_state=self._read_async_tasks_tui,
-                )
+                try:
+                    await async_notifier.consume_notifications(
+                        run_message=self._inject_notification_tui,
+                        read_async_tasks_state=self._read_async_tasks_tui,
+                        current_thread_id=self._conversation_tid,
+                    )
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "async-notifier consume failed (TUI)", exc_info=True
+                    )
             finally:
                 # Clear the guard flag regardless of success or exception so
                 # future notifications can schedule a new consume coroutine.
@@ -2630,6 +2644,12 @@ def run_textual_interactive(
                     _channels_stop(runtime=self._channel_runtime)
                 except Exception:
                     pass
+            try:
+                from EvoScientist.cli import async_notifier as _an
+
+                _an.shutdown_watcher_loop()
+            except Exception:
+                pass
             self.exit()
 
         def action_request_quit(self) -> None:

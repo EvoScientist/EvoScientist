@@ -559,6 +559,16 @@ def _patch_deepagents_async_watcher() -> None:
             orig_coro = tool.coroutine
 
             async def wrapped_coro(description, subagent_type, runtime):
+                # Capture the main agent's CLI thread_id BEFORE awaiting the
+                # original coroutine. This is the chat-session thread under
+                # which the sub-agent was launched; the consumer uses it to
+                # route the eventual notification back to the originating
+                # session even if the user has done /new in the meantime.
+                cli_thread_id = None
+                cfg = getattr(runtime, "config", None)
+                if isinstance(cfg, dict):
+                    cli_thread_id = cfg.get("configurable", {}).get("thread_id")
+
                 # Call the original coroutine to launch the subagent
                 result = await orig_coro(description, subagent_type, runtime)
 
@@ -586,6 +596,7 @@ def _patch_deepagents_async_watcher() -> None:
                                     task["run_id"],
                                     task["agent_name"],
                                     prompt=description,
+                                    origin_cli_thread_id=cli_thread_id,
                                 )
                             except Exception:
                                 import logging
@@ -613,6 +624,13 @@ def _patch_deepagents_async_watcher() -> None:
             orig_coro = tool.coroutine
 
             async def wrapped_coro(task_id, message, runtime):
+                # Capture the main agent's CLI thread_id (see start-tool
+                # wrapper for rationale).
+                cli_thread_id = None
+                cfg = getattr(runtime, "config", None)
+                if isinstance(cfg, dict):
+                    cli_thread_id = cfg.get("configurable", {}).get("thread_id")
+
                 # Cancel the existing watcher for this thread_id BEFORE
                 # awaiting orig_coro.  The update creates a new run on the
                 # same thread_id via runs.create(..., multitask_strategy=
@@ -648,6 +666,7 @@ def _patch_deepagents_async_watcher() -> None:
                                 task["run_id"],
                                 task["agent_name"],
                                 prompt=message,
+                                origin_cli_thread_id=cli_thread_id,
                             )
                         except Exception:
                             import logging

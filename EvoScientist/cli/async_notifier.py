@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import queue
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,17 +35,95 @@ class AsyncTaskNotification:
     summary: str  # last AI message, truncated to ≤500 chars; "" if none
     received_at: str  # ISO-8601 UTC timestamp
     prompt: str = ""  # original task description sent to the sub-agent
+    # The CLI/main-agent thread_id under which the watcher was spawned. Used
+    # to route the notification back to the originating CLI session so a
+    # /new between launch and completion does not inject the synthetic
+    # message into an unrelated thread (where ``check_async_task`` cannot
+    # find the task_id). ``None`` means "unrouted" — the notification
+    # drains for any current_thread_id (back-compat for direct callers).
+    origin_cli_thread_id: str | None = None
 
 
-# Thread-safe (watcher coro pushes from asyncio loop; CLI consumer also asyncio)
-_notification_queue: queue.Queue[AsyncTaskNotification] = queue.Queue()
+# Per-thread routing: notifications with ``origin_cli_thread_id`` land in
+# the matching sub-queue. Notifications without one go to ``_unrouted_queue``
+# and drain regardless of current thread (back-compat for legacy callers
+# and direct-put test paths).
+_notifications_by_thread: dict[str, queue.Queue[AsyncTaskNotification]] = {}
+_notifications_lock = threading.Lock()
+_unrouted_queue: queue.Queue[AsyncTaskNotification] = queue.Queue()
+# Public alias for the unrouted bucket — preserved so legacy tests and any
+# external direct callers that did ``_notification_queue.put(...)`` keep
+# working unchanged. New code should call ``_enqueue`` instead.
+_notification_queue = _unrouted_queue
 
-# Track active watcher tasks for clean shutdown
-_active_watchers: set[asyncio.Task] = set()
-# Map thread_id → current watcher Task (supports replacement on update_async_task)
-_watcher_by_thread: dict[str, asyncio.Task] = {}
+# Track active watcher tasks/futures for clean shutdown
+_active_watchers: set = set()
+# Map thread_id (sub-agent thread) → current watcher handle (supports
+# replacement on update_async_task). Value type widens from asyncio.Task
+# to "anything with .cancel()/.done()/.add_done_callback()" so we can
+# move watcher scheduling onto a background loop in a follow-up fix.
+_watcher_by_thread: dict[str, object] = {}
 
 logger = logging.getLogger(__name__)
+
+
+def _enqueue(notification: AsyncTaskNotification) -> None:
+    """Route a notification to its origin-thread queue or the unrouted bucket."""
+    tid = notification.origin_cli_thread_id
+    if not tid:
+        _unrouted_queue.put(notification)
+        return
+    with _notifications_lock:
+        q = _notifications_by_thread.get(tid)
+        if q is None:
+            q = queue.Queue()
+            _notifications_by_thread[tid] = q
+    q.put(notification)
+
+
+def has_pending_notifications(current_thread_id: str | None = None) -> bool:
+    """Cheap predicate for poller idle paths — true iff there's anything to consume.
+
+    If ``current_thread_id`` is given, only the matching thread queue and
+    the unrouted bucket count. With no argument, only the unrouted bucket
+    counts (legacy behavior).
+    """
+    if not _unrouted_queue.empty():
+        return True
+    if current_thread_id is None:
+        return False
+    with _notifications_lock:
+        q = _notifications_by_thread.get(current_thread_id)
+    return q is not None and not q.empty()
+
+
+def pending_thread_ids() -> set[str]:
+    """Return the set of thread_ids with pending routed notifications."""
+    with _notifications_lock:
+        return {tid for tid, q in _notifications_by_thread.items() if not q.empty()}
+
+
+# ---------------------------------------------------------------------------
+# Watcher scheduling note (Fix #2 reverted).
+#
+# Watchers run on the CALLER's asyncio loop (CLI / TUI / serve turn loop).
+# In CLI/TUI that loop is long-lived, so watchers happily run for minutes.
+# In serve mode each turn runs under asyncio.run(...) and the loop closes
+# when the turn ends — watchers spawned inside die immediately. This is a
+# known limitation; the previous "background daemon loop" attempt broke
+# real CLI usage because langgraph SDK clients cache asyncio primitives
+# bound to the loop that first touches them, and giving the watcher a
+# fresh loop-local client made join_stream raise (cause TBD — httpx state
+# or langgraph SDK internals). See CLAUDE.md follow-up.
+#
+# A no-op shutdown_watcher_loop() is kept so existing callers (CLI atexit,
+# serve finally, TUI on_unmount) remain wired without dead-import errors.
+# ---------------------------------------------------------------------------
+
+
+def shutdown_watcher_loop(timeout: float = 2.0) -> None:
+    """No-op (background loop currently disabled — see module note)."""
+    return
 
 
 def _extract_summary(final_state: dict | None) -> str:
@@ -67,11 +146,32 @@ def _extract_summary(final_state: dict | None) -> str:
 
 
 async def watch_run_and_notify(
-    client, thread_id: str, run_id: str, agent_name: str, prompt: str = ""
+    client,
+    thread_id: str,
+    run_id: str,
+    agent_name: str,
+    prompt: str = "",
+    origin_cli_thread_id: str | None = None,
 ) -> None:
-    """Subscribe to a run's event stream; enqueue notification when it terminates."""
+    """Subscribe to a run's event stream; enqueue notification when it terminates.
+
+    Status detection strategy:
+      1. Watch for an explicit ``event="error"`` SSE part — langgraph dev
+         emits one when the run fails. This is authoritative, in-band, and
+         has no timing race against the server-side run-state writeback.
+      2. On clean stream exit with no error event → ``"success"``.
+      3. On stream exception → fall back to ``client.runs.get`` (best-effort).
+
+    NOTE on the "always-poll runs.get" variant we tried (Fix #1, then
+    reverted): immediately calling ``runs.get`` after the stream closes
+    sometimes returned ``status="error"`` for runs that actually succeeded
+    — server-side terminal status is not always written by the time the
+    SSE stream signals close. Reading the in-band ``event="error"`` SSE
+    part avoids that race entirely.
+    """
     final_values: dict | None = None
     stream_failed = False
+    saw_error_event = False
     try:
         async for chunk in client.runs.join_stream(
             thread_id=thread_id, run_id=run_id, stream_mode="values"
@@ -80,16 +180,39 @@ async def watch_run_and_notify(
             data = getattr(chunk, "data", None)
             if ev == "values" and isinstance(data, dict):
                 final_values = data
+            elif ev == "error":
+                # Authoritative in-band error signal from langgraph dev.
+                saw_error_event = True
+                logger.info("Watcher saw error event for task %s: %r", thread_id, data)
     except Exception:
         stream_failed = True
         logger.warning("Watcher stream failed for task %s", thread_id, exc_info=True)
 
-    # Determine terminal status — if stream errored, fall back to runs.get
-    status = "success"
-    if stream_failed:
+    if saw_error_event:
+        status = "error"
+    elif not stream_failed:
+        # Clean stream exit, no error event → trust the server-side success.
+        status = "success"
+    else:
+        # Stream errored without delivering a final state — fall back to
+        # runs.get (best-effort). REJECT non-terminal statuses (pending /
+        # running / unknown): the run is still alive, we shouldn't notify
+        # at all. Returning early without enqueueing prevents the
+        # "⚠ pending" notification we observed when the stream failed
+        # mid-flight.
         try:
             run = await client.runs.get(thread_id=thread_id, run_id=run_id)
-            status = run.get("status", "error")
+            raw_status = run.get("status", "")
+            if raw_status in TERMINAL_STATUSES:
+                status = raw_status
+            else:
+                logger.info(
+                    "Watcher fallback got non-terminal status %r for task %s; "
+                    "skipping notification (run still alive)",
+                    raw_status,
+                    thread_id,
+                )
+                return
         except Exception:
             status = "error"
 
@@ -100,13 +223,15 @@ async def watch_run_and_notify(
         summary=_extract_summary(final_values),
         received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         prompt=prompt,
+        origin_cli_thread_id=origin_cli_thread_id,
     )
-    _notification_queue.put(notification)
+    _enqueue(notification)
     logger.info(
-        "Enqueued async notification: task=%s agent=%s status=%s",
+        "Enqueued async notification: task=%s agent=%s status=%s origin_thread=%s",
         thread_id,
         agent_name,
         status,
+        origin_cli_thread_id or "<unrouted>",
     )
 
 
@@ -116,51 +241,84 @@ def spawn_watcher(
     run_id: str,
     agent_name: str,
     prompt: str = "",
+    origin_cli_thread_id: str | None = None,
 ) -> asyncio.Task:
-    """Spawn a watcher; if one already exists for this thread_id, cancel it first.
+    """Spawn a watcher on the caller's asyncio loop.
 
-    Replacement semantics support ``update_async_task`` which creates a new run_id
-    on the same thread_id — we want the new watcher to take over without the
-    old (now obsolete) watcher firing a stale notification. Cancellation
-    propagates ``CancelledError`` (a BaseException), which the watcher's
-    ``except Exception:`` does NOT catch — so ``_notification_queue.put(...)``
+    Replacement semantics support ``update_async_task`` which creates a new
+    run_id on the same thread_id — we want the new watcher to take over
+    without the old (now obsolete) watcher firing a stale notification.
+    Cancellation propagates ``CancelledError`` (a BaseException), which the
+    watcher's ``except Exception:`` does NOT catch — so ``_enqueue(...)``
     never executes for the cancelled watcher (no stale notification).
 
-    Caller must already be in a running asyncio event loop.
+    ``origin_cli_thread_id`` tags the resulting notification so the consumer
+    only injects it back into the originating CLI session (see Fix #3).
+
+    Caller must already be in a running asyncio event loop. (See module
+    note about Fix #2 revert — serve mode's ephemeral per-turn loop is a
+    known limitation.)
     """
     old_task = _watcher_by_thread.get(thread_id)
     if old_task is not None and not old_task.done():
         old_task.cancel()
 
     task = asyncio.create_task(
-        watch_run_and_notify(client, thread_id, run_id, agent_name, prompt)
+        watch_run_and_notify(
+            client,
+            thread_id,
+            run_id,
+            agent_name,
+            prompt,
+            origin_cli_thread_id=origin_cli_thread_id,
+        )
     )
     _watcher_by_thread[thread_id] = task
+    _active_watchers.add(task)
 
     def _cleanup(t: asyncio.Task) -> None:
         _active_watchers.discard(t)
-        # Only remove from dict if THIS task is still the registered one
-        # (could have been replaced by a newer spawn already)
+        # Only remove if THIS task is still the registered one — could
+        # have been replaced by a newer spawn_watcher call already.
         if _watcher_by_thread.get(thread_id) is t:
             del _watcher_by_thread[thread_id]
 
     task.add_done_callback(_cleanup)
-    _active_watchers.add(task)
     return task
 
 
-def drain_notifications() -> list[AsyncTaskNotification]:
-    """Pull every pending notification off the queue (non-blocking).
-
-    Returns a list of all notifications currently in the queue, emptying it.
-    If the queue is empty, returns an empty list.
-    """
+def _drain_one_queue(q: queue.Queue) -> list[AsyncTaskNotification]:
     items: list[AsyncTaskNotification] = []
     while True:
         try:
-            items.append(_notification_queue.get_nowait())
+            items.append(q.get_nowait())
         except queue.Empty:
             return items
+
+
+def drain_notifications(
+    current_thread_id: str | None = None,
+) -> list[AsyncTaskNotification]:
+    """Pull pending notifications off the queue (non-blocking).
+
+    With ``current_thread_id``: drains the matching per-thread queue plus
+    the unrouted bucket. Without it: drains EVERY queue (legacy behavior;
+    used by tests and diagnostics).
+    """
+    if current_thread_id is None:
+        items: list[AsyncTaskNotification] = _drain_one_queue(_unrouted_queue)
+        with _notifications_lock:
+            queues = list(_notifications_by_thread.values())
+        for q in queues:
+            items.extend(_drain_one_queue(q))
+        return items
+
+    items = _drain_one_queue(_unrouted_queue)
+    with _notifications_lock:
+        q = _notifications_by_thread.get(current_thread_id)
+    if q is not None:
+        items.extend(_drain_one_queue(q))
+    return items
 
 
 def dedup_notifications(
@@ -278,6 +436,7 @@ NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS = 3.0
 async def consume_notifications(
     run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
     read_async_tasks_state: Callable[[], Awaitable[dict[str, dict]]],
+    current_thread_id: str | None = None,
 ) -> None:
     """Drain queue, dedup, batch, and inject as a synthetic user message.
 
@@ -289,8 +448,14 @@ async def consume_notifications(
             without re-parsing the text.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
+        current_thread_id: the active CLI thread id. When given, only
+            notifications whose ``origin_cli_thread_id`` matches (or that
+            were enqueued unrouted) are drained — notifications belonging
+            to other threads stay queued and naturally drain on the next
+            poller tick after the user ``/resume``s back into them. When
+            omitted (legacy callers / tests), every queue drains.
     """
-    notifs = drain_notifications()
+    notifs = drain_notifications(current_thread_id)
     if not notifs:
         return
     # Adaptive grace: if other watchers are still in flight, wait briefly for
@@ -300,10 +465,10 @@ async def consume_notifications(
     )
     while _active_watchers and asyncio.get_event_loop().time() < deadline:
         await asyncio.sleep(0.2)
-        notifs.extend(drain_notifications())
+        notifs.extend(drain_notifications(current_thread_id))
     # Final brief grace to catch arrivals enqueued just before this tick
     await asyncio.sleep(NOTIFICATION_BATCH_GRACE_SECONDS)
-    notifs.extend(drain_notifications())
+    notifs.extend(drain_notifications(current_thread_id))
 
     try:
         async_tasks = await read_async_tasks_state()
