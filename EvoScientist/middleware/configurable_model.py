@@ -44,9 +44,7 @@ from langchain.agents.middleware.types import (
 logger = logging.getLogger(__name__)
 
 
-def _read_model_override(
-    request: ModelRequest | None = None,
-) -> tuple[str | None, str | None]:
+def _read_model_override() -> tuple[str | None, str | None]:
     """Pull ``(model, model_provider)`` from the active ``RunnableConfig``.
 
     Reads via ``langgraph.config.get_config()`` (the documented entry point
@@ -54,12 +52,6 @@ def _read_model_override(
     context — middleware, node, tool). Returns ``(None, None)`` when the
     config has no ``configurable.model`` override or when called outside a
     runnable context.
-
-    Args:
-        request: Optional ``ModelRequest``. Currently unused — kept on the
-            signature so call sites mirror other middleware helpers and the
-            argument is available if a future runtime exposes config back
-            on the request object.
     """
     try:
         from langgraph.config import get_config
@@ -134,7 +126,7 @@ class ConfigurableModelMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        model_name, provider = _read_model_override(request)
+        model_name, provider = _read_model_override()
         if model_name is None:
             return handler(request)
         try:
@@ -160,7 +152,7 @@ class ConfigurableModelMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        model_name, provider = _read_model_override(request)
+        model_name, provider = _read_model_override()
         if model_name is None:
             return await handler(request)
         try:
