@@ -25,6 +25,12 @@ def run_async(coro):
         loop.close()
 
 
+@pytest.fixture(name="run_async")
+def run_async_fixture():
+    """Pytest fixture that exposes run_async as a callable for test functions."""
+    return run_async
+
+
 @pytest.fixture
 def sample_tool_call():
     """A minimal tool call dict."""

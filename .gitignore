@@ -9,6 +9,7 @@ dist/
 build/
 *.egg
 *.pytest_cache/
+.benchmarks/
 .coverage
 .ipynb_checkpoints/
 

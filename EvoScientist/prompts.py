@@ -9,7 +9,9 @@ The main agent's system prompt is assembled by :func:`get_system_prompt` from:
 - :data:`REPORT_TEMPLATE` — final-report structure
 - :data:`WRITING_GUIDELINES` — style rules for written output
 - :data:`SHELL_GUIDELINES` — sandbox limits and `execute` tool usage
-- :data:`DELEGATION_STRATEGY` — sub-agent delegation strategy
+- :data:`DELEGATION_STRATEGY` — sub-agent delegation strategy (sync sub-agents)
+- :data:`ASYNC_NOTIFICATIONS` — how to triage `[Async tasks update]` signals
+  from async sub-agents
 
 :data:`RESEARCHER_INSTRUCTIONS` is the research-agent sub-agent prompt,
 loaded via ``_build_prompt_refs`` in ``EvoScientist.py``.
@@ -316,6 +318,37 @@ After each stage, ask: "Would a critical reviewer accept this evidence?"
 """
 
 # =============================================================================
+# Async sub-agent notifications
+# =============================================================================
+
+ASYNC_NOTIFICATIONS = """# Async Task Notifications
+
+A `[Async tasks update]` message is a SIGNAL of background completion, not a
+new request.
+
+## Hard rules (read these first)
+
+NEVER:
+- Switch the topic away from an ongoing user-clarification dialogue.
+- Hijack a literature search or experiment step into a summary of the
+  unrelated finished task.
+- Silently ignore — always at minimum acknowledge so the user knows the
+  signal was seen.
+
+## Per-task triage
+
+For EACH task in the batch, independently:
+- Result needed for the CURRENT step → fetch the result, integrate,
+  continue your work in the same turn.
+- Otherwise → acknowledge in ONE short line (e.g. "Noted: data-analysis-agent
+  finished — will fetch when relevant"), then RESUME what you were doing.
+- `status="error"` → surface briefly to the user even if not currently
+  relevant; ask whether to retry or wait.
+
+It is fine to fetch one task and defer another from the same batch.
+"""
+
+# =============================================================================
 # Sub-agent research instructions
 # =============================================================================
 
@@ -381,6 +414,7 @@ def get_system_prompt() -> str:
     4. :data:`WRITING_GUIDELINES`
     5. :data:`SHELL_GUIDELINES`
     6. :data:`DELEGATION_STRATEGY`
+    7. :data:`ASYNC_NOTIFICATIONS`
 
     The current date is injected per-turn by
     :class:`EvoScientist.middleware.EvoMemoryMiddleware` (piggy-backing on its
@@ -397,5 +431,6 @@ def get_system_prompt() -> str:
         WRITING_GUIDELINES,
         SHELL_GUIDELINES,
         DELEGATION_STRATEGY,
+        ASYNC_NOTIFICATIONS,
     ]
     return "\n".join(sections)

@@ -83,6 +83,53 @@ def _aes_encrypt(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
             ) from None
 
 
+def aes128_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+    """AES-128-ECB decryption with PKCS#7 unpadding.
+
+    Used by the personal-WeChat (iLink) backend for CDN-encrypted media
+    payloads. Block size is 16; the WeChat CDN protocol pads with PKCS#7.
+    """
+    if _HAS_PYCRYPTO:
+        cipher = AES.new(key, AES.MODE_ECB)
+        padded = cipher.decrypt(ciphertext)
+    else:
+        try:
+            import pyaes
+
+            decrypter = pyaes.Decrypter(pyaes.AESModeOfOperationECB(key))
+            padded = decrypter.feed(ciphertext)
+            padded += decrypter.feed()
+        except ImportError:
+            raise ImportError(
+                "WeChat CDN media decryption requires pycryptodome or pyaes. "
+                "Install with: pip install pycryptodome"
+            ) from None
+
+    if not padded:
+        return padded
+    pad_len = padded[-1]
+    if 1 <= pad_len <= 16 and padded.endswith(bytes([pad_len]) * pad_len):
+        return padded[:-pad_len]
+    return padded
+
+
+def parse_ilink_aes_key(aes_key_b64: str) -> bytes:
+    """Parse the iLink CDN AES key.
+
+    iLink encodes the 16-byte key in two formats:
+    - direct base64 of 16 bytes
+    - base64 of a 32-char ASCII hex string (which decodes to 16 raw bytes)
+    """
+    decoded = base64.b64decode(aes_key_b64)
+    if len(decoded) == 16:
+        return decoded
+    if len(decoded) == 32:
+        text = decoded.decode("ascii", errors="ignore")
+        if text and all(ch in "0123456789abcdefABCDEF" for ch in text):
+            return bytes.fromhex(text)
+    raise ValueError(f"unexpected aes_key format ({len(decoded)} decoded bytes)")
+
+
 class WeChatCrypto:
     """Handles WeChat/WeCom message encryption and decryption.
 

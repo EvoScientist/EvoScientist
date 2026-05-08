@@ -187,6 +187,23 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
+def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
+    """Conditionally start the langgraph dev subprocess for async sub-agents.
+
+    Shared by both the interactive entry and the serve entry — keeps the
+    user-visible status message and the conditional in one place.
+    """
+    if not getattr(config, "enable_async_subagents", False):
+        return
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+
+    with console.status(
+        "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+        spinner="dots",
+    ):
+        ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+
+
 def _resolve_context_window(
     model: Any, fallback: int = _COMPACT_CONTEXT_WINDOW_FALLBACK
 ) -> int:
@@ -781,6 +798,80 @@ def _serve_process_message(
 # =============================================================================
 
 
+def _serve_drain_notifications(
+    *,
+    agent_holder: dict,
+    model: str | None,
+    workspace_dir: str,
+    show_thinking: bool,
+) -> None:
+    """Drain the async-task notification queue in headless serve mode.
+
+    Mirrors the Rich CLI's ``_check_channel_queue`` notification path.
+    Uses a dedicated event loop (same pattern as serve mode's slash dispatch).
+    """
+    import asyncio as _aio
+
+    from EvoScientist.cli import async_notifier
+
+    from .tui_runtime import run_streaming
+
+    def _run_notification_message(text: str, notifs: list) -> None:
+        """Synchronous wrapper: run the agent on the synthetic notification text."""
+        # Render the per-task visual frame (matches CLI/TUI aesthetic).
+        from EvoScientist.cli.async_notifier import format_notification_lines
+
+        for line_text, line_style in format_notification_lines(notifs):
+            console.print(line_text, style=line_style, markup=False)
+        # Use the current workspace from agent_holder (updated by /resume's
+        # session-rebind callback), falling back to the startup value.
+        runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
+        meta = build_metadata(runtime_workspace, model)
+        try:
+            run_streaming(
+                ui_backend="cli",
+                agent=agent_holder["agent"],
+                message=text,
+                thread_id=agent_holder["thread_id"],
+                show_thinking=show_thinking,
+                interactive=True,
+                metadata=meta,
+            )
+        except Exception as exc:
+            _serve_logger.warning("Notification agent turn failed: %s", exc)
+
+    async def _run_notification_message_async(text: str, notifs: list) -> None:
+        await _aio.to_thread(_run_notification_message, text, notifs)
+
+    async def _read_async_tasks() -> dict:
+        agent = agent_holder.get("agent")
+        thread_id = agent_holder.get("thread_id")
+        if agent is None or not thread_id:
+            return {}
+        try:
+            snap = await agent.aget_state({"configurable": {"thread_id": thread_id}})
+            return (snap.values or {}).get("async_tasks") or {}
+        except Exception:
+            return {}
+
+    async def _consume() -> None:
+        await async_notifier.consume_notifications(
+            run_message=_run_notification_message_async,
+            read_async_tasks_state=_read_async_tasks,
+            current_thread_id=agent_holder.get("thread_id"),
+        )
+
+    _notif_loop: _aio.AbstractEventLoop | None = None
+    try:
+        _notif_loop = _aio.new_event_loop()
+        _notif_loop.run_until_complete(_consume())
+    except Exception as exc:
+        _serve_logger.warning("Notification drain failed: %s", exc)
+    finally:
+        if _notif_loop is not None:
+            _notif_loop.close()
+
+
 @app.command()
 def serve(
     no_thinking: bool = typer.Option(
@@ -868,6 +959,10 @@ def serve(
     set_workspace_root(ws)
     ensure_dirs()
 
+    # Auto-start langgraph dev (after workspace resolution, so deployed
+    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    _ensure_async_subagent_server(config, workspace_dir=ws)
+
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
     from ..sessions import generate_thread_id
@@ -939,23 +1034,35 @@ def serve(
             try:
                 msg = _message_queue.get(timeout=0.5)
             except queue.Empty:
-                continue
+                msg = None
             if shutdown_event.is_set():
                 break
-            try:
-                _serve_process_message(
-                    msg,
+            if msg is not None:
+                try:
+                    _serve_process_message(
+                        msg,
+                        agent_holder=agent_holder,
+                        model=config.model,
+                        workspace_dir=ws,
+                        show_thinking=effective_channel_thinking,
+                        on_cmd_completed=_serve_on_cmd_completed,
+                        start_new_session_cb=_serve_start_new_session_cb,
+                        channel_runtime=channel_runtime,
+                    )
+                except KeyboardInterrupt:
+                    shutdown_event.set()
+                    break
+
+            # Poll notification queue when idle (no channel message was pending).
+            from EvoScientist.cli import async_notifier
+
+            if async_notifier.has_pending_notifications(agent_holder.get("thread_id")):
+                _serve_drain_notifications(
                     agent_holder=agent_holder,
                     model=config.model,
                     workspace_dir=ws,
                     show_thinking=effective_channel_thinking,
-                    on_cmd_completed=_serve_on_cmd_completed,
-                    start_new_session_cb=_serve_start_new_session_cb,
-                    channel_runtime=channel_runtime,
                 )
-            except KeyboardInterrupt:
-                shutdown_event.set()
-                break
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
@@ -1574,6 +1681,10 @@ def _main_callback(
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
 
+    # Auto-start langgraph dev (after workspace resolution, so deployed
+    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    _ensure_async_subagent_server(config, workspace_dir=workspace_dir)
+
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
@@ -1584,6 +1695,7 @@ def _main_callback(
             resolve_thread_id_prefix,
         )
         from .interactive import cmd_run
+        from .resume_hint import print_resume_hint
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
@@ -1613,15 +1725,21 @@ def _main_callback(
                     checkpointer=checkpointer,
                     config=config,
                 )
-                cmd_run(
-                    agent,
-                    prompt,
-                    thread_id=tid,
-                    show_thinking=show_thinking,
-                    workspace_dir=workspace_dir,
-                    model=config.model,
-                    ui_backend=config.ui_backend,
-                )
+                try:
+                    cmd_run(
+                        agent,
+                        prompt,
+                        thread_id=tid,
+                        show_thinking=show_thinking,
+                        workspace_dir=workspace_dir,
+                        model=config.model,
+                        ui_backend=config.ui_backend,
+                    )
+                finally:
+                    try:
+                        print_resume_hint(tid, console=console)
+                    except Exception:
+                        pass
 
         import nest_asyncio  # type: ignore[import-untyped]
 

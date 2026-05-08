@@ -70,3 +70,40 @@ async def validate_wechat_mp(
         return False, f"Error ({data.get('errcode')}): {data.get('errmsg')}"
     except Exception as e:
         return False, f"Error: {e}"
+
+
+async def validate_wechat_personal(
+    account_id: str,
+    token: str = "",
+) -> tuple[bool, str]:
+    """Validate that a personal WeChat (iLink) account has been logged in.
+
+    Personal-WeChat credentials are obtained via QR-code scan and persisted
+    on disk; there is no offline credential format the user can paste in.
+    This probe simply checks that:
+
+    - the account_id is set, and
+    - either *token* is supplied inline, or a saved-account file exists for
+      *account_id* under ``DATA_DIR/wechat_personal/accounts/``.
+
+    Online liveness is not checked because the iLink long-poll endpoint is
+    not designed for cheap probes.
+    """
+    if not account_id:
+        return False, (
+            "account_id is required. Run "
+            "`python -m EvoScientist.channels.wechat.serve --qr-login` first."
+        )
+
+    if token:
+        return True, f"Personal WeChat account {account_id[:8]}… token provided"
+
+    from .personal import load_account
+
+    persisted = load_account(account_id)
+    if not persisted or not persisted.get("token"):
+        return False, (
+            f"No saved credentials for account_id={account_id[:8]}…. "
+            "Run `python -m EvoScientist.channels.wechat.serve --qr-login`."
+        )
+    return True, f"Personal WeChat account {account_id[:8]}… loaded from disk"

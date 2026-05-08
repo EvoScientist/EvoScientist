@@ -1510,6 +1510,13 @@ class TestInboundConsumerErrorHandling:
 
 
 class TestMessageBus:
+    """Covers the bus as a pure pub/sub queue.
+
+    Outbound routing (subscriber dispatch, error handling, stop semantics)
+    is owned by ``ChannelManager._dispatch_outbound`` — see
+    ``TestChannelManagerDispatch`` for that coverage.
+    """
+
     def test_publish_consume_inbound(self):
         async def _test():
             bus = MessageBus()
@@ -1535,57 +1542,6 @@ class TestMessageBus:
 
         _run(_test())
 
-    def test_subscriber_dispatch(self):
-        async def _test():
-            bus = MessageBus()
-            received = []
-            bus.subscribe_outbound("tg", lambda m: received.append(m))
-
-            task = asyncio.create_task(bus.dispatch_outbound())
-            await bus.publish_outbound(
-                BusOutbound(
-                    channel="tg",
-                    chat_id="c1",
-                    content="hello",
-                )
-            )
-            await asyncio.sleep(0.1)
-            bus.stop()
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            assert len(received) == 1
-
-        _run(_test())
-
-    def test_no_subscriber_logs_warning(self):
-        """Messages to unsubscribed channels should warn, not crash."""
-
-        async def _test():
-            bus = MessageBus()
-            task = asyncio.create_task(bus.dispatch_outbound())
-            await bus.publish_outbound(
-                BusOutbound(
-                    channel="unknown",
-                    chat_id="c1",
-                    content="lost",
-                )
-            )
-            await asyncio.sleep(0.1)
-            bus.stop()
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        _run(_test())
-
     def test_queue_sizes(self):
         async def _test():
             bus = MessageBus()
@@ -1602,41 +1558,6 @@ class TestMessageBus:
             assert bus.inbound_size == 1
 
         _run(_test())
-
-    def test_subscriber_error_does_not_crash_dispatch(self):
-        async def _test():
-            bus = MessageBus()
-
-            async def bad_callback(msg):
-                raise RuntimeError("subscriber crash")
-
-            bus.subscribe_outbound("tg", bad_callback)
-
-            task = asyncio.create_task(bus.dispatch_outbound())
-            await bus.publish_outbound(
-                BusOutbound(
-                    channel="tg",
-                    chat_id="c1",
-                    content="trigger",
-                )
-            )
-            await asyncio.sleep(0.1)
-            bus.stop()
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            # dispatch should survive the error
-
-        _run(_test())
-
-    def test_stop_flag(self):
-        bus = MessageBus()
-        assert bus._running is False
-        bus.stop()
-        assert bus._running is False
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -380,6 +380,9 @@ def run_textual_interactive(
             self._channel_timer: Any = None
             self._started_channel_types: list[str] = []
             self._busy = False
+            self._notification_consuming: bool = (
+                False  # prevent overlapping consume coroutines
+            )
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -612,6 +615,35 @@ def run_textual_interactive(
         ) -> None:
             if workspace_dir:
                 self._workspace_dir = workspace_dir
+                # Mirror the Rich CLI fix: when a /resume restores a thread
+                # whose workspace differs from the one the langgraph dev
+                # subprocess was launched with, the deployed sub-agents
+                # would otherwise keep operating on the previous workspace.
+                # Sync the subprocess to the new workspace; the manager
+                # auto-detects the change and restarts (or no-ops if disabled
+                # or unchanged). Run in a worker thread so the Textual event
+                # loop keeps refreshing the UI during the up-to-60s wait, and
+                # show a live timer widget (like /compact) so the user sees
+                # progress instead of a frozen static line.
+                from ..config import load_config
+
+                _resume_cfg = load_config()
+                if getattr(_resume_cfg, "enable_async_subagents", False):
+                    from ..langgraph_dev.manager import ensure_langgraph_dev
+                    from .widgets.workspace_sync_widget import WorkspaceSyncWidget
+
+                    sync_widget = WorkspaceSyncWidget()
+                    container = self.query_one("#chat", VerticalScroll)
+                    await container.mount(sync_widget)
+                    container.scroll_end(animate=False)
+                    try:
+                        await asyncio.to_thread(
+                            ensure_langgraph_dev,
+                            _resume_cfg,
+                            workspace_dir=workspace_dir,
+                        )
+                    finally:
+                        await sync_widget.cleanup()
 
             self._conversation_tid = thread_id
             # Background reload: history renders immediately; next turn awaits.
@@ -652,6 +684,12 @@ def run_textual_interactive(
             yield Static("", id="status")
 
         def on_mount(self) -> None:
+            # Register fallback middleware UI callback so messages appear
+            # as SystemMessage widgets in the chat container.
+            from ..middleware.model_fallback import set_ui_emit
+
+            set_ui_emit(lambda text, style: self._append_system(text, style))
+
             self._render_welcome()
             self._render_status()
             self.set_interval(1.0, self._render_status)
@@ -750,17 +788,130 @@ def run_textual_interactive(
             self._channel_timer = self.set_interval(0.1, self._poll_channel_queue)
 
         def _poll_channel_queue(self) -> None:
-            """Poll the channel message queue (called every 100ms)."""
+            """Poll the channel + notification queues (every 100ms)."""
+            from EvoScientist.cli import async_notifier
+
             try:
                 msg = _message_queue.get_nowait()
             except queue.Empty:
+                msg = None
+            if msg is not None:
+                if self._busy:
+                    _message_queue.put(msg)
+                    return
+                self.call_later(
+                    lambda m=msg: asyncio.ensure_future(
+                        self._process_channel_message(m)
+                    )
+                )
                 return
-            if self._busy:
-                _message_queue.put(msg)
-                return
-            self.call_later(
-                lambda m=msg: asyncio.ensure_future(self._process_channel_message(m))
+
+            # Notification path (only when idle and NOT already consuming).
+            # _notification_consuming is set synchronously at the schedule point
+            # so that the next poll tick cannot schedule a second consumer before
+            # the first one has a chance to run (fixes overlapping-turn bug).
+            if (
+                async_notifier.has_pending_notifications(self._conversation_tid)
+                and not self._busy
+                and not self._notification_consuming
+            ):
+                self._notification_consuming = True
+                self.call_later(
+                    lambda: asyncio.ensure_future(self._consume_notifications_tui())
+                )
+
+        async def _consume_notifications_tui(self) -> None:
+            """Drain the notification queue and inject a synthetic agent turn.
+
+            Wraps the consume call in a swallowing try/except (Fix #4) so an
+            exception inside dedup/inject doesn't bubble out of the
+            ``asyncio.ensure_future(...)`` scheduled by ``_poll_channel_queue``
+            and silently kill notification + channel dispatch.
+            """
+            from EvoScientist.cli import async_notifier
+
+            target_tid = self._conversation_tid
+            try:
+                try:
+                    await async_notifier.consume_notifications(
+                        run_message=lambda text, notifs: self._inject_notification_tui(
+                            text, notifs, target_thread_id=target_tid
+                        ),
+                        read_async_tasks_state=lambda: self._read_async_tasks_tui(
+                            target_tid
+                        ),
+                        current_thread_id=target_tid,
+                    )
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "async-notifier consume failed (TUI)", exc_info=True
+                    )
+            finally:
+                # Clear the guard flag regardless of success or exception so
+                # future notifications can schedule a new consume coroutine.
+                self._notification_consuming = False
+
+        async def _inject_notification_tui(
+            self,
+            text: str,
+            notifs: list,
+            *,
+            target_thread_id: str | None = None,
+        ) -> None:
+            """Run a synthetic user turn for the batched async-task notification.
+
+            Renders one compact tool-result-style line per task (matching the
+            Rich CLI aesthetic) instead of a single breadcrumb. The LLM still
+            receives the full ``format_batch_message`` text; only the visual
+            representation changes.
+
+            Args:
+                text: Full structured LLM message from ``format_batch_message``.
+                notifs: Survivor notification list for per-task visual rendering.
+                target_thread_id: Pinned thread id for the synthetic turn —
+                    forwarded to ``_run_turn`` so a mid-consume ``/new`` cannot
+                    misroute the notification into a different thread.
+            """
+            from EvoScientist.cli.async_notifier import format_notification_lines
+
+            for line_text, line_style in format_notification_lines(notifs):
+                self._append_system(line_text, style=line_style)
+            # Fire-and-forget the turn as an INDEPENDENT task — matches the
+            # keyboard input path (line ~2113). Queue-triggered turns that
+            # `await _run_turn` from inside a nested call_later chain don't
+            # get viewport-follow during streaming (only after completion).
+            # Mark busy synchronously so the next poll tick doesn't re-enter.
+            self._busy = True
+            self._run_task = asyncio.ensure_future(
+                self._run_turn(
+                    text,
+                    skip_user_message=True,
+                    resolve_mentions=False,
+                    thread_id_override=target_thread_id,
+                )
             )
+
+        async def _read_async_tasks_tui(
+            self, target_thread_id: str | None
+        ) -> dict[str, dict]:
+            """Read async_tasks from agent state for dedup, against a frozen tid.
+
+            ``target_thread_id`` is captured by ``_consume_notifications_tui`` at
+            the start of the consume call so a mid-consume thread switch cannot
+            make us read the wrong thread's state.
+            """
+            agent = self._agent_loader.agent
+            if agent is None or not target_thread_id:
+                return {}
+            try:
+                snap = await agent.aget_state(
+                    {"configurable": {"thread_id": target_thread_id}}
+                )
+                return (snap.values or {}).get("async_tasks") or {}
+            except Exception:
+                return {}
 
         async def _on_channel_cmd_completed(
             self,
@@ -1016,6 +1167,7 @@ def run_textual_interactive(
             channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
             channel_ask_user_fn: Callable[[dict], dict] | None = None,
             cancel_scope: str | None = None,
+            thread_id_override: str | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -1224,7 +1376,7 @@ def run_textual_interactive(
                     async for event in stream_agent_events(
                         self._agent_loader.agent,
                         _stream_input,
-                        self._conversation_tid,
+                        thread_id_override or self._conversation_tid,
                         metadata=metadata,
                     ):
                         if is_stream_cancel_requested(cancel_scope):
@@ -1768,8 +1920,31 @@ def run_textual_interactive(
 
             return response
 
-        async def _run_turn(self, user_text: str) -> None:
-            """Handle a user turn: stream agent response with widgets."""
+        async def _run_turn(
+            self,
+            user_text: str,
+            *,
+            skip_user_message: bool = False,
+            resolve_mentions: bool = True,
+            thread_id_override: str | None = None,
+        ) -> None:
+            """Handle a user turn: stream agent response with widgets.
+
+            Args:
+                user_text: The user's message text.
+                skip_user_message: If True, suppress the UserMessage widget echo
+                    (caller has already displayed a visual representation of the
+                    input — e.g. async-notifier per-task lines).
+                resolve_mentions: If False, skip ``@file`` mention expansion.
+                    Used by synthetic notifier turns whose payload is a fixed
+                    JSON template — keeps the TUI path consistent with the
+                    Rich CLI notifier path which never expands mentions.
+                thread_id_override: Pin the agent stream to this thread instead
+                    of the live ``self._conversation_tid``. Used by the async
+                    notifier path so a mid-consume ``/new`` cannot redirect a
+                    notification meant for thread A into thread B. Falls back
+                    to the live tid when ``None``.
+            """
             cancelled = False
             try:
                 self._busy = True
@@ -1778,9 +1953,13 @@ def run_textual_interactive(
                 # Resolve @file mentions — inject file contents before sending to agent.
                 # Use self._workspace_dir (current session) not the startup-captured
                 # workspace_dir closure, which becomes stale after /new or /resume.
-                _, message_to_send, file_warnings = await asyncio.to_thread(
-                    resolve_file_mentions, user_text, self._workspace_dir
-                )
+                if resolve_mentions:
+                    _, message_to_send, file_warnings = await asyncio.to_thread(
+                        resolve_file_mentions, user_text, self._workspace_dir
+                    )
+                else:
+                    message_to_send = user_text
+                    file_warnings = []
                 await self._refresh_status_snapshot(message_to_send)
 
                 # Block the turn on MCP tools finishing, if still in flight.
@@ -1795,6 +1974,8 @@ def run_textual_interactive(
                     message_to_send,
                     display_text=user_text,
                     file_warnings=file_warnings,
+                    skip_user_message=skip_user_message,
+                    thread_id_override=thread_id_override,
                 )
             except asyncio.CancelledError:
                 cancelled = True
@@ -2504,7 +2685,10 @@ def run_textual_interactive(
             self._do_exit()
 
         def _do_exit(self) -> None:
-            """Clean up channels and exit."""
+            """Clean up channels, unregister callbacks, and exit."""
+            from ..middleware.model_fallback import set_ui_emit
+
+            set_ui_emit(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None
@@ -2759,6 +2943,41 @@ def run_textual_interactive(
                     ws = (meta or {}).get("workspace_dir", "")
                     if ws:
                         effective_workspace = ws
+                        # Sync langgraph dev subprocess to the resumed
+                        # workspace BEFORE the Textual app takes over the
+                        # terminal. Mirrors interactive.py's Rich-CLI fix.
+                        # Without this, --resume against a thread from a
+                        # different workspace would leave deployed sub-agents
+                        # operating on the launch directory's files.
+                        try:
+                            from ..config import load_config
+                            from ..langgraph_dev.manager import ensure_langgraph_dev
+                            from ..stream.console import console as _resume_console
+
+                            _ws_cfg = load_config()
+                            if getattr(_ws_cfg, "enable_async_subagents", False):
+                                with _resume_console.status(
+                                    "[dim]Syncing async sub-agent server to "
+                                    "resumed workspace...[/dim]",
+                                    spinner="dots",
+                                ):
+                                    await asyncio.to_thread(
+                                        ensure_langgraph_dev,
+                                        _ws_cfg,
+                                        workspace_dir=ws,
+                                    )
+                        except Exception as _ws_sync_exc:
+                            # Non-fatal at startup — async sub-agents fall back
+                            # to sync via the manager's own availability flag.
+                            # Surface the exception so unexpected failures
+                            # (import errors, regressions in
+                            # ensure_langgraph_dev, etc.) don't hide silently.
+                            logging.getLogger(__name__).warning(
+                                "TUI startup workspace sync to langgraph dev "
+                                "failed: %s. Async sub-agents will fall back "
+                                "to in-process sync delegation for this session.",
+                                _ws_sync_exc,
+                            )
                     effective_thread_id = resolved
                     resumed = True
                 elif matches:

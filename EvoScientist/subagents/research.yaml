@@ -1,0 +1,5 @@
+research-agent:
+  description: "Web research for methods/baselines/datasets (one topic at a time, return actionable notes + sources)."
+  tools: [tavily_search, think_tool]
+  skills: ["/skills/"]
+  system_prompt_ref: RESEARCHER_INSTRUCTIONS

@@ -103,6 +103,7 @@ def _checkbox_ask(choices, message: str, **kwargs):
 
 STEPS = [
     "UI",
+    "LangGraph Port",
     "Provider",
     "API Key",
     "Model",
@@ -659,6 +660,90 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         raise KeyboardInterrupt()
 
     return backend
+
+
+def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
+    """Step 0.5: Choose the local TCP port for the langgraph dev subprocess.
+
+    EvoSci auto-starts a ``langgraph dev`` server in the background to host
+    deployed sub-agents (writing-agent, data-analysis-agent) when
+    ``enable_async_subagents`` is True. This step lets the user pick a free
+    port, with a live conflict check on the configured default.
+
+    Returns the chosen port; caller assigns it to ``config.langgraph_dev_port``.
+    """
+    if not getattr(config, "enable_async_subagents", True):
+        # User has async disabled — port is irrelevant, no prompt.
+        return getattr(config, "langgraph_dev_port", 6174)
+
+    from ..langgraph_dev.manager import _is_port_occupied, is_langgraph_dev_running
+
+    current_port = getattr(config, "langgraph_dev_port", 6174)
+    current_occupied = _is_port_occupied(current_port)
+    if current_occupied and is_langgraph_dev_running(port=current_port):
+        # Another EvoSci shell is already serving on this port — reuse, don't
+        # force the user to renumber.
+        current_occupied = False
+
+    # Bake the live status into the prompt label so the user sees it WITH
+    # the question, not as a side-effect line that prints before input.
+    # Single set of parens, no nesting (mirrors ccproxy's prompt style).
+    if current_occupied:
+        prompt_label = (
+            f"Enter port for EvoScientist server "
+            f"(Current: {current_port}, occupied, pick another):"
+        )
+    else:
+        prompt_label = (
+            f"Enter port for EvoScientist server "
+            f"(Current: {current_port}, available, Enter to keep):"
+        )
+
+    def valid_port(value: str) -> bool:
+        if not value:
+            # Allow keeping the default only if it's actually free; otherwise
+            # require the user to pick something else.
+            return not current_occupied
+        try:
+            port = int(value)
+        except (ValueError, TypeError):
+            return False
+        if not (1024 < port < 65536):
+            return False
+        # Reject user-typed ports that are already occupied UNLESS the
+        # occupier is our own langgraph dev (e.g., another EvoSci shell) —
+        # in that case the runtime will reuse it.
+        if not _is_port_occupied(port):
+            return True
+        return is_langgraph_dev_running(port=port)
+
+    raw = questionary.text(
+        prompt_label,
+        validate=valid_port,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+    ).ask()
+
+    if raw is None:
+        raise KeyboardInterrupt()
+
+    port = int(raw) if raw else current_port
+
+    # Final probe — warn (don't fail) if the chosen port is still occupied
+    # by something OTHER than our own langgraph dev. Reuse of an existing
+    # EvoSci server on that port is fine. They can always change later via:
+    # EvoSci config set langgraph_dev_port <port>
+    if _is_port_occupied(port) and not is_langgraph_dev_running(port=port):
+        console.print(
+            f"  [yellow]⚠ Port {port} is occupied. EvoSci may fail to start its "
+            f"server. Free the port or change later with: "
+            f"EvoSci config set langgraph_dev_port <other-port>[/yellow]"
+        )
+    else:
+        console.print(
+            f"  [green]✓ EvoScientist will run on http://127.0.0.1:{port}[/green]"
+        )
+    return port
 
 
 def _step_provider(config: EvoScientistConfig) -> str:
@@ -2351,7 +2436,12 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         "slack": ["slack-sdk>=3.27", "aiohttp>=3.9"],
         "feishu": ["aiohttp>=3.9"],
         "dingtalk": ["aiohttp>=3.9"],
-        "wechat": ["pycryptodome>=3.20", "aiohttp>=3.9"],
+        "wechat": [
+            "pycryptodome>=3.20",
+            "aiohttp>=3.9",
+            "qrcode>=7.4",
+            "certifi>=2024.0",
+        ],
         "qq": ["qq-botpy>=1.0", "cryptography>=41.0", "qrcode>=7.4"],
     }
 
@@ -2402,12 +2492,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         (
             "wechat",
             "WeChat",
-            [
-                ("wechat_wecom_corp_id", "WeCom Corp ID"),
-                ("wechat_wecom_agent_id", "WeCom Agent ID"),
-                ("wechat_wecom_secret", "WeCom Secret"),
-            ],
-            "aiohttp",
+            [],  # backend-specific fields prompted in the wechat branch below
+            ("aiohttp", "qrcode", "Crypto", "certifi"),
             "wechat",
         ),
         (
@@ -2483,9 +2569,15 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
         # Check pip dependency before proceeding
         if import_check:
+            _required_imports: tuple[str, ...] = (
+                (import_check,)
+                if isinstance(import_check, str)
+                else tuple(import_check)
+            )
             _pkg_ready = False
             try:
-                __import__(import_check)
+                for _module_name in _required_imports:
+                    __import__(_module_name)
                 _pkg_ready = True
             except ImportError:
                 console.print("  [yellow]✗ Required package not installed.[/yellow]")
@@ -2511,9 +2603,10 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     else:
                         _ok = install_library(f"evoscientist[{pip_extra}]")
                     if _ok:
-                        # Verify the import actually works now
+                        # Verify the imports actually work now
                         try:
-                            __import__(import_check)
+                            for _module_name in _required_imports:
+                                __import__(_module_name)
                             console.print("  [green]✓ Installed successfully.[/green]")
                             _pkg_ready = True
                         except ImportError:
@@ -2636,6 +2729,141 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         "  [yellow]⚠ Scan did not complete — falling"
                         " back to manual entry.[/yellow]"
                     )
+
+        # WeChat: pick backend (wecom / wechatmp / personal), then prompt
+        # backend-specific fields. Personal-WeChat has no static credentials —
+        # we offer an interactive QR-scan that obtains and persists them.
+        if ch_name == "wechat":
+            backend_choices = [
+                Choice(
+                    title="WeCom (企业微信应用) — most stable, official API",
+                    value="wecom",
+                ),
+                Choice(
+                    title="Official Account (微信公众号) — public-facing bots",
+                    value="wechatmp",
+                ),
+                Choice(
+                    title="Personal WeChat (个人微信, iLink) — QR-code scan login",
+                    value="personal",
+                ),
+            ]
+            wechat_backend = questionary.select(
+                "WeChat backend:",
+                choices=backend_choices,
+                default=getattr(config, "wechat_backend", "") or "wecom",
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+                use_indicator=True,
+            ).ask()
+            if wechat_backend is None:
+                raise KeyboardInterrupt()
+            updates["wechat_backend"] = wechat_backend
+
+            if wechat_backend == "wecom":
+                wechat_fields = [
+                    ("wechat_wecom_corp_id", "WeCom Corp ID", False),
+                    ("wechat_wecom_agent_id", "WeCom Agent ID", False),
+                    ("wechat_wecom_secret", "WeCom Secret", True),
+                ]
+                for field_name, prompt_label, is_secret in wechat_fields:
+                    current = getattr(config, field_name, "")
+                    prompt_fn = questionary.password if is_secret else questionary.text
+                    value = prompt_fn(
+                        f"{prompt_label}:",
+                        default=current,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    updates[field_name] = value.strip()
+            elif wechat_backend == "wechatmp":
+                wechat_fields = [
+                    ("wechat_mp_app_id", "Official Account App ID", False),
+                    ("wechat_mp_app_secret", "Official Account App Secret", True),
+                ]
+                for field_name, prompt_label, is_secret in wechat_fields:
+                    current = getattr(config, field_name, "")
+                    prompt_fn = questionary.password if is_secret else questionary.text
+                    value = prompt_fn(
+                        f"{prompt_label}:",
+                        default=current,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    updates[field_name] = value.strip()
+            else:  # personal
+                personal_choices = [
+                    Choice(
+                        title="Scan QR code now (recommended — login to a personal WeChat account)",
+                        value="scan",
+                    ),
+                    Choice(
+                        title="I already have an account_id — enter it manually",
+                        value="manual",
+                    ),
+                ]
+                personal_choice = questionary.select(
+                    "Personal WeChat login:",
+                    choices=personal_choices,
+                    default="scan",
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                    use_indicator=True,
+                ).ask()
+                if personal_choice is None:
+                    raise KeyboardInterrupt()
+
+                if personal_choice == "scan":
+                    from ..channels.wechat.personal import _account_dir as _wp_dir
+
+                    _accounts_path = _wp_dir()
+                    console.print(
+                        "  [dim]A QR code will be printed below — open WeChat on"
+                        " your phone and scan it. The session token is saved"
+                        f" to {_accounts_path}.[/dim]"
+                    )
+                    try:
+                        import asyncio
+
+                        from ..channels.wechat.personal import qr_login
+
+                        creds = asyncio.run(qr_login())
+                    except Exception as exc:
+                        console.print(f"  [red]✗ Scan failed: {exc}[/red]")
+                        creds = None
+
+                    if creds:
+                        updates["wechat_personal_account_id"] = creds["account_id"]
+                        # Token is persisted on disk by qr_login(); the channel
+                        # reads it from the per-account store at runtime, so we
+                        # intentionally do NOT copy it into the main config here
+                        # (avoids stale duplicates and broader secret exposure).
+                        console.print(
+                            f"  [green]✓ Logged in (account_id: "
+                            f"{creds['account_id'][:12]}…)[/green]"
+                        )
+                    else:
+                        console.print(
+                            "  [yellow]⚠ QR login did not complete — falling"
+                            " back to manual entry.[/yellow]"
+                        )
+                        personal_choice = "manual"
+
+                if personal_choice == "manual":
+                    current_id = getattr(config, "wechat_personal_account_id", "")
+                    account_id = questionary.text(
+                        "iLink account_id (from a previous --qr-login run):",
+                        default=current_id,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if account_id is None:
+                        raise KeyboardInterrupt()
+                    updates["wechat_personal_account_id"] = account_id.strip()
 
         # Prompt for required fields
         if not _qq_scanned:
@@ -2821,6 +3049,13 @@ def _probe_channel(
                     _val("wechat_mp_app_secret"),
                     _val("wechat_proxy") or None,
                 )
+            elif backend == "personal":
+                from ..channels.wechat.probe import validate_wechat_personal
+
+                return await validate_wechat_personal(
+                    _val("wechat_personal_account_id"),
+                    _val("wechat_personal_token"),
+                )
             else:
                 from ..channels.wechat.probe import validate_wecom
 
@@ -2970,6 +3205,9 @@ def run_onboard(skip_validation: bool = False) -> bool:
         # Step 0: UI Backend
         ui_backend = _step_ui_backend(config)
         config.ui_backend = ui_backend
+
+        # Step 0.5: langgraph dev port (with live conflict check)
+        config.langgraph_dev_port = _step_langgraph_dev_port(config)
 
         # Step 1: Provider
         provider = _step_provider(config)

@@ -20,7 +20,6 @@ from .patches import (
     _patch_ccproxy_system_to_developer,
     _patch_deepseek_reasoning_passback,
     _patch_openai_compat_content,
-    _patch_openrouter_reasoning_details,
 )
 
 _MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
@@ -391,7 +390,6 @@ def get_chat_model(
 
     # OpenRouter → native ChatOpenRouter via init_chat_model.
     elif provider == "openrouter":
-        _patch_openrouter_reasoning_details()
         _is_third_party = True
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if api_key:

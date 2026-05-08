@@ -86,6 +86,55 @@ class EvoScientistConfig:
     # LLM Settings
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5"
+    model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+
+    # Async Sub-agent Settings
+    # When True (default), the EvoSci CLI auto-starts a langgraph dev subprocess
+    # so any sub-agent flagged ``async: true`` in subagents/<name>.yaml runs
+    # non-blocking via AsyncSubAgent. Currently affects writing-agent and
+    # data-analysis-agent. Adds ~10-15s to CLI startup (langgraph dev cold
+    # start, mostly MCP server spawn time).
+    #
+    # Set False to run fully in-process — saves the startup cost in scenarios
+    # where async isn't useful: short scripted EvoSci runs (CI / one-shot
+    # ``-p "..."``), low-RAM environments, or workflows that only need the
+    # synchronous sub-agents (planner / research / code / debug).
+    enable_async_subagents: bool = True
+
+    # Port for the auto-started langgraph dev subprocess. 6174 is Kaprekar's
+    # constant — a memorable EvoScientist-themed default that avoids collisions
+    # with common dev ports (3000/5000/8000/8080) and the langgraph CLI default
+    # 2024. Override if it conflicts with another local service.
+    langgraph_dev_port: int = 6174
+
+    # Whether langgraph dev persists its runtime state to .langgraph_api/ next
+    # to the subprocess cwd. True (default) keeps async-task, scheduler, and
+    # Store API state across subprocess restarts — useful for future
+    # cross-session async, cron, and Store features. Set False to suppress
+    # writes (workspace stays cleaner; state is in-memory only and lost on
+    # CLI exit). EvoScientist's main thread persistence uses sessions.db
+    # regardless of this setting.
+    langgraph_dev_file_persistence: bool = True
+
+    # Concurrency: how many runs each langgraph dev worker processes in parallel.
+    # 10 is the langgraph dev recommended default and works well on a typical
+    # dev machine. Lower it (e.g., 4) on memory-constrained or low-core
+    # machines if multiple async sub-agents in flight cause noticeable
+    # slowdown.
+    langgraph_dev_jobs_per_worker: int = 10
+
+    # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
+    # each count as 1) before raising GraphRecursionError. Resets on every
+    # ``agent.invoke()`` — i.e., this is per-turn, NOT per-conversation. For
+    # long conversations the relevant mechanisms are checkpointer persistence
+    # (sessions.db), ContextEditingMiddleware (window management), and
+    # EvoMemoryMiddleware (cross-turn memory).
+    #
+    # 1,000,000 is "effectively unlimited" — typical research turns use
+    # 200-1000 steps; reaching 1M would cost ~$10K in tokens, by which point
+    # rate limits, context overflow, or API quota errors would trip first.
+    # Lower (e.g., 5000) if you want a tighter safety net against runaway loops.
+    recursion_limit: int = 1_000_000
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -152,6 +201,15 @@ class EvoScientistConfig:
     wechat_mp_app_secret: str = ""
     wechat_mp_token: str = ""
     wechat_mp_encoding_aes_key: str = ""
+    # Personal WeChat (iLink Bot) — credentials obtained via QR-code login.
+    # Run: python -m EvoScientist.channels.wechat.serve --qr-login
+    wechat_personal_account_id: str = ""
+    wechat_personal_token: str = ""
+    wechat_personal_base_url: str = ""
+    wechat_personal_cdn_base_url: str = ""
+    wechat_personal_dm_policy: str = "open"
+    wechat_personal_group_policy: str = "disabled"
+    wechat_personal_group_allowed: str = ""
 
     # DingTalk Settings
     dingtalk_client_id: str = ""
@@ -388,11 +446,17 @@ _ENV_MAPPINGS = {
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
+    "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
+    "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
+    "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
+    "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
+    "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
 }
 
 
