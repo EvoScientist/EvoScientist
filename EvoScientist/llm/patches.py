@@ -634,21 +634,24 @@ class _ClientProxy:
     is safe — but if a future caller tries ``client.foo = bar`` through the
     proxy, the write will be silently lost. ``object.__setattr__`` in
     ``__init__`` is used solely to avoid infinite recursion when seeding
-    the internal ``_real`` / ``_is_async`` slots.
+    the internal slots.
+
+    ``client.runs`` is a stable attribute set in
+    ``langgraph_sdk.client.LangGraphClient.__init__`` (``self.runs =
+    RunsClient(...)``) — not a property or lazy initializer — so the wrapped
+    runs proxy is built once at ``__init__`` time and reused on every
+    ``proxy.runs`` access. This avoids the previous behavior of selecting
+    sync/async and instantiating a new ``_RunsProxy`` per attribute access.
     """
 
     def __init__(self, real: Any, *, is_async: bool) -> None:
+        runs_proxy_cls = _AsyncRunsProxy if is_async else _SyncRunsProxy
         object.__setattr__(self, "_real", real)
-        object.__setattr__(self, "_is_async", is_async)
+        object.__setattr__(self, "_runs_proxy", runs_proxy_cls(real.runs))
 
     def __getattr__(self, name: str) -> Any:
         if name == "runs":
-            real_runs = self._real.runs
-            return (
-                _AsyncRunsProxy(real_runs)
-                if self._is_async
-                else _SyncRunsProxy(real_runs)
-            )
+            return self._runs_proxy
         return getattr(self._real, name)
 
 

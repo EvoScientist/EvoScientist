@@ -63,3 +63,57 @@ def test_factory_requests_async_safe_middleware(
 
     # The contract: factory MUST pass ``for_async_subagent=True``.
     mock_get_mw.assert_called_once_with(for_async_subagent=True)
+
+
+# ---------------------------------------------------------------------------
+# Direct behavior test for ``_get_default_middleware`` filter
+# ---------------------------------------------------------------------------
+#
+# The factory test above pins the *contract* (factory passes the flag).
+# This test pins the *behavior* (the flag actually excludes
+# AskUserMiddleware), so a future refactor that renames the flag or
+# restructures the middleware list cannot silently re-introduce the
+# interrupt-based deadlock.
+
+
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_async_subagent_mode_filters_ask_user(
+    mock_config, mock_chat, mock_tool_selector
+):
+    """``_get_default_middleware(for_async_subagent=True)`` must drop
+    ``AskUserMiddleware`` even when ``enable_ask_user`` is on.
+
+    Without mocking the middleware list itself: we let the real list be
+    constructed and assert ``AskUserMiddleware`` is absent. Mocks here
+    cover only the heavy dependencies (chat model, tool-selector) that
+    the middleware list builder pulls in transitively.
+    """
+    cfg = MagicMock()
+    cfg.enable_ask_user = True  # would normally include AskUserMiddleware
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+    from EvoScientist.middleware.ask_user import AskUserMiddleware
+
+    # CLI / in-process path includes AskUserMiddleware …
+    cli_mw = _get_default_middleware()
+    assert any(isinstance(m, AskUserMiddleware) for m in cli_mw), (
+        "Sanity check: with enable_ask_user=True and CLI mode, "
+        "AskUserMiddleware should be present."
+    )
+
+    # … but the async-subagent path filters it out.
+    async_mw = _get_default_middleware(for_async_subagent=True)
+    assert not any(isinstance(m, AskUserMiddleware) for m in async_mw), (
+        "AskUserMiddleware leaked into async sub-agent middleware — its "
+        "interrupt() call deadlocks the deployed graph (no UI to resume)."
+    )

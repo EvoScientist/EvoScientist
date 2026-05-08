@@ -103,6 +103,30 @@ class ConfigurableModelMiddleware(AgentMiddleware):
         super().__init__()
         self._cache: dict[tuple[str, str | None], Any] = {}
         self._lock = threading.Lock()
+        # Track the last (model, provider) pair we INFO-logged so we only
+        # surface a banner on transition. Without this, every LLM call in a
+        # long async run would emit an identical INFO line.
+        self._last_logged_key: tuple[str, str | None] | None = None
+
+    def _log_override(self, model_name: str, provider: str | None) -> None:
+        """INFO on transition; DEBUG on subsequent calls with same key."""
+        key = (model_name, provider)
+        with self._lock:
+            transitioned = key != self._last_logged_key
+            if transitioned:
+                self._last_logged_key = key
+        if transitioned:
+            logger.info(
+                "ConfigurableModelMiddleware: overriding model to %s (%s)",
+                model_name,
+                provider,
+            )
+        else:
+            logger.debug(
+                "ConfigurableModelMiddleware: reusing override model=%s provider=%s",
+                model_name,
+                provider,
+            )
 
     def _resolve(self, model: str, provider: str | None) -> Any:
         """Return a cached or freshly-built chat model for ``(model, provider)``."""
@@ -140,11 +164,7 @@ class ConfigurableModelMiddleware(AgentMiddleware):
                 exc_info=True,
             )
             return handler(request)
-        logger.info(
-            "ConfigurableModelMiddleware: overriding model to %s (%s)",
-            model_name,
-            provider,
-        )
+        self._log_override(model_name, provider)
         return handler(request.override(model=new_model))
 
     async def awrap_model_call(
@@ -172,9 +192,5 @@ class ConfigurableModelMiddleware(AgentMiddleware):
                 exc_info=True,
             )
             return await handler(request)
-        logger.info(
-            "ConfigurableModelMiddleware: overriding model to %s (%s)",
-            model_name,
-            provider,
-        )
+        self._log_override(model_name, provider)
         return await handler(request.override(model=new_model))
