@@ -266,9 +266,7 @@ def qr_register(timeout_seconds: int = 600) -> dict | None:
                 try:
                     client_secret = decrypt_secret(encrypted_secret, aes_key)
                 except Exception as exc:
-                    logger.warning(
-                        "[QQ onboard] decrypt_secret failed: %s", exc
-                    )
+                    logger.warning("[QQ onboard] decrypt_secret failed: %s", exc)
                     return None
                 print()
                 print(f"  QR scan complete! (App ID: {app_id})")

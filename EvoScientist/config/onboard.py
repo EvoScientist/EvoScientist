@@ -2694,9 +2694,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     if install_now is None:
                         raise KeyboardInterrupt() from None
                     if install_now and install_library("cryptography>=41.0"):
-                        console.print(
-                            "  [green]✓ Installed cryptography.[/green]"
-                        )
+                        console.print("  [green]✓ Installed cryptography.[/green]")
                     else:
                         console.print(
                             "  [yellow]⚠ Falling back to manual entry.[/yellow]"
