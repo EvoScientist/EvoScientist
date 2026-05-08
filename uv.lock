@@ -907,6 +907,7 @@ dependencies = [
 all-channels = [
     { name = "aiohttp" },
     { name = "certifi" },
+    { name = "cryptography" },
     { name = "discord-py" },
     { name = "lark-oapi" },
     { name = "pycryptodome" },
@@ -933,7 +934,9 @@ oauth = [
     { name = "ccproxy-api" },
 ]
 qq = [
+    { name = "cryptography" },
     { name = "qq-botpy" },
+    { name = "qrcode" },
 ]
 slack = [
     { name = "aiohttp" },
@@ -971,6 +974,8 @@ requires-dist = [
     { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.7" },
     { name = "certifi", marker = "extra == 'all-channels'", specifier = ">=2024.0" },
     { name = "certifi", marker = "extra == 'wechat'", specifier = ">=2024.0" },
+    { name = "cryptography", marker = "extra == 'all-channels'", specifier = ">=41.0" },
+    { name = "cryptography", marker = "extra == 'qq'", specifier = ">=41.0" },
     { name = "deepagents", specifier = ">=0.5.7" },
     { name = "discord-py", marker = "extra == 'all-channels'", specifier = ">=2.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3" },
@@ -1007,6 +1012,7 @@ requires-dist = [
     { name = "qq-botpy", marker = "extra == 'all-channels'", specifier = ">=1.0" },
     { name = "qq-botpy", marker = "extra == 'qq'", specifier = ">=1.0" },
     { name = "qrcode", marker = "extra == 'all-channels'", specifier = ">=7.4" },
+    { name = "qrcode", marker = "extra == 'qq'", specifier = ">=7.4" },
     { name = "qrcode", marker = "extra == 'wechat'", specifier = ">=7.4" },
     { name = "questionary", specifier = ">=2.1" },
     { name = "rich", specifier = ">=15.0" },

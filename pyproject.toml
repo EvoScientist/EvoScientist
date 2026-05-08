@@ -67,7 +67,11 @@ discord = ["discord.py>=2.3"]
 slack = ["slack-sdk>=3.27", "aiohttp>=3.9"]
 wechat = ["pycryptodome>=3.20", "aiohttp>=3.9", "qrcode>=7.4", "certifi>=2024.0"]
 feishu = ["lark-oapi>=1.4.0"]
-qq = ["qq-botpy>=1.0"]
+qq = [
+    "qq-botpy>=1.0",
+    "cryptography>=41.0",
+    "qrcode>=7.4",
+]
 stt = ["faster-whisper>=1.0"]
 oauth = ["ccproxy-api>=0.2.7"]
 all-channels = [
@@ -80,6 +84,8 @@ all-channels = [
     "certifi>=2024.0",
     "lark-oapi>=1.4.0",
     "qq-botpy>=1.0",
+    "cryptography>=41.0",
+    "qrcode>=7.4",
 ]
 
 [project.urls]

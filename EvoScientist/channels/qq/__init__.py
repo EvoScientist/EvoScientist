@@ -10,8 +10,9 @@ Usage in config:
 
 from ..channel_manager import _parse_csv, register_channel
 from .channel import QQChannel, QQConfig
+from .onboard import qr_register
 
-__all__ = ["QQChannel", "QQConfig"]
+__all__ = ["QQChannel", "QQConfig", "qr_register"]
 
 
 def create_from_config(config) -> QQChannel:

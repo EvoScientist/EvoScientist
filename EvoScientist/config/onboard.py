@@ -2442,7 +2442,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             "qrcode>=7.4",
             "certifi>=2024.0",
         ],
-        "qq": ["qq-botpy>=1.0"],
+        "qq": ["qq-botpy>=1.0", "cryptography>=41.0", "qrcode>=7.4"],
     }
 
     # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
@@ -2653,6 +2653,81 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             enabled_channels.append("imessage")
             continue
 
+        # QQ: offer scan-to-configure before falling back to manual entry.
+        # The bot must already exist at q.qq.com — scanning binds the
+        # developer's QQ account to it and returns app_id + client_secret.
+        _qq_scanned = False
+        if ch_name == "qq":
+            scan_choices = [
+                Choice(
+                    title="Scan QR code  (recommended — auto-fill App ID & Secret)",
+                    value="scan",
+                ),
+                Choice(title="Enter App ID and Secret manually", value="manual"),
+            ]
+            scan_choice = questionary.select(
+                "Configure QQ Bot:",
+                choices=scan_choices,
+                default="scan",
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+                use_indicator=True,
+            ).ask()
+            if scan_choice is None:
+                raise KeyboardInterrupt()
+
+            if scan_choice == "scan":
+                # Preflight: AES-GCM decryption needs `cryptography`.
+                # `qrcode` is a soft dep — onboard.py degrades to URL-only display.
+                try:
+                    import cryptography  # noqa: F401
+                except ImportError:
+                    console.print(
+                        '  [yellow]✗ QR scan requires "cryptography".[/yellow]'
+                    )
+                    install_now = questionary.confirm(
+                        'Install "cryptography" now?',
+                        default=True,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if install_now is None:
+                        raise KeyboardInterrupt() from None
+                    if install_now and install_library("cryptography>=41.0"):
+                        console.print("  [green]✓ Installed cryptography.[/green]")
+                    else:
+                        console.print(
+                            "  [yellow]⚠ Falling back to manual entry.[/yellow]"
+                        )
+                        scan_choice = "manual"
+
+            if scan_choice == "scan":
+                from ..channels.qq.onboard import qr_register
+
+                console.print(
+                    "  [dim]Make sure the bot is registered at"
+                    " https://q.qq.com first — scanning binds an"
+                    " existing app, it does not create one.[/dim]"
+                )
+                try:
+                    creds = qr_register()
+                except Exception as exc:
+                    console.print(f"  [red]✗ Scan failed: {exc}[/red]")
+                    creds = None
+
+                if creds:
+                    updates["qq_app_id"] = creds["app_id"]
+                    updates["qq_app_secret"] = creds["client_secret"]
+                    console.print(
+                        f"  [green]✓ Bound QQ Bot (App ID: {creds['app_id']})[/green]"
+                    )
+                    _qq_scanned = True
+                else:
+                    console.print(
+                        "  [yellow]⚠ Scan did not complete — falling"
+                        " back to manual entry.[/yellow]"
+                    )
+
         # WeChat: pick backend (wecom / wechatmp / personal), then prompt
         # backend-specific fields. Personal-WeChat has no static credentials —
         # we offer an interactive QR-scan that obtains and persists them.
@@ -2789,17 +2864,18 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     updates["wechat_personal_account_id"] = account_id.strip()
 
         # Prompt for required fields
-        for field_name, prompt_label in required_fields:
-            current = getattr(config, field_name, "")
-            value = questionary.text(
-                f"{prompt_label}:",
-                default=current,
-                style=WIZARD_STYLE,
-                qmark=f"  {QMARK}",
-            ).ask()
-            if value is None:
-                raise KeyboardInterrupt()
-            updates[field_name] = value.strip()
+        if not _qq_scanned:
+            for field_name, prompt_label in required_fields:
+                current = getattr(config, field_name, "")
+                value = questionary.text(
+                    f"{prompt_label}:",
+                    default=current,
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                ).ask()
+                if value is None:
+                    raise KeyboardInterrupt()
+                updates[field_name] = value.strip()
 
         # Feishu: subscription mode + optional fields
         if ch_name == "feishu":
