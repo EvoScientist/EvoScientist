@@ -26,6 +26,8 @@ STATUS_BAD = "#d08c61"
 STATUS_CRITICAL = "#d86f6f"
 STATUS_HINT_IDLE = "#8b9bb0"
 STATUS_HINT_BUSY = "#f0c36a"
+STATUS_HINT_DONE = "#5fcf8b"
+STATUS_HINT_WRITING = "#7eb8e0"
 
 # Braille spinner frames used by the CLI bottom toolbar and TUI status bar
 # to animate the "Loading MCP tools" indicator.

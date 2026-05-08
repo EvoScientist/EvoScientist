@@ -52,11 +52,14 @@ from .status_bar import (
     STATUS_BAR_BG,
     STATUS_DIM,
     STATUS_HINT_BUSY,
+    STATUS_HINT_DONE,
     STATUS_HINT_IDLE,
+    STATUS_HINT_WRITING,
     apply_assistant_text_to_snapshot,
     apply_user_text_to_snapshot,
     build_session_status_snapshot,
     build_status_text,
+    format_duration_compact,
     make_empty_status_snapshot,
     make_usage_status_snapshot,
 )
@@ -171,14 +174,7 @@ def _build_welcome_banner(
 
 def _is_final_response(state: StreamState) -> bool:
     """Check if all tools are done and no sub-agents are active."""
-    n_visible = 0
-    n_done = 0
-    for i, tc in enumerate(state.tool_calls):
-        if tc.get("name") in _INTERNAL_TOOLS:
-            continue
-        n_visible += 1
-        if i < len(state.tool_results):
-            n_done += 1
+    n_done, n_visible = state.visible_tool_counts()
     has_pending = n_visible > n_done
     any_active_sa = any(sa.is_active for sa in state.subagents)
     return not has_pending and not any_active_sa and not state.is_processing
@@ -411,6 +407,8 @@ def run_textual_interactive(
             self._status_snapshot = self._status_base_snapshot
             self._status_streaming_text = ""
             self._status_last_input_tokens: int | None = None
+            self._status_phase: str = "idle"
+            self._turn_started_at: datetime | None = None
             self._compacting_widget: CompactingWidget | None = None
 
         # ── Background agent / MCP loading ───────────────────
@@ -1384,6 +1382,14 @@ def run_textual_interactive(
                             break
                         event_type = state.handle_event(event)
 
+                        if event_type == "done":
+                            new_phase = "done"
+                        else:
+                            new_phase = state.compute_phase(has_used_tools)
+                        if new_phase != self._status_phase:
+                            self._status_phase = new_phase
+                            self._render_status()
+
                         if event_type == "usage_stats":
                             self._set_status_usage_baseline(state.last_input_tokens)
 
@@ -1825,12 +1831,18 @@ def run_textual_interactive(
                                     delays=(0.15, 0.4, 0.8, 1.5),
                                     immediate=False,
                                 )
-                            # Mount token usage stats
+                            # Mount token usage stats with elapsed time
                             if state.total_input_tokens or state.total_output_tokens:
+                                elapsed = None
+                                if self._turn_started_at:
+                                    elapsed = format_duration_compact(
+                                        self._turn_started_at
+                                    )
                                 await container.mount(
                                     UsageWidget(
                                         state.total_input_tokens,
                                         state.total_output_tokens,
+                                        elapsed=elapsed,
                                     )
                                 )
 
@@ -1948,6 +1960,8 @@ def run_textual_interactive(
             cancelled = False
             try:
                 self._busy = True
+                self._turn_started_at = datetime.now()
+                self._status_phase = "thinking"
                 self._render_status()
 
                 # Resolve @file mentions — inject file contents before sending to agent.
@@ -1982,6 +1996,7 @@ def run_textual_interactive(
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._busy = False
+                self._status_phase = "idle"
                 self._run_task = None
                 await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
@@ -2007,6 +2022,8 @@ def run_textual_interactive(
                 return
             try:
                 self._busy = True
+                self._turn_started_at = datetime.now()
+                self._status_phase = "thinking"
                 await self._refresh_status_snapshot(msg.content)
                 self._render_status()
 
@@ -2144,6 +2161,7 @@ def run_textual_interactive(
 
             finally:
                 self._busy = False
+                self._status_phase = "idle"
                 await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
                 if prompt_widget is not None:
@@ -2863,8 +2881,7 @@ def run_textual_interactive(
             # MCP load progress lives in the dedicated MCPLoaderWidget
             # above the input bar — no need to duplicate it here.
             if self._busy:
-                hint_label = "vibe researching..."
-                hint_style = f"on {STATUS_BAR_BG} {STATUS_HINT_BUSY} bold"
+                hint_label, hint_style = self._phase_hint_label()
             else:
                 hint_label = "/help for commands"
                 hint_style = f"on {STATUS_BAR_BG} {STATUS_HINT_IDLE}"
@@ -2883,6 +2900,31 @@ def run_textual_interactive(
             line.append_text(hint)
             line.append_text(metrics)
             status.update(line)
+
+        def _phase_hint_label(self) -> tuple[str, str]:
+            """Return (label, style) for the current research phase."""
+            phase = self._status_phase
+            busy_style = f"on {STATUS_BAR_BG} {STATUS_HINT_BUSY} bold"
+            elapsed = ""
+            if self._turn_started_at:
+                elapsed = f" ({format_duration_compact(self._turn_started_at)})"
+
+            if phase == "thinking":
+                return f"Thinking...{elapsed}", busy_style
+            if phase == "researching":
+                return f"Researching...{elapsed}", busy_style
+            if phase == "writing":
+                return (
+                    f"Writing report...{elapsed}",
+                    f"on {STATUS_BAR_BG} {STATUS_HINT_WRITING} bold",
+                )
+            if phase == "done":
+                return (
+                    f"Done{elapsed}",
+                    f"on {STATUS_BAR_BG} {STATUS_HINT_DONE} bold",
+                )
+            # Fallback for busy state with no specific phase (e.g. slash commands)
+            return f"Working...{elapsed}", busy_style
 
     # ── Media forwarding helper (module-level) ──────────────
 

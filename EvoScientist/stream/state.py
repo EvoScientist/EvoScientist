@@ -12,6 +12,13 @@ import json
 # These should be excluded from display rendering and "all_done" calculations.
 _INTERNAL_TOOLS = {"ExtractedMemory"}
 
+# Research phase constants used by the TUI status bar.
+PHASE_IDLE = "idle"
+PHASE_THINKING = "thinking"
+PHASE_RESEARCHING = "researching"
+PHASE_WRITING = "writing"
+PHASE_DONE = "done"
+
 
 class SubAgentState:
     """Tracks a single sub-agent's activity."""
@@ -340,6 +347,45 @@ class StreamState:
             self.response_text += f"\n\n[Error] {error_msg}"
 
         return event_type
+
+    def visible_tool_counts(self) -> tuple[int, int]:
+        """Return (completed, total) counts for visible (non-internal) tools."""
+        n_visible = 0
+        n_done = 0
+        for i, tc in enumerate(self.tool_calls):
+            if tc.get("name") in _INTERNAL_TOOLS:
+                continue
+            n_visible += 1
+            if i < len(self.tool_results):
+                n_done += 1
+        return n_done, n_visible
+
+    def has_pending_work(self) -> bool:
+        """Return True if tools or sub-agents are still running."""
+        n_done, n_visible = self.visible_tool_counts()
+        has_pending = n_visible > n_done
+        any_active_sa = any(sa.is_active for sa in self.subagents)
+        return has_pending or any_active_sa or self.is_processing
+
+    def compute_phase(self, has_used_tools: bool = False) -> str:
+        """Derive the current research phase from internal state.
+
+        Args:
+            has_used_tools: Whether any visible tool has been called this turn.
+
+        Returns:
+            One of the ``PHASE_*`` constants.
+        """
+        if self.is_thinking:
+            return PHASE_THINKING
+        if has_used_tools and self.has_pending_work():
+            return PHASE_RESEARCHING
+        if self.is_responding:
+            return PHASE_WRITING
+        if has_used_tools:
+            # Tools finished but model hasn't started responding yet
+            return PHASE_WRITING
+        return PHASE_IDLE
 
     def get_display_args(self) -> dict:
         """Get kwargs for create_streaming_display()."""

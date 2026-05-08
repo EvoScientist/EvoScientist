@@ -16,7 +16,12 @@ class UsageWidget(Static):
     }
     """
 
-    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+    def __init__(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        elapsed: str | None = None,
+    ) -> None:
         stats = Text(justify="right")
         stats.append("[", style="dim italic")
         stats.append("Usage: ", style="dim italic")
@@ -24,5 +29,8 @@ class UsageWidget(Static):
         stats.append(" in · ", style="dim italic")
         stats.append(f"{output_tokens:,}", style="green italic")
         stats.append(" out", style="dim italic")
+        if elapsed:
+            stats.append(" · ", style="dim italic")
+            stats.append(f"Elapsed: {elapsed}", style="dim italic")
         stats.append("]", style="dim italic")
         super().__init__(stats)
