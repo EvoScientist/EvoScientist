@@ -31,55 +31,57 @@ except ImportError:
 # QQ Bot button styles: 0 = secondary (grey), 1 = primary (blue).
 _QQ_BUTTON_STYLE = {"primary": 1, "default": 0, "danger": 0, "secondary": 0}
 
-# Permission types: 1=specify_user_ids, 2=admin only, 3=group manager,
-# 4=specify_role_ids; for C2C HITL we want "anyone in this DM" — type 2
-# isn't right.  Permission only applies in groups; in C2C the click is
-# always from the DM peer, so this field is largely ignored by QQ but
-# required by schema.  Use type 2 (admin) which QQ treats permissively
-# for C2C; group support is out of scope here.
+# Permission only matters in groups; for C2C the click is always from the
+# DM peer. type=2 (admin) is harmless for C2C and satisfies the schema.
 _QQ_DEFAULT_PERMISSION = {"type": 2}
 
 
+def _normalize_button(btn: dict) -> tuple[str, str] | None:
+    """Return ``(label, value)`` for a button dict, or ``None`` if no label.
+
+    ``value`` is coerced to ``str`` and defaults to *label* when omitted/None.
+    """
+    label = (btn.get("text") or "").strip()
+    if not label:
+        return None
+    raw = btn.get("value")
+    return label, str(raw) if raw is not None else label
+
+
 def _build_qq_keyboard(buttons: list[dict]) -> dict | None:
-    """Build a QQ Bot inline keyboard payload from a list of button dicts.
+    """Build a QQ Bot keyboard payload (one button per row for mobile clarity).
 
-    Each button dict supports:
-      - ``text`` (required): visible label.
-      - ``value``: callback data echoed as ``button_data`` on click.
-        Defaults to *text* when omitted.
-      - ``type``: ``"primary"`` → blue style; anything else → grey.
-      - ``id``: optional explicit button id; auto-numbered otherwise.
-
-    Returns a ``{"content": {"rows": [...]}}`` payload, or ``None`` when no
-    valid button is provided.  One button per row (cleaner on mobile).
+    Button schema: ``{text, value?, type?, id?}``. ``type="primary"`` → blue;
+    anything else → grey. Returns ``None`` if no button has a usable label.
     """
     rows: list[dict] = []
     for idx, btn in enumerate(buttons):
-        label = (btn.get("text") or "").strip()
-        if not label:
+        norm = _normalize_button(btn)
+        if norm is None:
             continue
-        data = btn.get("value", label)
-        if not isinstance(data, str):
-            data = str(data)
+        label, value = norm
         style = _QQ_BUTTON_STYLE.get(btn.get("type") or "", 0)
-        rows.append({
-            "buttons": [{
-                "id": btn.get("id") or f"btn_{idx}",
-                "render_data": {
-                    "label": label,
-                    "visited_label": label,
-                    "style": style,
-                },
-                "action": {
-                    "type": 1,  # 1 = callback (server pushes interaction event)
-                    "permission": _QQ_DEFAULT_PERMISSION,
-                    "data": data,
-                },
-            }],
-        })
-    if not rows:
-        return None
-    return {"content": {"rows": rows}}
+        rows.append({"buttons": [{
+            "id": btn.get("id") or f"btn_{idx}",
+            "render_data": {"label": label, "visited_label": label, "style": style},
+            "action": {
+                "type": 1,  # callback (server pushes interaction event)
+                "permission": _QQ_DEFAULT_PERMISSION,
+                "data": value,
+            },
+        }]})
+    return {"content": {"rows": rows}} if rows else None
+
+
+def _button_hint(buttons: list[dict]) -> str:
+    """Plain-text fallback for keyboards: ``value=label`` joined by commas."""
+    pairs = []
+    for btn in buttons:
+        norm = _normalize_button(btn)
+        if norm is not None:
+            label, value = norm
+            pairs.append(f"{value}={label}")
+    return ", ".join(pairs)
 
 
 @dataclass
@@ -247,35 +249,34 @@ class QQChannel(Channel):
         The click runs through inbound middleware (Dedup suppresses QQ
         retries) but is published directly to the bus so the per-sender
         debounce buffer doesn't merge the click value with subsequent text.
-
-        QQ requires the bot to ACK the interaction within ~5 seconds via
-        ``api.on_interaction_result(interaction_id, code)`` or the user
-        sees an "expired" hint.  We always ACK with ``code=0`` (success);
-        actual approval/rejection is handled downstream by the consumer.
         Group-scope clicks are ignored (DM-only by design).
         """
+        # ACK first — QQ requires a response within ~5s or the button UI
+        # shows "expired".  Code 0 just means "received"; downstream still
+        # decides the actual approval/rejection.
+        interaction_id = getattr(interaction, "id", "") or ""
+        if interaction_id and self._client:
+            try:
+                await self._client.api.on_interaction_result(interaction_id, 0)
+            except Exception as ack_exc:
+                logger.debug("QQ interaction ack failed: %s", ack_exc)
+
         try:
-            # DM-only: skip group/guild interactions
             user_openid = getattr(interaction, "user_openid", "") or ""
             if not user_openid:
                 logger.debug("QQ interaction ignored (no user_openid; not C2C)")
                 return
 
-            data = getattr(interaction, "data", None)
-            resolved = getattr(data, "resolved", None) if data else None
+            resolved = getattr(getattr(interaction, "data", None), "resolved", None)
             button_data = getattr(resolved, "button_data", "") if resolved else ""
             button_id = getattr(resolved, "button_id", "") if resolved else ""
-            triggering_msg_id = (
-                getattr(resolved, "message_id", "") if resolved else ""
-            )
+            triggering_msg_id = getattr(resolved, "message_id", "") if resolved else ""
 
-            text = button_data if isinstance(button_data, str) else str(button_data or "")
-            if not text:
-                # Empty payload → fall back to button id, then to a sentinel
-                text = button_id or "[button click]"
+            # Coerce non-str payload; fall back to button id, then sentinel.
+            button_value = str(button_data) if button_data not in (None, "") else ""
+            text = button_value or button_id or "[button click]"
 
             # Stable id so DedupMiddleware suppresses any QQ retry callbacks.
-            interaction_id = getattr(interaction, "id", "") or ""
             message_id = (
                 f"{triggering_msg_id}:action:{interaction_id}"
                 if interaction_id
@@ -295,7 +296,7 @@ class QQChannel(Channel):
                     "backend": "qq",
                     "button_click": True,
                     "button_id": button_id,
-                    "button_value": button_data,
+                    "button_value": button_value,
                     "triggering_message_id": triggering_msg_id,
                 },
                 is_group=False,
@@ -307,15 +308,6 @@ class QQChannel(Channel):
                 await self._bus.publish_inbound(inbound)
         except Exception:
             logger.exception("QQ interaction handler error")
-        finally:
-            # ACK so the QQ client UI doesn't show the button as unresponsive.
-            try:
-                if self._client and getattr(interaction, "id", None):
-                    await self._client.api.on_interaction_result(
-                        interaction.id, 0
-                    )
-            except Exception as ack_exc:
-                logger.debug("QQ interaction ack failed: %s", ack_exc)
 
     # ── Send ──────────────────────────────────────────────────────
 
@@ -341,10 +333,8 @@ class QQChannel(Channel):
 
         # Inline keyboard is C2C-only here — group keyboards have stricter
         # permission semantics and are out of scope for now.
-        keyboard = None
-        buttons = (metadata or {}).get("buttons")
-        if buttons and msg_type == "c2c":
-            keyboard = _build_qq_keyboard(buttons)
+        buttons = (metadata or {}).get("buttons") if msg_type == "c2c" else None
+        keyboard = _build_qq_keyboard(buttons) if buttons else None
 
         try:
             await self._post_markdown_message(
@@ -377,17 +367,13 @@ class QQChannel(Channel):
         # always advance to a fresh seq before the fallback send.
         fallback_seq = self._next_msg_seq(msg_id)
         plain_text = self._plain_formatter.format(raw_text)
-        # Plain-text fallback can't carry a keyboard.  When the original send
-        # had buttons, append a textual hint so the user still knows how to
-        # respond (works because `_parse_approval_reply` accepts "1"/"approve"/…).
-        if keyboard is not None:
-            labels = ", ".join(
-                f"{(b.get('value') or b.get('text') or '').strip()}={b.get('text', '')}"
-                for b in buttons
-                if (b.get("text") or "").strip()
-            )
-            if labels:
-                plain_text = f"{plain_text}\n\nReply: {labels}"
+        # Plain-text fallback can't carry a keyboard.  Append a textual hint
+        # so the user can still type "1"/"approve"/… (`_parse_approval_reply`
+        # accepts the same values).
+        if buttons:
+            hint = _button_hint(buttons)
+            if hint:
+                plain_text = f"{plain_text}\n\nReply: {hint}"
         try:
             await self._post_plain_message(
                 chat_id, plain_text, msg_type, msg_id, fallback_seq

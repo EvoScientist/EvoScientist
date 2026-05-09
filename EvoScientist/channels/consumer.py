@@ -149,8 +149,14 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
     return True
 
 
-def _format_approval_prompt(action_requests: list[dict]) -> str:
-    """Format an approval prompt as a text message for channel users."""
+def _format_approval_prompt(
+    action_requests: list[dict], *, with_buttons: bool = False
+) -> str:
+    """Format an approval prompt as a text message for channel users.
+
+    When *with_buttons* is True, the trailing "Reply: 1=Approve..."
+    instruction is dropped — the buttons replace the textual cue.
+    """
     lines = ["\u26a0\ufe0f Approval Required\n"]
     for i, req in enumerate(action_requests, 1):
         name = (
@@ -167,9 +173,10 @@ def _format_approval_prompt(action_requests: list[dict]) -> str:
             lines.append(f"  {i}. {name}: {command}")
         else:
             lines.append(f"  {i}. {name}")
-    lines.append("")
-    lines.append("Reply: 1=Approve, 2=Reject, 3=Approve all")
-    lines.append("(Auto-reject in 2 min if no reply)")
+    if not with_buttons:
+        lines.append("")
+        lines.append("Reply: 1=Approve, 2=Reject, 3=Approve all")
+        lines.append("(Auto-reject in 2 min if no reply)")
     return "\n".join(lines)
 
 
@@ -186,6 +193,30 @@ def _parse_approval_reply(text: str) -> str | None:
     if t in ("3", "a", "auto", "approve all"):
         return "auto"
     return None
+
+
+def _approval_prompt_metadata(
+    base_metadata: dict | None,
+    channel: "Channel | None",
+) -> dict:
+    """Build outbound metadata for the HITL approval prompt.
+
+    Attaches Approve/Reject/Auto buttons whose values match
+    ``_parse_approval_reply`` so a click is consumed by the same path as
+    a typed ``"1"``/``"2"``/``"3"`` reply — only when the channel's
+    capabilities advertise ``inline_buttons``.  Callers detect whether
+    buttons were attached by checking ``"buttons" in metadata``.
+    """
+    metadata = dict(base_metadata or {})
+    if channel is not None and getattr(
+        channel.capabilities, "inline_buttons", False
+    ):
+        metadata["buttons"] = [
+            {"text": "Approve", "value": "1", "type": "primary"},
+            {"text": "Reject", "value": "2", "type": "danger"},
+            {"text": "Approve all", "value": "3"},
+        ]
+    return metadata
 
 
 @dataclass
@@ -605,13 +636,16 @@ class InboundConsumer:
                     continue
 
                 # Needs user approval — send prompt to channel
-                prompt_text = _format_approval_prompt(action_reqs)
+                approval_metadata = _approval_prompt_metadata(msg.metadata, channel)
+                prompt_text = _format_approval_prompt(
+                    action_reqs, with_buttons="buttons" in approval_metadata
+                )
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=prompt_text,
-                        metadata=msg.metadata,
+                        metadata=approval_metadata,
                     )
                 )
 

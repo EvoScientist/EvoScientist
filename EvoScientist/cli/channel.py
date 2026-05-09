@@ -623,6 +623,7 @@ def channel_hitl_prompt(
     """
     from ..channels.bus.events import OutboundMessage
     from ..channels.consumer import (
+        _approval_prompt_metadata,
         _format_approval_prompt,
         _parse_approval_reply,
     )
@@ -637,7 +638,15 @@ def channel_hitl_prompt(
         _channel_logger.debug("HITL: no bus_loop or bus_ref, rejecting")
         return None
 
-    def _send(content: str) -> bool:
+    # Look up the channel instance so we can attach buttons when the channel
+    # supports `inline_buttons` (Feishu cards, QQ keyboards, …).
+    channel_obj = (
+        _manager.get_channel(msg.channel_type) if _manager is not None else None
+    )
+    approval_metadata = _approval_prompt_metadata(msg.metadata, channel_obj)
+    use_buttons = "buttons" in approval_metadata
+
+    def _send(content: str, *, metadata: dict | None = None) -> bool:
         """Send a message to the channel user.  Returns True on success."""
         try:
             asyncio.run_coroutine_threadsafe(
@@ -646,7 +655,7 @@ def channel_hitl_prompt(
                         channel=msg.channel_type,
                         chat_id=msg.chat_id,
                         content=content,
-                        metadata=msg.metadata,
+                        metadata=metadata if metadata is not None else msg.metadata,
                     )
                 ),
                 bus_loop,
@@ -657,8 +666,8 @@ def channel_hitl_prompt(
             return False
 
     # 1. Send approval prompt
-    prompt_text = _format_approval_prompt(action_requests)
-    if not _send(prompt_text):
+    prompt_text = _format_approval_prompt(action_requests, with_buttons=use_buttons)
+    if not _send(prompt_text, metadata=approval_metadata):
         return None
 
     # 2. Wait for channel user's reply

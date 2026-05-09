@@ -307,6 +307,35 @@ class TestQQSendWithButtons:
         assert "1=Approve" in plain_call["content"]
         assert "2=Reject" in plain_call["content"]
 
+    def test_fallback_hint_handles_non_string_button_value(self):
+        """Regression: integer/None button values must not crash the
+        plain-text fallback (the keyboard builder already coerces them)."""
+        channel = self._make_channel()
+        channel._client.api.post_c2c_message = AsyncMock(
+            side_effect=[
+                RuntimeError('{"code": 304014, "message": "template not configured"}'),
+                None,
+            ]
+        )
+        msg = OutboundMessage(
+            channel="qq",
+            chat_id="openid",
+            content="Pick:",
+            metadata={
+                "chat_id": "openid",
+                "event_id": "evt_coerce",
+                "msg_type": "c2c",
+                "buttons": [
+                    {"text": "OK", "value": 42},  # int
+                    {"text": "Cancel"},  # value omitted → defaults to label
+                ],
+            },
+        )
+        assert _run(channel.send(msg)) is True
+        plain_call = channel._client.api.post_c2c_message.await_args_list[1].kwargs
+        assert "42=OK" in plain_call["content"]
+        assert "Cancel=Cancel" in plain_call["content"]
+
 
 class TestQQInteractionCallback:
     """`_on_interaction` should publish click as InboundMessage to the bus
@@ -394,9 +423,7 @@ class TestQQInteractionCallback:
         intr.group_openid = "group_xxx"
         _run(channel._on_interaction(intr))
         channel._bus.publish_inbound.assert_not_called()
-        # ACK is also skipped (we returned before the finally — but the
-        # finally still runs because no exception was raised). Verify ACK
-        # path is exercised so QQ doesn't see "expired".
+        # ACK still fires — it runs first, before the group-skip return.
         channel._client.api.on_interaction_result.assert_awaited_once_with(
             "intr_1", 0
         )
@@ -414,6 +441,28 @@ class TestQQInteractionCallback:
         _run(channel._on_interaction(self._make_interaction(button_data="", button_id="btn_3")))
         inbound = channel._bus.publish_inbound.await_args[0][0]
         assert inbound.content == "btn_3"
+
+    def test_ack_fires_even_when_handler_throws(self):
+        """ACK must run before downstream processing so the QQ button UI
+        stays responsive even if middleware/bus crashes."""
+        channel = self._make_channel()
+        channel._build_inbound_async = AsyncMock(side_effect=RuntimeError("boom"))
+        # Should not raise — handler swallows downstream errors.
+        _run(channel._on_interaction(self._make_interaction("1")))
+        channel._client.api.on_interaction_result.assert_awaited_once_with(
+            "intr_1", 0
+        )
+
+    def test_button_value_metadata_is_string_coerced(self):
+        """Regression: metadata['button_value'] must be a string (was raw)."""
+        channel = self._make_channel()
+        resolved = MagicMock(button_id="btn_0", button_data=42, message_id="msg_orig")
+        data = MagicMock(type=None, resolved=resolved)
+        intr = MagicMock(id="intr_1", user_openid="u_x", group_openid=None, data=data)
+        _run(channel._on_interaction(intr))
+        inbound = channel._bus.publish_inbound.await_args[0][0]
+        assert inbound.content == "42"
+        assert inbound.metadata["button_value"] == "42"
 
 
 class TestQQCapabilitiesButtons:
