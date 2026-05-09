@@ -160,6 +160,7 @@ QQ = ChannelCapabilities(
     format_type="plain",
     max_text_length=4096,
     typing=False,  # no typing API for QQ bots
+    inline_buttons=True,  # markdown + keyboard payload (C2C only)
     media_send=True,
     media_receive=True,
     voice=False,  # qq-botpy does not expose voice as a distinct message type
