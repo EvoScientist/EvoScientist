@@ -1384,7 +1384,12 @@ def _get_api_key_from_config(config: EvoScientistConfig, provider: str) -> str:
         "zhipu-code": "zhipu_api_key",
         "volcengine": "volcengine_api_key",
         "dashscope": "dashscope_api_key",
+        "nvidia": "nvidia_api_key",
+        "google-genai": "google_api_key",
+        "minimax": "minimax_api_key",
+        "kimi-coding": "kimi_api_key",
         "custom-openai": "custom_openai_api_key",
+        "custom-anthropic": "custom_anthropic_api_key",
     }
     attr = attr_map.get(provider, "")
     return getattr(config, attr, "") if attr else ""
@@ -1394,6 +1399,10 @@ def _get_base_url_from_config(config: EvoScientistConfig, provider: str) -> str 
     """Return the configured base URL for *provider*, or ``None``."""
     if provider == "custom-openai":
         return config.custom_openai_base_url or None
+    if provider == "custom-anthropic":
+        return config.custom_anthropic_base_url or None
+    if provider == "minimax":
+        return config.minimax_base_url or None
     return None
 
 
@@ -1470,12 +1479,7 @@ def _step_model(
         """
         from ..llm.model_cache import (
             fetch_models,
-<<<<<<< HEAD
-            format_fetched_at,
-            get_cached_fetched_at,
-=======
             get_cached_models_entry,
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
             is_supported,
         )
 
@@ -1500,13 +1504,6 @@ def _step_model(
                 cache_entry = get_cached_models_entry(provider, base_url=base_url)
 
             if dynamic_ids:
-<<<<<<< HEAD
-                fetched_at = get_cached_fetched_at(provider, base_url=base_url)
-                time_info = (
-                    f" (last refresh: {format_fetched_at(fetched_at)})"
-                    if fetched_at is not None
-                    else ""
-=======
                 if cache_entry is not None:
                     age_seconds = time.time() - cache_entry.get("fetched_at", 0)
                     if age_seconds < 10:
@@ -1524,11 +1521,7 @@ def _step_model(
                 status_line = (
                     f"{status_prefix}  ✓ {len(dynamic_ids)} model(s) available "
                     f"(last refresh: {age})"
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
                 )
-                plain_status = f"  ✓ {len(dynamic_ids)} model(s) available{time_info}"
-                padding = " " * max(0, len(_FETCH_MSG) - len(plain_status))
-                console.print(f"\r[green]{plain_status}[/green]{padding}", end="\r")
             else:
                 warning_line = "⚠ Unable to fetch model list (check API key/base URL)."
                 if provider == "custom-openai":
@@ -1546,7 +1539,7 @@ def _step_model(
             for model_id in dynamic_ids:
                 short = static_by_id.get(model_id)
                 title = f"{short} ({model_id})" if short else model_id
-                value = short if short else model_id
+                value = short or model_id
                 choices.append(Choice(title=title, value=value))
         else:
             for name, model_id in static_entries:
@@ -1556,7 +1549,10 @@ def _step_model(
             # Completely unknown provider — fall through to free-text input
             return None
 
-        choices.append(Choice(title="↻ Refresh model list", value=_REFRESH_SENTINEL))
+        if is_supported(provider):
+            choices.append(
+                Choice(title="↻ Refresh model list", value=_REFRESH_SENTINEL)
+            )
         choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
         selectable_values = [c.value for c in choices]

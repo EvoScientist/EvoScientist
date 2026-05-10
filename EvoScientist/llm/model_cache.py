@@ -37,7 +37,15 @@ _SUPPORTED: dict[str, tuple[str | None, str]] = {
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "DASHSCOPE_API_KEY",
     ),
+    "nvidia": ("https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY"),
+    "google-genai": (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GOOGLE_API_KEY",
+    ),
+    "minimax": ("https://api.minimaxi.com/v1", "MINIMAX_API_KEY"),
+    "kimi-coding": ("https://api.kimi.com/v1", "KIMI_API_KEY"),
     "custom-openai": (None, "CUSTOM_OPENAI_API_KEY"),
+    "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
 }
 
 
@@ -78,21 +86,6 @@ def _save_cache(cache: dict) -> None:
         pass
 
 
-<<<<<<< HEAD
-def _cache_key(provider: str, resolved_base_url: str | None) -> str:
-    """Compute the cache dictionary key for a ``(provider, endpoint)`` pair.
-
-    Embedding the resolved URL means different endpoints for the same provider
-    name (e.g. two distinct ``custom-openai`` setups) maintain independent
-    cache entries.
-    """
-    if resolved_base_url:
-        return f"{provider}::{resolved_base_url}"
-    return provider
-
-
-def get_cached_models(provider: str, *, base_url: str | None = None) -> list[str] | None:
-=======
 def _cache_key(provider: str, base_url: str | None) -> str | None:
     resolved_base_url, _ = _resolve(provider, base_url=base_url)
     if not resolved_base_url:
@@ -117,29 +110,16 @@ def _save_cache_entry(provider: str, base_url: str | None, models: list[str]) ->
 
 
 def get_cached_models(provider: str, base_url: str | None = None) -> list[str] | None:
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
     """Return cached model IDs for *provider* if still within the TTL.
 
     Args:
         provider: Provider name (e.g. ``"openai"``, ``"deepseek"``).
-<<<<<<< HEAD
-        base_url: Base URL override used to distinguish between different
-            endpoints for the same provider (e.g. multiple ``custom-openai``
-            setups with different servers).
-=======
         base_url: Override the provider base URL used for cache partitioning.
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
 
     Returns:
         A list of model ID strings when the cache is valid, otherwise ``None``.
     """
-<<<<<<< HEAD
-    resolved_base_url, _ = _resolve(provider, base_url=base_url)
-    key = _cache_key(provider, resolved_base_url)
-    entry = _load_cache().get(key)
-=======
     entry = _get_cache_entry(provider, base_url)
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
     if not entry:
         return None
     if time.time() - entry.get("fetched_at", 0) > CACHE_TTL:
@@ -147,51 +127,6 @@ def get_cached_models(provider: str, base_url: str | None = None) -> list[str] |
     return entry.get("models") or None
 
 
-<<<<<<< HEAD
-def get_cached_fetched_at(provider: str, *, base_url: str | None = None) -> float | None:
-    """Return the ``fetched_at`` timestamp for a fresh cache entry, or ``None``.
-
-    Args:
-        provider: Provider name.
-        base_url: Base URL override (same semantics as :func:`get_cached_models`).
-
-    Returns:
-        Unix timestamp (float) of the last successful fetch when the entry is
-        still within the TTL, otherwise ``None``.
-    """
-    resolved_base_url, _ = _resolve(provider, base_url=base_url)
-    key = _cache_key(provider, resolved_base_url)
-    entry = _load_cache().get(key)
-    if not entry:
-        return None
-    fetched_at = entry.get("fetched_at", 0)
-    if time.time() - fetched_at > CACHE_TTL:
-        return None
-    return fetched_at
-
-
-def format_fetched_at(fetched_at: float) -> str:
-    """Format a ``fetched_at`` Unix timestamp as a human-readable elapsed string.
-
-    Args:
-        fetched_at: Unix timestamp returned by :func:`get_cached_fetched_at`.
-
-    Returns:
-        A short string such as ``"just now"``, ``"3m ago"``, ``"5h ago"``,
-        or ``"2d ago"``.
-    """
-    elapsed = time.time() - fetched_at
-    if elapsed < 60:
-        return "just now"
-    minutes = int(elapsed / 60)
-    if minutes < 60:
-        return f"{minutes}m ago"
-    hours = int(elapsed / 3600)
-    if hours < 24:
-        return f"{hours}h ago"
-    days = int(elapsed / 86400)
-    return f"{days}d ago"
-=======
 def get_cached_models_entry(provider: str, base_url: str | None = None) -> dict | None:
     """Return the current cache entry for *provider* and *base_url*.
 
@@ -206,7 +141,6 @@ def get_cached_models_entry(provider: str, base_url: str | None = None) -> dict 
     if not entry.get("models"):
         return None
     return entry
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
 
 
 # =============================================================================
@@ -302,14 +236,7 @@ def fetch_models(
         if not models:
             return None
 
-<<<<<<< HEAD
-        key = _cache_key(provider, resolved_base_url)
-        cache = _load_cache()
-        cache[key] = {"models": models, "fetched_at": time.time()}
-        _save_cache(cache)
-=======
         _save_cache_entry(provider, base_url, models)
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         return models
     except Exception:
         return None
@@ -363,14 +290,7 @@ async def fetch_models_async(
         if not models:
             return None
 
-<<<<<<< HEAD
-        key = _cache_key(provider, resolved_base_url)
-        cache = _load_cache()
-        cache[key] = {"models": models, "fetched_at": time.time()}
-        _save_cache(cache)
-=======
         _save_cache_entry(provider, base_url, models)
->>>>>>> 406b405 (fix(onboard): tidy dynamic model fetch UI and custom endpoint cache behavior)
         return models
     except Exception:
         return None

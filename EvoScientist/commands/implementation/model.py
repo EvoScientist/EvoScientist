@@ -66,7 +66,6 @@ class ModelCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...EvoScientist import _ensure_config
-        from ...llm.model_cache import fetch_models_async, is_supported
         from ...llm.models import list_models_by_provider
 
         cfg = _ensure_config()
@@ -98,55 +97,54 @@ class ModelCommand(Command):
             )
             return
 
-        _REFRESH_SENTINEL = "__refresh__"
-
-        async def _build_entries(*, force: bool = False) -> list[tuple[str, str, str]]:
+        async def _build_entries() -> list[tuple[str, str, str]]:
             """Build the (name, model_id, provider) entry list.
 
-            For the current provider, dynamic models from the API are merged
-            into the list (prepended so they appear first).  A sentinel entry
-            for manual refresh is appended at the end of the current-provider
-            section.
+            For all supported providers, dynamic models from the cache are used.
+            If dynamic models are available for a provider, they REPLACE the
+            static registry models for that provider.
             """
             entries = list_models_by_provider()
 
-            # Fetch dynamic models for the current provider
-            if is_supported(current_provider):
-                api_key = None  # use env vars already applied by apply_config_to_env
-                base_url = getattr(cfg, "custom_openai_base_url", None) or None
-                dynamic_ids = await fetch_models_async(
-                    current_provider,
-                    api_key=api_key,
-                    base_url=base_url,
-                    force=force,
-                )
+            from ...llm.model_cache import _SUPPORTED, get_cached_models
+
+            # 1. Map provider -> dynamic models from cache
+            dynamic_cache: dict[str, list[str]] = {}
+            for provider_name in _SUPPORTED:
+                base_url = None
+                if provider_name == "custom-openai":
+                    base_url = getattr(cfg, "custom_openai_base_url", None)
+
+                dynamic_ids = get_cached_models(provider_name, base_url=base_url)
                 if dynamic_ids:
-                    # Build set of model_ids already in static entries
-                    static_ids_for_provider = {
-                        mid for nm, mid, prov in entries if prov == current_provider
-                    }
-                    # Prepend new dynamic models (not in static list) for provider
-                    new_dynamic = [
-                        (mid, mid, current_provider)
-                        for mid in dynamic_ids
-                        if mid not in static_ids_for_provider
-                    ]
-                    # Insert dynamic-only entries right after existing provider entries,
-                    # or append to the end of the list when no static entries exist.
-                    provider_end = max(
-                        (i for i, (_, _, p) in enumerate(entries) if p == current_provider),
-                        default=None,
-                    )
-                    insert_at = len(entries) if provider_end is None else provider_end + 1
-                    for offset, entry in enumerate(new_dynamic):
-                        entries.insert(insert_at + offset, entry)
+                    dynamic_cache[provider_name] = dynamic_ids
 
-            # Refresh sentinel for the current provider
-            entries.append((_REFRESH_SENTINEL, _REFRESH_SENTINEL, current_provider))
+            # 2. Rebuild the list: if a provider has dynamic models, discard its
+            # static ones and use the dynamic ones instead.
+            if dynamic_cache:
+                new_entries: list[tuple[str, str, str]] = []
+                handled_dynamic: set[str] = set()
 
-            # Ollama models are locally-installed — probe the daemon for the list
-            # the user has actually pulled. Gated on ollama_base_url being set
-            # (issue non-goal forbids implicit localhost detection).
+                for nm, mid, prov in entries:
+                    if prov in dynamic_cache:
+                        if prov not in handled_dynamic:
+                            # First time seeing this provider: insert all its dynamic models
+                            for d_id in dynamic_cache[prov]:
+                                new_entries.append((d_id, d_id, prov))
+                            handled_dynamic.add(prov)
+                        # Skip the static entry
+                        continue
+                    new_entries.append((nm, mid, prov))
+
+                # Add any dynamic models for providers that HAD NO static entries
+                for prov, d_ids in dynamic_cache.items():
+                    if prov not in handled_dynamic:
+                        for d_id in d_ids:
+                            new_entries.append((d_id, d_id, prov))
+                entries = new_entries
+
+            # 3. Ollama models are locally-installed — probe the daemon for the list
+            # the user has actually pulled. Gated on ollama_base_url being set.
             ollama_base_url = getattr(cfg, "ollama_base_url", None)
             if ollama_base_url:
                 from ...llm.ollama_discovery import discover_ollama_models
@@ -156,39 +154,35 @@ class ModelCommand(Command):
                     entries.append((detected_name, detected_name, "ollama"))
                 # Always append the sentinel so users can type a name even when
                 # the daemon is down or no models have been pulled yet.
-                entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+                entries.append(
+                    ("Custom Ollama model...", "__custom_ollama__", "ollama")
+                )
 
             return entries
 
-        force_refresh = False
-        while True:
-            entries = await _build_entries(force=force_refresh)
-            force_refresh = False
+        entries = await _build_entries()
 
-            result = await ctx.ui.wait_for_model_pick(
-                entries,
-                current_model=current_model,
-                current_provider=current_provider,
-            )
-            if result is None:
-                return
+        result = await ctx.ui.wait_for_model_pick(
+            entries,
+            current_model=current_model,
+            current_provider=current_provider,
+        )
 
-            name, provider = result
-
-            if provider == current_provider and name == _REFRESH_SENTINEL:
-                force_refresh = True
-                continue
-
-            # Defense-in-depth: the widget should have replaced the sentinel with
-            # the user-typed name. If it didn't, treat as cancel rather than try
-            # to switch to a literal "__custom_ollama__" model.
-            if provider == "ollama" and name in (
-                "Custom Ollama model...",
-                "__custom_ollama__",
-            ):
-                return
-            await self._apply_model(ctx, name, provider, save=save)
+        if result is None:
             return
+
+        name, provider = result
+
+        # Defense-in-depth: the widget should have replaced the sentinel with
+        # the user-typed name. If it didn't, treat as cancel rather than try
+        # to switch to a literal "__custom_ollama__" model.
+        if provider == "ollama" and name in (
+            "Custom Ollama model...",
+            "__custom_ollama__",
+        ):
+            return
+        await self._apply_model(ctx, name, provider, save=save)
+        return
 
     async def _apply_model(
         self,
