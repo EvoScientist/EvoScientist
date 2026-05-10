@@ -196,21 +196,16 @@ def _parse_approval_reply(text: str) -> str | None:
 
 
 def _approval_prompt_metadata(
-    base_metadata: dict | None,
-    channel: "Channel | None",
+    base_metadata: dict | None, *, with_buttons: bool
 ) -> dict:
-    """Build outbound metadata for the HITL approval prompt.
+    """Outbound metadata for the HITL approval prompt.
 
-    Attaches Approve/Reject/Auto buttons whose values match
-    ``_parse_approval_reply`` so a click is consumed by the same path as
-    a typed ``"1"``/``"2"``/``"3"`` reply — only when the channel's
-    capabilities advertise ``inline_buttons``.  Callers detect whether
-    buttons were attached by checking ``"buttons" in metadata``.
+    When *with_buttons* is True, attaches Approve/Reject/Auto buttons whose
+    values match ``_parse_approval_reply`` so a click flows through the same
+    path as a typed ``"1"``/``"2"``/``"3"`` reply.
     """
     metadata = dict(base_metadata or {})
-    if channel is not None and getattr(
-        channel.capabilities, "inline_buttons", False
-    ):
+    if with_buttons:
         metadata["buttons"] = [
             {"text": "Approve", "value": "1", "type": "primary"},
             {"text": "Reject", "value": "2", "type": "danger"},
@@ -636,9 +631,14 @@ class InboundConsumer:
                     continue
 
                 # Needs user approval — send prompt to channel
-                approval_metadata = _approval_prompt_metadata(msg.metadata, channel)
+                has_buttons = (
+                    channel is not None and channel.capabilities.inline_buttons
+                )
                 prompt_text = _format_approval_prompt(
-                    action_reqs, with_buttons="buttons" in approval_metadata
+                    action_reqs, with_buttons=has_buttons
+                )
+                approval_metadata = _approval_prompt_metadata(
+                    msg.metadata, with_buttons=has_buttons
                 )
                 await self.bus.publish_outbound(
                     OutboundMessage(

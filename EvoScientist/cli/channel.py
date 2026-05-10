@@ -643,8 +643,10 @@ def channel_hitl_prompt(
     channel_obj = (
         _manager.get_channel(msg.channel_type) if _manager is not None else None
     )
-    approval_metadata = _approval_prompt_metadata(msg.metadata, channel_obj)
-    use_buttons = "buttons" in approval_metadata
+    has_buttons = channel_obj is not None and channel_obj.capabilities.inline_buttons
+    approval_metadata = _approval_prompt_metadata(
+        msg.metadata, with_buttons=has_buttons
+    )
 
     def _send(content: str, *, metadata: dict | None = None) -> bool:
         """Send a message to the channel user.  Returns True on success."""
@@ -666,7 +668,7 @@ def channel_hitl_prompt(
             return False
 
     # 1. Send approval prompt
-    prompt_text = _format_approval_prompt(action_requests, with_buttons=use_buttons)
+    prompt_text = _format_approval_prompt(action_requests, with_buttons=has_buttons)
     if not _send(prompt_text, metadata=approval_metadata):
         return None
 

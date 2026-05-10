@@ -28,19 +28,9 @@ except ImportError:
 
 # ── Inline keyboard (button) helpers ─────────────────────────────────
 
-# QQ Bot button styles: 0 = secondary (grey), 1 = primary (blue).
-_QQ_BUTTON_STYLE = {"primary": 1, "default": 0, "danger": 0, "secondary": 0}
-
-# Permission only matters in groups; for C2C the click is always from the
-# DM peer. type=2 (admin) is harmless for C2C and satisfies the schema.
-_QQ_DEFAULT_PERMISSION = {"type": 2}
-
 
 def _normalize_button(btn: dict) -> tuple[str, str] | None:
-    """Return ``(label, value)`` for a button dict, or ``None`` if no label.
-
-    ``value`` is coerced to ``str`` and defaults to *label* when omitted/None.
-    """
+    """Return ``(label, value)`` for a button, or ``None`` if no label."""
     label = (btn.get("text") or "").strip()
     if not label:
         return None
@@ -49,10 +39,12 @@ def _normalize_button(btn: dict) -> tuple[str, str] | None:
 
 
 def _build_qq_keyboard(buttons: list[dict]) -> dict | None:
-    """Build a QQ Bot keyboard payload (one button per row for mobile clarity).
+    """Build a QQ Bot keyboard payload (one button per row).
 
-    Button schema: ``{text, value?, type?, id?}``. ``type="primary"`` → blue;
-    anything else → grey. Returns ``None`` if no button has a usable label.
+    Render style: 1 = primary (blue), 0 = secondary (grey) — QQ has no danger.
+    ``action.permission`` is required by the schema; ``type=2`` is harmless for
+    C2C (the click always comes from the DM peer). Returns ``None`` if no
+    button has a usable label.
     """
     rows: list[dict] = []
     for idx, btn in enumerate(buttons):
@@ -60,28 +52,27 @@ def _build_qq_keyboard(buttons: list[dict]) -> dict | None:
         if norm is None:
             continue
         label, value = norm
-        style = _QQ_BUTTON_STYLE.get(btn.get("type") or "", 0)
-        rows.append({"buttons": [{
-            "id": btn.get("id") or f"btn_{idx}",
-            "render_data": {"label": label, "visited_label": label, "style": style},
-            "action": {
-                "type": 1,  # callback (server pushes interaction event)
-                "permission": _QQ_DEFAULT_PERMISSION,
-                "data": value,
-            },
-        }]})
+        style = 1 if btn.get("type") == "primary" else 0
+        rows.append(
+            {
+                "buttons": [
+                    {
+                        "id": btn.get("id") or f"btn_{idx}",
+                        "render_data": {
+                            "label": label,
+                            "visited_label": label,
+                            "style": style,
+                        },
+                        "action": {
+                            "type": 1,  # callback (server pushes interaction event)
+                            "permission": {"type": 2},
+                            "data": value,
+                        },
+                    }
+                ]
+            }
+        )
     return {"content": {"rows": rows}} if rows else None
-
-
-def _button_hint(buttons: list[dict]) -> str:
-    """Plain-text fallback for keyboards: ``value=label`` joined by commas."""
-    pairs = []
-    for btn in buttons:
-        norm = _normalize_button(btn)
-        if norm is not None:
-            label, value = norm
-            pairs.append(f"{value}={label}")
-    return ", ".join(pairs)
 
 
 @dataclass
@@ -268,13 +259,14 @@ class QQChannel(Channel):
                 return
 
             resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-            button_data = getattr(resolved, "button_data", "") if resolved else ""
-            button_id = getattr(resolved, "button_id", "") if resolved else ""
-            triggering_msg_id = getattr(resolved, "message_id", "") if resolved else ""
+            button_data = getattr(resolved, "button_data", "") or ""
+            button_id = getattr(resolved, "button_id", "") or ""
+            triggering_msg_id = getattr(resolved, "message_id", "") or ""
 
-            # Coerce non-str payload; fall back to button id, then sentinel.
-            button_value = str(button_data) if button_data not in (None, "") else ""
-            text = button_value or button_id or "[button click]"
+            # QQ may serialize non-str values; coerce.  Fall back to button id
+            # when no data — same path as a typed reply via _parse_approval_reply.
+            button_value = str(button_data) if button_data != "" else ""
+            text = button_value or button_id
 
             # Stable id so DedupMiddleware suppresses any QQ retry callbacks.
             message_id = (
@@ -297,7 +289,6 @@ class QQChannel(Channel):
                     "button_click": True,
                     "button_id": button_id,
                     "button_value": button_value,
-                    "triggering_message_id": triggering_msg_id,
                 },
                 is_group=False,
                 was_mentioned=True,
@@ -367,13 +358,18 @@ class QQChannel(Channel):
         # always advance to a fresh seq before the fallback send.
         fallback_seq = self._next_msg_seq(msg_id)
         plain_text = self._plain_formatter.format(raw_text)
-        # Plain-text fallback can't carry a keyboard.  Append a textual hint
-        # so the user can still type "1"/"approve"/… (`_parse_approval_reply`
-        # accepts the same values).
+        # Plain-text fallback can't carry a keyboard.  Append `value=label`
+        # pairs so the user can still type "1"/"approve"/… instead of
+        # tapping (`_parse_approval_reply` accepts the same values).
         if buttons:
-            hint = _button_hint(buttons)
-            if hint:
-                plain_text = f"{plain_text}\n\nReply: {hint}"
+            pairs = []
+            for btn in buttons:
+                norm = _normalize_button(btn)
+                if norm is not None:
+                    label, value = norm
+                    pairs.append(f"{value}={label}")
+            if pairs:
+                plain_text = f"{plain_text}\n\nReply: {', '.join(pairs)}"
         try:
             await self._post_plain_message(
                 chat_id, plain_text, msg_type, msg_id, fallback_seq
