@@ -691,12 +691,14 @@ def channel_hitl_prompt(
     decision = _parse_approval_reply(reply_text)
     if decision == "auto":
         _hitl_auto_approve.add(session_key)
+        _send("\u2705 已批准（后续自动通过）")
         return [{"type": "approve"} for _ in action_requests]
     if decision == "approve":
+        _send("\u2705 已批准")
         return [{"type": "approve"} for _ in action_requests]
 
     feedback = (
-        "Action rejected."
+        "\u274c 已拒绝"
         if decision == "reject"
         else "Unrecognized reply. Action rejected."
     )

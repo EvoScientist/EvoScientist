@@ -670,15 +670,27 @@ class InboundConsumer:
 
                 decision = pending.decision or "approve"
 
-                if decision == "reject":
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                            content="Tool execution rejected.",
-                            metadata=msg.metadata,
+                # Visible confirmation so the click/reply registers (QQ has no
+                # message recall API for C2C).  Only fires when the user
+                # actually responded — silent on timeout to avoid claiming
+                # the user approved when they just walked away.
+                if pending.event.is_set():
+                    feedback_text = {
+                        "approve": "\u2705 已批准",
+                        "auto": "\u2705 已批准（后续自动通过）",
+                        "reject": "\u274c 已拒绝",
+                    }.get(decision)
+                    if feedback_text:
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content=feedback_text,
+                                metadata=msg.metadata,
+                            )
                         )
-                    )
+
+                if decision == "reject":
                     return
 
                 if decision == "auto":
