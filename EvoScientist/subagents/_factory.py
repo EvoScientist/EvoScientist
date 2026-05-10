@@ -90,6 +90,12 @@ def build_async_subagent_graph(name: str) -> Any:
     # approve. The user-visible HITL boundary is the parent's
     # ``start_async_task`` decision; restrict the child's reach by limiting
     # ``tools`` in ``subagents/<name>.yaml`` instead.
+    #
+    # ``for_async_subagent=True`` propagates the same reasoning to the
+    # middleware list — specifically, it suppresses ``AskUserMiddleware``,
+    # which uses ``interrupt()`` for the same purpose (waiting on a user
+    # reply) and would deadlock an async sub-agent for the same reason.
+    #
     # Memory middleware is included so async sub-agents can READ
     # /memory/MEMORY.md, but the extraction trigger (20+ human messages,
     # see middleware/memory.py) never fires here — sub-agents only receive
@@ -103,5 +109,5 @@ def build_async_subagent_graph(name: str) -> Any:
         tools=spec.get("tools", []) + agent_mcp_tools,
         skills=spec.get("skills"),
         backend=_get_default_backend(),
-        middleware=_get_default_middleware(),
+        middleware=_get_default_middleware(for_async_subagent=True),
     ).with_config({"recursion_limit": cfg.recursion_limit})

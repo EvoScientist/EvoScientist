@@ -308,6 +308,15 @@ def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> l
 
         middleware.append(AsyncWatcherMiddleware(agent_specs))
 
+    # Forward the CLI's live (model, provider) into deepagents'
+    # start/update_async_task tool calls so the deployed graph can
+    # re-resolve its chat model per run via ConfigurableModelMiddleware.
+    # Idempotent — safe to call on every CLI startup.
+    if agent_specs:
+        from .llm.patches import _patch_deepagents_model_passthrough
+
+        _patch_deepagents_model_passthrough()
+
     return out
 
 
@@ -439,9 +448,23 @@ def _get_default_backend():
     )
 
 
-def _get_default_middleware():
-    """Build the default middleware list."""
+def _get_default_middleware(*, for_async_subagent: bool = False):
+    """Build the default middleware list.
+
+    Args:
+        for_async_subagent: When True, omit middleware that would deadlock a
+            deployed async sub-agent. Specifically: ``AskUserMiddleware`` uses
+            ``interrupt()`` to pause the graph waiting for a user reply, but
+            async sub-agents run in the ``langgraph dev`` subprocess where
+            the parent only holds a ``task_id`` and has no UI path to surface
+            (or resume) an interrupt — the sub-agent would hang forever the
+            first time it called ``ask_user``. This mirrors the same reason
+            ``subagents/_factory.py`` deliberately skips ``interrupt_on=`` on
+            the deepagents level. Defaults to False (full middleware list)
+            for the CLI's in-process agent.
+    """
     from .middleware import (
+        ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
@@ -456,7 +479,12 @@ def _get_default_middleware():
         load_fallback_chain(cfg.model_fallbacks)
     model = _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    # ``ConfigurableModelMiddleware`` is placed first so it wraps
+    # ``ModelFallbackMiddleware``: a configurable.model override sets the
+    # PRIMARY model only, leaving the fallback chain free to try its own
+    # alternatives instead of re-overriding every retry to the same model.
     mw = [
+        ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
@@ -465,7 +493,7 @@ def _get_default_middleware():
         create_memory_middleware(memory_dir, extraction_model=model),
     ]
 
-    if cfg.enable_ask_user and not cfg.auto_mode:
+    if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
@@ -557,19 +585,8 @@ def create_cli_agent(
 
     from . import paths as _paths
     from .backends import CustomSandboxBackend, MergedSkillsBackend
-    from .middleware import (
-        ContextOverflowMapperMiddleware,
-        ModelFallbackMiddleware,
-        ToolErrorHandlerMiddleware,
-        create_context_editing_middleware,
-        create_memory_middleware,
-        create_tool_selector_middleware,
-        load_fallback_chain,
-    )
 
     cfg = _ensure_config(config)
-    if cfg.model_fallbacks:
-        load_fallback_chain(cfg.model_fallbacks)
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
@@ -617,19 +634,10 @@ def create_cli_agent(
         },
     )
 
-    model = _ensure_chat_model()
-    mw: list[AgentMiddleware] = [
-        create_context_editing_middleware(model),
-        ModelFallbackMiddleware(),
-        ContextOverflowMapperMiddleware(),
-        ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(model=model),
-        create_memory_middleware(_mem_dir, extraction_model=model),
-    ]
-    if cfg.enable_ask_user and not cfg.auto_mode:
-        from .middleware.ask_user import AskUserMiddleware
-
-        mw.insert(0, AskUserMiddleware())
+    # Delegate middleware construction to the single source of truth so the
+    # CLI agent never drifts from the default chain. Anything CLI-specific
+    # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
+    mw: list[AgentMiddleware] = _get_default_middleware()
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
     # would propagate it to every subagent, breaking parallel execute calls

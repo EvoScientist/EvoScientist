@@ -91,3 +91,49 @@ def tmp_workspace(tmp_path):
     ws = tmp_path / "workspace"
     ws.mkdir()
     return str(ws)
+
+
+# Capture deepagents tool factories at conftest load time — BEFORE any test
+# imports EvoScientist, which can trigger ``_patch_deepagents_model_passthrough``
+# during agent construction. Once captured here, the ``restore_model_passthrough_patch``
+# fixture has a stable "truly unpatched" baseline to reset to between tests, even
+# if upstream code paths apply the patch as a side effect.
+try:
+    from deepagents.middleware import async_subagents as _ds_async_subagents
+
+    _DEEPAGENTS_ORIGINAL_BUILD_START = _ds_async_subagents._build_start_tool
+    _DEEPAGENTS_ORIGINAL_BUILD_UPDATE = _ds_async_subagents._build_update_tool
+except Exception:
+    _ds_async_subagents = None
+    _DEEPAGENTS_ORIGINAL_BUILD_START = None
+    _DEEPAGENTS_ORIGINAL_BUILD_UPDATE = None
+
+
+@pytest.fixture
+def restore_model_passthrough_patch():
+    """Reset deepagents internals + ``_model_passthrough_patched`` to unpatched.
+
+    The model-passthrough patch wraps ``deepagents.middleware.async_subagents``
+    module-level functions in place. The originals are captured at conftest
+    load time (above) so this fixture can always start each test from a
+    known-unpatched state regardless of what other tests / agent fixtures
+    did to the module before.
+    """
+    from EvoScientist.llm import patches as patches_mod
+
+    if _ds_async_subagents is None:
+        # deepagents not importable — fixture is a no-op (the patch fn itself
+        # returns early in that case).
+        yield
+        return
+
+    def _reset() -> None:
+        _ds_async_subagents._build_start_tool = _DEEPAGENTS_ORIGINAL_BUILD_START
+        _ds_async_subagents._build_update_tool = _DEEPAGENTS_ORIGINAL_BUILD_UPDATE
+        patches_mod._model_passthrough_patched = False
+
+    _reset()
+    try:
+        yield
+    finally:
+        _reset()

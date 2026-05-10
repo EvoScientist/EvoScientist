@@ -119,7 +119,9 @@ def test_default_middleware_includes_context_editing(mock_config, mock_model, mo
     from EvoScientist.EvoScientist import _get_default_middleware
 
     mw = _get_default_middleware()
-    assert isinstance(mw[0], ContextEditingMiddleware)
+    # ContextEditingMiddleware is present (its absolute position depends on
+    # other leading middlewares like ConfigurableModelMiddleware).
+    assert any(isinstance(m, ContextEditingMiddleware) for m in mw)
 
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")

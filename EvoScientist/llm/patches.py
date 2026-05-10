@@ -522,3 +522,186 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
         return payload
 
     model._get_request_payload = _patched
+
+
+# ---------------------------------------------------------------------------
+# Patch: forward CLI's live (model, model_provider) into deepagents'
+# start_async_task / update_async_task tool calls so the deployed graph
+# (running in a separate ``langgraph dev`` subprocess) re-resolves the
+# chat model per run.
+#
+# Without this, async sub-agents stay on the model their graph was compiled
+# with at langgraph dev boot — `/model` switches in the CLI never reach
+# them because they live in another process.
+#
+# Mechanism: wrap deepagents' ``_build_start_tool`` and ``_build_update_tool``
+# factories. Each wrapped factory calls the original with a proxied client
+# cache that intercepts ``runs.create(...)`` calls only and injects
+# ``config={"configurable": {"model": <cfg.model>, "model_provider": <cfg.provider>}}``.
+# All other client methods (``threads.create``, ``runs.get``, ``runs.cancel``,
+# ``runs.join_stream``) pass through unchanged. The deployed graph picks up
+# ``configurable.model`` via ``ConfigurableModelMiddleware``.
+#
+# Reads ``_ensure_config()`` at tool-call time (not patch time) so a
+# ``/model`` switch in the CLI is reflected on the very next async tool
+# call without an agent rebuild.
+#
+# Upstream PR opportunity: passing ``config`` through ``client.runs.create``
+# is generic functionality; worth contributing back to ``langchain-ai/deepagents``
+# so this patch can be retired.
+# ---------------------------------------------------------------------------
+_model_passthrough_patched = False
+
+
+def _read_cfg_configurable() -> dict[str, str]:
+    """Read live ``(model, provider)`` from EvoScientist config.
+
+    Returns a dict suitable for inserting under
+    ``RunnableConfig.configurable``. Empty dict on any failure (so the
+    patch degrades to a no-op rather than breaking async tool calls).
+    """
+    try:
+        from EvoScientist.EvoScientist import _ensure_config
+
+        cfg = _ensure_config()
+    except Exception:
+        return {}
+
+    out: dict[str, str] = {}
+    model = getattr(cfg, "model", None)
+    provider = getattr(cfg, "provider", None)
+    if isinstance(model, str) and model:
+        out["model"] = model
+    if isinstance(provider, str) and provider:
+        out["model_provider"] = provider
+    return out
+
+
+def _merge_runs_config_kwargs(kwargs: dict) -> dict:
+    """Merge the live model override into ``kwargs`` for ``runs.create``.
+
+    Preserves any caller-supplied ``config.configurable`` keys. EvoScientist's
+    keys take precedence on conflict (callers shouldn't be passing model
+    overrides — the CLI is the source of truth).
+    """
+    overrides = _read_cfg_configurable()
+    if not overrides:
+        return kwargs
+    existing = kwargs.get("config")
+    if not isinstance(existing, dict):
+        existing = {}
+    existing_configurable = existing.get("configurable")
+    if not isinstance(existing_configurable, dict):
+        existing_configurable = {}
+    merged_configurable = {**existing_configurable, **overrides}
+    kwargs = dict(kwargs)
+    kwargs["config"] = {**existing, "configurable": merged_configurable}
+    return kwargs
+
+
+class _SyncRunsProxy:
+    """Wraps a sync ``RunsClient`` and injects config into ``create`` only."""
+
+    def __init__(self, real: Any) -> None:
+        object.__setattr__(self, "_real", real)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def create(self, **kwargs: Any) -> Any:
+        return self._real.create(**_merge_runs_config_kwargs(kwargs))
+
+
+class _AsyncRunsProxy:
+    """Wraps an async ``RunsClient`` and injects config into ``create`` only."""
+
+    def __init__(self, real: Any) -> None:
+        object.__setattr__(self, "_real", real)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    async def create(self, **kwargs: Any) -> Any:
+        return await self._real.create(**_merge_runs_config_kwargs(kwargs))
+
+
+class _ClientProxy:
+    """Lightweight proxy that swaps ``client.runs`` for a runs proxy.
+
+    Read-only forwarding: only ``__getattr__`` is overridden. Attribute
+    *writes* on the proxy land on the proxy itself, NOT on the wrapped real
+    client. Current deepagents only reads ``.threads`` / ``.runs``, so this
+    is safe — but if a future caller tries ``client.foo = bar`` through the
+    proxy, the write will be silently lost. ``object.__setattr__`` in
+    ``__init__`` is used solely to avoid infinite recursion when seeding
+    the internal slots.
+
+    ``client.runs`` is a stable attribute set in
+    ``langgraph_sdk.client.LangGraphClient.__init__`` (``self.runs =
+    RunsClient(...)``) — not a property or lazy initializer — so the wrapped
+    runs proxy is built once at ``__init__`` time and reused on every
+    ``proxy.runs`` access. This avoids the previous behavior of selecting
+    sync/async and instantiating a new ``_RunsProxy`` per attribute access.
+    """
+
+    def __init__(self, real: Any, *, is_async: bool) -> None:
+        runs_proxy_cls = _AsyncRunsProxy if is_async else _SyncRunsProxy
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_runs_proxy", runs_proxy_cls(real.runs))
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "runs":
+            return self._runs_proxy
+        return getattr(self._real, name)
+
+
+class _ClientCacheProxy:
+    """Proxy a ``_ClientCache`` so callers receive config-injecting clients."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def get_sync(self, name: str) -> Any:
+        return _ClientProxy(self._real.get_sync(name), is_async=False)
+
+    def get_async(self, name: str) -> Any:
+        return _ClientProxy(self._real.get_async(name), is_async=True)
+
+
+def _patch_deepagents_model_passthrough() -> None:
+    """Wrap deepagents' async-launch tool factories to inject CLI model.
+
+    Idempotent: re-invocation is a no-op once the patch is active. Safe to
+    call from ``_maybe_swap_async_subagents`` on every CLI startup; both
+    that hook and this patch turn on together when async sub-agents are
+    enabled.
+    """
+    global _model_passthrough_patched
+    if _model_passthrough_patched:
+        return
+
+    try:
+        from deepagents.middleware import async_subagents as ds_mod
+    except ImportError:
+        return
+
+    # Defensive ``getattr`` lookups mirror the rest of this file (lines 254,
+    # 266, 279, 290, 339, 351, 362, 373, 473): a deepagents update that
+    # renames or removes either private helper degrades to a no-op instead
+    # of raising ``AttributeError`` at CLI startup.
+    orig_build_start = getattr(ds_mod, "_build_start_tool", None)
+    orig_build_update = getattr(ds_mod, "_build_update_tool", None)
+    if orig_build_start is None or orig_build_update is None:
+        return
+
+    def _patched_build_start(
+        agent_map: Any, clients: Any, tool_description: str
+    ) -> Any:
+        return orig_build_start(agent_map, _ClientCacheProxy(clients), tool_description)
+
+    def _patched_build_update(agent_map: Any, clients: Any) -> Any:
+        return orig_build_update(agent_map, _ClientCacheProxy(clients))
+
+    ds_mod._build_start_tool = _patched_build_start
+    ds_mod._build_update_tool = _patched_build_update
+    _model_passthrough_patched = True
