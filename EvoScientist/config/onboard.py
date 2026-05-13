@@ -496,6 +496,44 @@ def validate_dashscope_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_dashscope_code_key(api_key: str) -> tuple[bool, str]:
+    """Validate a DashScope Coding Plan API key (sk-sp-* subscription keys).
+
+    The coding endpoint at coding.dashscope.aliyuncs.com does not expose
+    /models (returns 404), so validation issues a minimal chat completion
+    instead of the usual models.list() probe.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://coding.dashscope.aliyuncs.com/v1",
+        )
+        client.chat.completions.create(
+            model="qwen3-coder-plus",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+        )
+        return True, "Valid"
+    except Exception as e:
+        error_str = str(e).lower()
+        if (
+            "401" in error_str
+            or "unauthorized" in error_str
+            or "invalid_api_key" in error_str
+            or "authentication" in error_str
+        ):
+            return False, "Invalid API key"
+        return False, f"Error: {e}"
+
+
 def validate_moonshot_key(api_key: str) -> tuple[bool, str]:
     """Validate a Moonshot API key by making a test request.
 
@@ -777,6 +815,10 @@ def _step_provider(config: EvoScientistConfig) -> str:
             value="dashscope",
         ),
         Choice(
+            title="DashScope Coding Plan (阿里云代码计划 — Qwen models)",
+            value="dashscope-code",
+        ),
+        Choice(
             title="DeepSeek (DeepSeek-R1, DeepSeek-V3)",
             value="deepseek",
         ),
@@ -937,6 +979,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "DashScope",
             config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
             validate_dashscope_key,
+        ),
+        "dashscope-code": (
+            "DashScope Coding Plan",
+            config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
+            validate_dashscope_code_key,
         ),
         "moonshot": (
             "Moonshot",
@@ -3258,6 +3305,7 @@ def run_onboard(skip_validation: bool = False) -> bool:
             "zhipu-code": "zhipu_api_key",
             "volcengine": "volcengine_api_key",
             "dashscope": "dashscope_api_key",
+            "dashscope-code": "dashscope_api_key",
             "moonshot": "moonshot_api_key",
             "kimi-coding": "kimi_api_key",
             "custom-openai": "custom_openai_api_key",
