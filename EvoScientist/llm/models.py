@@ -171,15 +171,16 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("doubao-seed-1.6", "doubao-seed-1.6", "volcengine"),
     ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
     ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
-    # DashScope (阿里云 — Qwen models)
-    ("qwen3-coder", "qwen3-coder-plus", "dashscope"),
-    ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
-    ("qwen-max", "qwen-max", "dashscope"),
-    ("qwq-plus", "qwq-plus", "dashscope"),
+    # DashScope Coding Plan (阿里云代码计划 — subscription sk-sp-* endpoint)
     ("qwen3-coder", "qwen3-coder-plus", "dashscope-code"),
     ("qwen3-coder-next", "qwen3-coder-next", "dashscope-code"),
     ("qwen3-max", "qwen3-max", "dashscope-code"),
     ("qwen3.5-plus", "qwen3.5-plus", "dashscope-code"),
+    # DashScope (阿里云 — Qwen models, default for simple lookups)
+    ("qwen3-coder", "qwen3-coder-plus", "dashscope"),
+    ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
+    ("qwen-max", "qwen-max", "dashscope"),
+    ("qwq-plus", "qwq-plus", "dashscope"),
     # DeepSeek
     ("deepseek-v4-pro", "deepseek-v4-pro", "deepseek"),
     ("deepseek-v4-flash", "deepseek-v4-flash", "deepseek"),
