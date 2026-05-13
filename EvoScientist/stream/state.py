@@ -21,7 +21,6 @@ class ResearchPhase(StrEnum):
     THINKING = "thinking"
     RESEARCHING = "researching"
     WRITING = "writing"
-    DONE = "done"
 
 
 class SubAgentState:
@@ -384,8 +383,9 @@ class StreamState:
         if self.is_responding:
             return ResearchPhase.WRITING
         if self.visible_tool_counts()[1] > 0 or self.subagents:
-            # Tools/sub-agents finished but model hasn't started responding yet
-            return ResearchPhase.WRITING
+            # Tools/sub-agents finished but model hasn't started responding
+            # yet — it may call more tools, so don't claim WRITING.
+            return ResearchPhase.RESEARCHING
         return ResearchPhase.IDLE
 
     def get_display_args(self) -> dict:

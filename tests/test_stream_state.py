@@ -790,15 +790,15 @@ class TestComputePhase:
         state.handle_event({"type": "text", "content": "Report"})
         assert state.compute_phase() == "writing"
 
-    def test_writing_before_text_when_tools_finished(self):
-        """Tools done but model hasn't emitted text yet — still writing."""
+    def test_researching_before_text_when_tools_finished(self):
+        """Tools done but model hasn't emitted text yet — may call more tools."""
         state = StreamState()
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
         state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
         state.is_processing = False
-        assert state.compute_phase() == "writing"
+        assert state.compute_phase() == "researching"
 
     def test_thinking_takes_priority_over_pending_tools(self):
         state = StreamState()

@@ -52,7 +52,6 @@ from .status_bar import (
     STATUS_BAR_BG,
     STATUS_DIM,
     STATUS_HINT_BUSY,
-    STATUS_HINT_DONE,
     STATUS_HINT_IDLE,
     STATUS_HINT_WRITING,
     apply_assistant_text_to_snapshot,
@@ -1382,10 +1381,7 @@ def run_textual_interactive(
                             break
                         event_type = state.handle_event(event)
 
-                        if event_type == "done":
-                            new_phase = ResearchPhase.DONE
-                        else:
-                            new_phase = state.compute_phase()
+                        new_phase = state.compute_phase()
                         if new_phase != self._status_phase:
                             self._status_phase = new_phase
                             self._render_status()
@@ -2918,11 +2914,6 @@ def run_textual_interactive(
                     return (
                         f"Writing report...{elapsed}",
                         f"on {STATUS_BAR_BG} {STATUS_HINT_WRITING} bold",
-                    )
-                case ResearchPhase.DONE:
-                    return (
-                        f"Done{elapsed}",
-                        f"on {STATUS_BAR_BG} {STATUS_HINT_DONE} bold",
                     )
                 case _:
                     # Fallback for busy state with no specific phase (e.g. slash commands)
