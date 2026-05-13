@@ -7,17 +7,21 @@ so the bulk of the module stays import-cheap and free of UI dependencies.
 
 import ast
 import json
+from enum import StrEnum
 
 # Tool names that are internal middleware artifacts (not user-visible actions).
 # These should be excluded from display rendering and "all_done" calculations.
 _INTERNAL_TOOLS = {"ExtractedMemory"}
 
-# Research phase constants used by the TUI status bar.
-PHASE_IDLE = "idle"
-PHASE_THINKING = "thinking"
-PHASE_RESEARCHING = "researching"
-PHASE_WRITING = "writing"
-PHASE_DONE = "done"
+
+class ResearchPhase(StrEnum):
+    """Research phase constants used by the TUI status bar."""
+
+    IDLE = "idle"
+    THINKING = "thinking"
+    RESEARCHING = "researching"
+    WRITING = "writing"
+    DONE = "done"
 
 
 class SubAgentState:
@@ -367,25 +371,22 @@ class StreamState:
         any_active_sa = any(sa.is_active for sa in self.subagents)
         return has_pending or any_active_sa or self.is_processing
 
-    def compute_phase(self, has_used_tools: bool = False) -> str:
+    def compute_phase(self) -> ResearchPhase:
         """Derive the current research phase from internal state.
 
-        Args:
-            has_used_tools: Whether any visible tool has been called this turn.
-
         Returns:
-            One of the ``PHASE_*`` constants.
+            A ``ResearchPhase`` enum member.
         """
         if self.is_thinking:
-            return PHASE_THINKING
-        if has_used_tools and self.has_pending_work():
-            return PHASE_RESEARCHING
+            return ResearchPhase.THINKING
+        if self.has_pending_work():
+            return ResearchPhase.RESEARCHING
         if self.is_responding:
-            return PHASE_WRITING
-        if has_used_tools:
-            # Tools finished but model hasn't started responding yet
-            return PHASE_WRITING
-        return PHASE_IDLE
+            return ResearchPhase.WRITING
+        if self.visible_tool_counts()[1] > 0 or self.subagents:
+            # Tools/sub-agents finished but model hasn't started responding yet
+            return ResearchPhase.WRITING
+        return ResearchPhase.IDLE
 
     def get_display_args(self) -> dict:
         """Get kwargs for create_streaming_display()."""

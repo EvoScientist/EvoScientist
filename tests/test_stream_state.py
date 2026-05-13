@@ -749,7 +749,7 @@ class TestComputePhase:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        assert state.compute_phase(has_used_tools=True) == "researching"
+        assert state.compute_phase() == "researching"
 
     def test_researching_after_tool_result(self):
         """is_processing is True right after tool_result, so still researching."""
@@ -758,7 +758,7 @@ class TestComputePhase:
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
         state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
-        assert state.compute_phase(has_used_tools=True) == "researching"
+        assert state.compute_phase() == "researching"
 
     def test_writing_after_tools_done_and_text_starts(self):
         state = StreamState()
@@ -767,19 +767,19 @@ class TestComputePhase:
         )
         state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
         state.handle_event({"type": "text", "content": "Final report"})
-        assert state.compute_phase(has_used_tools=True) == "writing"
+        assert state.compute_phase() == "writing"
 
     def test_writing_for_pure_text_response(self):
         state = StreamState()
         state.handle_event({"type": "text", "content": "Hello"})
-        assert state.compute_phase(has_used_tools=False) == "writing"
+        assert state.compute_phase() == "writing"
 
     def test_researching_with_active_subagent(self):
         state = StreamState()
         state.handle_event(
             {"type": "subagent_start", "name": "research", "description": ""}
         )
-        assert state.compute_phase(has_used_tools=True) == "researching"
+        assert state.compute_phase() == "researching"
 
     def test_writing_after_subagent_ends(self):
         state = StreamState()
@@ -788,7 +788,7 @@ class TestComputePhase:
         )
         state.handle_event({"type": "subagent_end", "name": "research"})
         state.handle_event({"type": "text", "content": "Report"})
-        assert state.compute_phase(has_used_tools=True) == "writing"
+        assert state.compute_phase() == "writing"
 
     def test_writing_before_text_when_tools_finished(self):
         """Tools done but model hasn't emitted text yet — still writing."""
@@ -797,9 +797,8 @@ class TestComputePhase:
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
         state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
-        # Simulate next event clearing is_processing (e.g. thinking)
         state.is_processing = False
-        assert state.compute_phase(has_used_tools=True) == "writing"
+        assert state.compute_phase() == "writing"
 
     def test_thinking_takes_priority_over_pending_tools(self):
         state = StreamState()
@@ -807,7 +806,18 @@ class TestComputePhase:
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
         state.handle_event({"type": "thinking", "content": "re-thinking"})
-        assert state.compute_phase(has_used_tools=True) == "thinking"
+        assert state.compute_phase() == "thinking"
+
+    def test_researching_with_task_only_orchestrator(self):
+        """Orchestrator delegates via 'task' tool — subagent drives the phase."""
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "task", "args": {}}
+        )
+        state.handle_event(
+            {"type": "subagent_start", "name": "code-agent", "description": ""}
+        )
+        assert state.compute_phase() == "researching"
 
 
 class TestHasPendingWork:

@@ -33,7 +33,7 @@ from ..sessions import (
     thread_exists,
 )
 from ..stream.events import stream_agent_events
-from ..stream.state import _INTERNAL_TOOLS, StreamState
+from ..stream.state import _INTERNAL_TOOLS, ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .channel import (
@@ -407,7 +407,7 @@ def run_textual_interactive(
             self._status_snapshot = self._status_base_snapshot
             self._status_streaming_text = ""
             self._status_last_input_tokens: int | None = None
-            self._status_phase: str = "idle"
+            self._status_phase: ResearchPhase = ResearchPhase.IDLE
             self._turn_started_at: datetime | None = None
             self._compacting_widget: CompactingWidget | None = None
 
@@ -1383,9 +1383,9 @@ def run_textual_interactive(
                         event_type = state.handle_event(event)
 
                         if event_type == "done":
-                            new_phase = "done"
+                            new_phase = ResearchPhase.DONE
                         else:
-                            new_phase = state.compute_phase(has_used_tools)
+                            new_phase = state.compute_phase()
                         if new_phase != self._status_phase:
                             self._status_phase = new_phase
                             self._render_status()
@@ -1961,7 +1961,7 @@ def run_textual_interactive(
             try:
                 self._busy = True
                 self._turn_started_at = datetime.now()
-                self._status_phase = "thinking"
+                self._status_phase = ResearchPhase.THINKING
                 self._render_status()
 
                 # Resolve @file mentions — inject file contents before sending to agent.
@@ -1996,7 +1996,7 @@ def run_textual_interactive(
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._busy = False
-                self._status_phase = "idle"
+                self._status_phase = ResearchPhase.IDLE
                 self._run_task = None
                 await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
@@ -2023,7 +2023,7 @@ def run_textual_interactive(
             try:
                 self._busy = True
                 self._turn_started_at = datetime.now()
-                self._status_phase = "thinking"
+                self._status_phase = ResearchPhase.THINKING
                 await self._refresh_status_snapshot(msg.content)
                 self._render_status()
 
@@ -2161,7 +2161,7 @@ def run_textual_interactive(
 
             finally:
                 self._busy = False
-                self._status_phase = "idle"
+                self._status_phase = ResearchPhase.IDLE
                 await self._refresh_status_snapshot(reset_streaming_text=True)
                 self._render_status()
                 if prompt_widget is not None:
@@ -2909,22 +2909,24 @@ def run_textual_interactive(
             if self._turn_started_at:
                 elapsed = f" ({format_duration_compact(self._turn_started_at)})"
 
-            if phase == "thinking":
-                return f"Thinking...{elapsed}", busy_style
-            if phase == "researching":
-                return f"Researching...{elapsed}", busy_style
-            if phase == "writing":
-                return (
-                    f"Writing report...{elapsed}",
-                    f"on {STATUS_BAR_BG} {STATUS_HINT_WRITING} bold",
-                )
-            if phase == "done":
-                return (
-                    f"Done{elapsed}",
-                    f"on {STATUS_BAR_BG} {STATUS_HINT_DONE} bold",
-                )
-            # Fallback for busy state with no specific phase (e.g. slash commands)
-            return f"Working...{elapsed}", busy_style
+            match phase:
+                case ResearchPhase.THINKING:
+                    return f"Thinking...{elapsed}", busy_style
+                case ResearchPhase.RESEARCHING:
+                    return f"Researching...{elapsed}", busy_style
+                case ResearchPhase.WRITING:
+                    return (
+                        f"Writing report...{elapsed}",
+                        f"on {STATUS_BAR_BG} {STATUS_HINT_WRITING} bold",
+                    )
+                case ResearchPhase.DONE:
+                    return (
+                        f"Done{elapsed}",
+                        f"on {STATUS_BAR_BG} {STATUS_HINT_DONE} bold",
+                    )
+                case _:
+                    # Fallback for busy state with no specific phase (e.g. slash commands)
+                    return f"Working...{elapsed}", busy_style
 
     # ── Media forwarding helper (module-level) ──────────────
 
