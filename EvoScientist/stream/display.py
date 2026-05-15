@@ -940,43 +940,29 @@ def _resolve_hitl_approval(
     interrupt_data: dict,
     prompt_fn: Callable[[list], list[dict] | None] | None = None,
 ) -> list[dict] | None:
-    """Resolve HITL approval for an interrupt.
-
-    Returns list of decisions if approved, None if rejected.
-    Auto-approves based on config and session state.
-
-    Args:
-        interrupt_data: The interrupt event data.
-        prompt_fn: Optional custom prompt function (e.g. channel-based).
-            If provided and manual approval is needed, this is called
-            instead of the default CLI ``input()`` prompt.
-    """
+    """Resolve HITL approval per-action. Forced-confirmation patterns
+    override all auto-approve settings."""
     global _session_auto_approve
+
+    from ..backends import check_forced_confirmation
+    from ..config.settings import load_config
 
     action_requests = interrupt_data.get("action_requests", [])
     if not action_requests:
         return [{"type": "approve"}]
 
-    # Session-level auto-approve (user chose "Approve all" earlier)
-    if _session_auto_approve:
-        return [{"type": "approve"} for _ in action_requests]
-
-    # Config-level auto-approve
-    from ..config.settings import load_config
-
     cfg = load_config()
-    if cfg.auto_approve:
-        return [{"type": "approve"} for _ in action_requests]
-
-    # Per-tool auto-approval: only execute needs manual approval
+    auto_approve = _session_auto_approve or cfg.auto_approve
     shell_allow_list = (
         [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
         if cfg.shell_allow_list
         else []
     )
 
-    needs_prompt = False
-    for req in action_requests:
+    decisions: list[dict] = []
+    approve_remaining = False
+
+    for i, req in enumerate(action_requests):
         name = (
             req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
         )
@@ -985,33 +971,75 @@ def _resolve_hitl_approval(
         )
 
         if name != "execute":
-            continue  # Non-execute tools auto-approve
+            decisions.append({"type": "approve"})
+            continue
 
         command = args.get("command", "") if isinstance(args, dict) else ""
-        if not _matches_shell_allow_list(command, shell_allow_list):
-            needs_prompt = True
-            break
+        forced_reason = check_forced_confirmation(command)
 
-    if not needs_prompt:
-        return [{"type": "approve"} for _ in action_requests]
+        # Forced confirmation: always prompt regardless of auto-approve
+        if forced_reason:
+            remaining = len(action_requests) - i
+            result = (
+                prompt_fn([req])
+                if prompt_fn
+                else _prompt_hitl_approval([req], forced_reason=forced_reason)
+            )
+            if result is None:
+                decisions.extend(
+                    {"type": "reject", "message": "Rejected by user"}
+                    for _ in range(remaining)
+                )
+                return decisions
+            decisions.append(result[0] if isinstance(result, list) else result)
+            continue
 
-    # Use custom prompt function if provided (e.g. channel-based approval)
-    if prompt_fn is not None:
-        return prompt_fn(action_requests)
+        # Normal auto-approve paths
+        if auto_approve or approve_remaining:
+            decisions.append({"type": "approve"})
+            continue
+        if _matches_shell_allow_list(command, shell_allow_list):
+            decisions.append({"type": "approve"})
+            continue
 
-    return _prompt_hitl_approval(action_requests)
+        # Needs manual approval
+        remaining = len(action_requests) - i
+        result = prompt_fn([req]) if prompt_fn else _prompt_hitl_approval([req])
+        if result is None:
+            decisions.extend(
+                {"type": "reject", "message": "Rejected by user"}
+                for _ in range(remaining)
+            )
+            return decisions
+        decisions.append(result[0] if isinstance(result, list) else result)
+
+    return decisions
 
 
-def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
-    """Display approval prompt and get user decision.
+def _resolve_all_interrupts(
+    pending_interrupts: dict[str, dict],
+    prompt_fn: Callable[[list], list[dict] | None] | None = None,
+) -> dict[str, dict]:
+    """Resolve all pending interrupts and return {interrupt_id: {"decisions": [...]}}."""
+    resume_map: dict[str, dict] = {}
+    for iid, event in pending_interrupts.items():
+        decisions = _resolve_hitl_approval(event, prompt_fn=prompt_fn)
+        if decisions is not None:
+            resume_map[iid] = {"decisions": decisions}
+        else:
+            n = len(event.get("action_requests", [])) or 1
+            resume_map[iid] = {
+                "decisions": [
+                    {"type": "reject", "message": "Rejected"} for _ in range(n)
+                ]
+            }
+    return resume_map
 
-    Returns list of decisions if approved, None if rejected.
 
-    Uses ``questionary.select()`` for arrow-key navigation, matching the
-    style used by ``_resolve_ask_user_prompt``. Imports are lazy so the
-    auto-approve / shell-allow-list fast paths in ``_resolve_hitl_approval``
-    don't pay for them.
-    """
+def _prompt_hitl_approval(
+    action_requests: list, *, forced_reason: str | None = None
+) -> list[dict] | None:
+    """Display approval prompt. Shows warning and hides bulk options when forced."""
     global _session_auto_approve
 
     import questionary  # type: ignore[import-untyped]
@@ -1031,43 +1059,44 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
         if panel_text.plain:
             panel_text.append("\n")
         panel_text.append(f"  {i + 1}. {desc}", style="yellow")
+    if forced_reason:
+        panel_text.append(f"\n  \u26a0 {forced_reason}", style="bold red")
 
+    title = "Approval Required (forced)" if forced_reason else "Approval Required"
     console.print(
         Panel(
             panel_text,
-            title="Approval Required",
-            border_style="yellow",
+            title=title,
+            border_style="red" if forced_reason else "yellow",
             padding=(0, 1),
         )
     )
 
-    n = len(action_requests)
-    if n <= 1:
-        approve_label = "Approve"
-        reject_label = "Reject"
+    if forced_reason:
+        choices = ["Approve", "Reject"]
     else:
-        approve_label = f"Approve all {n}"
-        reject_label = f"Reject all {n}"
-    auto_label = "Approve all (session)"
+        n = len(action_requests)
+        choices = [
+            "Approve" if n <= 1 else f"Approve all {n}",
+            "Reject" if n <= 1 else f"Reject all {n}",
+            "Approve all (session)",
+        ]
 
     try:
         selected = questionary.select(
-            "Approval required",
-            choices=[approve_label, reject_label, auto_label],
-            style=_PICKER_STYLE,
+            "Approval required", choices=choices, style=_PICKER_STYLE
         ).ask()
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]  Rejected.[/dim]")
         return None
 
-    if selected is None:  # Ctrl+C inside questionary
+    if selected is None:
         console.print("[dim]  Rejected.[/dim]")
         return None
-
-    if selected == approve_label:
-        return [{"type": "approve"} for _ in action_requests]
-    if selected == auto_label:
+    if selected.startswith("Approve all (session)"):
         _session_auto_approve = True
+        return [{"type": "approve"} for _ in action_requests]
+    if selected.startswith("Approve"):
         return [{"type": "approve"} for _ in action_requests]
     console.print("[dim]  Rejected.[/dim]")
     return None
@@ -1513,26 +1542,24 @@ def _run_streaming(
                 _sent_thinking_text=_sent_thinking_text,
             )
 
-        # HITL: check for pending interrupt and handle approval
-        if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
+        # HITL: handle all pending interrupts
+        if state.pending_interrupts and _hitl_depth < _MAX_HITL_ITERATIONS:
             if is_stream_cancel_requested(cancel_scope):
                 return _stopped_response()
-            decisions = _resolve_hitl_approval(
-                state.pending_interrupt,
-                prompt_fn=hitl_prompt_fn,
+            resume_map = _resolve_all_interrupts(
+                state.pending_interrupts, prompt_fn=hitl_prompt_fn
             )
-            if is_stream_cancel_requested(cancel_scope):
-                return _stopped_response()
-            if decisions is not None:
+            if resume_map:
                 from langgraph.types import Command  # type: ignore[import-untyped]
 
                 state.pending_interrupt = None
-                state.thinking_text = ""  # reset accumulation for fresh round
+                state.pending_interrupts.clear()
+                state.thinking_text = ""
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
                 return _run_streaming(
                     agent=agent,
-                    message=Command(resume={"decisions": decisions}),
+                    message=Command(resume=resume_map),
                     thread_id=thread_id,
                     show_thinking=show_thinking,
                     interactive=interactive,

@@ -124,6 +124,22 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
     except Exception:
         return False  # fail-closed
 
+    from ..backends import check_forced_confirmation
+
+    # Check forced confirmation before auto-approve
+    for req in action_requests:
+        name = (
+            req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
+        )
+        if name != "execute":
+            continue
+        args = (
+            req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
+        )
+        command = args.get("command", "") if isinstance(args, dict) else ""
+        if check_forced_confirmation(command):
+            return False
+
     if cfg.auto_approve:
         return True
 
@@ -629,12 +645,11 @@ class InboundConsumer:
                         timeout=_HITL_APPROVAL_TIMEOUT,
                     )
                 except TimeoutError:
-                    # Auto-approve on timeout
-                    pending.decision = "approve"
+                    pending.decision = "reject"
                 finally:
                     self._pending_interrupts.pop(session_key, None)
 
-                decision = pending.decision or "approve"
+                decision = pending.decision or "reject"
 
                 if decision == "reject":
                     await self.bus.publish_outbound(

@@ -22,10 +22,11 @@ class TestValidateCommand:
     def test_safe_pip(self):
         assert validate_command("pip install pandas") is None
 
-    def test_blocked_traversal(self):
-        result = validate_command("cat ../../../etc/passwd")
-        assert result is not None
-        assert "blocked" in result.lower()
+    def test_traversal_soft_blocked(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert validate_command("cat ../../../etc/passwd") is None
+        assert check_forced_confirmation("cat ../../../etc/passwd") is not None
 
     def test_blocked_sudo(self):
         result = validate_command("sudo rm -rf /")
@@ -40,9 +41,11 @@ class TestValidateCommand:
         result = validate_command("dd if=/dev/zero of=file bs=1M count=100")
         assert result is not None
 
-    def test_blocked_home_tilde(self):
-        result = validate_command("cat ~/secrets.txt")
-        assert result is not None
+    def test_home_tilde_soft_blocked(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert validate_command("cat ~/secrets.txt") is None
+        assert check_forced_confirmation("cat ~/secrets.txt") is not None
 
     def test_blocked_rm_rf_absolute(self):
         result = validate_command("rm -rf /important")
@@ -342,14 +345,17 @@ class TestTraversalFalsePositiveFix:
     def test_dotdot_in_filename_allowed(self):
         assert validate_command("echo foo..bar.txt") is None
 
-    def test_dotdot_path_component_still_blocked(self):
-        result = validate_command("cat ../secret")
-        assert result is not None
-        assert "blocked" in result.lower()
+    def test_dotdot_path_component_soft_blocked(self):
+        from EvoScientist.backends import check_forced_confirmation
 
-    def test_dotdot_nested_still_blocked(self):
-        result = validate_command("cat foo/../../etc/passwd")
-        assert result is not None
+        assert validate_command("cat ../secret") is None
+        assert check_forced_confirmation("cat ../secret") is not None
+
+    def test_dotdot_nested_soft_blocked(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert validate_command("cat foo/../../etc/passwd") is None
+        assert check_forced_confirmation("cat foo/../../etc/passwd") is not None
 
 
 # === Pipeline command validation ===
