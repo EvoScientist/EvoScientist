@@ -1840,7 +1840,12 @@ def run_textual_interactive(
                     from EvoScientist.channels.consumer import _should_auto_approve
 
                     resume_map: dict[str, dict] = {}
+                    _cancelled = False
                     for _iid, _iev in list(state.pending_interrupts.items()):
+                        if is_stream_cancel_requested(cancel_scope):
+                            _cancelled = True
+                            break
+
                         _areqs = _iev.get("action_requests", [])
                         _n = len(_areqs) or 1
 
@@ -1851,7 +1856,13 @@ def run_textual_interactive(
                             continue
 
                         if channel_hitl_fn is not None:
+                            if is_stream_cancel_requested(cancel_scope):
+                                _cancelled = True
+                                break
                             _decs = await asyncio.to_thread(channel_hitl_fn, _areqs)
+                            if is_stream_cancel_requested(cancel_scope):
+                                _cancelled = True
+                                break
                             resume_map[_iid] = {
                                 "decisions": _decs
                                 or [
@@ -1868,9 +1879,17 @@ def run_textual_interactive(
                         _aw = ApprovalWidget(_areqs)
                         await container.mount(_aw)
                         self._schedule_scroll_to_bottom(container)
+                        if is_stream_cancel_requested(cancel_scope):
+                            await _aw.remove()
+                            _prompt.disabled = False
+                            _cancelled = True
+                            break
                         _decided = await self._wait_for_approval(_aw)
                         await _aw.remove()
                         _prompt.disabled = False
+                        if is_stream_cancel_requested(cancel_scope):
+                            _cancelled = True
+                            break
 
                         if _decided and _decided.decisions is not None:
                             if _decided.auto_approve_session:
@@ -1883,6 +1902,10 @@ def run_textual_interactive(
                                     for _ in range(_n)
                                 ]
                             }
+
+                    if _cancelled:
+                        response = await _mark_cancelled_response()
+                        break
 
                     if resume_map:
                         _stream_input = Command(resume=resume_map)
