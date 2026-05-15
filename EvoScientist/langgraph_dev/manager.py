@@ -73,12 +73,23 @@ _PROCESS: subprocess.Popen | None = None
 # sub-agents' cwd / EVOSCIENTIST_WORKSPACE_DIR env match the new workspace.
 _PROCESS_WORKSPACE: Path | None = None
 
-# Whether async sub-agents are usable in this CLI process. Only True after
-# ``ensure_langgraph_dev`` confirms the subprocess is healthy (or already
-# running). Stays False on startup failure so ``_maybe_swap_async_subagents``
-# can fall back to in-process sync delegation instead of routing tool calls
-# at a dead URL.
-_ASYNC_SUBAGENTS_AVAILABLE: bool = False
+# Whether async sub-agents are usable in this process.
+#
+# - CLI / serve parent process: starts False; flipped True after
+#   ``ensure_langgraph_dev`` confirms the subprocess is healthy. Stays False
+#   on startup failure so ``_maybe_swap_async_subagents`` can fall back to
+#   in-process sync delegation instead of routing tool calls at a dead URL.
+# - langgraph dev subprocess spawned by ``EvoSci deploy``: starts True via
+#   ``EVOSCIENTIST_DEPLOY_MODE=true`` env var. The deployed main agent IS the
+#   langgraph dev server, so http://localhost:{port} is always reachable for
+#   self-loop async sub-agent dispatch.
+# - langgraph dev subprocess spawned by ``EvoSci`` / ``EvoSci serve``: env
+#   var is unset (NO_MCP path), stays False — the deployed main agent in that
+#   subprocess is dead code (only sub-agent graphs are invoked), so async swap
+#   is unnecessary.
+_ASYNC_SUBAGENTS_AVAILABLE: bool = (
+    os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "true"
+)
 
 
 def is_async_subagents_available() -> bool:
@@ -330,6 +341,7 @@ def start_langgraph_dev(
     port: int = _DEFAULT_PORT,
     file_persistence: bool = True,
     jobs_per_worker: int = 10,
+    deploy_mode: bool = False,
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -450,17 +462,24 @@ def start_langgraph_dev(
     if not file_persistence:
         sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
 
-    # Skip MCP loading inside the langgraph dev subprocess. The CLI's main
-    # agent already loaded MCP servers in the foreground process; without
-    # this guard, ``main_graph.py`` would import ``EvoScientist_agent`` and
-    # trigger ``_get_default_agent`` → ``load_mcp_and_build_kwargs`` →
-    # spawning a SECOND copy of every MCP server in the subprocess.
-    # The deployed main agent is currently only reachable via HTTP (for
-    # future Web UI / SDK clients), and none of those are in use, so the
-    # duplicate MCP pool is pure waste. Async sub-agents don't load MCP at
-    # all (their factory bypasses ``load_mcp_and_build_kwargs``), so they
-    # are unaffected.
-    sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+    # Subprocess mode flag: deploy-mode → fully equipped main agent (MCP +
+    # async self-loop); default → stripped main agent (no MCP, sub-agent
+    # graphs only). The two env vars are mutually exclusive by design — only
+    # one is ever set, controlled here in a single place.
+    #
+    # - ``EvoSci deploy`` (deploy_mode=True): sets ``EVOSCIENTIST_DEPLOY_MODE``.
+    #   Deployed main agent loads MCP + flips ``_ASYNC_SUBAGENTS_AVAILABLE``
+    #   to True at module init, enabling self-loop async dispatch.
+    # - ``EvoSci`` / ``EvoSci serve`` (deploy_mode=False): sets
+    #   ``EVOSCIENTIST_DEPLOYED_NO_MCP``. The CLI's main agent already loaded
+    #   MCP in the foreground process; without this guard, the subprocess
+    #   would spawn a SECOND copy of every MCP server. The deployed main
+    #   agent there is dead code (only sub-agent graphs are invoked), so the
+    #   duplicate MCP pool is pure waste.
+    if deploy_mode:
+        sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "true"
+    else:
+        sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
 
     try:
         proc = subprocess.Popen(
