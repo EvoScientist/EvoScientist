@@ -97,10 +97,8 @@ class ApprovalWidget(Widget):
                 self._option_widgets.append(widget)
                 yield widget
 
-        yield Static(
-            "↑/↓ navigate · Enter select · y/n/a quick keys · e expand · Esc reject",
-            classes="approval-help",
-        )
+        self._help_widget = Static("", classes="approval-help")
+        yield self._help_widget
 
     def on_mount(self) -> None:
         self._refresh_display()
@@ -164,7 +162,12 @@ class ApprovalWidget(Widget):
                 self._warning_widget.update("")
                 self._warning_widget.display = False
 
-        # Options — suppress auto-approve when forced
+        if self._help_widget:
+            if forced_reason:
+                self._help_widget.update("↑/↓ navigate · Enter select · y/n quick keys · e expand · Esc reject")
+            else:
+                self._help_widget.update("↑/↓ navigate · Enter select · y/n/a quick keys · e expand · Esc reject")
+
         n = len(self._action_requests)
         if forced_reason:
             self._options = ["1. Approve (y)", "2. Reject (n)"]
