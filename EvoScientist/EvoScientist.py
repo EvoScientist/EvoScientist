@@ -196,6 +196,7 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        OrphanedToolMessageMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
     )
@@ -208,6 +209,7 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
                 create_context_editing_middleware(),
                 ToolErrorHandlerMiddleware(),
                 ContextOverflowMapperMiddleware(),
+                OrphanedToolMessageMiddleware(),
             ]
         )
 
@@ -467,6 +469,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ModelFallbackMiddleware,
+        OrphanedToolMessageMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_middleware,
@@ -491,6 +494,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
         create_memory_middleware(memory_dir, extraction_model=model),
+        OrphanedToolMessageMiddleware(),
     ]
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:

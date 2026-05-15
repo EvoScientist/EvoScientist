@@ -17,6 +17,7 @@ from .context_editing import (
     create_context_editing_middleware,
 )
 from .context_overflow import ContextOverflowMapperMiddleware
+from .orphan_tool_messages import OrphanedToolMessageMiddleware
 from .memory import (
     EvoMemoryMiddleware,
     EvoMemoryState,
@@ -39,6 +40,7 @@ __all__ = [
     "EvoMemoryState",
     "ExtractedMemory",
     "ModelFallbackMiddleware",
+    "OrphanedToolMessageMiddleware",
     "Question",
     "ToolErrorHandlerMiddleware",
     "compute_context_editing_trigger",
