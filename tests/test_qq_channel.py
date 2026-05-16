@@ -83,7 +83,7 @@ class TestQQChannelSend:
     def test_send_does_not_fallback_on_transport_error(self):
         channel = self._make_ready_channel()
 
-        async def _send_once(coro_factory, max_retries=3):
+        async def _send_once(coro_factory, max_retries=3, **kwargs):
             return await coro_factory()
 
         channel._send_with_retry = _send_once
@@ -113,7 +113,7 @@ class TestQQChannelSend:
         otherwise genuine send failures get silently swallowed as plain-text."""
         channel = self._make_ready_channel()
 
-        async def _send_once(coro_factory, max_retries=3):
+        async def _send_once(coro_factory, max_retries=3, **kwargs):
             return await coro_factory()
 
         channel._send_with_retry = _send_once

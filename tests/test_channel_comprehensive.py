@@ -558,6 +558,86 @@ class TestChannelSend:
 
         _run(_test())
 
+    def test_rate_limit_notice_sent_when_delay_above_threshold(self):
+        """A user-facing notice fires when retry backoff meets the threshold."""
+
+        async def _test():
+            ch = StubChannel()
+            attempts = {"n": 0}
+            original_send_chunk = ch._send_chunk
+
+            async def flaky_send(chat_id, fmt, raw, reply_to, meta):
+                # Skip the notice path — it would otherwise be miscounted as
+                # an attempt.  The notice has reply_to=None and an empty
+                # metadata dict; the real send carries metadata={"chat_id":...}.
+                if raw.startswith("⏳"):
+                    await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+                    return
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    err = RuntimeError("HTTP 429 rate limit")
+                    err.retry_after = 5.0  # > 2 s threshold
+                    raise err
+                await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+
+            ch._send_chunk = flaky_send
+            # Drop the per-retry sleep so the test stays fast.
+            ch._retry_config.min_delay_s = 0.0
+            ch._retry_config.max_delay_s = 5.0
+            ch._retry_config.jitter = 0.0
+
+            msg = OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="payload",
+                metadata={"chat_id": "c1"},
+            )
+            ok = await ch.send(msg)
+            assert ok is True
+
+            notices = [c for c in ch._sent_chunks if c[2].startswith("⏳")]
+            assert len(notices) == 1
+            assert notices[0][0] == "c1"
+            assert "5s" in notices[0][2]
+
+        _run(_test())
+
+    def test_rate_limit_notice_suppressed_below_threshold(self):
+        """Short backoffs must not spam the chat."""
+
+        async def _test():
+            ch = StubChannel()
+            attempts = {"n": 0}
+            original_send_chunk = ch._send_chunk
+
+            async def flaky_send(chat_id, fmt, raw, reply_to, meta):
+                if raw.startswith("⏳"):
+                    await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+                    return
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise RuntimeError("transient ratelimit")  # default 1.0 s
+                await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+
+            ch._send_chunk = flaky_send
+            ch._retry_config.min_delay_s = 0.0
+            ch._retry_config.max_delay_s = 5.0
+            ch._retry_config.jitter = 0.0
+
+            msg = OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="payload",
+                metadata={"chat_id": "c1"},
+            )
+            ok = await ch.send(msg)
+            assert ok is True
+
+            notices = [c for c in ch._sent_chunks if c[2].startswith("⏳")]
+            assert notices == []
+
+        _run(_test())
+
 
 class TestChannelAllowList:
     def test_open_access_when_no_list(self):

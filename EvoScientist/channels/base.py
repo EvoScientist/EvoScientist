@@ -538,7 +538,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                         await self._send_with_retry(
                             lambda _cid=chat_id, _fmt=formatted, _raw=raw, _reply=reply_to, _meta=message.metadata: (
                                 self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
-                            )
+                            ),
+                            notify_chat_id=chat_id,
                         )
                     except Exception as chunk_err:
                         self._trace_event(
@@ -744,6 +745,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
     _non_retryable_patterns: tuple[str, ...] = ()
     _rate_limit_patterns: tuple[str, ...] = ("429", "ratelimit")
     _rate_limit_delay: float = 1.0
+    _rate_limit_notify_threshold_s: float = 2.0
+    """Send a user-facing notice when a retry delay meets/exceeds this many
+    seconds.  Set to ``float("inf")`` to disable.  Short backoffs (≤2 s) are
+    suppressed so transient blips don't spam the chat."""
 
     def _extract_retry_after(self, exc: Exception) -> float | None:
         """Extract retry-wait seconds from an exception.
@@ -808,6 +813,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         self,
         coro_factory: CallableABC[[], Awaitable],
         max_retries: int = 3,
+        *,
+        notify_chat_id: str | None = None,
     ) -> Any:
         """Send helper with automatic exponential-backoff retry.
 
@@ -817,6 +824,11 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
         The *max_retries* parameter is accepted for backward compatibility
         but the attempt count is taken from ``self._retry_config``.
+
+        When *notify_chat_id* is provided and a retry backoff meets
+        ``_rate_limit_notify_threshold_s``, a best-effort user-facing
+        "Rate limited, retrying in Xs..." notice is sent to that chat so
+        users aren't left waiting in silence.
         """
         from .retry import retry_async
 
@@ -832,6 +844,15 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 f"{self.name} send retry {info.attempt}/{info.max_attempts} "
                 f"in {info.delay_s:.2f}s: {info.error}"
             )
+            if (
+                notify_chat_id is not None
+                and info.delay_s >= self._rate_limit_notify_threshold_s
+            ):
+                # Fire-and-forget: notice is best-effort and must not block
+                # or fail the retry pipeline.
+                asyncio.create_task(
+                    self._notify_rate_limit_retry(notify_chat_id, info.delay_s)
+                )
 
         return await retry_async(
             coro_factory,
@@ -841,6 +862,32 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             on_retry=_on_retry,
             label=f"{self.name}.send",
         )
+
+    def _format_rate_limit_notice(self, delay_s: float) -> str:
+        """Build the user-facing rate-limit retry notice.  Override to localize."""
+        return f"⏳ Rate limited, retrying in {delay_s:.0f}s..."
+
+    async def _notify_rate_limit_retry(self, chat_id: str, delay_s: float) -> None:
+        """Best-effort user-facing rate-limit notice.
+
+        Bypasses :meth:`send` (and its per-chat lock / retry loop) so this
+        notice can slip out while the parent send is mid-backoff.  Any error
+        is swallowed — a failed notice must never block actual delivery.
+        """
+        try:
+            text = self._format_rate_limit_notice(delay_s)
+            formatted = self._format_chunk(text)
+            await self._send_chunk(chat_id, formatted, text, None, {})
+        except Exception as exc:
+            self._trace_event(
+                "outbound_rate_limit_notify_failed",
+                chat_id=chat_id,
+                delay_s=round(delay_s, 2),
+                error_type=type(exc).__name__,
+            )
+            _logger.debug(
+                f"{self.name} rate-limit notify to {chat_id} failed: {exc}"
+            )
 
     # ── Typing indicator abstraction ─────────────────────────────────
 
