@@ -890,9 +890,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 delay_s=round(delay_s, 2),
                 error_type=type(exc).__name__,
             )
-            _logger.debug(
-                f"{self.name} rate-limit notify to {chat_id} failed: {exc}"
-            )
+            _logger.debug(f"{self.name} rate-limit notify to {chat_id} failed: {exc}")
 
     # ── Typing indicator abstraction ─────────────────────────────────
 
