@@ -102,7 +102,10 @@ def generate_thread_id() -> str:
 
 # Default kept when the caller cannot resolve config (tests, unit-init paths).
 # Production callers use ``EvoScientistConfig.checkpoint_keep_per_thread``.
-_DEFAULT_KEEP_PER_NS = 10
+# Kept in sync with the dataclass default so config-failure fallbacks
+# don't silently regress to the pre-DeltaChannel aggressive value (which
+# could prune away ``_DeltaSnapshot`` seeds and break message replay).
+_DEFAULT_KEEP_PER_NS = 1000
 
 
 class PruningCheckpointer(AsyncSqliteSaver):
@@ -378,16 +381,160 @@ async def _load_checkpoint_messages(
 ) -> list:
     """Load messages from the most recent checkpoint for *thread_id*.
 
+    Under deepagents 0.6 ``DeltaChannel``, the ``messages`` channel is not
+    materialized into ``channel_values`` on every checkpoint — it lives in
+    the ``writes`` table as incremental deltas, with a periodic snapshot
+    into ``channel_values`` (wrapped in ``_DeltaSnapshot``). To return the
+    full conversation history we walk the checkpoint chain oldest-first
+    and apply each pending write via the same reducer the runtime uses.
+
+    Intra-checkpoint write order matches langgraph's SQLite saver
+    (``ORDER BY task_id, idx``) so ``Overwrite`` / ``RemoveMessage`` /
+    ``REMOVE_ALL_MESSAGES`` semantics line up with replay.
+
     Returns a list of LangChain message objects, or an empty list on failure.
     """
-    channel_values = await _load_checkpoint_channel_values(conn, thread_id, serde)
-    messages = channel_values.get("messages", [])
-    if not isinstance(messages, list):
+    try:
+        from deepagents._messages_reducer import _messages_delta_reducer
+    except ImportError:
+        _messages_delta_reducer = None  # type: ignore[assignment]
+
+    # Pull main-namespace checkpoints + their pending writes for this thread,
+    # oldest first. (writes are 1:1 with checkpoint_id, so a single SQL join
+    # is enough.) Restricting to ``checkpoint_ns = ''`` keeps sub-agent
+    # internal-state writes (which live under ``tools:<uuid>`` namespaces)
+    # out of the user-facing message reconstruction — those have their own
+    # ``messages`` channel and would otherwise interleave with the main
+    # dialogue.
+    #
+    # Intra-checkpoint sort by (task_id, idx) mirrors langgraph's exit-mode
+    # delta persistence order — synthetic task_id values encode chronological
+    # step order, so this preserves replay semantics for RemoveMessage /
+    # REMOVE_ALL_MESSAGES across writes that share a checkpoint_id.
+    query = """
+        SELECT c.checkpoint_id, c.type, c.checkpoint,
+               w.channel, w.type, w.value
+        FROM checkpoints c
+        LEFT JOIN writes w ON
+            w.thread_id = c.thread_id
+            AND w.checkpoint_ns = c.checkpoint_ns
+            AND w.checkpoint_id = c.checkpoint_id
+        WHERE c.thread_id = ?
+          AND c.checkpoint_ns = ''
+          AND json_extract(c.metadata, '$.agent_name') = ?
+        ORDER BY c.checkpoint_id ASC, w.task_id ASC, w.idx ASC
+    """
+    accumulated: list = []
+    summarization_event: dict | None = None
+    seen_checkpoint: str | None = None
+    async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
+        async for row in cur:
+            cid, ck_type, ck_blob, w_channel, w_type, w_value = row
+
+            # First time we see this checkpoint_id: apply its channel_values
+            # snapshot (if any) and refresh the summarization_event pointer.
+            if cid != seen_checkpoint:
+                seen_checkpoint = cid
+                if ck_type and ck_blob:
+                    try:
+                        ck = serde.loads_typed((ck_type, ck_blob))
+                        cv = ck.get("channel_values") or {}
+                        seed = _unwrap_messages_seed(cv.get("messages"))
+                        if seed is not None:
+                            accumulated = seed
+                        event = cv.get("_summarization_event")
+                        if isinstance(event, dict):
+                            summarization_event = event
+                    except (ValueError, TypeError, KeyError):
+                        pass
+
+            # Apply pending writes that landed on this checkpoint.
+            if w_channel == "messages" and w_type and w_value:
+                try:
+                    delta = serde.loads_typed((w_type, w_value))
+                except (ValueError, TypeError, KeyError):
+                    continue
+                # ``Overwrite`` (langgraph.types) wraps a value with
+                # "replace this channel" semantics — reset state, then
+                # the wrapped value becomes the new full content.
+                if type(delta).__name__ == "Overwrite":
+                    inner = getattr(delta, "value", None)
+                    accumulated = (
+                        list(inner)
+                        if isinstance(inner, list)
+                        else ([inner] if inner is not None else [])
+                    )
+                    continue
+                if _messages_delta_reducer is not None:
+                    accumulated = _messages_delta_reducer(accumulated, delta)
+                else:
+                    # ``deepagents._messages_delta_reducer`` is unavailable
+                    # (upstream rename / packaging change). A naive concat
+                    # would silently break dedup-by-id and RemoveMessage /
+                    # REMOVE_ALL_MESSAGES semantics. Skip the delta with a
+                    # warning instead — the caller gets a partial but
+                    # internally consistent view.
+                    _logger.warning(
+                        "deepagents._messages_delta_reducer unavailable; "
+                        "skipping messages delta of type %s for thread %s "
+                        "at checkpoint %s",
+                        type(delta).__name__,
+                        thread_id,
+                        cid,
+                    )
+
+    # Diagnose silent truncation: accumulated is empty but the chain shows
+    # a pruning ancestry (parent_checkpoint_id pointing at a no-longer-
+    # present row). This happens for threads created under the pre-fix
+    # ``keep_per_ns=10`` default that lost their early writes before the
+    # snapshot frequency (50) could materialize a ``_DeltaSnapshot`` seed.
+    # The DB has no path to recover those messages — surface the issue
+    # via WARNING so users understand why /resume shows a stub history.
+    if not accumulated:
+        orphan_query = """
+            SELECT 1 FROM checkpoints c1
+            WHERE c1.thread_id = ? AND c1.checkpoint_ns = ''
+              AND c1.parent_checkpoint_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM checkpoints c2
+                  WHERE c2.thread_id = c1.thread_id
+                    AND c2.checkpoint_ns = ''
+                    AND c2.checkpoint_id = c1.parent_checkpoint_id
+              )
+            LIMIT 1
+        """
+        async with conn.execute(orphan_query, (thread_id,)) as ocur:
+            if await ocur.fetchone():
+                _logger.warning(
+                    "Thread %s has orphan checkpoints (pre-fix pruning) "
+                    "and no surviving DeltaChannel snapshot; reconstructed "
+                    "history is empty. Early messages cannot be recovered.",
+                    thread_id,
+                )
+
+    if not isinstance(accumulated, list):
         return []
-    event = channel_values.get("_summarization_event")
-    return _apply_summarization_event(
-        messages, event if isinstance(event, dict) else None
-    )
+    return _apply_summarization_event(accumulated, summarization_event)
+
+
+def _unwrap_messages_seed(value: object) -> list | None:
+    """Coerce a ``channel_values["messages"]`` snapshot seed into a plain list.
+
+    LangGraph 1.2 stores snapshot blobs as ``_DeltaSnapshot(value=[...])``
+    (a ``NamedTuple``, NOT a list subclass), so a bare ``isinstance(v, list)``
+    check silently ignores the seed and reconstruction starts from whatever
+    writes survived pruning. Pre-migration / non-DeltaChannel checkpoints
+    still store a plain list. Returns ``None`` when no usable seed is
+    present (caller leaves accumulated state untouched).
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return list(value)
+    inner = getattr(value, "value", None)
+    if isinstance(inner, list):
+        return list(inner)
+    return None
 
 
 async def _load_checkpoint_channel_values(
@@ -677,6 +824,11 @@ async def get_thread_messages(thread_id: str) -> list:
 
     Only returns messages for EvoScientist threads.
     Returns an empty list if the thread has no checkpoints.
+
+    Reconstructs the full message history by walking the checkpoint chain
+    and applying pending writes — required under deepagents 0.6
+    ``DeltaChannel`` where messages live in the ``writes`` table rather
+    than the latest checkpoint's ``channel_values``.
     """
     db_path = str(get_db_path())
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
@@ -692,10 +844,7 @@ async def get_thread_messages(thread_id: str) -> list:
             if not await cur.fetchone():
                 return []
         serde = JsonPlusSerializer()
-        channel_values = await _load_checkpoint_channel_values(conn, thread_id, serde)
-        messages = channel_values.get("messages", [])
-        event = channel_values.get("_summarization_event")
-        return _apply_summarization_event(messages, event)
+        return await _load_checkpoint_messages(conn, thread_id, serde)
 
 
 # ---------------------------------------------------------------------------

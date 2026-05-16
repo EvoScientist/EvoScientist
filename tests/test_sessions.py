@@ -145,7 +145,7 @@ class TestThreadFunctions(unittest.TestCase):
                         idx INTEGER NOT NULL,
                         channel TEXT NOT NULL,
                         type TEXT,
-                        blob BLOB,
+                        value BLOB,
                         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
                     )
                 """)
@@ -403,7 +403,7 @@ class TestThreadFunctions(unittest.TestCase):
                     (shared_tid, "cp_evo_shared", evo_meta),
                 )
                 await conn.execute(
-                    "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                    "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) "
                     "VALUES (?, '', ?, 't1', 0, 'ch', 'str', X'AA')",
                     (shared_tid, "cp_evo_shared"),
                 )
@@ -420,7 +420,7 @@ class TestThreadFunctions(unittest.TestCase):
                     (shared_tid, "cp_other_shared", other_meta),
                 )
                 await conn.execute(
-                    "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                    "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) "
                     "VALUES (?, '', ?, 't2', 0, 'ch', 'str', X'BB')",
                     (shared_tid, "cp_other_shared"),
                 )
@@ -933,7 +933,7 @@ class TestMigrationSweep(unittest.TestCase):
                         idx INTEGER NOT NULL,
                         channel TEXT NOT NULL,
                         type TEXT,
-                        blob BLOB,
+                        value BLOB,
                         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
                     )
                     """
@@ -1167,7 +1167,7 @@ class TestDbStats(unittest.TestCase):
                         idx INTEGER NOT NULL,
                         channel TEXT NOT NULL,
                         type TEXT,
-                        blob BLOB,
+                        value BLOB,
                         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
                     )
                     """
@@ -1197,7 +1197,7 @@ class TestDbStats(unittest.TestCase):
                 # (counted by db_stats via the JOIN to checkpoints).
                 for i in range(4):
                     await conn.execute(
-                        "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                        "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) "
                         "VALUES ('evo01', '', 'ce01_0', 't1', ?, 'ch', 'str', X'AA')",
                         (i,),
                     )
@@ -1206,7 +1206,7 @@ class TestDbStats(unittest.TestCase):
                 # checkpoints and filters by agent_name).
                 for i in range(2):
                     await conn.execute(
-                        "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                        "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) "
                         "VALUES ('oth01', '', 'co01_0', 't2', ?, 'ch', 'str', X'BB')",
                         (i,),
                     )

@@ -11,6 +11,7 @@ from .ask_user import (
     Choice,
     Question,
 )
+from .code_interpreter import create_code_interpreter_middleware
 from .configurable_model import ConfigurableModelMiddleware
 from .context_editing import (
     compute_context_editing_trigger,
@@ -42,6 +43,7 @@ __all__ = [
     "Question",
     "ToolErrorHandlerMiddleware",
     "compute_context_editing_trigger",
+    "create_code_interpreter_middleware",
     "create_context_editing_middleware",
     "create_memory_middleware",
     "create_tool_selector_middleware",

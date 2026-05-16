@@ -260,7 +260,12 @@ class EvoScientistConfig:
     enable_ask_user: bool = True  # Enable ask_user tool for agent-initiated questions
 
     # Checkpoint pruning (sessions.db retention per (thread_id, checkpoint_ns))
-    checkpoint_keep_per_thread: int = 10
+    # Safety net for runaway conversations. Under DeltaChannel (deepagents 0.6+)
+    # normal usage produces linear growth, so this default is set well above
+    # any realistic conversation length (~180-450 turns of dialogue) while
+    # still capping legacy bloat at upgrade time. 0 disables ongoing pruning
+    # entirely; the one-time legacy migration sweep still runs.
+    checkpoint_keep_per_thread: int = 1000
 
     # DM access control policy
     dm_policy: str = "allowlist"
