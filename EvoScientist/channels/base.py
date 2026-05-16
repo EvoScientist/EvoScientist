@@ -334,6 +334,9 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         self._message_media: dict[str, list[str]] = {}
         self._message_ids: dict[str, str] = {}
         self._debounce_tasks: dict[str, asyncio.Task] = {}
+        # Fire-and-forget background tasks (e.g. rate-limit notices).  Holding
+        # strong references prevents the asyncio loop from GC-ing them mid-run.
+        self._background_tasks: set[asyncio.Task] = set()
 
         # Mention gating: "always" | "group" | "off"
         self.require_mention: str = getattr(config, "require_mention", "group")
@@ -850,9 +853,11 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             ):
                 # Fire-and-forget: notice is best-effort and must not block
                 # or fail the retry pipeline.
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self._notify_rate_limit_retry(notify_chat_id, info.delay_s)
                 )
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
 
         return await retry_async(
             coro_factory,
