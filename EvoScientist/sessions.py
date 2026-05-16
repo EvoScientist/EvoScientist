@@ -29,6 +29,7 @@ from typing import Any
 import aiosqlite
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Overwrite
 
 _logger = logging.getLogger(__name__)
 
@@ -457,7 +458,7 @@ async def _load_checkpoint_messages(
                 # ``Overwrite`` (langgraph.types) wraps a value with
                 # "replace this channel" semantics — reset state, then
                 # the wrapped value becomes the new full content.
-                if type(delta).__name__ == "Overwrite":
+                if isinstance(delta, Overwrite):
                     inner = getattr(delta, "value", None)
                     accumulated = (
                         list(inner)
@@ -466,7 +467,17 @@ async def _load_checkpoint_messages(
                     )
                     continue
                 if _messages_delta_reducer is not None:
-                    accumulated = _messages_delta_reducer(accumulated, delta)
+                    try:
+                        accumulated = _messages_delta_reducer(accumulated, delta)
+                    except Exception as exc:
+                        _logger.warning(
+                            "Failed to apply messages delta of type %s for "
+                            "thread %s at checkpoint %s: %s",
+                            type(delta).__name__,
+                            thread_id,
+                            cid,
+                            exc,
+                        )
                 else:
                     # ``deepagents._messages_delta_reducer`` is unavailable
                     # (upstream rename / packaging change). A naive concat

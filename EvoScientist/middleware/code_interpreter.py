@@ -11,6 +11,8 @@ Excluded from PTC by design:
     - ``execute`` (shell) — would bypass ``HumanInTheLoopMiddleware`` approval
     - ``write_file`` / ``edit_file`` — side-effectful, no batch benefit
     - ``think_tool`` — reflection is not batchable
+    - ``tavily_search`` — only mounted on the ``research-agent`` sub-agent,
+      not on the main agent; main agent reaches search via ``task`` dispatch
     - MCP tools — dynamic at runtime; add manually if a specific server needs PTC
 
 Usage::
@@ -31,8 +33,6 @@ from langchain_quickjs import CodeInterpreterMiddleware
 # that don't exist at runtime (e.g. async tools when langgraph dev isn't
 # reachable) are silently skipped by ``filter_tools_for_ptc``.
 _DEFAULT_PTC_ALLOWLIST: list[str] = [
-    # Information retrieval
-    "tavily_search",
     # Sub-agent dispatch — sync (deepagents) + async (langgraph dev)
     "task",
     "start_async_task",
