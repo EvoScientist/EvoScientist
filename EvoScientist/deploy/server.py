@@ -91,8 +91,19 @@ def deploy(
     set_workspace_root(ws)
     ensure_dirs()
 
-    # 3. Resolve port
-    effective_port = port or int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+    # 3. Resolve port (explicit None check — don't treat --port 0 as "unset"),
+    # then validate range so misconfigurations fail fast with a clear message
+    # instead of an opaque socket error from langgraph dev later.
+    effective_port = (
+        int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+        if port is None
+        else port
+    )
+    if not (1 <= effective_port <= 65535):
+        console.print(
+            f"[red]Invalid port {effective_port}. Use an integer in [1, 65535].[/red]"
+        )
+        raise typer.Exit(1)
 
     # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
     # holding the port. If an existing EvoSci langgraph dev is already up,

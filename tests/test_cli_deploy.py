@@ -251,6 +251,16 @@ def test_deploy_port_defaults_to_config(monkeypatch, tmp_path):
     assert captured["port_passed"] == 6543
 
 
+@pytest.mark.parametrize("bad_port", [0, -1, 70000])
+def test_deploy_refuses_invalid_port(monkeypatch, tmp_path, bad_port):
+    """CLI must reject out-of-range ports (port=0 was the original silent-fail
+    case: ``port or default`` treated 0 as falsy)."""
+    config = _make_config(default_workdir=str(tmp_path))
+    with pytest.raises(typer.Exit) as exc:
+        _run_deploy_once(monkeypatch, config, port=bad_port)
+    assert exc.value.exit_code == 1
+
+
 def test_deploy_no_ccproxy_when_api_key_auth(monkeypatch, tmp_path):
     config = _make_config(
         default_workdir=str(tmp_path),

@@ -476,6 +476,11 @@ def start_langgraph_dev(
     #   would spawn a SECOND copy of every MCP server. The deployed main
     #   agent there is dead code (only sub-agent graphs are invoked), so the
     #   duplicate MCP pool is pure waste.
+    #
+    # Strip any inherited values first so a user who exported one of these in
+    # their shell cannot break the mutual exclusion contract.
+    sub_env.pop("EVOSCIENTIST_DEPLOY_MODE", None)
+    sub_env.pop("EVOSCIENTIST_DEPLOYED_NO_MCP", None)
     if deploy_mode:
         sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "true"
     else:

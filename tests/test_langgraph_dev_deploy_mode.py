@@ -131,6 +131,74 @@ def test_both_env_vars_never_set_simultaneously(monkeypatch, tmp_path):
         )
 
 
+def test_inherited_opposite_env_var_is_stripped_deploy_true(monkeypatch, tmp_path):
+    """If the parent process already exports ``EVOSCIENTIST_DEPLOYED_NO_MCP``
+    and we ask for deploy mode, the subprocess env must NOT carry the leaked
+    NO_MCP flag (otherwise the mutual exclusion contract breaks)."""
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOYED_NO_MCP", "true")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path,
+            port=16180,
+            deploy_mode=True,
+        )
+
+    env = captured["env"]
+    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "true"
+    assert "EVOSCIENTIST_DEPLOYED_NO_MCP" not in env, (
+        "inherited NO_MCP flag must be stripped when deploy_mode=True"
+    )
+
+
+def test_inherited_opposite_env_var_is_stripped_deploy_false(monkeypatch, tmp_path):
+    """Symmetric: parent exports ``EVOSCIENTIST_DEPLOY_MODE``, CLI/serve calls
+    start_langgraph_dev with default (deploy_mode=False), inherited DEPLOY_MODE
+    must be stripped."""
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "true")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path,
+            port=16181,
+        )
+
+    env = captured["env"]
+    assert env.get("EVOSCIENTIST_DEPLOYED_NO_MCP") == "true"
+    assert "EVOSCIENTIST_DEPLOY_MODE" not in env, (
+        "inherited DEPLOY_MODE flag must be stripped when deploy_mode=False"
+    )
+
+
+def test_inherited_both_env_vars_stripped_then_one_set(monkeypatch, tmp_path):
+    """Worst case: parent has BOTH flags exported. start_langgraph_dev must
+    still produce exactly one in the subprocess env."""
+    for deploy_mode, expected_set, expected_unset in (
+        (True, "EVOSCIENTIST_DEPLOY_MODE", "EVOSCIENTIST_DEPLOYED_NO_MCP"),
+        (False, "EVOSCIENTIST_DEPLOYED_NO_MCP", "EVOSCIENTIST_DEPLOY_MODE"),
+    ):
+        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "true")
+        monkeypatch.setenv("EVOSCIENTIST_DEPLOYED_NO_MCP", "true")
+        captured = _patch_start_prereqs(monkeypatch, tmp_path)
+
+        with pytest.raises(_PopenAbort):
+            manager.start_langgraph_dev(
+                workspace_dir=tmp_path,
+                port=16182,
+                deploy_mode=deploy_mode,
+            )
+
+        env = captured["env"]
+        assert env.get(expected_set) == "true", (
+            f"deploy_mode={deploy_mode}: {expected_set} must be set"
+        )
+        assert expected_unset not in env, (
+            f"deploy_mode={deploy_mode}: inherited {expected_unset} must be stripped"
+        )
+
+
 def test_workspace_dir_env_var_set_regardless_of_mode(monkeypatch, tmp_path):
     """EVOSCIENTIST_WORKSPACE_DIR is independent of deploy_mode."""
     for deploy_mode in (True, False):
