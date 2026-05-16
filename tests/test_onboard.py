@@ -859,6 +859,32 @@ class TestStepChannels:
         assert result["channel_enabled"] == "discord"
         assert result["discord_bot_token"] == "discord-token"
 
+    def test_webui_channel_rejects_occupied_port(self):
+        """Test WebUI setup asks again when the selected port is not bindable."""
+        from EvoScientist.config.onboard import _step_channels
+
+        config = EvoScientistConfig()
+
+        with (
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch(
+                "EvoScientist.langgraph_dev.manager._can_bind_port",
+                side_effect=[False, True],
+            ),
+        ):
+            mock_q.checkbox.return_value.ask.return_value = ["webui"]
+            mock_q.text.return_value.ask.side_effect = [
+                "127.0.0.1",
+                "8010",
+                "8011",
+                "/webui",
+            ]
+            mock_q.password.return_value.ask.return_value = ""
+            result = _step_channels(config)
+
+        assert result["channel_enabled"] == "webui"
+        assert result["webui_port"] == 8011
+
 
 class TestStepMcpServersNpxFailure:
     def _make_test_servers(self):

@@ -449,28 +449,11 @@ def start_langgraph_dev(
     # purposes mean "this is the user's workspace", so they don't conflict;
     # the explicit write below always wins for the subprocess regardless of
     # what the parent had inherited from its own environment.
-    sub_env = os.environ.copy()
-    sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
-
-    # By default, let langgraph dev write its full ``.langgraph_api/`` cache
-    # so future use cases — cross-session async tasks, Store API persistence,
-    # cron job state across CLI restarts — work without further changes. Users
-    # who want a clean workspace can opt out via:
-    #   EvoSci config set langgraph_dev_file_persistence false
-    if not file_persistence:
-        sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
-
-    # Skip MCP loading inside the langgraph dev subprocess. The CLI's main
-    # agent already loaded MCP servers in the foreground process; without
-    # this guard, ``main_graph.py`` would import ``EvoScientist_agent`` and
-    # trigger ``_get_default_agent`` → ``load_mcp_and_build_kwargs`` →
-    # spawning a SECOND copy of every MCP server in the subprocess.
-    # The deployed main agent is currently only reachable via HTTP (for
-    # future Web UI / SDK clients), and none of those are in use, so the
-    # duplicate MCP pool is pure waste. Async sub-agents don't load MCP at
-    # all (their factory bypasses ``load_mcp_and_build_kwargs``), so they
-    # are unaffected.
-    sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+    sub_env = _langgraph_dev_env(
+        workspace_dir,
+        file_persistence=file_persistence,
+        disable_mcp=True,
+    )
 
     try:
         proc = subprocess.Popen(
@@ -767,12 +750,14 @@ def _langgraph_dev_env(
     workspace_dir: Path,
     *,
     file_persistence: bool,
+    disable_mcp: bool = False,
 ) -> dict[str, str]:
     sub_env = os.environ.copy()
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
     if not file_persistence:
         sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
-    sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+    if disable_mcp:
+        sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
     return sub_env
 
 

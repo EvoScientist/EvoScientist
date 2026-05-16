@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import zipfile
+from pathlib import Path
 
 from EvoScientist.channels.webui.channel import WebUIChannel, WebUIConfig
 from EvoScientist.langgraph_dev import manager as langgraph_manager
@@ -22,6 +24,26 @@ def test_webui_run_mode_uses_per_thread_workspace(tmp_path):
     )
 
 
+def test_webui_route_normalizes_configured_base_path():
+    channel = WebUIChannel(WebUIConfig(base_path="webui/"))
+
+    assert channel._route("/healthz") == "/webui/healthz"
+
+
+def test_webui_proxy_strips_control_auth_headers():
+    channel = WebUIChannel(WebUIConfig())
+
+    headers = channel._proxied_request_headers(
+        {
+            "Authorization": "Bearer webui-secret",
+            "X-API-Key": "webui-key",
+            "Content-Type": "application/json",
+        }
+    )
+
+    assert headers == {"Content-Type": "application/json"}
+
+
 def test_webui_thread_registry_discovers_run_workspaces(tmp_path):
     thread_id = "5cd2e8b1-b4a6-48cb-9fe0-11441a6ffddb"
     workspace = tmp_path / "runs" / f"webui_{thread_id}"
@@ -35,6 +57,18 @@ def test_webui_thread_registry_discovers_run_workspaces(tmp_path):
     assert len(threads) == 1
     assert threads[0]["threadId"] == thread_id
     assert threads[0]["workspaceDir"] == str(workspace.resolve())
+
+
+def test_webui_thread_registry_skips_tombstoned_run_workspaces(tmp_path):
+    thread_id = "5cd2e8b1-b4a6-48cb-9fe0-11441a6ffddb"
+    workspace = tmp_path / "runs" / f"webui_{thread_id}"
+    workspace.mkdir(parents=True)
+    channel = WebUIChannel(
+        WebUIConfig(workspace_mode="run", workspace_root=str(tmp_path))
+    )
+    channel._mark_thread_deleted_sync(thread_id)
+
+    assert channel._load_thread_registry_sync() == []
 
 
 def test_webui_thread_registry_order_uses_created_at(tmp_path):
@@ -170,3 +204,17 @@ def test_webui_command_catalog_prefers_native_actions():
     assert catalog["/skills"]["nativeAction"] == "show_skills"
     assert catalog["/mcp"]["nativeAction"] == "manage_mcp"
     assert catalog["/compact"]["nativeAction"] is None
+
+
+def test_webui_workspace_zip_helper_creates_downloadable_archive(tmp_path):
+    channel = WebUIChannel(WebUIConfig())
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("hello")
+
+    archive_path = channel._create_workspace_zip_sync(workspace)
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            assert archive.read("notes.txt") == b"hello"
+    finally:
+        Path(archive_path).unlink()

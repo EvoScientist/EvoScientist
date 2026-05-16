@@ -2739,6 +2739,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 if not 1 <= port <= 65535:
                     console.print("  [red]Port must be between 1 and 65535.[/red]")
                     continue
+                from ..langgraph_dev.manager import _can_bind_port
+
+                if not _can_bind_port(port):
+                    console.print(
+                        f"  [red]Port {port} is already in use. Pick another port.[/red]"
+                    )
+                    continue
                 updates["webui_port"] = port
                 break
 

@@ -39,6 +39,7 @@ _MAX_WORKSPACE_TREE_ENTRIES = 500
 _BINARY_PROBE_BYTES = 8192
 _RUNTIME_IDLE_TTL_SECONDS = 20 * 60
 _MAX_WARM_RUNTIMES = 4
+_THREAD_TOMBSTONE_FILE = ".evoscientist_webui_deleted"
 _LANGUAGE_BY_SUFFIX = {
     ".css": "css",
     ".go": "go",
@@ -174,6 +175,7 @@ class WebUIChannel(Channel):
         self._runtime_records: dict[str, _RuntimeRecord] = {}
         self._runtime_leases: dict[str, _RuntimeLease] = {}
         self._runtime_lock = asyncio.Lock()
+        self._thread_registry_lock = asyncio.Lock()
 
     async def start(self) -> None:
         try:
@@ -229,7 +231,10 @@ class WebUIChannel(Channel):
         return None
 
     def _route(self, suffix: str) -> str:
-        base = (self.config.base_path or "/webui").rstrip("/") or "/webui"
+        base = str(self.config.base_path or "/webui").strip() or "/webui"
+        if not base.startswith("/"):
+            base = f"/{base}"
+        base = base.rstrip("/") or "/webui"
         return f"{base}{suffix}"
 
     def _routes(self) -> list[tuple[str, str, Any]]:
@@ -472,8 +477,9 @@ class WebUIChannel(Channel):
     async def _handle_threads_list(self, request):
         if not self._check_auth(request):
             return self._unauthorized(request)
-        threads = await self._load_thread_registry()
-        await self._save_thread_registry(threads)
+        async with self._thread_registry_lock:
+            threads = await self._load_thread_registry_unlocked()
+            await self._save_thread_registry_unlocked(threads)
         return self._json(
             request,
             sorted(
@@ -524,9 +530,21 @@ class WebUIChannel(Channel):
             )
         async with self._runtime_lock:
             self._evict_runtime_locked(thread_id)
-        threads = await self._load_thread_registry()
-        next_threads = [item for item in threads if item.get("threadId") != thread_id]
-        await self._save_thread_registry(next_threads)
+        async with self._thread_registry_lock:
+            threads = await self._load_thread_registry_unlocked()
+            next_threads = [
+                item for item in threads if item.get("threadId") != thread_id
+            ]
+            if (self.config.workspace_mode or "daemon") == "run":
+                try:
+                    await asyncio.to_thread(self._mark_thread_deleted_sync, thread_id)
+                except OSError:
+                    logger.warning(
+                        "Failed to tombstone deleted WebUI thread %s",
+                        thread_id,
+                        exc_info=True,
+                    )
+            await self._save_thread_registry_unlocked(next_threads)
         return self._json(
             request, {"ok": True, "deleted": len(next_threads) != len(threads)}
         )
@@ -591,22 +609,7 @@ class WebUIChannel(Channel):
         if request.query_string:
             target_url = f"{target_url}?{request.query_string}"
 
-        headers = {}
-        for key, value in request.headers.items():
-            if key.lower() not in {
-                "connection",
-                "content-encoding",
-                "content-length",
-                "host",
-                "keep-alive",
-                "proxy-authenticate",
-                "proxy-authorization",
-                "te",
-                "trailer",
-                "transfer-encoding",
-                "upgrade",
-            }:
-                headers[key] = value
+        headers = self._proxied_request_headers(request.headers)
 
         body = await request.read()
         timeout = ClientTimeout(total=None, sock_connect=30)
@@ -645,12 +648,47 @@ class WebUIChannel(Channel):
                 await stream.write_eof()
                 return stream
 
+    def _proxied_request_headers(self, request_headers) -> dict[str, str]:
+        excluded = {
+            "authorization",
+            "connection",
+            "content-encoding",
+            "content-length",
+            "host",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "x-api-key",
+        }
+        return {
+            key: value
+            for key, value in request_headers.items()
+            if key.lower() not in excluded
+        }
+
     def _workspace_root(self) -> Path:
         configured = (self.config.workspace_root or "").strip()
         return Path(configured).expanduser().resolve() if configured else Path.cwd()
 
     def _thread_registry_path(self) -> Path:
         return self._workspace_root() / ".evoscientist_webui_threads.json"
+
+    def _thread_tombstone_path(self, thread_id: str) -> Path:
+        return self._workspace_path_for_thread(thread_id) / _THREAD_TOMBSTONE_FILE
+
+    def _is_thread_tombstoned_sync(self, thread_id: str) -> bool:
+        return (self.config.workspace_mode or "daemon") == "run" and (
+            self._thread_tombstone_path(thread_id).exists()
+        )
+
+    def _mark_thread_deleted_sync(self, thread_id: str) -> None:
+        tombstone = self._thread_tombstone_path(thread_id)
+        tombstone.parent.mkdir(parents=True, exist_ok=True)
+        tombstone.write_text(_utc_now_iso())
 
     def _load_thread_registry_sync(self) -> list[dict[str, Any]]:
         path = self._thread_registry_path()
@@ -670,6 +708,8 @@ class WebUIChannel(Channel):
                 continue
             thread_id = str(item.get("threadId") or item.get("thread_id") or "").strip()
             if not _UUID_THREAD_ID_RE.match(thread_id):
+                continue
+            if self._is_thread_tombstoned_sync(thread_id):
                 continue
             title = str(item.get("title") or f"Session {thread_id}").strip()
             created_at = str(
@@ -705,6 +745,8 @@ class WebUIChannel(Channel):
                     continue
                 thread_id = workspace.name.removeprefix("webui_")
                 if not _UUID_THREAD_ID_RE.match(thread_id):
+                    continue
+                if (workspace / _THREAD_TOMBSTONE_FILE).exists():
                     continue
                 if thread_id in threads_by_id:
                     continue
@@ -742,13 +784,40 @@ class WebUIChannel(Channel):
             key=lambda item: str(item.get("createdAt") or item.get("updatedAt") or ""),
             reverse=True,
         )
-        path.write_text(json.dumps({"threads": ordered}, indent=2, sort_keys=True))
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+                temp_file.write(
+                    json.dumps({"threads": ordered}, indent=2, sort_keys=True)
+                )
+            os.replace(temp_name, path)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
 
-    async def _load_thread_registry(self) -> list[dict[str, Any]]:
+    async def _load_thread_registry_unlocked(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._load_thread_registry_sync)
 
-    async def _save_thread_registry(self, threads: list[dict[str, Any]]) -> None:
+    async def _save_thread_registry_unlocked(
+        self, threads: list[dict[str, Any]]
+    ) -> None:
         await asyncio.to_thread(self._save_thread_registry_sync, threads)
+
+    async def _load_thread_registry(self) -> list[dict[str, Any]]:
+        async with self._thread_registry_lock:
+            return await self._load_thread_registry_unlocked()
+
+    async def _save_thread_registry(self, threads: list[dict[str, Any]]) -> None:
+        async with self._thread_registry_lock:
+            await self._save_thread_registry_unlocked(threads)
 
     async def _ensure_thread_record(
         self,
@@ -761,44 +830,45 @@ class WebUIChannel(Channel):
         if not _UUID_THREAD_ID_RE.match(thread_id):
             raise ValueError("direct WebUI runtime requires a UUID threadId")
         workspace_dir = await self._resolve_or_create_workspace(thread_id)
-        threads = await self._load_thread_registry()
-        now = _utc_now_iso()
-        existing_index = next(
-            (
-                index
-                for index, item in enumerate(threads)
-                if item.get("threadId") == thread_id
-            ),
-            None,
-        )
-        if existing_index is None:
-            record = {
-                "threadId": thread_id,
-                "title": title or f"Session {thread_id}",
-                "titleSource": title_source or ("manual" if title else "default"),
-                "createdAt": now,
-                "updatedAt": now,
-                "workspaceDir": workspace_dir,
-                "legacy": False,
-                "readOnly": False,
-            }
-            threads.append(record)
-        else:
-            record = {
-                **threads[existing_index],
-                "workspaceDir": workspace_dir,
-                "title": title
-                or threads[existing_index].get("title")
-                or f"Session {thread_id}",
-                "titleSource": title_source
-                or threads[existing_index].get("titleSource")
-                or "default",
-            }
-            if touch:
-                record["updatedAt"] = now
-            threads[existing_index] = record
-        await self._save_thread_registry(threads)
-        return record
+        async with self._thread_registry_lock:
+            threads = await self._load_thread_registry_unlocked()
+            now = _utc_now_iso()
+            existing_index = next(
+                (
+                    index
+                    for index, item in enumerate(threads)
+                    if item.get("threadId") == thread_id
+                ),
+                None,
+            )
+            if existing_index is None:
+                record = {
+                    "threadId": thread_id,
+                    "title": title or f"Session {thread_id}",
+                    "titleSource": title_source or ("manual" if title else "default"),
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "workspaceDir": workspace_dir,
+                    "legacy": False,
+                    "readOnly": False,
+                }
+                threads.append(record)
+            else:
+                record = {
+                    **threads[existing_index],
+                    "workspaceDir": workspace_dir,
+                    "title": title
+                    or threads[existing_index].get("title")
+                    or f"Session {thread_id}",
+                    "titleSource": title_source
+                    or threads[existing_index].get("titleSource")
+                    or "default",
+                }
+                if touch:
+                    record["updatedAt"] = now
+                threads[existing_index] = record
+            await self._save_thread_registry_unlocked(threads)
+            return record
 
     def _workspace_name_for_thread(self, thread_id: str) -> str:
         token = re.sub(r"[^A-Za-z0-9._-]+", "-", thread_id).strip(" .-_")
@@ -1719,6 +1789,27 @@ class WebUIChannel(Channel):
             },
         )
 
+    def _create_workspace_zip_sync(self, root: Path) -> str:
+        fd, archive_path = tempfile.mkstemp(prefix="evosci-webui-", suffix=".zip")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for current_root, dirs, files in os.walk(root, followlinks=False):
+                    dirs[:] = sorted(dirs)
+                    for filename in sorted(files):
+                        candidate = Path(current_root) / filename
+                        if candidate.is_symlink() or not candidate.is_file():
+                            continue
+                        relative = candidate.resolve().relative_to(root).as_posix()
+                        archive.write(candidate, arcname=relative)
+        except Exception:
+            try:
+                os.unlink(archive_path)
+            except OSError:
+                pass
+            raise
+        return archive_path
+
     async def _handle_ui_files_download_all(self, request):
         if not self._check_auth(request):
             return self._unauthorized(request)
@@ -1729,25 +1820,29 @@ class WebUIChannel(Channel):
             thread_id or uuid.uuid4().hex
         )
         root = Path(workspace_dir).resolve()
-        fd, archive_path = tempfile.mkstemp(prefix="evosci-webui-", suffix=".zip")
-        os.close(fd)
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for current_root, dirs, files in os.walk(root, followlinks=False):
-                dirs[:] = sorted(dirs)
-                for filename in sorted(files):
-                    candidate = Path(current_root) / filename
-                    if candidate.is_symlink() or not candidate.is_file():
-                        continue
-                    relative = candidate.resolve().relative_to(root).as_posix()
-                    archive.write(candidate, arcname=relative)
-        response = web.FileResponse(
-            archive_path,
+        archive_path = await asyncio.to_thread(self._create_workspace_zip_sync, root)
+        response = web.StreamResponse(
             headers={
                 **self._cors_headers(request),
                 "Content-Disposition": 'attachment; filename="workspace.zip"',
+                "Content-Type": "application/zip",
             },
         )
-        return response
+        try:
+            await response.prepare(request)
+            with open(archive_path, "rb") as archive:
+                while True:
+                    chunk = await asyncio.to_thread(archive.read, 65536)
+                    if not chunk:
+                        break
+                    await response.write(chunk)
+            await response.write_eof()
+            return response
+        finally:
+            try:
+                os.unlink(archive_path)
+            except OSError:
+                pass
 
     async def _handle_ui_session_shutdown(self, request):
         if not self._check_auth(request):
