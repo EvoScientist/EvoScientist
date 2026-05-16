@@ -2490,6 +2490,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             "certifi>=2024.0",
         ],
         "qq": ["qq-botpy>=1.0", "cryptography>=41.0", "qrcode>=7.4"],
+        "webui": ["aiohttp>=3.9"],
     }
 
     # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
@@ -2571,6 +2572,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             [("signal_phone_number", "Phone number (E.164)")],
             None,
             None,
+        ),
+        (
+            "webui",
+            "Web UI",
+            [],
+            "aiohttp",
+            "webui",
         ),
         ("imessage", "iMessage", [], None, None),  # handled via _setup_imessage()
     ]
@@ -2698,6 +2706,66 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             updates["imessage_enabled"] = True
             updates["imessage_allowed_senders"] = senders.strip()
             enabled_channels.append("imessage")
+            continue
+
+        if ch_name == "webui":
+            console.print(
+                "  [dim]Configure the browser-facing control channel for the Next.js UI.[/dim]"
+            )
+            bind_host = questionary.text(
+                "Web UI bind host (127.0.0.1 = local only):",
+                default=str(getattr(config, "webui_bind_host", "127.0.0.1")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if bind_host is None:
+                raise KeyboardInterrupt()
+            updates["webui_bind_host"] = (bind_host or "127.0.0.1").strip()
+
+            while True:
+                port_text = questionary.text(
+                    "Web UI port:",
+                    default=str(getattr(config, "webui_port", 8010)),
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                ).ask()
+                if port_text is None:
+                    raise KeyboardInterrupt()
+                try:
+                    port = int((port_text or "8010").strip())
+                except ValueError:
+                    console.print("  [red]Port must be a number.[/red]")
+                    continue
+                if not 1 <= port <= 65535:
+                    console.print("  [red]Port must be between 1 and 65535.[/red]")
+                    continue
+                updates["webui_port"] = port
+                break
+
+            base_path = questionary.text(
+                "Web UI API base path:",
+                default=str(getattr(config, "webui_base_path", "/webui")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if base_path is None:
+                raise KeyboardInterrupt()
+            normalized_base = (base_path or "/webui").strip() or "/webui"
+            if not normalized_base.startswith("/"):
+                normalized_base = f"/{normalized_base}"
+            updates["webui_base_path"] = normalized_base.rstrip("/") or "/webui"
+
+            api_key = questionary.password(
+                "Web UI API key (optional):",
+                default=str(getattr(config, "webui_api_key", "")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if api_key is None:
+                raise KeyboardInterrupt()
+            updates["webui_api_key"] = api_key.strip()
+
+            enabled_channels.append("webui")
             continue
 
         # QQ: offer scan-to-configure before falling back to manual entry.

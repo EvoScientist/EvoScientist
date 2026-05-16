@@ -188,20 +188,66 @@ class CompactSummaryRenderable:
 
 
 def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
-    """Conditionally start the langgraph dev subprocess for async sub-agents.
+    """Conditionally start the langgraph dev subprocess.
 
-    Shared by both the interactive entry and the serve entry — keeps the
-    user-visible status message and the conditional in one place.
+    Async sub-agents and WebUI both use LangGraph Dev. WebUI can force-start
+    the server without enabling async sub-agent routing for the main CLI.
     """
-    if not getattr(config, "enable_async_subagents", False):
+    needs_async = bool(getattr(config, "enable_async_subagents", False))
+    needs_webui = _channels_include(config, "webui")
+    if not (needs_async or needs_webui):
         return
     from ..langgraph_dev.manager import ensure_langgraph_dev
 
+    label = (
+        "Starting async sub-agent server (langgraph dev)..."
+        if needs_async
+        else "Starting WebUI runtime (langgraph dev)..."
+    )
     with console.status(
-        "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+        f"[dim]{label}[/dim]",
         spinner="dots",
     ):
-        ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+        ensure_langgraph_dev(
+            config,
+            workspace_dir=workspace_dir,
+            force=needs_webui and not needs_async,
+        )
+
+
+def _channels_include(config: Any, channel_name: str) -> bool:
+    enabled = str(getattr(config, "channel_enabled", "") or "")
+    return channel_name in {part.strip() for part in enabled.split(",") if part.strip()}
+
+
+def _normalize_webui_base_path(base_path: str) -> str:
+    normalized = (base_path or "/webui").strip() or "/webui"
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/") or "/webui"
+
+
+def _format_webui_url_host(bind_host: str) -> str:
+    host = (bind_host or "127.0.0.1").strip() or "127.0.0.1"
+    if host in {"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"}:
+        return "localhost"
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _webui_base_from_config(config: Any) -> str:
+    bind_host = str(getattr(config, "webui_bind_host", "127.0.0.1") or "127.0.0.1")
+    port = int(getattr(config, "webui_port", 8010) or 8010)
+    base_path = _normalize_webui_base_path(
+        str(getattr(config, "webui_base_path", "/webui") or "/webui")
+    )
+    return f"http://{_format_webui_url_host(bind_host)}:{port}{base_path}"
+
+
+def _langgraph_dev_base_from_config(config: Any) -> str:
+    port = int(getattr(config, "langgraph_dev_port", 6174) or 6174)
+    return f"http://127.0.0.1:{port}"
 
 
 def _resolve_context_window(
@@ -1003,6 +1049,11 @@ def serve(
 
     console.print(f"[dim]Thread: {tid}[/dim]")
     console.print(f"[dim]Workspace: {_shorten_path(ws)}[/dim]")
+    if _channels_include(config, "webui"):
+        console.print(f"[dim]WebUI base: {_webui_base_from_config(config)}[/dim]")
+        console.print(
+            f"[dim]LangGraph runtime: {_langgraph_dev_base_from_config(config)}[/dim]"
+        )
     console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
 
     # Explicit SIGINT/SIGTERM handlers.  Python's default SIGINT raises
