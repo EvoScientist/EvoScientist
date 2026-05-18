@@ -532,7 +532,33 @@ async def _load_checkpoint_messages(
     except ImportError:
         _messages_delta_reducer = None  # type: ignore[assignment]
 
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    # Pre-resolve the latest EvoScientist checkpoint_id with an
+    # ``agent_name`` filter, then pin it into the config so
+    # ``aget_tuple`` fetches THAT specific row. Without the pin,
+    # ``aget_tuple`` returns the latest by ``checkpoint_id`` alone — in
+    # a multi-agent DB where a third-party tool shares the same
+    # ``(thread_id, checkpoint_ns)`` and happens to have a higher id,
+    # we'd leak that agent's transcript into our /resume. The ancestor
+    # walk via ``parent_checkpoint_id`` chain is unambiguous (specific
+    # ids), so pinning the head is sufficient — the rest of the chain
+    # follows EvoScientist's parent links.
+    head_query = (
+        "SELECT checkpoint_id FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = '' "
+        "  AND json_extract(metadata, '$.agent_name') = ? "
+        "ORDER BY checkpoint_id DESC LIMIT 1"
+    )
+    async with saver.conn.execute(head_query, (thread_id, AGENT_NAME)) as cur:
+        head_row = await cur.fetchone()
+    if head_row is None:
+        return []
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": head_row[0],
+        }
+    }
     target = await saver.aget_tuple(config)
     if target is None:
         return []

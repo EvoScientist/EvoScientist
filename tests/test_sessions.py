@@ -545,6 +545,79 @@ class TestThreadFunctions(unittest.TestCase):
         finally:
             _run(_cleanup())
 
+    def test_get_thread_messages_ignores_colliding_other_agent(self):
+        """Multi-agent DB with thread_id collision: must surface only ours.
+
+        Without the agent_name filter on the head-checkpoint lookup,
+        ``saver.aget_tuple()`` returns the latest by ``checkpoint_id``
+        alone — so if a third-party agent's checkpoint for the same
+        ``thread_id`` happens to have a higher id (lexicographically),
+        we'd leak its transcript into ``/resume``. Pinning the head to
+        the latest EvoScientist-agent row prevents that.
+        """
+        from langgraph.checkpoint.serde.types import _DeltaSnapshot
+
+        async def _insert():
+            import aiosqlite
+
+            serde = JsonPlusSerializer()
+            evo_messages = [
+                HumanMessage(content="ours_1", id="o1"),
+                AIMessage(content="ours_2", id="o2"),
+            ]
+            other_messages = [
+                HumanMessage(content="theirs_1", id="t1"),
+                AIMessage(content="theirs_2", id="t2"),
+                HumanMessage(content="theirs_3", id="t3"),
+            ]
+            evo_type, evo_blob = serde.dumps_typed(
+                {"channel_values": {"messages": _DeltaSnapshot(value=evo_messages)}}
+            )
+            other_type, other_blob = serde.dumps_typed(
+                {"channel_values": {"messages": _DeltaSnapshot(value=other_messages)}}
+            )
+            evo_meta = json.dumps({"agent_name": AGENT_NAME})
+            other_meta = json.dumps({"agent_name": "ThirdPartyAgent"})
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                # EvoScientist's checkpoint id is LEXICOGRAPHICALLY
+                # SMALLER than the third-party agent's, so a naive
+                # "latest by checkpoint_id" lookup would pick the wrong
+                # one.
+                await conn.execute(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
+                    "parent_checkpoint_id, type, checkpoint, metadata) "
+                    "VALUES (?, '', 'aaa_evo', NULL, ?, ?, ?)",
+                    ("collide01", evo_type, evo_blob, evo_meta),
+                )
+                await conn.execute(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
+                    "parent_checkpoint_id, type, checkpoint, metadata) "
+                    "VALUES (?, '', 'zzz_other', NULL, ?, ?, ?)",
+                    ("collide01", other_type, other_blob, other_meta),
+                )
+                await conn.commit()
+
+        async def _cleanup():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?", ("collide01",)
+                )
+                await conn.commit()
+
+        _run(_insert())
+        try:
+            messages = _run(get_thread_messages("collide01"))
+            assert [m.content for m in messages] == ["ours_1", "ours_2"]
+            # Defense-in-depth: explicitly forbid leakage of the other
+            # agent's content.
+            for msg in messages:
+                assert not msg.content.startswith("theirs_")
+        finally:
+            _run(_cleanup())
+
     # -- Agent isolation: OtherAgent data should never be visible --
 
     def test_thread_exists_ignores_other_agent(self):
