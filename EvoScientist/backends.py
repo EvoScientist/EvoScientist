@@ -58,7 +58,7 @@ BLOCKED_COMMANDS = [
 # and require explicit user confirmation. Each entry: (regex, reason string).
 _FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
-        re.compile(r"(?:^|\s)~(?:/|\s|$)"),
+        re.compile(r"(?:^|\s)~(?:[A-Za-z0-9._-]*/|/|\s|$)"),
         "references home directory '~' (may leak sensitive files)",
     ),
     (re.compile(r"\$[A-Za-z_{]"), "expands environment variables (may leak secrets)"),

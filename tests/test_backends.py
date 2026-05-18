@@ -47,6 +47,12 @@ class TestValidateCommand:
         assert validate_command("cat ~/secrets.txt") is None
         assert check_forced_confirmation("cat ~/secrets.txt") is not None
 
+    def test_home_tilde_user_expansion_soft_blocked(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("cat ~root/.ssh/id_rsa") is not None
+        assert check_forced_confirmation("ls ~user/.bashrc") is not None
+
     def test_blocked_rm_rf_absolute(self):
         result = validate_command("rm -rf /important")
         assert result is not None
