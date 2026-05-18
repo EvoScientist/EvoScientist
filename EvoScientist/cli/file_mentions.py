@@ -496,8 +496,7 @@ def complete_file_mention(
     if quoted:
         # User opened a quoted mention — close it for them.
         return [
-            (f'@"{r}"', "dir" if r.endswith("/") else _type_hint(r))
-            for r in results
+            (f'@"{r}"', "dir" if r.endswith("/") else _type_hint(r)) for r in results
         ]
     return [
         (_format_mention(r), "dir" if r.endswith("/") else _type_hint(r))
