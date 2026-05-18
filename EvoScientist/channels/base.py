@@ -7,6 +7,7 @@ This module defines the Channel interface that all messaging channels
 import asyncio
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -337,6 +338,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         # Fire-and-forget background tasks (e.g. rate-limit notices).  Holding
         # strong references prevents the asyncio loop from GC-ing them mid-run.
         self._background_tasks: set[asyncio.Task] = set()
+        # Per-chat timestamp (monotonic) of the most recent rate-limit notice.
+        # Used to suppress duplicate notices when a multi-chunk send hits the
+        # same rate limit repeatedly within ``_rate_limit_notice_cooldown_s``.
+        self._rate_limit_last_notice: dict[str, float] = {}
 
         # Mention gating: "always" | "group" | "off"
         self.require_mention: str = getattr(config, "require_mention", "group")
@@ -457,6 +462,21 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 _logger.debug(f"{self.name} debounce task shutdown error: {e}")
         self._debounce_tasks.clear()
 
+        # Cancel fire-and-forget background tasks (e.g. in-flight rate-limit
+        # notices).  These are best-effort by design — we don't want them
+        # outliving the channel and writing to a torn-down client.
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                _logger.debug(f"{self.name} background task shutdown error: {e}")
+        self._background_tasks.clear()
+
         for sender in list(self._message_buffers.keys()):
             try:
                 await self._process_buffered_messages(sender)
@@ -543,6 +563,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                                 self._send_chunk(_cid, _fmt, _raw, _reply, _meta)
                             ),
                             notify_chat_id=chat_id,
+                            notify_reply_to=reply_to,
+                            notify_metadata=message.metadata,
                         )
                     except Exception as chunk_err:
                         self._trace_event(
@@ -750,8 +772,13 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
     _rate_limit_delay: float = 1.0
     _rate_limit_notify_threshold_s: float = 2.0
     """Send a user-facing notice when a retry delay meets/exceeds this many
-    seconds.  Set to ``float("inf")`` to disable.  Short backoffs (≤2 s) are
-    suppressed so transient blips don't spam the chat."""
+    seconds.  Set to ``float("inf")`` to disable.  Short backoffs (< threshold)
+    are suppressed so transient blips don't spam the chat."""
+
+    _rate_limit_notice_cooldown_s: float = 30.0
+    """Per-chat cooldown between consecutive rate-limit notices.  Prevents one
+    multi-chunk send (each chunk retried independently) from spamming the same
+    chat with several "retrying in Xs..." notices in quick succession."""
 
     def _extract_retry_after(self, exc: Exception) -> float | None:
         """Extract retry-wait seconds from an exception.
@@ -818,6 +845,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         max_retries: int = 3,
         *,
         notify_chat_id: str | None = None,
+        notify_reply_to: str | None = None,
+        notify_metadata: dict | None = None,
     ) -> Any:
         """Send helper with automatic exponential-backoff retry.
 
@@ -831,7 +860,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         When *notify_chat_id* is provided and a retry backoff meets
         ``_rate_limit_notify_threshold_s``, a best-effort user-facing
         "Rate limited, retrying in Xs..." notice is sent to that chat so
-        users aren't left waiting in silence.
+        users aren't left waiting in silence.  *notify_reply_to* and
+        *notify_metadata* are forwarded to ``_send_chunk`` so channels
+        that require platform-specific fields (e.g. QQ's ``event_id``)
+        can still render the notice correctly.
         """
         from .retry import retry_async
 
@@ -848,16 +880,29 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 f"in {info.delay_s:.2f}s: {info.error}"
             )
             if (
-                notify_chat_id is not None
-                and info.delay_s >= self._rate_limit_notify_threshold_s
+                notify_chat_id is None
+                or info.delay_s < self._rate_limit_notify_threshold_s
             ):
-                # Fire-and-forget: notice is best-effort and must not block
-                # or fail the retry pipeline.
-                task = asyncio.create_task(
-                    self._notify_rate_limit_retry(notify_chat_id, info.delay_s)
+                return
+            # Per-chat cooldown: a multi-chunk send retrying each chunk
+            # independently must not fire one notice per chunk.
+            now = time.monotonic()
+            last = self._rate_limit_last_notice.get(notify_chat_id, 0.0)
+            if now - last < self._rate_limit_notice_cooldown_s:
+                return
+            self._rate_limit_last_notice[notify_chat_id] = now
+            # Fire-and-forget: notice is best-effort and must not block
+            # or fail the retry pipeline.
+            task = asyncio.create_task(
+                self._notify_rate_limit_retry(
+                    notify_chat_id,
+                    info.delay_s,
+                    reply_to=notify_reply_to,
+                    metadata=notify_metadata,
                 )
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return await retry_async(
             coro_factory,
@@ -872,17 +917,32 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Build the user-facing rate-limit retry notice.  Override to localize."""
         return f"⏳ Rate limited, retrying in {delay_s:.0f}s..."
 
-    async def _notify_rate_limit_retry(self, chat_id: str, delay_s: float) -> None:
+    async def _notify_rate_limit_retry(
+        self,
+        chat_id: str,
+        delay_s: float,
+        *,
+        reply_to: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
         """Best-effort user-facing rate-limit notice.
 
         Bypasses :meth:`send` (and its per-chat lock / retry loop) so this
         notice can slip out while the parent send is mid-backoff.  Any error
         is swallowed — a failed notice must never block actual delivery.
+
+        Forwarding the original send's *reply_to* and *metadata* lets
+        platform-specific channels (e.g. QQ, which needs ``event_id``) render
+        the notice in the right context.  Note that if the channel itself is
+        rate-limited, this notice may also be rejected; that's accepted as the
+        cost of a best-effort path.
         """
         try:
             text = self._format_rate_limit_notice(delay_s)
             formatted = self._format_chunk(text)
-            await self._send_chunk(chat_id, formatted, text, None, {})
+            await self._send_chunk(
+                chat_id, formatted, text, reply_to, dict(metadata or {})
+            )
         except Exception as exc:
             self._trace_event(
                 "outbound_rate_limit_notify_failed",

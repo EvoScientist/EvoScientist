@@ -638,6 +638,142 @@ class TestChannelSend:
 
         _run(_test())
 
+    def test_rate_limit_notice_deduplicated_across_chunks(self):
+        """A multi-chunk send hitting the same rate limit fires at most one notice."""
+
+        async def _test():
+            ch = StubChannel()
+            # Tight cooldown isn't needed — the default already guards a single
+            # send call.  Lower it slightly so the assertion is unambiguous.
+            ch._rate_limit_notice_cooldown_s = 30.0
+            original_send_chunk = ch._send_chunk
+            real_calls = {"n": 0}
+
+            async def flaky_send(chat_id, fmt, raw, reply_to, meta):
+                if raw.startswith("⏳"):
+                    await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+                    return
+                real_calls["n"] += 1
+                # Every real chunk's first attempt trips the rate limit.
+                # Subsequent attempts (within the same chunk) succeed.
+                if real_calls["n"] % 2 == 1:
+                    err = RuntimeError("HTTP 429 rate limit")
+                    err.retry_after = 5.0
+                    raise err
+                await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+
+            ch._send_chunk = flaky_send
+            ch._retry_config.min_delay_s = 0.0
+            ch._retry_config.max_delay_s = 5.0
+            ch._retry_config.jitter = 0.0
+
+            # Force chunking by exceeding the chunk limit (4096).
+            payload = "abcd " * 1200  # ~6 KB → ≥2 chunks
+            msg = OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content=payload,
+                metadata={"chat_id": "c1"},
+            )
+            ok = await ch.send(msg)
+            assert ok is True
+
+            notices = [c for c in ch._sent_chunks if c[2].startswith("⏳")]
+            # At least 2 chunks each hit the rate limit, but the cooldown
+            # collapses them into a single user-facing notice.
+            assert len(notices) == 1, (
+                f"expected 1 notice, got {len(notices)} (real chunks: "
+                f"{real_calls['n']})"
+            )
+
+        _run(_test())
+
+    def test_rate_limit_notice_forwards_metadata_and_reply_to(self):
+        """Notice carries the original send's metadata + reply_to so channels
+        like QQ (which need ``event_id``) can render it correctly."""
+
+        async def _test():
+            ch = StubChannel()
+            attempts = {"n": 0}
+            original_send_chunk = ch._send_chunk
+
+            async def flaky_send(chat_id, fmt, raw, reply_to, meta):
+                if raw.startswith("⏳"):
+                    await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+                    return
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    err = RuntimeError("HTTP 429 rate limit")
+                    err.retry_after = 5.0
+                    raise err
+                await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+
+            ch._send_chunk = flaky_send
+            ch._retry_config.min_delay_s = 0.0
+            ch._retry_config.max_delay_s = 5.0
+            ch._retry_config.jitter = 0.0
+
+            sent_meta = {"chat_id": "c1", "event_id": "evt_42", "msg_type": "c2c"}
+            msg = OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="payload",
+                reply_to="msg_99",
+                metadata=sent_meta,
+            )
+            ok = await ch.send(msg)
+            assert ok is True
+
+            notices = [c for c in ch._sent_chunks if c[2].startswith("⏳")]
+            assert len(notices) == 1
+            _, _, _, notice_reply_to, notice_meta = notices[0]
+            assert notice_reply_to == "msg_99"
+            assert notice_meta.get("event_id") == "evt_42"
+            assert notice_meta.get("msg_type") == "c2c"
+            # Defensive copy: mutating the notice's metadata must not bleed
+            # into the caller's dict.
+            notice_meta["leaked"] = True
+            assert "leaked" not in sent_meta
+
+        _run(_test())
+
+    def test_stop_cancels_in_flight_rate_limit_notices(self):
+        """``stop()`` must cancel pending background notices so they don't
+        outlive the channel and write to a torn-down client."""
+
+        async def _test():
+            ch = StubChannel()
+            await ch.start()
+            notice_started = asyncio.Event()
+            notice_should_finish = asyncio.Event()
+
+            async def slow_notify(chat_id, delay_s, *, reply_to=None, metadata=None):
+                notice_started.set()
+                try:
+                    await notice_should_finish.wait()
+                except asyncio.CancelledError:
+                    raise
+
+            ch._notify_rate_limit_retry = slow_notify
+
+            # Manually trigger the background-task registration path the same
+            # way _send_with_retry does, to avoid coupling this test to the
+            # retry internals.
+            task = asyncio.create_task(
+                ch._notify_rate_limit_retry("c1", 5.0)
+            )
+            ch._background_tasks.add(task)
+            task.add_done_callback(ch._background_tasks.discard)
+
+            await notice_started.wait()
+            assert task in ch._background_tasks
+
+            await ch.stop()
+            assert task.cancelled() or task.done()
+            assert ch._background_tasks == set()
+
+        _run(_test())
+
 
 class TestChannelAllowList:
     def test_open_access_when_no_list(self):
