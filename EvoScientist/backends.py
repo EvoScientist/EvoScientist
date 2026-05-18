@@ -254,32 +254,43 @@ def _subpath_under_mount(token: str, mount: str) -> str | None:
     return None
 
 
+def _skills_tier_paths() -> tuple[Path, Path | None, Path]:
+    """``(USER, GLOBAL or None, BUILTIN)`` — the tier priority chain that
+    ``MergedSkillsBackend._backends()`` honors. Single source of truth so
+    the resolver and the backend can't silently drift out of order.
+    """
+    return (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR, _BUILTIN_SKILLS_DIR)
+
+
 def _resolve_virtual_mount_path(token: str) -> str | None:
-    """Resolve a virtual mount token to an absolute filesystem path, or
-    ``None`` when *token* is not a registered virtual mount.
+    """Resolve a virtual mount token to a shell-safe token, or ``None`` when
+    *token* is not a registered virtual mount.
 
-    Mirrors ``MergedSkillsBackend._backends()`` priority for ``/skills/...``
-    (USER → GLOBAL → BUILTIN), returning the first tier where the path
-    exists. Falls back to USER_SKILLS_DIR (the write target) so a not-found
-    shell error names the location the agent would write to.
+    For ``/skills/...``: walks ``_skills_tier_paths()`` priority (USER →
+    GLOBAL → BUILTIN), returning ``shlex.quote`` of the first tier where the
+    path exists. On miss, returns a workspace-relative ``./skills/<rel>``
+    form — agent typed a virtual path, so the shell error should reference a
+    location they recognise (`USER_SKILLS_DIR` defaults to
+    ``WORKSPACE_ROOT / "skills"``, which is also where ``MergedSkillsBackend``
+    would write a new skill).
 
-    ``/memories/...`` has only one tier (``paths.MEMORIES_DIR``).
+    For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
+    absolute and ``shlex.quote``-wrapped. Memories live outside the
+    workspace, so a relative form would point at an unrelated location.
     """
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
-        for tier in (
-            paths.USER_SKILLS_DIR,
-            paths.GLOBAL_SKILLS_DIR,
-            _BUILTIN_SKILLS_DIR,
-        ):
+        for tier in _skills_tier_paths():
+            if tier is None:
+                continue
             candidate = Path(tier) / rel
             if candidate.exists():
-                return str(candidate)
-        return str(Path(paths.USER_SKILLS_DIR) / rel)
+                return shlex.quote(str(candidate))
+        return shlex.quote("./skills/" + rel if rel else "./skills")
 
     rel = _subpath_under_mount(token, "/memories")
     if rel is not None:
-        return str(Path(paths.MEMORIES_DIR) / rel)
+        return shlex.quote(str(Path(paths.MEMORIES_DIR) / rel))
 
     return None
 
