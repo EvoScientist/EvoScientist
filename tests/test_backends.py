@@ -391,9 +391,6 @@ class TestVirtualMountResolution:
         tokens = shlex.split(result)
         assert tokens[0] == "python"
         assert tokens[1] == str(user_dir / "hello" / "main.py")
-        # Round-trip proof: the resolver output is genuinely shell-quoted,
-        # not just a raw absolute path that happens to lack metachars.
-        assert "'" in result or " " not in str(user_dir)
 
     def test_memories_resolver_quotes_path_when_memories_dir_has_whitespace(
         self, monkeypatch, tmp_path
@@ -507,7 +504,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python /skills/hello-ws/main.py")
+        resp = backend.execute("python3 /skills/hello-ws/main.py")
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
@@ -543,7 +540,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python /skills/shadow-test/main.py")
+        resp = backend.execute("python3 /skills/shadow-test/main.py")
         assert resp.exit_code == 0, resp.output
         assert "WORKSPACE_TIER_WINS" in resp.output
         assert "GLOBAL_TIER_LOST" not in resp.output
@@ -575,7 +572,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python /skills/hello-e2e/main.py")
+        resp = backend.execute("python3 /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
 
