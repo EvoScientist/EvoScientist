@@ -19,15 +19,34 @@ from pathlib import Path
 
 _PATH_CHARS = r"A-Za-z0-9._~/\\:-"
 
-FILE_MENTION_PATTERN = re.compile(r"@(?P<path>(?:\\.|[" + _PATH_CHARS + r"])+)")
+FILE_MENTION_PATTERN = re.compile(
+    r"@(?:"
+    r'"(?P<dquoted>[^"\n]+)"'
+    r"|'(?P<squoted>[^'\n]+)'"
+    r"|(?P<bare>(?:\\.|[" + _PATH_CHARS + r"])+)"
+    r")"
+)
 """Matches ``@path/to/file`` in user input.
 
-Escaped spaces (``@my\\\\ folder/file``) are supported.  Bare ``@`` with no
-path characters is not matched (uses ``+`` not ``*``).
+Three forms are supported, in priority order:
+
+1. ``@"path with spaces.pdf"`` — explicit double-quoted path
+2. ``@'path with spaces.pdf'`` — explicit single-quoted path
+3. ``@bare/path`` — backslash-escaped spaces (``@my\\\\ folder/file``) work;
+   raw unescaped spaces are handled via greedy expansion in
+   :func:`parse_file_mentions`.
+
+Bare ``@`` with no path characters is not matched (uses ``+`` not ``*``).
 """
 
 _EMAIL_PREFIX = re.compile(r"[a-zA-Z0-9._%+-]$")
 """If the character immediately before ``@`` matches this, it's an email address."""
+
+# Hard cap on tokens consumed during greedy expansion across whitespace.
+_GREEDY_MAX_TOKENS = 20
+
+# Trailing punctuation stripped before checking if a greedy candidate exists.
+_GREEDY_TRAIL_PUNCT = ",;:!?)]}>"
 
 # Files larger than this are referenced by path only (not embedded inline).
 _MAX_EMBED_BYTES = 256 * 1024  # 256 KB
@@ -193,6 +212,75 @@ def _read_file(path: Path) -> str:
     return f"\n### {path.name}\nPath: `{path}`\n```\n{content}\n```"
 
 
+def _resolve_path(raw: str, cwd: Path) -> Path | None:
+    """Resolve *raw* to an existing file path, or ``None``.
+
+    Honors backslash-escaped spaces and ``~`` expansion.  Returns ``None``
+    when the path does not exist, is not a regular file, or raises
+    ``OSError``/``RuntimeError`` during resolution.
+    """
+    clean = raw.replace("\\ ", " ")
+    try:
+        p = Path(clean).expanduser()
+        if not p.is_absolute():
+            p = cwd / p
+        resolved = p.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if resolved.is_file():
+        return resolved
+    return None
+
+
+def _greedy_extend(
+    text: str,
+    raw: str,
+    match_end: int,
+    cwd: Path,
+) -> tuple[str, Path, int] | None:
+    """Try to extend *raw* across whitespace until the path resolves.
+
+    Walks the text after *match_end*, capped at the next newline or the
+    start of another ``@`` mention.  Tries the longest plausible suffix
+    first and shrinks one token at a time, stripping trailing punctuation
+    that is unlikely to be part of a filename.
+
+    Returns ``(extended_raw, resolved_file, new_end_pos)`` on success,
+    else ``None``.
+    """
+    rest = text[match_end:]
+
+    # Hard boundaries that should never be crossed.
+    boundary = len(rest)
+    nl = rest.find("\n")
+    if nl >= 0:
+        boundary = nl
+    next_at = re.search(r"\s@", rest[:boundary])
+    if next_at:
+        boundary = next_at.start()
+
+    region = rest[:boundary]
+    if not region or not region[0].isspace():
+        return None
+
+    tokens = list(re.finditer(r"\S+", region))
+    if not tokens:
+        return None
+
+    # Try longest-first so we prefer the most specific match.
+    for i in range(min(len(tokens), _GREEDY_MAX_TOKENS), 0, -1):
+        end = tokens[i - 1].end()
+        suffix = region[:end].rstrip(_GREEDY_TRAIL_PUNCT)
+        if not suffix:
+            continue
+        candidate = raw + suffix
+        resolved = _resolve_path(candidate, cwd)
+        if resolved is not None:
+            return candidate, resolved, match_end + len(suffix)
+
+    return None
+
+
 def parse_file_mentions(
     text: str,
     cwd: Path | None = None,
@@ -218,40 +306,54 @@ def parse_file_mentions(
     files: list[Path] = []
     warnings: list[str] = []
     seen: set[Path] = set()
+    # finditer would normally re-scan from each match's end, but greedy
+    # expansion can consume bytes past that point.  Track a manual cursor
+    # and skip matches that start before it.
+    cursor = 0
     for match in FILE_MENTION_PATTERN.finditer(text):
+        if match.start() < cursor:
+            continue
         # Skip email addresses — character immediately before @ is alphanumeric
         before = text[: match.start()]
         if before and _EMAIL_PREFIX.search(before):
             continue
 
-        raw = match.group("path")
-        clean = raw.replace("\\ ", " ")
+        dquoted = match.group("dquoted")
+        squoted = match.group("squoted")
+        bare = match.group("bare")
+        quoted_raw = dquoted if dquoted is not None else squoted
+        raw = quoted_raw if quoted_raw is not None else bare
+        is_quoted = quoted_raw is not None
 
+        resolved = _resolve_path(raw, cwd)
+        end_pos = match.end()
+
+        if resolved is None and not is_quoted:
+            extended = _greedy_extend(text, raw, match.end(), cwd)
+            if extended is not None:
+                raw, resolved, end_pos = extended
+
+        cursor = end_pos
+
+        if resolved is None:
+            warnings.append(f"@file not found: {raw}")
+            continue
+
+        # Deduplicate: skip paths already seen in this message.
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        files.append(resolved)
+        # Warn when the file lives outside the workspace root — it may
+        # contain sensitive content (e.g. @~/.ssh/id_rsa).
+        # Checked after dedup so a repeated mention only warns once.
         try:
-            p = Path(clean).expanduser()
-            if not p.is_absolute():
-                p = cwd / p
-            resolved = p.resolve()
-            if not resolved.exists() or not resolved.is_file():
-                warnings.append(f"@file not found: {raw}")
-                continue
-            # Deduplicate: skip paths already seen in this message.
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            files.append(resolved)
-            # Warn when the file lives outside the workspace root — it may
-            # contain sensitive content (e.g. @~/.ssh/id_rsa).
-            # Checked after dedup so a repeated mention only warns once.
-            try:
-                resolved.relative_to(workspace_root)
-            except ValueError:
-                warnings.append(
-                    f"@{raw} is outside the workspace "
-                    f"({workspace_root}) — embedding may expose sensitive files"
-                )
-        except (OSError, RuntimeError) as exc:
-            warnings.append(f"invalid @file path {raw!r}: {exc}")
+            resolved.relative_to(workspace_root)
+        except ValueError:
+            warnings.append(
+                f"@{raw} is outside the workspace "
+                f"({workspace_root}) — embedding may expose sensitive files"
+            )
 
     return files, warnings
 
@@ -302,6 +404,13 @@ def _type_hint(rel_path: str) -> str:
     return suffix or "file"
 
 
+def _format_mention(rel_path: str) -> str:
+    """Render *rel_path* as an ``@`` mention, quoting if it contains spaces."""
+    if " " in rel_path:
+        return f'@"{rel_path}"'
+    return f"@{rel_path}"
+
+
 def complete_file_mention(
     text: str,
     workspace_dir: str | None = None,
@@ -320,13 +429,22 @@ def complete_file_mention(
         List of ``(completion_string, type_hint)`` tuples, e.g.
         ``[("@results/v2.json", "json"), ("@README.md", "md")]``.
         Directories have a trailing ``/`` and type hint ``"dir"``.
+        Paths containing spaces are returned in double-quoted form,
+        e.g. ``@"my docs/file.pdf"``.
     """
-    # Find the last @token
-    match = re.search(r"@([^\s]*)$", text)
-    if not match:
-        return []
+    # Find the last @token.  Allow whitespace inside a quoted partial so
+    # completion keeps working as the user types ``@"PRE`` → ``@"PREPING_ B``.
+    quoted_match = re.search(r'@"([^"\n]*)$', text)
+    if quoted_match:
+        partial = quoted_match.group(1)
+        quoted = True
+    else:
+        match = re.search(r"@([^\s\"']*)$", text)
+        if not match:
+            return []
+        partial = match.group(1).replace("\\ ", " ")
+        quoted = False
 
-    partial = match.group(1).replace("\\ ", " ")
     base_str = workspace_dir or str(Path.cwd())
     base = Path(base_str)
 
@@ -347,7 +465,7 @@ def complete_file_mention(
         except OSError:
             return []
         return [
-            (f"@{r}", "dir" if r.endswith("/") else _type_hint(r))
+            (_format_mention(r), "dir" if r.endswith("/") else _type_hint(r))
             for r in candidates_raw[:10]
         ]
 
@@ -375,4 +493,12 @@ def complete_file_mention(
     else:
         results = _fuzzy_search(partial, combined)
 
-    return [(f"@{r}", "dir" if r.endswith("/") else _type_hint(r)) for r in results]
+    if quoted:
+        # User opened a quoted mention — close it for them.
+        return [
+            (f'@"{r}"', "dir" if r.endswith("/") else _type_hint(r)) for r in results
+        ]
+    return [
+        (_format_mention(r), "dir" if r.endswith("/") else _type_hint(r))
+        for r in results
+    ]
