@@ -759,9 +759,7 @@ class TestChannelSend:
             # Manually trigger the background-task registration path the same
             # way _send_with_retry does, to avoid coupling this test to the
             # retry internals.
-            task = asyncio.create_task(
-                ch._notify_rate_limit_retry("c1", 5.0)
-            )
+            task = asyncio.create_task(ch._notify_rate_limit_retry("c1", 5.0))
             ch._background_tasks.add(task)
             task.add_done_callback(ch._background_tasks.discard)
 
