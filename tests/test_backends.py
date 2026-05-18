@@ -388,6 +388,43 @@ class TestVirtualMountResolution:
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
+    def test_execute_e2e_workspace_tier_shadows_global(self, monkeypatch, tmp_path):
+        """End-to-end: when the same skill exists in BOTH workspace and global
+        tiers, the workspace version must shadow the global one when invoked
+        via ``CustomSandboxBackend.execute``. Mirrors
+        ``MergedSkillsBackend``'s priority (USER > GLOBAL > BUILTIN) at the
+        full-pipeline level, complementing the unit-level priority check in
+        ``test_skills_path_resolves_to_workspace_tier_when_present``.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        user_dir = workspace / "skills"
+        user_dir.mkdir()
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        memories_dir = tmp_path / "memories"
+        memories_dir.mkdir()
+        builtin_dir = tmp_path / "builtin_skills"
+        builtin_dir.mkdir()
+        # Same skill name in both tiers, different outputs.
+        (user_dir / "shadow-test").mkdir()
+        (user_dir / "shadow-test" / "main.py").write_text(
+            "print('WORKSPACE_TIER_WINS')"
+        )
+        (global_dir / "shadow-test").mkdir()
+        (global_dir / "shadow-test" / "main.py").write_text("print('GLOBAL_TIER_LOST')")
+
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+
+        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        resp = backend.execute("python /skills/shadow-test/main.py")
+        assert resp.exit_code == 0, resp.output
+        assert "WORKSPACE_TIER_WINS" in resp.output
+        assert "GLOBAL_TIER_LOST" not in resp.output
+
     def test_execute_e2e_global_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill that exists ONLY in the global tier (workspace
         does not have a copy) must execute successfully via
