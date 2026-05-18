@@ -1553,6 +1553,107 @@ class TestMigrationSweep(unittest.TestCase):
 
                 assert _run(_second())
 
+    def test_sweep_preserves_snapshot_ancestor(self):
+        """Migration sweep must apply the same DeltaChannel walk as steady-state.
+
+        Without this, legacy users upgrading to PR #231 would hit a
+        one-shot silent truncation: the bloat sweep would naive-prune
+        the ``_DeltaSnapshot`` seed out of long threads, then the
+        ``user_version`` marker locks the sweep so it never re-runs —
+        leaving permanently empty ``/resume`` history.
+
+        Mirrors ``TestPruningCheckpointerDeltaChannel.test_preserves_
+        snapshot_ancestor`` but drives via ``_run_migration_sweep``.
+        """
+        from langgraph.checkpoint.serde.types import _DeltaSnapshot
+
+        from EvoScientist.sessions import _run_migration_sweep
+
+        tid = "tsweep_delta"
+
+        async def _seed():
+            import aiosqlite
+
+            serde = JsonPlusSerializer()
+            snapshot_type, snapshot_blob = serde.dumps_typed(
+                {"channel_values": {"messages": _DeltaSnapshot(value=[])}}
+            )
+            empty_type, empty_blob = serde.dumps_typed({"channel_values": {}})
+            meta = json.dumps({"agent_name": AGENT_NAME})
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS checkpoints (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_ns TEXT NOT NULL DEFAULT '',
+                        checkpoint_id TEXT NOT NULL,
+                        parent_checkpoint_id TEXT,
+                        type TEXT,
+                        checkpoint BLOB,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS writes (
+                        thread_id TEXT NOT NULL,
+                        checkpoint_ns TEXT NOT NULL DEFAULT '',
+                        checkpoint_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        idx INTEGER NOT NULL,
+                        channel TEXT NOT NULL,
+                        type TEXT,
+                        value BLOB,
+                        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+                    )
+                    """
+                )
+                # cp_001..cp_002 delta-only, cp_003 carries the snapshot,
+                # cp_004..cp_010 delta-only. Anchor window with keep=5 is
+                # cp_006..cp_010; walk from cp_005 backward hits cp_003
+                # (seed) → stop. Survivors: cp_003..cp_010.
+                for i in range(1, 11):
+                    cid = f"cp_{i:03d}"
+                    parent = f"cp_{i - 1:03d}" if i > 1 else None
+                    if i == 3:
+                        ct, cb = snapshot_type, snapshot_blob
+                    else:
+                        ct, cb = empty_type, empty_blob
+                    await conn.execute(
+                        "INSERT INTO checkpoints (thread_id, checkpoint_ns, "
+                        "checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata) "
+                        "VALUES (?, '', ?, ?, ?, ?, ?)",
+                        (tid, cid, parent, ct, cb, meta),
+                    )
+                await conn.commit()
+
+        _run(_seed())
+        pairs = _run(_run_migration_sweep(keep=5))
+        assert pairs == 1
+
+        async def _survivors():
+            import aiosqlite
+
+            async with aiosqlite.connect(self._db_path) as conn:
+                async with conn.execute(
+                    "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
+                    "ORDER BY checkpoint_id ASC",
+                    (tid,),
+                ) as cur:
+                    return [r[0] for r in await cur.fetchall()]
+
+        survivors = _run(_survivors())
+        # cp_001, cp_002 pruned. cp_003 (snapshot) + walk-through (cp_004,
+        # cp_005) + anchors (cp_006..cp_010) survive.
+        assert survivors == [f"cp_{i:03d}" for i in range(3, 11)]
+        # Explicit absence of the pruned ids — guards against a future
+        # refactor that accidentally returns an empty survivors list.
+        assert "cp_001" not in survivors
+        assert "cp_002" not in survivors
+
 
 class TestDbStats(unittest.TestCase):
     """Tests for the read-only ``db_stats`` diagnostic helper."""

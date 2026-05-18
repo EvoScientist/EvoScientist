@@ -233,14 +233,11 @@ class PruningCheckpointer(AsyncSqliteSaver):
         keep = self._keep_per_ns
         agent = AGENT_NAME
         async with self.lock:
-            # Skip on a legacy DB lacking the ``writes`` table — without
-            # this guard, the writes DELETE would raise OperationalError
-            # and the caller's try/except would silently swallow the entire
-            # prune. ``AsyncSqliteSaver.setup()`` creates both tables but
-            # inherited DBs from older builds may lag.
-            if not await _table_exists(self.conn, "writes"):
-                return
-
+            # ``writes`` table is checked inside ``_delete_outside`` so a
+            # legacy DB that only has ``checkpoints`` still gets pruned
+            # (writes DELETE silently skipped; checkpoints DELETE runs).
+            # The migration sweep depends on this — it walks legacy DBs
+            # that often pre-date the ``writes`` table entirely.
             anchor_ids = await self._fetch_recent_checkpoint_ids(
                 thread_id, checkpoint_ns, agent, keep
             )
@@ -368,27 +365,31 @@ class PruningCheckpointer(AsyncSqliteSaver):
         kept_list = list(kept_ids)
         placeholders = ",".join("?" * len(kept_list))
 
-        del_writes = (
-            "DELETE FROM writes "
-            "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND checkpoint_id IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            f"     AND checkpoint_id NOT IN ({placeholders})"
-            "  )"
-        )
-        await self.conn.execute(
-            del_writes,
-            (
-                thread_id,
-                checkpoint_ns,
-                thread_id,
-                checkpoint_ns,
-                agent,
-                *kept_list,
-            ),
-        )
+        # Writes DELETE only runs if the ``writes`` table exists. Legacy
+        # DBs from pre-DeltaChannel builds may have only ``checkpoints`` —
+        # we still want to prune those, just skipping the writes step.
+        if await _table_exists(self.conn, "writes"):
+            del_writes = (
+                "DELETE FROM writes "
+                "WHERE thread_id = ? AND checkpoint_ns = ? "
+                "  AND checkpoint_id IN ("
+                "    SELECT checkpoint_id FROM checkpoints "
+                "    WHERE thread_id = ? AND checkpoint_ns = ? "
+                "      AND json_extract(metadata, '$.agent_name') = ? "
+                f"     AND checkpoint_id NOT IN ({placeholders})"
+                "  )"
+            )
+            await self.conn.execute(
+                del_writes,
+                (
+                    thread_id,
+                    checkpoint_ns,
+                    thread_id,
+                    checkpoint_ns,
+                    agent,
+                    *kept_list,
+                ),
+            )
 
         del_checkpoints = (
             "DELETE FROM checkpoints "
@@ -1114,9 +1115,6 @@ async def _run_migration_sweep(
             return 0
         if await _get_user_version(conn) >= _MIGRATION_VERSION:
             return 0
-        # ``writes`` is optional on legacy DBs: skip the writes DELETE
-        # if the table is absent rather than aborting the whole sweep.
-        has_writes = await _table_exists(conn, "writes")
 
         async with conn.execute(
             "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
@@ -1125,62 +1123,23 @@ async def _run_migration_sweep(
         ) as cur:
             pairs = await cur.fetchall()
 
-        del_writes = (
-            "DELETE FROM writes "
-            "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND checkpoint_id IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            "      AND checkpoint_id NOT IN ("
-            "        SELECT checkpoint_id FROM checkpoints "
-            "        WHERE thread_id = ? AND checkpoint_ns = ? "
-            "          AND json_extract(metadata, '$.agent_name') = ? "
-            "        ORDER BY checkpoint_id DESC LIMIT ?"
-            "      )"
-            "  )"
-        )
-        del_checkpoints = (
-            "DELETE FROM checkpoints "
-            "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND json_extract(metadata, '$.agent_name') = ? "
-            "  AND checkpoint_id NOT IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            "    ORDER BY checkpoint_id DESC LIMIT ?"
-            "  )"
-        )
+        # Reuse the DeltaChannel-aware prune logic from PruningCheckpointer
+        # instead of running naive keep_latest SQL: legacy DBs almost always
+        # have threads where the latest N checkpoints sit ABOVE a
+        # ``_DeltaSnapshot`` ancestor, and the naive form would sever the
+        # snapshot chain — exactly the failure mode the steady-state Fix
+        # already prevents. Sharing one saver across all pairs means
+        # ``setup()`` and the in-class lock are constructed once.
+        #
+        # We invoke ``_prune_after_put`` directly (not ``aput``) — the
+        # sweep is a bulk cleanup, not a checkpoint write. As a result
+        # ``saver._aput_lock`` (the outer put+prune pair lock) is
+        # intentionally unused here; only the inner ``self.lock`` that
+        # ``_prune_after_put`` itself acquires runs.
+        saver = PruningCheckpointer(conn, keep_per_ns=keep)
         for thread_id, checkpoint_ns in pairs:
             ns = checkpoint_ns or ""
-            if has_writes:
-                await conn.execute(
-                    del_writes,
-                    (
-                        thread_id,
-                        ns,
-                        thread_id,
-                        ns,
-                        AGENT_NAME,
-                        thread_id,
-                        ns,
-                        AGENT_NAME,
-                        keep,
-                    ),
-                )
-            await conn.execute(
-                del_checkpoints,
-                (
-                    thread_id,
-                    ns,
-                    AGENT_NAME,
-                    thread_id,
-                    ns,
-                    AGENT_NAME,
-                    keep,
-                ),
-            )
-            await conn.commit()
+            await saver._prune_after_put(str(thread_id), ns)
             pairs_pruned += 1
             if progress_cb is not None:
                 try:
