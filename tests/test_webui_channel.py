@@ -1,33 +1,55 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from EvoScientist.channels.webui.channel import WebUIChannel, WebUIConfig
-from EvoScientist.langgraph_dev import manager as langgraph_manager
 
 
-class _FakeProcess:
-    def poll(self):
-        return None
+def _request(headers=None, **query):
+    return SimpleNamespace(
+        headers={"Host": "localhost", **(headers or {})},
+        query=query,
+        match_info={},
+    )
 
 
-def test_webui_run_mode_uses_per_thread_workspace(tmp_path):
+def test_webui_uses_shared_workspace_root(tmp_path):
     thread_id = "5cd2e8b1-b4a6-48cb-9fe0-11441a6ffddb"
     channel = WebUIChannel(
         WebUIConfig(workspace_mode="run", workspace_root=str(tmp_path))
     )
 
-    assert channel._workspace_path_for_thread(thread_id) == (
-        tmp_path / "runs" / f"webui_{thread_id}"
-    )
+    assert channel._workspace_path_for_thread(thread_id) == tmp_path.resolve()
 
 
 def test_webui_route_normalizes_configured_base_path():
     channel = WebUIChannel(WebUIConfig(base_path="webui/"))
 
     assert channel._route("/healthz") == "/webui/healthz"
+
+
+def test_webui_cors_allows_configured_public_origin():
+    channel = WebUIChannel(WebUIConfig(allowed_origins="https://ui.example.com"))
+    request = _request(headers={"Origin": "https://ui.example.com"})
+
+    response = asyncio.run(channel._handle_options(request))
+
+    assert response.status == 204
+    assert response.headers["Access-Control-Allow-Origin"] == "https://ui.example.com"
+
+
+def test_webui_host_allows_configured_public_host():
+    channel = WebUIChannel(
+        WebUIConfig(bind_host="0.0.0.0", allowed_hosts="api.example.com")
+    )
+
+    assert channel._request_host_allowed(
+        _request(headers={"Host": "api.example.com:8010"})
+    )
 
 
 def test_webui_proxy_strips_control_auth_headers():
@@ -44,7 +66,7 @@ def test_webui_proxy_strips_control_auth_headers():
     assert headers == {"Content-Type": "application/json"}
 
 
-def test_webui_thread_registry_discovers_run_workspaces(tmp_path):
+def test_webui_thread_registry_does_not_discover_run_workspaces(tmp_path):
     thread_id = "5cd2e8b1-b4a6-48cb-9fe0-11441a6ffddb"
     workspace = tmp_path / "runs" / f"webui_{thread_id}"
     workspace.mkdir(parents=True)
@@ -54,21 +76,7 @@ def test_webui_thread_registry_discovers_run_workspaces(tmp_path):
 
     threads = channel._load_thread_registry_sync()
 
-    assert len(threads) == 1
-    assert threads[0]["threadId"] == thread_id
-    assert threads[0]["workspaceDir"] == str(workspace.resolve())
-
-
-def test_webui_thread_registry_skips_tombstoned_run_workspaces(tmp_path):
-    thread_id = "5cd2e8b1-b4a6-48cb-9fe0-11441a6ffddb"
-    workspace = tmp_path / "runs" / f"webui_{thread_id}"
-    workspace.mkdir(parents=True)
-    channel = WebUIChannel(
-        WebUIConfig(workspace_mode="run", workspace_root=str(tmp_path))
-    )
-    channel._mark_thread_deleted_sync(thread_id)
-
-    assert channel._load_thread_registry_sync() == []
+    assert threads == []
 
 
 def test_webui_thread_registry_order_uses_created_at(tmp_path):
@@ -133,8 +141,8 @@ def test_webui_daemon_mode_uses_workspace_root(tmp_path):
     )
 
 
-def test_webui_runtime_status_is_backend_owned():
-    channel = WebUIChannel(WebUIConfig())
+def test_webui_runtime_status_points_to_shared_runtime(tmp_path):
+    channel = WebUIChannel(WebUIConfig(workspace_root=str(tmp_path)))
 
     status = asyncio.run(channel._runtime_status_payload())
 
@@ -142,58 +150,31 @@ def test_webui_runtime_status_is_backend_owned():
         "isRunning": False,
         "activeThreadId": None,
         "activeThreadIds": [],
-        "activeWorkspaceDir": None,
+        "activeWorkspaceDir": str(tmp_path.resolve()),
         "activeWorkspaces": {},
         "createdAt": None,
+        "langGraphApiUrl": "/api/langgraph",
+        "langGraphBaseUrl": "http://localhost:6174",
+        "workspaceDir": str(tmp_path.resolve()),
     }
 
 
-def test_webui_runtime_pool_starts_isolated_runtime_per_thread(tmp_path, monkeypatch):
-    thread_id = "5cd2e8b1-b4a6-48cb-9fe0-11441a6ffddb"
-    channel = WebUIChannel(
-        WebUIConfig(workspace_mode="run", workspace_root=str(tmp_path))
-    )
-    calls = []
+def test_webui_file_tree_rejects_invalid_path(tmp_path):
+    channel = WebUIChannel(WebUIConfig(workspace_root=str(tmp_path)))
 
-    def fake_start_isolated_langgraph_dev(
-        workspace_dir,
-        *,
-        port,
-        log_file,
-        file_persistence=True,
-        jobs_per_worker=10,
-    ):
-        calls.append(
-            {
-                "workspace_dir": workspace_dir,
-                "port": port,
-                "log_file": log_file,
-                "file_persistence": file_persistence,
-                "jobs_per_worker": jobs_per_worker,
-            }
-        )
-        return _FakeProcess()
+    response = asyncio.run(channel._handle_ui_files_tree(_request(path="../secret")))
 
-    monkeypatch.setattr(
-        langgraph_manager,
-        "start_isolated_langgraph_dev",
-        fake_start_isolated_langgraph_dev,
-    )
-    monkeypatch.setattr(langgraph_manager, "is_langgraph_dev_running", lambda **_: True)
-    channel._next_runtime_port_locked = lambda: 7001
+    assert response.status == 400
+    assert json.loads(response.text) == {"error": "invalid path"}
 
-    async def run():
-        async with channel._runtime_lock:
-            first = await channel._ensure_thread_runtime_locked(thread_id)
-            second = await channel._ensure_thread_runtime_locked(thread_id)
-        return first, second
 
-    first_runtime, second_runtime = asyncio.run(run())
+def test_webui_file_read_rejects_invalid_path(tmp_path):
+    channel = WebUIChannel(WebUIConfig(workspace_root=str(tmp_path)))
 
-    assert first_runtime is second_runtime
-    assert first_runtime.workspace_dir == str(tmp_path / "runs" / f"webui_{thread_id}")
-    assert first_runtime.base_url == "http://localhost:7001"
-    assert len(calls) == 1
+    response = asyncio.run(channel._handle_ui_files_read(_request(path="../secret")))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {"error": "invalid path"}
 
 
 def test_webui_command_catalog_prefers_native_actions():

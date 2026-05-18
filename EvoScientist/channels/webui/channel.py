@@ -64,6 +64,8 @@ class WebUIConfig(BaseChannelConfig):
     webhook_port: int = 8010
     base_path: str = "/webui"
     api_key: str = ""
+    allowed_origins: str = ""
+    allowed_hosts: str = ""
     workspace_mode: str = "daemon"
     workspace_root: str = ""
 
@@ -101,6 +103,14 @@ def _normalize_relative_path(path: str) -> str:
     if any(part == ".." for part in parts):
         raise ValueError("path traversal is not allowed")
     return "/".join(parts)
+
+
+def _split_config_list(value: str) -> set[str]:
+    return {part.strip() for part in (value or "").split(",") if part.strip()}
+
+
+def _normalize_origin(value: str) -> str:
+    return (value or "").strip().rstrip("/")
 
 
 def _looks_binary(data: bytes) -> bool:
@@ -266,8 +276,27 @@ class WebUIChannel(Channel):
             headers["Access-Control-Allow-Origin"] = allow_origin
         return headers
 
+    def _configured_allowed_hosts(self) -> set[str]:
+        return {
+            host.lower().rstrip(".")
+            for host in _split_config_list(self.config.allowed_hosts)
+        }
+
+    def _configured_allowed_origins(self) -> set[str]:
+        return {
+            _normalize_origin(origin)
+            for origin in _split_config_list(self.config.allowed_origins)
+        }
+
     def _request_host_allowed(self, request) -> bool:
         host = request.headers.get("Host", "")
+        normalized_host = host.strip().lower().rstrip(".")
+        host_without_port = _split_host_port(normalized_host).lower().rstrip(".")
+        allowed_hosts = self._configured_allowed_hosts()
+        if "*" in allowed_hosts:
+            return True
+        if normalized_host in allowed_hosts or host_without_port in allowed_hosts:
+            return True
         configured = (self.config.bind_host or "").strip().lower()
         if configured not in {"", "0.0.0.0", "::"}:
             configured_hosts = {configured, "localhost"}
@@ -279,8 +308,12 @@ class WebUIChannel(Channel):
         return _is_safe_web_host(host)
 
     def _is_origin_allowed(self, origin: str) -> bool:
+        normalized_origin = _normalize_origin(origin)
+        allowed_origins = self._configured_allowed_origins()
+        if "*" in allowed_origins or normalized_origin in allowed_origins:
+            return True
         try:
-            parsed = urlparse(origin)
+            parsed = urlparse(normalized_origin)
         except Exception:
             return False
         return parsed.scheme in {"http", "https"} and _is_safe_web_host(parsed.netloc)
@@ -1369,7 +1402,10 @@ class WebUIChannel(Channel):
         workspace_dir = await self._resolve_or_create_workspace(
             thread_id or uuid.uuid4().hex
         )
-        root_path, normalized = self._resolve_workspace_path(workspace_dir, path)
+        try:
+            root_path, normalized = self._resolve_workspace_path(workspace_dir, path)
+        except ValueError:
+            return self._json(request, {"error": "invalid path"}, status=400)
         if not root_path.exists() or not root_path.is_dir():
             return self._json(request, {"error": "directory not found"}, status=404)
         entries = []
@@ -1419,9 +1455,12 @@ class WebUIChannel(Channel):
         workspace_dir = await self._resolve_or_create_workspace(
             thread_id or uuid.uuid4().hex
         )
-        file_path, normalized = self._resolve_workspace_path(
-            workspace_dir, relative_path
-        )
+        try:
+            file_path, normalized = self._resolve_workspace_path(
+                workspace_dir, relative_path
+            )
+        except ValueError:
+            return self._json(request, {"error": "invalid path"}, status=400)
         if not file_path.exists() or not file_path.is_file():
             return self._json(request, {"error": "file not found"}, status=404)
         size = file_path.stat().st_size

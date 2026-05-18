@@ -13,6 +13,8 @@ def create_from_config(config) -> WebUIChannel:
             bind_host=getattr(config, "webui_bind_host", "127.0.0.1") or "127.0.0.1",
             webhook_port=int(getattr(config, "webui_port", 8010) or 8010),
             api_key=getattr(config, "webui_api_key", "") or "",
+            allowed_origins=getattr(config, "webui_allowed_origins", "") or "",
+            allowed_hosts=getattr(config, "webui_allowed_hosts", "") or "",
             base_path=str(base_path).rstrip("/") or "/webui",
             workspace_mode=getattr(config, "default_mode", "daemon") or "daemon",
             workspace_root=getattr(config, "default_workdir", "") or "",

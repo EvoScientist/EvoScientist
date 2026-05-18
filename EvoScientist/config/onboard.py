@@ -2772,6 +2772,26 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 raise KeyboardInterrupt()
             updates["webui_api_key"] = api_key.strip()
 
+            allowed_origins = questionary.text(
+                "Allowed Web UI frontend origins (comma-separated, empty = local/private only):",
+                default=str(getattr(config, "webui_allowed_origins", "")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if allowed_origins is None:
+                raise KeyboardInterrupt()
+            updates["webui_allowed_origins"] = allowed_origins.strip()
+
+            allowed_hosts = questionary.text(
+                "Allowed Web UI backend hosts (comma-separated, empty = local/private only):",
+                default=str(getattr(config, "webui_allowed_hosts", "")),
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+            ).ask()
+            if allowed_hosts is None:
+                raise KeyboardInterrupt()
+            updates["webui_allowed_hosts"] = allowed_hosts.strip()
+
             enabled_channels.append("webui")
             continue
 

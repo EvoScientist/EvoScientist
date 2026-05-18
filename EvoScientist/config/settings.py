@@ -253,6 +253,8 @@ class EvoScientistConfig:
     webui_port: int = 8010
     webui_api_key: str = ""
     webui_base_path: str = "/webui"
+    webui_allowed_origins: str = ""
+    webui_allowed_hosts: str = ""
 
     # Shared webhook port (0 = disabled)
     shared_webhook_port: int = 9000
@@ -459,6 +461,8 @@ _ENV_MAPPINGS = {
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
     "webui_api_key": "EVOSCIENTIST_WEBUI_API_KEY",
     "webui_base_path": "EVOSCIENTIST_WEBUI_BASE_PATH",
+    "webui_allowed_origins": "EVOSCIENTIST_WEBUI_ALLOWED_ORIGINS",
+    "webui_allowed_hosts": "EVOSCIENTIST_WEBUI_ALLOWED_HOSTS",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",

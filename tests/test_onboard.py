@@ -878,12 +878,16 @@ class TestStepChannels:
                 "8010",
                 "8011",
                 "/webui",
+                "https://ui.example.com",
+                "api.example.com",
             ]
             mock_q.password.return_value.ask.return_value = ""
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "webui"
         assert result["webui_port"] == 8011
+        assert result["webui_allowed_origins"] == "https://ui.example.com"
+        assert result["webui_allowed_hosts"] == "api.example.com"
 
 
 class TestStepMcpServersNpxFailure:
