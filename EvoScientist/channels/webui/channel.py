@@ -13,9 +13,7 @@ import logging
 import os
 import re
 import signal
-import socket
 import tempfile
-import time
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -37,9 +35,6 @@ _UUID_THREAD_ID_RE = re.compile(
 _MAX_FILE_PREVIEW_BYTES = 256 * 1024
 _MAX_WORKSPACE_TREE_ENTRIES = 500
 _BINARY_PROBE_BYTES = 8192
-_RUNTIME_IDLE_TTL_SECONDS = 20 * 60
-_MAX_WARM_RUNTIMES = 4
-_THREAD_TOMBSTONE_FILE = ".evoscientist_webui_deleted"
 _LANGUAGE_BY_SUFFIX = {
     ".css": "css",
     ".go": "go",
@@ -71,30 +66,6 @@ class WebUIConfig(BaseChannelConfig):
     api_key: str = ""
     workspace_mode: str = "daemon"
     workspace_root: str = ""
-
-
-@dataclass
-class _RuntimeLease:
-    thread_id: str
-    lease_id: str
-    workspace_dir: str
-    langgraph_base_url: str
-    active_run: bool
-    created_at: str
-
-
-@dataclass
-class _RuntimeRecord:
-    thread_id: str
-    workspace_dir: str
-    port: int
-    base_url: str
-    process: Any
-    log_file: str
-    created_at: str
-    last_used_at: str
-    last_used_monotonic: float
-    lease_ids: set[str]
 
 
 def _utc_now_iso() -> str:
@@ -172,9 +143,6 @@ class WebUIChannel(Channel):
         super().__init__(config)
         self._runner: Any = None
         self._site: Any = None
-        self._runtime_records: dict[str, _RuntimeRecord] = {}
-        self._runtime_leases: dict[str, _RuntimeLease] = {}
-        self._runtime_lock = asyncio.Lock()
         self._thread_registry_lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -206,7 +174,6 @@ class WebUIChannel(Channel):
         )
 
     async def _cleanup(self) -> None:
-        await self._stop_runtime_pool()
         if self._site is not None:
             await self._site.stop()
             self._site = None
@@ -379,37 +346,19 @@ class WebUIChannel(Channel):
             return self._unauthorized(request)
         return self._json(request, {"ok": True, "channel": "webui"})
 
-    @staticmethod
-    def _runtime_status_from_leases(
-        leases: dict[str, _RuntimeLease],
-    ) -> dict[str, Any]:
-        active = [lease for lease in leases.values() if lease.active_run]
-        if not active:
-            return {
-                "isRunning": False,
-                "activeThreadId": None,
-                "activeThreadIds": [],
-                "activeWorkspaceDir": None,
-                "activeWorkspaces": {},
-                "createdAt": None,
-            }
-        first = active[0]
-        return {
-            "isRunning": True,
-            "activeThreadId": first.thread_id,
-            "activeThreadIds": sorted({lease.thread_id for lease in active}),
-            "activeWorkspaceDir": first.workspace_dir,
-            "activeWorkspaces": {
-                lease.thread_id: lease.workspace_dir for lease in active
-            },
-            "createdAt": first.created_at,
-        }
-
     async def _runtime_status_payload(self) -> dict[str, Any]:
-        async with self._runtime_lock:
-            self._drop_dead_runtimes_locked()
-            self._evict_idle_runtimes_locked()
-            return self._runtime_status_from_leases(self._runtime_leases)
+        base_url = self._global_langgraph_base_url()
+        return {
+            "isRunning": False,
+            "activeThreadId": None,
+            "activeThreadIds": [],
+            "activeWorkspaceDir": str(self._workspace_root()),
+            "activeWorkspaces": {},
+            "createdAt": None,
+            "langGraphBaseUrl": base_url,
+            "langGraphApiUrl": "/api/langgraph",
+            "workspaceDir": str(self._workspace_root()),
+        }
 
     async def _handle_runtime_status(self, request):
         if not self._check_auth(request):
@@ -421,56 +370,27 @@ class WebUIChannel(Channel):
             return self._unauthorized(request)
         payload = await self._request_payload(request)
         thread_id = self._extract_thread_id(request, payload)
-        if not _UUID_THREAD_ID_RE.match(thread_id):
+        if thread_id and not _UUID_THREAD_ID_RE.match(thread_id):
             return self._json(
                 request,
                 {"error": "direct WebUI runtime requires a UUID threadId"},
                 status=400,
             )
-        touch = payload.get("touch")
-        if touch is None:
-            touch = request.query.get("touch")
-        touch_record = str(touch).lower() in {"1", "true", "yes"}
-        active = payload.get("activeRun")
-        if active is None:
-            active = payload.get("active_run")
-        if active is None:
-            active = request.query.get("activeRun")
-        active_run = str(active).lower() in {"1", "true", "yes"}
-
-        async with self._runtime_lock:
-            try:
-                runtime = await self._ensure_thread_runtime_locked(
-                    thread_id,
-                    touch_record=touch_record,
-                )
-            except Exception as exc:
-                logger.exception("Failed to prepare WebUI runtime")
-                return self._json(request, {"error": str(exc)}, status=409)
-
-            lease = _RuntimeLease(
-                thread_id=thread_id,
-                lease_id=uuid.uuid4().hex,
-                workspace_dir=runtime.workspace_dir,
-                langgraph_base_url=runtime.base_url,
-                active_run=active_run,
-                created_at=_utc_now_iso(),
-            )
-            runtime.lease_ids.add(lease.lease_id)
-            runtime.last_used_at = lease.created_at
-            runtime.last_used_monotonic = time.monotonic()
-            self._runtime_leases[lease.lease_id] = lease
+        if thread_id:
+            await self._ensure_thread_record(thread_id)
+        workspace_dir = str(self._workspace_root())
+        base_url = self._global_langgraph_base_url()
 
         return self._json(
             request,
             {
                 "ok": True,
                 "threadId": thread_id,
-                "workspaceDir": runtime.workspace_dir,
-                "leaseId": lease.lease_id,
-                "langGraphBaseUrl": runtime.base_url,
-                "langGraphApiUrl": f"/runtime/langgraph/{thread_id}",
-                "runtimeStatus": self._runtime_status_from_leases(self._runtime_leases),
+                "workspaceDir": workspace_dir,
+                "leaseId": None,
+                "langGraphBaseUrl": base_url,
+                "langGraphApiUrl": "/api/langgraph",
+                "runtimeStatus": await self._runtime_status_payload(),
             },
         )
 
@@ -528,22 +448,11 @@ class WebUIChannel(Channel):
                 {"error": "direct WebUI runtime requires a UUID threadId"},
                 status=400,
             )
-        async with self._runtime_lock:
-            self._evict_runtime_locked(thread_id)
         async with self._thread_registry_lock:
             threads = await self._load_thread_registry_unlocked()
             next_threads = [
                 item for item in threads if item.get("threadId") != thread_id
             ]
-            if (self.config.workspace_mode or "daemon") == "run":
-                try:
-                    await asyncio.to_thread(self._mark_thread_deleted_sync, thread_id)
-                except OSError:
-                    logger.warning(
-                        "Failed to tombstone deleted WebUI thread %s",
-                        thread_id,
-                        exc_info=True,
-                    )
             await self._save_thread_registry_unlocked(next_threads)
         return self._json(
             request, {"ok": True, "deleted": len(next_threads) != len(threads)}
@@ -552,27 +461,12 @@ class WebUIChannel(Channel):
     async def _handle_runtime_release(self, request):
         if not self._check_auth(request):
             return self._unauthorized(request)
-        payload = await self._request_payload(request)
-        thread_id = self._extract_thread_id(request, payload)
-        lease_id = str(payload.get("leaseId", "") or "").strip()
-        released = False
-        async with self._runtime_lock:
-            active = self._runtime_leases.get(lease_id)
-            if active is not None and active.thread_id == thread_id:
-                self._runtime_leases.pop(lease_id, None)
-                runtime = self._runtime_records.get(thread_id)
-                if runtime is not None:
-                    runtime.lease_ids.discard(lease_id)
-                    runtime.last_used_at = _utc_now_iso()
-                    runtime.last_used_monotonic = time.monotonic()
-                released = True
-            status = self._runtime_status_from_leases(self._runtime_leases)
         return self._json(
             request,
             {
                 "ok": True,
-                "released": released,
-                "runtimeStatus": status,
+                "released": False,
+                "runtimeStatus": await self._runtime_status_payload(),
             },
         )
 
@@ -584,25 +478,7 @@ class WebUIChannel(Channel):
         if not self._check_auth(request):
             return self._unauthorized(request)
 
-        thread_id = str(request.match_info.get("thread_id") or "").strip()
-        if not _UUID_THREAD_ID_RE.match(thread_id):
-            return self._json(
-                request,
-                {"error": "direct WebUI runtime requires a UUID threadId"},
-                status=400,
-            )
-
-        async with self._runtime_lock:
-            runtime = self._runtime_records.get(thread_id)
-            if runtime is None or not self._is_runtime_healthy(runtime):
-                return self._json(
-                    request,
-                    {"error": "WebUI LangGraph runtime is not prepared"},
-                    status=404,
-                )
-            target_base = runtime.base_url
-            runtime.last_used_at = _utc_now_iso()
-            runtime.last_used_monotonic = time.monotonic()
+        target_base = self._global_langgraph_base_url()
 
         tail = str(request.match_info.get("tail") or "").lstrip("/")
         target_url = f"{target_base}/{tail}"
@@ -677,19 +553,6 @@ class WebUIChannel(Channel):
     def _thread_registry_path(self) -> Path:
         return self._workspace_root() / ".evoscientist_webui_threads.json"
 
-    def _thread_tombstone_path(self, thread_id: str) -> Path:
-        return self._workspace_path_for_thread(thread_id) / _THREAD_TOMBSTONE_FILE
-
-    def _is_thread_tombstoned_sync(self, thread_id: str) -> bool:
-        return (self.config.workspace_mode or "daemon") == "run" and (
-            self._thread_tombstone_path(thread_id).exists()
-        )
-
-    def _mark_thread_deleted_sync(self, thread_id: str) -> None:
-        tombstone = self._thread_tombstone_path(thread_id)
-        tombstone.parent.mkdir(parents=True, exist_ok=True)
-        tombstone.write_text(_utc_now_iso())
-
     def _load_thread_registry_sync(self) -> list[dict[str, Any]]:
         path = self._thread_registry_path()
         try:
@@ -708,8 +571,6 @@ class WebUIChannel(Channel):
                 continue
             thread_id = str(item.get("threadId") or item.get("thread_id") or "").strip()
             if not _UUID_THREAD_ID_RE.match(thread_id):
-                continue
-            if self._is_thread_tombstoned_sync(thread_id):
                 continue
             title = str(item.get("title") or f"Session {thread_id}").strip()
             created_at = str(
@@ -733,46 +594,6 @@ class WebUIChannel(Channel):
                 "legacy": False,
                 "readOnly": False,
             }
-
-        if (self.config.workspace_mode or "daemon") == "run":
-            runs_root = self._workspace_root() / "runs"
-            try:
-                candidates = list(runs_root.iterdir())
-            except OSError:
-                candidates = []
-            for workspace in candidates:
-                if not workspace.is_dir() or not workspace.name.startswith("webui_"):
-                    continue
-                thread_id = workspace.name.removeprefix("webui_")
-                if not _UUID_THREAD_ID_RE.match(thread_id):
-                    continue
-                if (workspace / _THREAD_TOMBSTONE_FILE).exists():
-                    continue
-                if thread_id in threads_by_id:
-                    continue
-                try:
-                    stats = workspace.stat()
-                    created_timestamp = getattr(stats, "st_birthtime", stats.st_ctime)
-                    created_at = datetime.fromtimestamp(
-                        created_timestamp,
-                        UTC,
-                    ).isoformat()
-                    modified_at = datetime.fromtimestamp(
-                        stats.st_mtime, UTC
-                    ).isoformat()
-                except OSError:
-                    created_at = _utc_now_iso()
-                    modified_at = _utc_now_iso()
-                threads_by_id[thread_id] = {
-                    "threadId": thread_id,
-                    "title": f"Session {thread_id}",
-                    "titleSource": "default",
-                    "createdAt": created_at,
-                    "updatedAt": modified_at,
-                    "workspaceDir": str(workspace.resolve()),
-                    "legacy": False,
-                    "readOnly": False,
-                }
 
         return list(threads_by_id.values())
 
@@ -870,178 +691,20 @@ class WebUIChannel(Channel):
             await self._save_thread_registry_unlocked(threads)
             return record
 
-    def _workspace_name_for_thread(self, thread_id: str) -> str:
-        token = re.sub(r"[^A-Za-z0-9._-]+", "-", thread_id).strip(" .-_")
-        return f"webui_{token or uuid.uuid4().hex}"[:120]
-
     def _workspace_path_for_thread(self, thread_id: str) -> Path:
-        root = self._workspace_root()
-        if (self.config.workspace_mode or "daemon") == "run":
-            return root / "runs" / self._workspace_name_for_thread(thread_id)
-        return root
+        return self._workspace_root()
 
     async def _resolve_or_create_workspace(self, thread_id: str) -> str:
         workspace = self._workspace_path_for_thread(thread_id)
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         return str(workspace)
 
-    def _is_runtime_healthy(self, runtime: _RuntimeRecord) -> bool:
-        if runtime.process.poll() is not None:
-            return False
-        try:
-            from ...langgraph_dev.manager import is_langgraph_dev_running
-
-            return is_langgraph_dev_running(base_url=runtime.base_url)
-        except Exception:
-            return False
-
-    def _drop_dead_runtimes_locked(self) -> None:
-        dead_thread_ids = [
-            thread_id
-            for thread_id, runtime in self._runtime_records.items()
-            if not self._is_runtime_healthy(runtime)
-        ]
-        for thread_id in dead_thread_ids:
-            self._evict_runtime_locked(thread_id)
-
-    def _evict_runtime_locked(self, thread_id: str) -> None:
-        runtime = self._runtime_records.pop(thread_id, None)
-        if runtime is None:
-            return
-        for lease_id in list(runtime.lease_ids):
-            self._runtime_leases.pop(lease_id, None)
-        try:
-            from ...langgraph_dev.manager import stop_langgraph_process
-
-            stop_langgraph_process(runtime.process)
-        except Exception:
-            pass
-
-    def _evict_idle_runtimes_locked(self) -> None:
-        now = time.monotonic()
-        for thread_id, runtime in list(self._runtime_records.items()):
-            if runtime.lease_ids:
-                continue
-            if now - runtime.last_used_monotonic >= _RUNTIME_IDLE_TTL_SECONDS:
-                self._evict_runtime_locked(thread_id)
-
-        idle = sorted(
-            (
-                runtime
-                for runtime in self._runtime_records.values()
-                if not runtime.lease_ids
-            ),
-            key=lambda runtime: runtime.last_used_monotonic,
-        )
-        while len(self._runtime_records) > _MAX_WARM_RUNTIMES and idle:
-            runtime = idle.pop(0)
-            self._evict_runtime_locked(runtime.thread_id)
-
-    def _can_bind_runtime_port(self, port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-            except OSError:
-                return False
-        return True
-
-    def _next_runtime_port_locked(self) -> int:
+    def _global_langgraph_base_url(self) -> str:
         from ...config.settings import get_effective_config
 
-        configured = int(getattr(get_effective_config(), "langgraph_dev_port", 6174))
-        used_ports = {runtime.port for runtime in self._runtime_records.values()}
-        for port in range(configured + 1, configured + 512):
-            if port in used_ports:
-                continue
-            if self._can_bind_runtime_port(port):
-                return port
-        raise RuntimeError(
-            "no free localhost port available for WebUI LangGraph runtime"
-        )
-
-    def _runtime_log_file_for_thread(self, thread_id: str) -> Path:
-        safe = self._workspace_name_for_thread(thread_id)
-        return Path.home() / ".config" / "evoscientist" / f"{safe}.langgraph.log"
-
-    async def _ensure_thread_runtime_locked(
-        self,
-        thread_id: str,
-        *,
-        touch_record: bool = False,
-    ) -> _RuntimeRecord:
-        self._drop_dead_runtimes_locked()
-        existing = self._runtime_records.get(thread_id)
-        if existing is not None:
-            existing.last_used_at = _utc_now_iso()
-            existing.last_used_monotonic = time.monotonic()
-            await self._ensure_thread_record(thread_id, touch=touch_record)
-            return existing
-
-        self._evict_idle_runtimes_locked()
-        if len(self._runtime_records) >= _MAX_WARM_RUNTIMES:
-            idle = sorted(
-                (
-                    runtime
-                    for runtime in self._runtime_records.values()
-                    if not runtime.lease_ids
-                ),
-                key=lambda runtime: runtime.last_used_monotonic,
-            )
-            if idle:
-                self._evict_runtime_locked(idle[0].thread_id)
-        record = await self._ensure_thread_record(thread_id, touch=touch_record)
-        workspace_dir = str(record.get("workspaceDir") or "")
-        port = self._next_runtime_port_locked()
-        log_file = self._runtime_log_file_for_thread(thread_id)
-
-        def _start():
-            from ...config.settings import get_effective_config
-            from ...langgraph_dev.manager import start_isolated_langgraph_dev
-
-            cfg = get_effective_config()
-            return start_isolated_langgraph_dev(
-                workspace_dir,
-                port=port,
-                log_file=log_file,
-                file_persistence=bool(
-                    getattr(cfg, "langgraph_dev_file_persistence", True)
-                ),
-                jobs_per_worker=int(getattr(cfg, "langgraph_dev_jobs_per_worker", 10)),
-            )
-
-        proc = await asyncio.to_thread(_start)
-        now = _utc_now_iso()
-        runtime = _RuntimeRecord(
-            thread_id=thread_id,
-            workspace_dir=workspace_dir,
-            port=port,
-            base_url=f"http://localhost:{port}",
-            process=proc,
-            log_file=str(log_file),
-            created_at=now,
-            last_used_at=now,
-            last_used_monotonic=time.monotonic(),
-            lease_ids=set(),
-        )
-        self._runtime_records[thread_id] = runtime
-        return runtime
-
-    async def _stop_runtime_pool(self) -> None:
-        async with self._runtime_lock:
-            records = list(self._runtime_records.values())
-            self._runtime_records.clear()
-            self._runtime_leases.clear()
-
-        if not records:
-            return
-
-        def _stop_all() -> None:
-            from ...langgraph_dev.manager import stop_langgraph_process
-
-            for runtime in records:
-                stop_langgraph_process(runtime.process)
-
-        await asyncio.to_thread(_stop_all)
+        cfg = get_effective_config()
+        port = int(getattr(cfg, "langgraph_dev_port", 6174) or 6174)
+        return f"http://localhost:{port}"
 
     def _command_catalog(self) -> list[dict[str, Any]]:
         commands = {
