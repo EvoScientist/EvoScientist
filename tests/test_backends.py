@@ -363,6 +363,12 @@ class TestTraversalFalsePositiveFix:
         assert validate_command("cat foo/../../etc/passwd") is None
         assert check_forced_confirmation("cat foo/../../etc/passwd") is not None
 
+    def test_dotdot_in_quotes_detected(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("cat '../secret'") is not None
+        assert check_forced_confirmation('python -c "open(\'../secret\')"') is not None
+
 
 # === Pipeline command validation ===
 

@@ -118,13 +118,18 @@ def _split_shell_commands(command: str) -> list[str]:
 
 
 def _has_traversal_component(command: str) -> bool:
-    """Check if command contains '..' as a path component (not substring)."""
+    """Check if command contains '..' as a path component, including inside quotes."""
+    # Raw check catches ../  /..  and ../ inside any quoting style
+    if "../" in command or "/.." in command:
+        return True
+    # Token-level check for bare '..' at end of args (e.g. "ls ..")
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
     from pathlib import PurePosixPath
 
-    for token in command.split():
-        if ".." in PurePosixPath(token).parts:
-            return True
-    return False
+    return any(".." in PurePosixPath(t).parts for t in tokens)
 
 
 def _collect_executable_positions(command: str) -> set[int]:
