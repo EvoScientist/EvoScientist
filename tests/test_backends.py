@@ -1,10 +1,13 @@
 """Tests for EvoScientist/backends.py — validate_command, path conversion, resolve_path."""
 
 import re
+import shlex
 from pathlib import Path
 
+from EvoScientist import backends, paths
 from EvoScientist.backends import (
     CustomSandboxBackend,
+    MergedSkillsBackend,
     convert_virtual_paths_in_command,
     validate_command,
 )
@@ -148,6 +151,430 @@ class TestConvertVirtualPaths:
             workspace_name="workspace",
         )
         assert result == "cat ./tmp/somefile"
+
+
+# === tier-aware virtual mounts (/skills/, /memories/) ===
+
+
+class TestVirtualMountResolution:
+    """``convert_virtual_paths_in_command`` must resolve ``/skills/...`` and
+    ``/memories/...`` against the same tier priority chain used by
+    ``MergedSkillsBackend``, not blindly rewrite them as ``./skills/...``.
+    """
+
+    def _setup_tiers(self, monkeypatch, tmp_path):
+        """Create three skills tiers + a memories dir under tmp_path and
+        monkeypatch the path constants to point at them. Returns the tier
+        directories so tests can populate them.
+        """
+        user_dir = tmp_path / "ws_skills"
+        global_dir = tmp_path / "global_skills"
+        builtin_dir = tmp_path / "builtin_skills"
+        memories_dir = tmp_path / "memories"
+        for d in (user_dir, global_dir, builtin_dir, memories_dir):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+        return user_dir, global_dir, builtin_dir, memories_dir
+
+    def test_skills_path_resolves_to_workspace_tier_when_present(
+        self, monkeypatch, tmp_path
+    ):
+        user_dir, global_dir, _, _ = self._setup_tiers(monkeypatch, tmp_path)
+        (user_dir / "hello").mkdir()
+        (user_dir / "hello" / "main.py").write_text("print('ws')")
+        (global_dir / "hello").mkdir()
+        (global_dir / "hello" / "main.py").write_text("print('global')")
+        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        assert result == f"python {user_dir / 'hello' / 'main.py'}"
+
+    def test_skills_path_resolves_to_global_tier_when_workspace_missing(
+        self, monkeypatch, tmp_path
+    ):
+        _, global_dir, _, _ = self._setup_tiers(monkeypatch, tmp_path)
+        (global_dir / "hello").mkdir()
+        (global_dir / "hello" / "main.py").write_text("print('global')")
+        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        assert result == f"python {global_dir / 'hello' / 'main.py'}"
+
+    def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
+        self, monkeypatch, tmp_path
+    ):
+        _, _, builtin_dir, _ = self._setup_tiers(monkeypatch, tmp_path)
+        (builtin_dir / "find-skills").mkdir()
+        (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
+        result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
+        assert result == f"python {builtin_dir / 'find-skills' / 'tool.py'}"
+
+    def test_skills_path_unresolvable_falls_back_to_workspace_relative(
+        self, monkeypatch, tmp_path
+    ):
+        """Fallback returns a workspace-relative ``./skills/<rel>`` shape, not
+        an absolute path. The agent typed a virtual mount, so its shell error
+        should reference a location it recognises (the workspace tier is also
+        where MergedSkillsBackend.write would land a new skill).
+        """
+        self._setup_tiers(monkeypatch, tmp_path)
+        result = convert_virtual_paths_in_command(
+            "python /skills/never-installed/foo.py"
+        )
+        assert result == "python ./skills/never-installed/foo.py"
+
+    def test_memories_path_substitutes_absolute_memories_dir(
+        self, monkeypatch, tmp_path
+    ):
+        _, _, _, memories_dir = self._setup_tiers(monkeypatch, tmp_path)
+        result = convert_virtual_paths_in_command("cat /memories/note.md")
+        assert result == f"cat {memories_dir / 'note.md'}"
+
+    def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
+        """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
+        mirrors the existing `/` → `.` rule but for the mount root.
+        """
+        user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
+        assert convert_virtual_paths_in_command("ls /skills") == f"ls {user_dir}"
+        assert convert_virtual_paths_in_command("ls /skills/") == f"ls {user_dir}"
+
+    def test_skills_prefix_not_overmatched(self, monkeypatch, tmp_path):
+        """Paths starting with /skills but not /skills/ (e.g. /skillset/foo)
+        must fall through to the existing workspace-relative branch.
+        """
+        self._setup_tiers(monkeypatch, tmp_path)
+        assert (
+            convert_virtual_paths_in_command("cat /skillset/foo")
+            == "cat ./skillset/foo"
+        )
+        # Same defense for /memories prefix.
+        assert (
+            convert_virtual_paths_in_command("cat /memoriesfoo") == "cat ./memoriesfoo"
+        )
+
+    def test_validate_command_allows_resolved_skills_absolute_path(self, tmp_path):
+        """An absolute path whose prefix is in ``allow_prefixes`` must NOT be
+        flagged as a system path. This is what lets execute() forward
+        tier-resolved /skills/ expansions to the shell.
+        """
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        command = f"python {global_dir / 'hello' / 'main.py'}"
+        assert validate_command(command, allow_prefixes=(str(global_dir),)) is None
+
+    def test_validate_command_still_blocks_unrelated_system_path(self, tmp_path):
+        """The allowlist must NOT weaken the block list for arbitrary system
+        paths — only the whitelisted prefixes are exempted.
+        """
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        result = validate_command(
+            "cat /etc/passwd",
+            allow_prefixes=(str(global_dir),),
+        )
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_validate_command_prefix_boundary_not_bypassed(self):
+        """Allowlist matching must be directory-boundary-aware: a neighbour
+        directory sharing a string prefix (``..._evil``, ``...BACKDOOR``)
+        must NOT be admitted because its name happens to start with an
+        allowed prefix substring. Regression guard for the ``startswith``
+        bypass flagged by code review.
+
+        Paths are hardcoded under ``/tmp`` rather than via ``tmp_path``
+        because ``_extract_all_paths``'s regex only matches paths whose
+        first component is a known system prefix (``/Users``, ``/tmp``,
+        ``/var``, …) — on macOS ``tmp_path`` resolves to
+        ``/private/var/folders/…`` which the negative lookbehind rejects
+        (the ``v`` in ``/var`` is preceded by ``e`` in ``private``).
+        ``validate_command`` is a pure string check, so no real
+        filesystem entries are required.
+        """
+        allowed = "/tmp/evosci_skills_test_prefix"
+        evil_path = "/tmp/evosci_skills_test_prefix_evil/secret.txt"
+        result = validate_command(
+            f"cat {evil_path}",
+            allow_prefixes=(allowed,),
+        )
+        assert result is not None
+        assert "blocked" in result.lower()
+        # Sanity check: a real descendant of the allowed prefix still passes,
+        # so we're testing boundary semantics, not a blanket block.
+        legit_path = "/tmp/evosci_skills_test_prefix/real/file.txt"
+        assert (
+            validate_command(
+                f"cat {legit_path}",
+                allow_prefixes=(allowed,),
+            )
+            is None
+        )
+
+    def test_validate_command_prefix_with_trailing_slash_normalized(self):
+        """An allowlist entry that already has a trailing slash should behave
+        identically to the no-trailing-slash form — both reject the
+        neighbour-directory bypass AND admit legitimate descendants /
+        exact-match paths.
+        """
+        allowed_with_slash = "/tmp/evosci_skills_test_prefix/"
+        evil_path = "/tmp/evosci_skills_test_prefix_evil/x"
+        legit_descendant = "/tmp/evosci_skills_test_prefix/ok/file.txt"
+        exact_match = "/tmp/evosci_skills_test_prefix"
+        assert (
+            validate_command(
+                f"cat {evil_path}",
+                allow_prefixes=(allowed_with_slash,),
+            )
+            is not None
+        )
+        assert (
+            validate_command(
+                f"cat {legit_descendant}",
+                allow_prefixes=(allowed_with_slash,),
+            )
+            is None
+        )
+        assert (
+            validate_command(
+                f"cat {exact_match}",
+                allow_prefixes=(allowed_with_slash,),
+            )
+            is None
+        )
+
+    def test_validate_command_empty_prefix_does_not_disable_allowlist(self):
+        """An empty or root-only entry in ``allow_prefixes`` must NOT silently
+        admit every absolute path. Regression guard for the empty/root-prefix
+        gap flagged by code review — without the ``if not normalized: continue``
+        guard, ``"".rstrip("/") + "/"`` collapses to ``"/"`` and admits any
+        absolute path via ``startswith("/")``.
+        """
+        for trivial in ("", "/"):
+            assert (
+                validate_command(
+                    "cat /etc/passwd",
+                    allow_prefixes=(trivial,),
+                )
+                is not None
+            )
+
+    def test_skills_resolver_quotes_path_when_tier_dir_has_whitespace(
+        self, monkeypatch, tmp_path
+    ):
+        """When a tier directory itself sits under a path with whitespace
+        (the realistic case: user home like ``/Users/Foo Bar/.evoscientist/skills``),
+        the resolver must shell-quote its absolute output so the shell parses
+        the command argument as a single token.
+
+        NOTE: the input virtual path is kept clean (no whitespace in the
+        skill name). Input-side whitespace is truncated by the regex in
+        ``convert_virtual_paths_in_command`` before the resolver fires —
+        out of scope for this PR (would require a quote-aware path regex).
+        """
+        spacey_root = tmp_path / "Foo Bar"
+        spacey_root.mkdir()
+        user_dir = spacey_root / "ws_skills"
+        user_dir.mkdir()
+        for d in ("global_skills", "memories", "builtin_skills"):
+            (spacey_root / d).mkdir()
+        (user_dir / "hello").mkdir()
+        (user_dir / "hello" / "main.py").write_text("print('ok')")
+
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", spacey_root / "global_skills")
+        monkeypatch.setattr(paths, "MEMORIES_DIR", spacey_root / "memories")
+        monkeypatch.setattr(
+            backends, "_BUILTIN_SKILLS_DIR", spacey_root / "builtin_skills"
+        )
+
+        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+
+        tokens = shlex.split(result)
+        assert tokens[0] == "python"
+        assert tokens[1] == str(user_dir / "hello" / "main.py")
+
+    def test_memories_resolver_quotes_path_when_memories_dir_has_whitespace(
+        self, monkeypatch, tmp_path
+    ):
+        """Memories live outside the workspace, so the relative-form rewrite
+        Fix 3 applies to skills does NOT apply here. The resolver still must
+        shell-quote its absolute output for whitespace safety.
+        """
+        spacey = tmp_path / "Foo Bar" / "memories"
+        spacey.mkdir(parents=True)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", spacey)
+
+        result = convert_virtual_paths_in_command("cat /memories/note.md")
+
+        tokens = shlex.split(result)
+        assert tokens[0] == "cat"
+        assert tokens[1] == str(spacey / "note.md")
+
+    def test_skills_tier_paths_matches_merged_backend_priority(
+        self, monkeypatch, tmp_path
+    ):
+        """Drift detector: ``_skills_tier_paths()`` must list tiers in the
+        same priority order ``MergedSkillsBackend._backends()`` walks. If
+        either side reorders without the other, the resolver and backend
+        will disagree on which tier owns a file. Verified by populating the
+        same path in all three tiers with distinct content and asserting
+        both reach the same (highest-priority) tier.
+        """
+        user_dir, global_dir, builtin_dir, _ = self._setup_tiers(monkeypatch, tmp_path)
+        for tier_dir, tag in (
+            (user_dir, "USER"),
+            (global_dir, "GLOBAL"),
+            (builtin_dir, "BUILTIN"),
+        ):
+            (tier_dir / "probe").mkdir()
+            (tier_dir / "probe" / "main.txt").write_text(tag)
+
+        # Build MergedSkillsBackend wired via _skills_tier_paths positions —
+        # the test FAILS if helper return order doesn't align with the
+        # constructor's tier-arg semantics.
+        user, global_, builtin = backends._skills_tier_paths()
+        mb = MergedSkillsBackend(
+            primary_dir=str(user),
+            secondary_dir=str(builtin),
+            global_dir=str(global_) if global_ is not None else None,
+        )
+        # MergedSkillsBackend.read returns content from the highest-priority
+        # tier that has the file (USER per the assumed alignment).
+        backend_content = mb.read("/probe/main.txt")
+        text = (
+            backend_content
+            if isinstance(backend_content, str)
+            else getattr(backend_content, "content", str(backend_content))
+        )
+        assert "USER" in text
+
+        # Resolver also returns the USER tier path (the highest-priority hit).
+        resolved = backends._resolve_virtual_mount_path("/skills/probe/main.txt")
+        assert str(user_dir / "probe" / "main.txt") in resolved
+
+        # Remove USER tier file; both should fall through to GLOBAL together.
+        (user_dir / "probe" / "main.txt").unlink()
+        backend_content = mb.read("/probe/main.txt")
+        text = (
+            backend_content
+            if isinstance(backend_content, str)
+            else getattr(backend_content, "content", str(backend_content))
+        )
+        assert "GLOBAL" in text
+        resolved = backends._resolve_virtual_mount_path("/skills/probe/main.txt")
+        assert str(global_dir / "probe" / "main.txt") in resolved
+
+    def test_skills_tier_paths_helper_returns_canonical_order(self):
+        """Pin the helper's slot order so calling code (constructor wiring,
+        tests like the alignment one above) can rely on it.
+        """
+        result = backends._skills_tier_paths()
+        assert len(result) == 3
+        assert result[0] == paths.USER_SKILLS_DIR
+        assert result[1] == paths.GLOBAL_SKILLS_DIR
+        assert result[2] == backends._BUILTIN_SKILLS_DIR
+
+    def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
+        """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
+        execute successfully. Regression guard: USER_SKILLS_DIR must be in
+        execute()'s allow_prefixes — the workspace-literal replace at the
+        top of execute() runs BEFORE convert_virtual_paths_in_command, so
+        any absolute path the resolver subsequently injects reaches
+        validate_command unstripped and would trip the system-path block
+        list without an explicit allowlist entry.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        user_dir = workspace / "skills"
+        user_dir.mkdir()
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        memories_dir = tmp_path / "memories"
+        memories_dir.mkdir()
+        builtin_dir = tmp_path / "builtin_skills"
+        builtin_dir.mkdir()
+        # Skill lives ONLY in the workspace tier.
+        (user_dir / "hello-ws").mkdir()
+        (user_dir / "hello-ws" / "main.py").write_text(
+            "print('workspace-tier-fix-works')"
+        )
+
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+
+        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        resp = backend.execute("python3 /skills/hello-ws/main.py")
+        assert resp.exit_code == 0, resp.output
+        assert "workspace-tier-fix-works" in resp.output
+
+    def test_execute_e2e_workspace_tier_shadows_global(self, monkeypatch, tmp_path):
+        """End-to-end: when the same skill exists in BOTH workspace and global
+        tiers, the workspace version must shadow the global one when invoked
+        via ``CustomSandboxBackend.execute``. Mirrors
+        ``MergedSkillsBackend``'s priority (USER > GLOBAL > BUILTIN) at the
+        full-pipeline level, complementing the unit-level priority check in
+        ``test_skills_path_resolves_to_workspace_tier_when_present``.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        user_dir = workspace / "skills"
+        user_dir.mkdir()
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        memories_dir = tmp_path / "memories"
+        memories_dir.mkdir()
+        builtin_dir = tmp_path / "builtin_skills"
+        builtin_dir.mkdir()
+        # Same skill name in both tiers, different outputs.
+        (user_dir / "shadow-test").mkdir()
+        (user_dir / "shadow-test" / "main.py").write_text(
+            "print('WORKSPACE_TIER_WINS')"
+        )
+        (global_dir / "shadow-test").mkdir()
+        (global_dir / "shadow-test" / "main.py").write_text("print('GLOBAL_TIER_LOST')")
+
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+
+        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        resp = backend.execute("python3 /skills/shadow-test/main.py")
+        assert resp.exit_code == 0, resp.output
+        assert "WORKSPACE_TIER_WINS" in resp.output
+        assert "GLOBAL_TIER_LOST" not in resp.output
+
+    def test_execute_e2e_global_tier_skill(self, monkeypatch, tmp_path):
+        """End-to-end: a skill that exists ONLY in the global tier (workspace
+        does not have a copy) must execute successfully via
+        ``CustomSandboxBackend.execute``. This is the exact bug fixed.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        user_dir = workspace / "skills"
+        user_dir.mkdir()
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        memories_dir = tmp_path / "memories"
+        memories_dir.mkdir()
+        builtin_dir = tmp_path / "builtin_skills"
+        builtin_dir.mkdir()
+        # The skill lives ONLY in global, NOT in workspace.
+        (global_dir / "hello-e2e").mkdir()
+        (global_dir / "hello-e2e" / "main.py").write_text(
+            "print('global-tier-fix-works')"
+        )
+
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+
+        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        resp = backend.execute("python3 /skills/hello-e2e/main.py")
+        assert resp.exit_code == 0, resp.output
+        assert "global-tier-fix-works" in resp.output
 
 
 # === CustomSandboxBackend._resolve_path ===
