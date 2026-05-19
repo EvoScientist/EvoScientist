@@ -499,7 +499,12 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
 
         mw.insert(0, AskUserMiddleware())
 
-    mw.append(create_code_interpreter_middleware())
+    mw.append(
+        create_code_interpreter_middleware(
+            timeout=cfg.code_interpreter_timeout,
+            max_result_chars=cfg.code_interpreter_max_result_chars,
+        )
+    )
     return mw
 
 

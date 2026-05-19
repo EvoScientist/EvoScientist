@@ -27,8 +27,15 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from langchain_core.messages import (
+    AnyMessage,
+    BaseMessage,
+    RemoveMessage,
+    convert_to_messages,
+)
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Overwrite
 
 _logger = logging.getLogger(__name__)
@@ -501,6 +508,76 @@ async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
         return await cur.fetchone() is not None
 
 
+def _reduce_messages_delta(
+    state: list[AnyMessage], writes: list[Any]
+) -> list[AnyMessage]:
+    """Inline copy of deepagents' ``_messages_delta_reducer``.
+
+    The upstream reducer lives in ``deepagents._messages_reducer`` (a
+    private module) and itself adapts langgraph's experimental
+    ``_messages_delta_reducer`` (PR #7729). Both surfaces are
+    pre-stable — langgraph marks DeltaChannel as Beta, and the deepagents
+    file's leading underscore signals it's not part of the public API.
+
+    We copy the implementation here so a future upstream rename or
+    semantic shift doesn't silently break thread reconstruction.
+    Behavior MUST stay equivalent: dedups by message ``id``, tombstones
+    via ``RemoveMessage``, resets on ``REMOVE_ALL_MESSAGES``. ID-less
+    messages are appended without ID assignment — checkpointers
+    serialize pending writes before ``update()`` runs, so IDs assigned
+    inside the reducer never reach stored writes and would differ on
+    replay, defeating deduplication.
+
+    Raw dict / string / tuple inputs are coerced to typed ``BaseMessage``
+    so HTTP-driven graphs (and persisted blobs that round-tripped
+    through JSON) reconstruct correctly without a separate coercion
+    step.
+    """
+    flat: list[Any] = []
+    for w in writes:
+        if isinstance(w, list):
+            flat.extend(w)
+        else:
+            flat.append(w)
+    # Steady-state writes from this module already typed; only raw input
+    # (deserialized blobs, dict shorthands) needs ``convert_to_messages``.
+    state_msgs: list[AnyMessage] = (
+        state
+        if state and isinstance(state[0], BaseMessage)
+        else convert_to_messages(state)  # type: ignore[arg-type]
+    )
+    msgs: list[AnyMessage] = convert_to_messages(flat)  # type: ignore[assignment]
+
+    # ``REMOVE_ALL_MESSAGES`` resets everything; honor the last sentinel
+    # in the batch — discard prior state plus every write before it.
+    remove_all_idx: int | None = None
+    for idx, m in enumerate(msgs):
+        if isinstance(m, RemoveMessage) and m.id == REMOVE_ALL_MESSAGES:
+            remove_all_idx = idx
+    if remove_all_idx is not None:
+        state_msgs = []
+        msgs = msgs[remove_all_idx + 1 :]
+
+    index: dict[str, int] = {
+        m.id: i for i, m in enumerate(state_msgs) if m.id is not None
+    }
+    result: list[AnyMessage | None] = list(state_msgs)
+    for msg in msgs:
+        mid = msg.id
+        if mid is None:
+            result.append(msg)
+        elif isinstance(msg, RemoveMessage):
+            if mid in index:
+                result[index[mid]] = None
+                del index[mid]
+        elif mid in index:
+            result[index[mid]] = msg
+        else:
+            index[mid] = len(result)
+            result.append(msg)
+    return [m for m in result if m is not None]
+
+
 async def _load_checkpoint_messages(
     saver: AsyncSqliteSaver,
     thread_id: str,
@@ -511,8 +588,9 @@ async def _load_checkpoint_messages(
     ``BaseCheckpointSaver.aget_delta_channel_history`` — it finds the
     nearest ancestor whose ``channel_values["messages"]`` carries a seed
     (``_DeltaSnapshot`` blob or plain list) and returns that plus every
-    on-path pending write oldest→newest. The deepagents
-    ``_messages_delta_reducer`` is then applied in a single batched call,
+    on-path pending write oldest→newest. The local
+    ``_reduce_messages_delta`` (inline copy of deepagents' reducer; see
+    that function's docstring) is then applied in a single batched call,
     preserving dedup-by-id, ``RemoveMessage`` tombstones, and
     ``REMOVE_ALL_MESSAGES`` reset semantics.
 
@@ -527,11 +605,6 @@ async def _load_checkpoint_messages(
 
     Returns a list of LangChain message objects, or an empty list on failure.
     """
-    try:
-        from deepagents._messages_reducer import _messages_delta_reducer
-    except ImportError:
-        _messages_delta_reducer = None  # type: ignore[assignment]
-
     # Pre-resolve the latest EvoScientist checkpoint_id with an
     # ``agent_name`` filter, then pin it into the config so
     # ``aget_tuple`` fetches THAT specific row. Without the pin,
@@ -594,23 +667,8 @@ async def _load_checkpoint_messages(
         nonlocal accumulated
         if not batch:
             return
-        if _messages_delta_reducer is None:
-            # ``deepagents._messages_delta_reducer`` is unavailable
-            # (upstream rename / packaging change). A naive concat
-            # would silently break dedup-by-id and RemoveMessage /
-            # REMOVE_ALL_MESSAGES semantics. Skip the batch with a
-            # warning instead — the caller gets a partial but
-            # internally consistent view.
-            _logger.warning(
-                "deepagents._messages_delta_reducer unavailable; "
-                "skipping %d messages deltas for thread %s",
-                len(batch),
-                thread_id,
-            )
-            batch.clear()
-            return
         try:
-            accumulated = _messages_delta_reducer(accumulated, batch)
+            accumulated = _reduce_messages_delta(accumulated, batch)
         except Exception as exc:
             _logger.warning(
                 "Failed to apply %d messages deltas for thread %s: %s",

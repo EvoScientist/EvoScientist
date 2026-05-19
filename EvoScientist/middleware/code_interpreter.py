@@ -19,12 +19,20 @@ Usage::
 
     from EvoScientist.middleware import create_code_interpreter_middleware
 
-    middleware = create_code_interpreter_middleware()
+    middleware = create_code_interpreter_middleware(
+        timeout=60.0, max_result_chars=10000
+    )
 """
 
 from __future__ import annotations
 
 from langchain_quickjs import CodeInterpreterMiddleware
+
+# Defaults match the historical hardcoded values. Callers (the agent
+# builder in ``EvoScientist.py``) pass the resolved ``EvoScientistConfig``
+# values; tests / ad-hoc callers can omit and get sensible defaults.
+_DEFAULT_TIMEOUT_SECONDS: float = 60.0
+_DEFAULT_MAX_RESULT_CHARS: int = 10000
 
 # Read-only, batchable tools that benefit from being callable inside JS.
 # Multi-agent orchestration is the killer use case: ``Promise.all`` over
@@ -48,8 +56,21 @@ _DEFAULT_PTC_ALLOWLIST: list[str] = [
 ]
 
 
-def create_code_interpreter_middleware() -> CodeInterpreterMiddleware:
+def create_code_interpreter_middleware(
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
+) -> CodeInterpreterMiddleware:
     """Build a project-tuned CodeInterpreterMiddleware instance.
+
+    Args:
+        timeout: Per-eval timeout in seconds. Defaults to 60s — long enough
+            for LLM-authored algorithms that touch async sub-agent dispatch
+            (``start_async_task`` + ``check_async_task`` polling).
+        max_result_chars: Maximum characters of JS eval output passed back
+            to the LLM. Defaults to 10k — fits structured JSON aggregations
+            of file reads / sub-agent results without truncating useful
+            payloads. Larger values trade tokens for completeness.
 
     Returns:
         Configured ``CodeInterpreterMiddleware`` ready to append to an agent's
@@ -57,7 +78,7 @@ def create_code_interpreter_middleware() -> CodeInterpreterMiddleware:
     """
     return CodeInterpreterMiddleware(
         ptc=_DEFAULT_PTC_ALLOWLIST,
-        timeout=60.0,
-        max_result_chars=10000,
+        timeout=timeout,
+        max_result_chars=max_result_chars,
         tool_name="code_interpreter",
     )
