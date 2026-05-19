@@ -17,7 +17,6 @@ breaking ``task()`` delegations.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -34,9 +33,10 @@ def test_sidecar_path_is_next_to_pid_file():
 def test_write_workspace_sidecar_records_workspace_and_pid(tmp_path, monkeypatch):
     """``_write_workspace_sidecar`` writes JSON with workspace + pid."""
     monkeypatch.setattr(manager, "_WORKSPACE_SIDECAR", tmp_path / "ws.json")
-    manager._write_workspace_sidecar(workspace_dir=Path("/some/ws"), pid=12345)
+    workspace = tmp_path / "some" / "ws"
+    manager._write_workspace_sidecar(workspace_dir=workspace, pid=12345)
     data = json.loads((tmp_path / "ws.json").read_text())
-    assert data["workspace"] == "/some/ws"
+    assert data["workspace"] == str(workspace)
     assert data["pid"] == 12345
 
 
@@ -81,9 +81,10 @@ def test_read_workspace_sidecar_returns_none_on_wrong_schema(
 
 def test_read_workspace_sidecar_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "_WORKSPACE_SIDECAR", tmp_path / "rt.json")
-    manager._write_workspace_sidecar(workspace_dir=Path("/x/y"), pid=42)
+    workspace = tmp_path / "x" / "y"
+    manager._write_workspace_sidecar(workspace_dir=workspace, pid=42)
     data = manager._read_workspace_sidecar()
-    assert data == {"workspace": "/x/y", "pid": 42}
+    assert data == {"workspace": str(workspace), "pid": 42}
 
 
 def test_workspace_mismatch_error_is_runtime_error_subclass():
@@ -92,8 +93,10 @@ def test_workspace_mismatch_error_is_runtime_error_subclass():
 
 def test_ensure_langgraph_dev_refuses_on_workspace_mismatch(tmp_path, monkeypatch):
     """Cross-process reuse with sidecar workspace ≠ requested → raises."""
+    ws_a = tmp_path / "A"
+    ws_b = tmp_path / "B"
     monkeypatch.setattr(manager, "_WORKSPACE_SIDECAR", tmp_path / "ws.json")
-    manager._write_workspace_sidecar(workspace_dir=Path("/workspace/A"), pid=99999)
+    manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
 
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
     monkeypatch.setattr(manager, "_PROCESS", None)
@@ -102,15 +105,43 @@ def test_ensure_langgraph_dev_refuses_on_workspace_mismatch(tmp_path, monkeypatc
     cfg = manager.EvoScientistConfig()
     cfg.enable_async_subagents = True
     with pytest.raises(manager.WorkspaceMismatchError) as exc:
-        manager.ensure_langgraph_dev(cfg, workspace_dir=Path("/workspace/B"))
-    assert "/workspace/A" in str(exc.value)
-    assert "/workspace/B" in str(exc.value)
+        manager.ensure_langgraph_dev(cfg, workspace_dir=ws_b)
+    assert str(ws_a.resolve()) in str(exc.value)
+    assert str(ws_b) in str(exc.value)
+
+
+def test_ensure_langgraph_dev_refuses_on_mismatch_with_stale_process(
+    tmp_path, monkeypatch
+):
+    """A non-None but dead ``_PROCESS`` handle must NOT short-circuit the
+    sidecar check. Regression for the case where our subprocess exited and a
+    different langgraph dev rebound the port."""
+    ws_a = tmp_path / "A"
+    ws_b = tmp_path / "B"
+    monkeypatch.setattr(manager, "_WORKSPACE_SIDECAR", tmp_path / "ws.json")
+    manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
+
+    class _DeadProc:
+        def poll(self):
+            return 1  # non-None → process has exited
+
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
+    monkeypatch.setattr(manager, "_PROCESS", _DeadProc())
+    # _PROCESS_WORKSPACE matches ws_b so the earlier owned-restart branch (which
+    # also gates on _PROCESS.poll() is None) doesn't fire on this dead handle.
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", ws_b)
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    with pytest.raises(manager.WorkspaceMismatchError):
+        manager.ensure_langgraph_dev(cfg, workspace_dir=ws_b)
 
 
 def test_ensure_langgraph_dev_reuses_when_workspace_matches(tmp_path, monkeypatch):
     """Cross-process reuse with matching sidecar workspace → no raise."""
+    ws_a = tmp_path / "A"
     monkeypatch.setattr(manager, "_WORKSPACE_SIDECAR", tmp_path / "ws.json")
-    manager._write_workspace_sidecar(workspace_dir=Path("/workspace/A"), pid=99999)
+    manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
 
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
     monkeypatch.setattr(manager, "_PROCESS", None)
@@ -119,7 +150,7 @@ def test_ensure_langgraph_dev_reuses_when_workspace_matches(tmp_path, monkeypatc
     cfg = manager.EvoScientistConfig()
     cfg.enable_async_subagents = True
     # Should NOT raise.
-    manager.ensure_langgraph_dev(cfg, workspace_dir=Path("/workspace/A"))
+    manager.ensure_langgraph_dev(cfg, workspace_dir=ws_a)
 
 
 def test_ensure_langgraph_dev_reuses_when_sidecar_missing(tmp_path, monkeypatch):
@@ -133,7 +164,7 @@ def test_ensure_langgraph_dev_reuses_when_sidecar_missing(tmp_path, monkeypatch)
     cfg = manager.EvoScientistConfig()
     cfg.enable_async_subagents = True
     # Should NOT raise — degrades to the prior reuse-with-warning branch.
-    manager.ensure_langgraph_dev(cfg, workspace_dir=Path("/workspace/B"))
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B")
 
 
 def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch):
@@ -142,7 +173,7 @@ def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch):
     pid_file = tmp_path / "pid.txt"
     monkeypatch.setattr(manager, "_WORKSPACE_SIDECAR", sidecar)
     monkeypatch.setattr(manager, "_PID_FILE", pid_file)
-    manager._write_workspace_sidecar(workspace_dir=Path("/x"), pid=42)
+    manager._write_workspace_sidecar(workspace_dir=tmp_path / "x", pid=42)
     assert sidecar.exists()
 
     # _PROCESS is None so stop_langgraph_dev shouldn't try to kill anything;

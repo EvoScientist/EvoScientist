@@ -813,12 +813,17 @@ def _ensure_langgraph_dev_locked(
         _ASYNC_SUBAGENTS_AVAILABLE = False  # cleared until restart succeeds
 
     if is_langgraph_dev_running(port=port):
-        # If WE own the running process, workspace was already verified above
-        # via _PROCESS_WORKSPACE comparison. If we DON'T own it (e.g. EvoSci
-        # deploy in another terminal, or a langgraph dev the user spawned
-        # manually), check the workspace sidecar — it's the only cross-process
-        # source of truth for the externally-managed instance's workspace.
-        if _PROCESS is None and ws_path is not None:
+        # If WE own the running process AND it's still alive, workspace was
+        # already verified above via _PROCESS_WORKSPACE comparison. Otherwise
+        # — we never owned it (EvoSci deploy in another terminal, or a
+        # langgraph dev the user spawned manually) OR our handle is stale (our
+        # subprocess died and a different one rebound the port) — check the
+        # workspace sidecar, the only cross-process source of truth for the
+        # running instance's workspace. A stale non-None _PROCESS must NOT
+        # short-circuit this check, or we'd silently reuse a wrong-workspace
+        # server.
+        owned_running = _PROCESS is not None and _PROCESS.poll() is None
+        if not owned_running and ws_path is not None:
             sidecar = _read_workspace_sidecar()
             if sidecar is not None:
                 recorded = Path(sidecar["workspace"]).resolve()
