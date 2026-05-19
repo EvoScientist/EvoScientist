@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "deepagents[quickjs]>=0.6.1",
+    "deepagents[quickjs]~=0.6.2",
     "langchain>=1.2",
     "langchain-anthropic>=1.4",
     "langchain-openai>=1.2",
