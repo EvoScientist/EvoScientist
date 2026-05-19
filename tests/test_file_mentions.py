@@ -89,6 +89,86 @@ class TestParseFileMentions:
         _, warnings = parse_file_mentions(f"@{f}", cwd=tmp_path)
         assert not any("outside the workspace" in w for w in warnings)
 
+    def test_escaped_space_in_path(self, tmp_path: Path) -> None:
+        """Backslash-escaped spaces remain supported (existing behavior)."""
+        f = tmp_path / "my paper.pdf"
+        f.write_text("x")
+        files, _ = parse_file_mentions("see @my\\ paper.pdf", cwd=tmp_path)
+        assert files == [f.resolve()]
+
+    def test_double_quoted_path_with_spaces(self, tmp_path: Path) -> None:
+        f = tmp_path / "PREPING_ Building Agent Memory.pdf"
+        f.write_text("x")
+        files, _ = parse_file_mentions(
+            'read @"PREPING_ Building Agent Memory.pdf"', cwd=tmp_path
+        )
+        assert files == [f.resolve()]
+
+    def test_single_quoted_path_with_spaces(self, tmp_path: Path) -> None:
+        f = tmp_path / "notes with spaces.md"
+        f.write_text("x")
+        files, _ = parse_file_mentions(
+            "open @'notes with spaces.md' please", cwd=tmp_path
+        )
+        assert files == [f.resolve()]
+
+    def test_greedy_extends_across_unescaped_spaces(self, tmp_path: Path) -> None:
+        """Bare ``@path with spaces`` should still resolve when the file exists."""
+        f = tmp_path / "PREPING_ Building Agent Memory without Tasks.pdf"
+        f.write_text("x")
+        files, warnings = parse_file_mentions(
+            "@PREPING_ Building Agent Memory without Tasks.pdf 阅读本文",
+            cwd=tmp_path,
+        )
+        assert files == [f.resolve()]
+        assert warnings == []
+
+    def test_greedy_extension_stops_at_next_mention(self, tmp_path: Path) -> None:
+        """Greedy expansion must not gobble across another ``@mention``."""
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("a")
+        b.write_text("b")
+        # ``@a.txt some prose @b.txt`` — both files should be picked up
+        # independently; the first must not swallow ``@b.txt``.
+        files, _ = parse_file_mentions("@a.txt some prose @b.txt", cwd=tmp_path)
+        assert set(files) == {a.resolve(), b.resolve()}
+
+    def test_greedy_extension_stops_at_newline(self, tmp_path: Path) -> None:
+        """Greedy expansion must not cross a newline."""
+        f = tmp_path / "alpha.txt"
+        f.write_text("x")
+        files, warnings = parse_file_mentions(
+            "@missing path\nsome other line", cwd=tmp_path
+        )
+        # Nothing resolves and we should not consume across the newline.
+        assert files == []
+        assert any("not found" in w for w in warnings)
+
+    def test_greedy_extension_only_when_bare_fails(self, tmp_path: Path) -> None:
+        """If bare ``@token`` resolves, do not greedily extend it."""
+        f = tmp_path / "a.txt"
+        f.write_text("x")
+        # ``@a.txt and more text`` — should pick up just ``a.txt``.
+        files, _ = parse_file_mentions("@a.txt and more text", cwd=tmp_path)
+        assert files == [f.resolve()]
+
+    def test_greedy_strips_trailing_punctuation(self, tmp_path: Path) -> None:
+        f = tmp_path / "my notes.md"
+        f.write_text("x")
+        files, _ = parse_file_mentions("see @my notes.md, then continue", cwd=tmp_path)
+        assert files == [f.resolve()]
+
+    def test_quoted_missing_does_not_extend(self, tmp_path: Path) -> None:
+        """Quoted form is explicit — no greedy expansion when it fails."""
+        f = tmp_path / "a b c.txt"
+        f.write_text("x")
+        files, warnings = parse_file_mentions(
+            '@"missing file.txt" but a b c.txt exists', cwd=tmp_path
+        )
+        assert files == []
+        assert any("not found" in w for w in warnings)
+
 
 # ---------------------------------------------------------------------------
 # resolve_file_mentions
@@ -290,3 +370,17 @@ class TestCompleteFileMention:
         result = complete_file_mention("@new", ws)
         paths = [p for p, _ in result]
         assert any("new_file" in p for p in paths)
+
+    def test_completion_quotes_paths_with_spaces(self, tmp_path: Path) -> None:
+        """Files whose relative path contains a space come back as ``@"..."``."""
+        (tmp_path / "my notes.md").write_text("")
+        result = complete_file_mention("@my", str(tmp_path))
+        paths = [p for p, _ in result]
+        assert any(p == '@"my notes.md"' for p in paths)
+
+    def test_completion_inside_quoted_partial(self, tmp_path: Path) -> None:
+        """Quoted partial allows the user to keep typing past the space."""
+        (tmp_path / "PREPING_ Building.pdf").write_text("")
+        result = complete_file_mention('@"PREPING_ Bui', str(tmp_path))
+        paths = [p for p, _ in result]
+        assert any("PREPING_ Building.pdf" in p and p.endswith('"') for p in paths)
