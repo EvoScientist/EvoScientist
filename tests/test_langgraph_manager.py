@@ -218,6 +218,24 @@ class TestEnsureLanggraphDev:
             assert mock_running.called
 
 
+class TestLanggraphDevEnv:
+    def test_webui_isolated_runtime_keeps_mcp_enabled_by_default(self, tmp_path):
+        env = manager._langgraph_dev_env(tmp_path, file_persistence=True)
+
+        assert env["EVOSCIENTIST_WORKSPACE_DIR"] == str(tmp_path)
+        assert "EVOSCIENTIST_DEPLOYED_NO_MCP" not in env
+
+    def test_cli_runtime_can_disable_duplicate_mcp_loading(self, tmp_path):
+        env = manager._langgraph_dev_env(
+            tmp_path,
+            file_persistence=False,
+            disable_mcp=True,
+        )
+
+        assert env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] == "true"
+        assert env["EVOSCIENTIST_DEPLOYED_NO_MCP"] == "true"
+
+
 # =============================================================================
 # is_async_subagents_available — module state
 # =============================================================================

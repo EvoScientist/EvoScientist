@@ -147,7 +147,7 @@ class EvoScientistConfig:
     reasoning_effort: str = "high"
 
     # Channel Settings
-    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
+    channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "webui" | "" (comma-separated for multiple)
     channel_send_thinking: bool = True  # forward thinking to any channel
     channel_debug_tracing: bool = False  # emit extra inbound diagnostics at DEBUG
     require_mention: str = "group"  # "always" | "group" | "off"
@@ -247,6 +247,14 @@ class EvoScientistConfig:
     signal_config_dir: str = ""
     signal_allowed_senders: str = ""
     signal_rpc_port: int = 7583
+
+    # Web UI Settings
+    webui_bind_host: str = "127.0.0.1"
+    webui_port: int = 8010
+    webui_api_key: str = ""
+    webui_base_path: str = "/webui"
+    webui_allowed_origins: str = ""
+    webui_allowed_hosts: str = ""
 
     # Shared webhook port (0 = disabled)
     shared_webhook_port: int = 9000
@@ -465,6 +473,12 @@ _ENV_MAPPINGS = {
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
+    "webui_bind_host": "EVOSCIENTIST_WEBUI_BIND_HOST",
+    "webui_port": "EVOSCIENTIST_WEBUI_PORT",
+    "webui_api_key": "EVOSCIENTIST_WEBUI_API_KEY",
+    "webui_base_path": "EVOSCIENTIST_WEBUI_BASE_PATH",
+    "webui_allowed_origins": "EVOSCIENTIST_WEBUI_ALLOWED_ORIGINS",
+    "webui_allowed_hosts": "EVOSCIENTIST_WEBUI_ALLOWED_HOSTS",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",

@@ -91,6 +91,16 @@ def is_async_subagents_available() -> bool:
     return _ASYNC_SUBAGENTS_AVAILABLE
 
 
+def get_langgraph_dev_workspace() -> Path | None:
+    """Return the workspace used by the managed langgraph dev process, if known."""
+    with _LOCK:
+        if _PROCESS_WORKSPACE is not None and (
+            _PROCESS is None or _PROCESS.poll() is None
+        ):
+            return _PROCESS_WORKSPACE
+    return None
+
+
 # =============================================================================
 # Availability & health
 # =============================================================================
@@ -439,28 +449,11 @@ def start_langgraph_dev(
     # purposes mean "this is the user's workspace", so they don't conflict;
     # the explicit write below always wins for the subprocess regardless of
     # what the parent had inherited from its own environment.
-    sub_env = os.environ.copy()
-    sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
-
-    # By default, let langgraph dev write its full ``.langgraph_api/`` cache
-    # so future use cases — cross-session async tasks, Store API persistence,
-    # cron job state across CLI restarts — work without further changes. Users
-    # who want a clean workspace can opt out via:
-    #   EvoSci config set langgraph_dev_file_persistence false
-    if not file_persistence:
-        sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
-
-    # Skip MCP loading inside the langgraph dev subprocess. The CLI's main
-    # agent already loaded MCP servers in the foreground process; without
-    # this guard, ``main_graph.py`` would import ``EvoScientist_agent`` and
-    # trigger ``_get_default_agent`` → ``load_mcp_and_build_kwargs`` →
-    # spawning a SECOND copy of every MCP server in the subprocess.
-    # The deployed main agent is currently only reachable via HTTP (for
-    # future Web UI / SDK clients), and none of those are in use, so the
-    # duplicate MCP pool is pure waste. Async sub-agents don't load MCP at
-    # all (their factory bypasses ``load_mcp_and_build_kwargs``), so they
-    # are unaffected.
-    sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+    sub_env = _langgraph_dev_env(
+        workspace_dir,
+        file_persistence=file_persistence,
+        disable_mcp=True,
+    )
 
     try:
         proc = subprocess.Popen(
@@ -605,11 +598,14 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
 def ensure_langgraph_dev(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None = None,
+    *,
+    force: bool = False,
 ) -> subprocess.Popen | None:
     """Conditionally start langgraph dev based on ``config.enable_async_subagents``.
 
     Behavior:
-    - flag false: no-op, returns None
+    - flag false and ``force`` false: no-op, returns None
+    - ``force`` true: start/reuse the server without enabling async sub-agent routing
     - flag true + already running on the configured port: reuse, returns None
       (we don't own it; warns if the workspace can't be verified)
     - flag true + not running: start subprocess, register atexit cleanup, return Popen
@@ -625,7 +621,8 @@ def ensure_langgraph_dev(
     still chat with sync sub-agents; only async sub-agent calls will fail.
     """
     global _ASYNC_SUBAGENTS_AVAILABLE
-    if not getattr(config, "enable_async_subagents", False):
+    async_enabled = bool(getattr(config, "enable_async_subagents", False))
+    if not async_enabled and not force:
         return None
 
     # Two layers of locking:
@@ -643,7 +640,7 @@ def ensure_langgraph_dev(
     try:
         with FileLock(str(_FILE_LOCK_PATH), timeout=_FILE_LOCK_TIMEOUT):
             with _LOCK:
-                return _ensure_langgraph_dev_locked(config, workspace_dir)
+                return _ensure_langgraph_dev_locked(config, workspace_dir, force=force)
     except FileLockTimeout:
         logger.warning(
             "Timed out waiting %.0fs for cross-process langgraph dev lock at %s. "
@@ -659,9 +656,12 @@ def ensure_langgraph_dev(
 def _ensure_langgraph_dev_locked(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None,
+    *,
+    force: bool = False,
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE
+    async_enabled = bool(getattr(config, "enable_async_subagents", False))
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
@@ -715,7 +715,7 @@ def _ensure_langgraph_dev_locked(
             )
         else:
             logger.info("langgraph dev already running on %s, reusing", _base_url(port))
-        _ASYNC_SUBAGENTS_AVAILABLE = True
+        _ASYNC_SUBAGENTS_AVAILABLE = async_enabled
         return None
 
     try:
@@ -731,12 +731,159 @@ def _ensure_langgraph_dev_locked(
         # calls at a dead URL.
         _ASYNC_SUBAGENTS_AVAILABLE = False
         logger.warning(
-            "Failed to start langgraph dev — async sub-agents disabled, "
-            "falling back to in-process sync delegation. %s",
+            "Failed to start langgraph dev — %s. %s",
+            (
+                "async sub-agents disabled, falling back to in-process sync delegation"
+                if async_enabled
+                else "WebUI LangGraph runtime unavailable"
+            ),
             exc,
         )
         return None
 
-    _ASYNC_SUBAGENTS_AVAILABLE = True
+    _ASYNC_SUBAGENTS_AVAILABLE = async_enabled
     atexit.register(stop_langgraph_dev, proc)
     return proc
+
+
+def _langgraph_dev_env(
+    workspace_dir: Path,
+    *,
+    file_persistence: bool,
+    disable_mcp: bool = False,
+) -> dict[str, str]:
+    sub_env = os.environ.copy()
+    sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
+    if not file_persistence:
+        sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
+    if disable_mcp:
+        sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+    return sub_env
+
+
+def start_isolated_langgraph_dev(
+    workspace_dir: Path | str,
+    *,
+    port: int,
+    log_file: Path,
+    file_persistence: bool = True,
+    jobs_per_worker: int = 10,
+) -> subprocess.Popen:
+    """Start a langgraph dev process without touching the global CLI runtime.
+
+    WebUI uses this for thread-scoped runtimes. Unlike ``start_langgraph_dev``,
+    this function does not write the global PID file, does not mutate
+    ``_PROCESS`` / ``_PROCESS_WORKSPACE``, and never tries to kill an occupant
+    on the requested port.
+    """
+    exe = _langgraph_exe()
+    if exe is None:
+        raise FileNotFoundError(
+            "langgraph CLI not found. Reinstall EvoScientist (langgraph-cli is "
+            "a hard dependency): pip install -e '.[dev]'"
+        )
+
+    config_file = _packaged_langgraph_config()
+    if not config_file.exists():
+        raise FileNotFoundError(
+            f"Packaged langgraph.json not found at {config_file}. "
+            "This indicates a broken EvoScientist installation — reinstall."
+        )
+
+    workspace_path = Path(workspace_dir).expanduser().resolve()
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if not _wait_for_port_bindable(port, timeout=5.0):
+        raise RuntimeError(f"Port {port} cannot be bound for WebUI LangGraph runtime")
+
+    log_handle = open(log_file, "ab")
+    try:
+        proc = subprocess.Popen(
+            [
+                exe,
+                "dev",
+                "--config",
+                str(config_file),
+                "--port",
+                str(port),
+                "--n-jobs-per-worker",
+                str(jobs_per_worker),
+                "--no-browser",
+            ],
+            cwd=str(workspace_path),
+            stdout=log_handle,
+            stderr=log_handle,
+            env=_langgraph_dev_env(
+                workspace_path,
+                file_persistence=file_persistence,
+            ),
+            start_new_session=True,
+        )
+    finally:
+        try:
+            log_handle.close()
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            tail = ""
+            try:
+                tail = log_file.read_text()[-2000:]
+            except Exception:
+                pass
+            stop_langgraph_process(proc)
+            raise RuntimeError(
+                f"langgraph dev exited immediately with code {proc.returncode}.\n"
+                f"Log tail:\n{tail}"
+            )
+        if is_langgraph_dev_running(port=port):
+            logger.info(
+                "isolated langgraph dev started on %s (pid=%d)",
+                _base_url(port),
+                proc.pid,
+            )
+            return proc
+        time.sleep(0.5)
+
+    stop_langgraph_process(proc)
+    raise RuntimeError(
+        f"langgraph dev did not become healthy within 60 seconds. Check {log_file}"
+    )
+
+
+def stop_langgraph_process(proc: subprocess.Popen | None) -> None:
+    """Stop a specific langgraph dev process without global bookkeeping."""
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        return
+    try:
+        parent = psutil.Process(proc.pid)
+        descendants = parent.children(recursive=True)
+        for child in descendants:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        parent.terminate()
+        proc.wait(timeout=5)
+    except psutil.NoSuchProcess:
+        pass
+    except subprocess.TimeoutExpired:
+        try:
+            parent = psutil.Process(proc.pid)
+            for child in parent.children(recursive=True):
+                try:
+                    child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            parent.kill()
+        except psutil.NoSuchProcess:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
