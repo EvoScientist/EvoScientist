@@ -27,8 +27,16 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from langchain_core.messages import (
+    AnyMessage,
+    BaseMessage,
+    RemoveMessage,
+    convert_to_messages,
+)
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import Overwrite
 
 _logger = logging.getLogger(__name__)
 
@@ -102,7 +110,10 @@ def generate_thread_id() -> str:
 
 # Default kept when the caller cannot resolve config (tests, unit-init paths).
 # Production callers use ``EvoScientistConfig.checkpoint_keep_per_thread``.
-_DEFAULT_KEEP_PER_NS = 10
+# Kept in sync with the dataclass default so config-failure fallbacks
+# don't silently regress to the pre-DeltaChannel aggressive value (which
+# could prune away ``_DeltaSnapshot`` seeds and break message replay).
+_DEFAULT_KEEP_PER_NS = 1000
 
 
 class PruningCheckpointer(AsyncSqliteSaver):
@@ -192,85 +203,211 @@ class PruningCheckpointer(AsyncSqliteSaver):
                 _logger.warning("checkpoint pruning failed: %s", exc, exc_info=True)
             return result
 
+    # Safety cap on the snapshot walk. Upstream default
+    # ``snapshot_frequency`` is 1000; ``DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT``
+    # is 5000. 10000 is a generous ceiling that catches pathological data
+    # (cycles, malformed parents) without raising a hard limit on normal
+    # operation.
+    _MAX_SNAPSHOT_WALK_STEPS = 10000
+
     async def _prune_after_put(self, thread_id: str, checkpoint_ns: str) -> None:
-        """Run the two DELETE queries (writes first, then checkpoints).
+        """Prune old checkpoints with DeltaChannel awareness.
+
+        Naively keeping the N most-recent rows can sever the
+        ``_DeltaSnapshot`` chain that ``messages`` reconstruction
+        depends on — the surviving "latest" checkpoint is rarely a
+        snapshot point itself, so delta channels silently reconstruct
+        as empty (upstream ``BaseCheckpointSaver.prune`` spells out the
+        same failure mode).
+
+        After selecting the N most-recent anchor ids, walk back from
+        the OLDEST anchor's parent via ``parent_checkpoint_id`` until
+        hitting an ancestor whose ``channel_values["messages"]`` is a
+        seed (``_DeltaSnapshot`` blob or plain list — both detected via
+        ``_unwrap_messages_seed``). All visited ancestors are preserved
+        alongside the anchor set. Anchors form a contiguous head, so a
+        single walk from the oldest one covers all of them.
 
         Restricted to rows whose ``metadata.agent_name == AGENT_NAME``.
         ``json_extract(metadata, '$.agent_name') = ?`` evaluates to NULL
-        (and so fails the predicate) for any row whose metadata does not
-        carry an ``agent_name`` key — by design, those rows belong to
-        third-party LangGraph users and must never be pruned by us.
+        (and so fails the predicate) for any row whose metadata lacks an
+        ``agent_name`` key — by design, those rows belong to third-party
+        LangGraph users and must never be pruned by us.
 
-        Runs through the saver's connection and lock for atomicity with
-        concurrent ``aput()`` calls on the same thread.
+        Walk + DELETEs held under ``self.lock`` for atomicity with
+        concurrent ``aput()`` on the same thread.
         """
         keep = self._keep_per_ns
         agent = AGENT_NAME
-        # writes first — we look up which checkpoint ids will be deleted, then
-        # delete the writes pointing at them. Doing checkpoints first would
-        # leave orphan writes whose `checkpoint_id` we can no longer resolve.
-        del_writes = (
-            "DELETE FROM writes "
+        async with self.lock:
+            # ``writes`` table is checked inside ``_delete_outside`` so a
+            # legacy DB that only has ``checkpoints`` still gets pruned
+            # (writes DELETE silently skipped; checkpoints DELETE runs).
+            # The migration sweep depends on this — it walks legacy DBs
+            # that often pre-date the ``writes`` table entirely.
+            anchor_ids = await self._fetch_recent_checkpoint_ids(
+                thread_id, checkpoint_ns, agent, keep
+            )
+            if len(anchor_ids) < keep:
+                return  # nothing to prune yet
+
+            extra_preserve = await self._walk_to_snapshot_ancestor(
+                thread_id, checkpoint_ns, anchor_ids[-1]
+            )
+            kept = set(anchor_ids) | extra_preserve
+
+            await self._delete_outside(thread_id, checkpoint_ns, agent, kept)
+            await self.conn.commit()
+
+    async def _fetch_recent_checkpoint_ids(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        agent: str,
+        limit: int,
+    ) -> list[str]:
+        """Return the ``limit`` most-recent checkpoint ids (newest first)."""
+        query = (
+            "SELECT checkpoint_id FROM checkpoints "
             "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND checkpoint_id IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            "      AND checkpoint_id NOT IN ("
-            "        SELECT checkpoint_id FROM checkpoints "
-            "        WHERE thread_id = ? AND checkpoint_ns = ? "
-            "          AND json_extract(metadata, '$.agent_name') = ? "
-            "        ORDER BY checkpoint_id DESC LIMIT ?"
-            "      )"
-            "  )"
+            "  AND json_extract(metadata, '$.agent_name') = ? "
+            "ORDER BY checkpoint_id DESC LIMIT ?"
         )
+        async with self.conn.execute(
+            query, (thread_id, checkpoint_ns, agent, limit)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+    async def _walk_to_snapshot_ancestor(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        oldest_anchor_id: str,
+    ) -> set[str]:
+        """Walk parent chain until hitting a ``messages`` seed.
+
+        Returns the set of ancestor ids to preserve (inclusive of the
+        snapshot ancestor). On chain-break or deserialization failure,
+        returns what was visited so far — the safe side is over-preserve.
+        """
+        extra: set[str] = set()
+        cursor = await self._fetch_parent_checkpoint_id(
+            thread_id, checkpoint_ns, oldest_anchor_id
+        )
+        steps = 0
+        while cursor is not None and steps < self._MAX_SNAPSHOT_WALK_STEPS:
+            steps += 1
+            blob = await self._fetch_checkpoint_blob(thread_id, checkpoint_ns, cursor)
+            if blob is None:
+                break  # chain broken (legacy DB); preserve what we have
+            extra.add(cursor)
+            try:
+                ck = self.serde.loads_typed(blob)
+            except Exception as exc:
+                _logger.warning(
+                    "Failed to deserialize checkpoint %s while walking to "
+                    "snapshot for thread %s: %s",
+                    cursor,
+                    thread_id,
+                    exc,
+                )
+                break  # safe-side: preserve everything visited so far
+            cv = ck.get("channel_values") or {}
+            if _unwrap_messages_seed(cv.get("messages")) is not None:
+                break  # found seed; this ancestor anchors reconstruction
+            cursor = await self._fetch_parent_checkpoint_id(
+                thread_id, checkpoint_ns, cursor
+            )
+        return extra
+
+    async def _fetch_parent_checkpoint_id(
+        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
+    ) -> str | None:
+        query = (
+            "SELECT parent_checkpoint_id FROM checkpoints "
+            "WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?"
+        )
+        async with self.conn.execute(
+            query, (thread_id, checkpoint_ns, checkpoint_id)
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row and row[0] else None
+
+    async def _fetch_checkpoint_blob(
+        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
+    ) -> tuple[str, bytes] | None:
+        query = (
+            "SELECT type, checkpoint FROM checkpoints "
+            "WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?"
+        )
+        async with self.conn.execute(
+            query, (thread_id, checkpoint_ns, checkpoint_id)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row or not row[0] or not row[1]:
+            return None
+        return (row[0], row[1])
+
+    async def _delete_outside(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        agent: str,
+        kept_ids: set[str],
+    ) -> None:
+        """DELETE rows whose ``checkpoint_id`` is NOT in ``kept_ids``.
+
+        Writes deleted first to preserve referential ordering — if we
+        dropped checkpoints first, surviving writes' ``checkpoint_id``
+        would become orphans.
+
+        Empty ``kept_ids`` is a no-op rather than "delete everything" —
+        a defensive check; the caller always passes anchor_ids which is
+        non-empty by construction (already checked ``len >= keep`` in
+        the caller).
+        """
+        if not kept_ids:
+            return
+        kept_list = list(kept_ids)
+        placeholders = ",".join("?" * len(kept_list))
+
+        # Writes DELETE only runs if the ``writes`` table exists. Legacy
+        # DBs from pre-DeltaChannel builds may have only ``checkpoints`` —
+        # we still want to prune those, just skipping the writes step.
+        if await _table_exists(self.conn, "writes"):
+            del_writes = (
+                "DELETE FROM writes "
+                "WHERE thread_id = ? AND checkpoint_ns = ? "
+                "  AND checkpoint_id IN ("
+                "    SELECT checkpoint_id FROM checkpoints "
+                "    WHERE thread_id = ? AND checkpoint_ns = ? "
+                "      AND json_extract(metadata, '$.agent_name') = ? "
+                f"     AND checkpoint_id NOT IN ({placeholders})"
+                "  )"
+            )
+            await self.conn.execute(
+                del_writes,
+                (
+                    thread_id,
+                    checkpoint_ns,
+                    thread_id,
+                    checkpoint_ns,
+                    agent,
+                    *kept_list,
+                ),
+            )
+
         del_checkpoints = (
             "DELETE FROM checkpoints "
             "WHERE thread_id = ? AND checkpoint_ns = ? "
             "  AND json_extract(metadata, '$.agent_name') = ? "
-            "  AND checkpoint_id NOT IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            "    ORDER BY checkpoint_id DESC LIMIT ?"
-            "  )"
+            f" AND checkpoint_id NOT IN ({placeholders})"
         )
-        async with self.lock:
-            # Skip the writes DELETE on a legacy DB that only has the
-            # checkpoints table — without this guard, a missing ``writes``
-            # would raise sqlite3.OperationalError, the outer try/except
-            # in ``aput`` would log+swallow it, and pruning would silently
-            # stop working on the very databases this feature is meant to
-            # clean up. ``AsyncSqliteSaver.setup()`` normally creates both
-            # tables, but inherited DBs from older builds may lag.
-            if await _table_exists(self.conn, "writes"):
-                await self.conn.execute(
-                    del_writes,
-                    (
-                        thread_id,
-                        checkpoint_ns,
-                        thread_id,
-                        checkpoint_ns,
-                        agent,
-                        thread_id,
-                        checkpoint_ns,
-                        agent,
-                        keep,
-                    ),
-                )
-            await self.conn.execute(
-                del_checkpoints,
-                (
-                    thread_id,
-                    checkpoint_ns,
-                    agent,
-                    thread_id,
-                    checkpoint_ns,
-                    agent,
-                    keep,
-                ),
-            )
-            await self.conn.commit()
+        await self.conn.execute(
+            del_checkpoints,
+            (thread_id, checkpoint_ns, agent, *kept_list),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -371,49 +508,256 @@ async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
         return await cur.fetchone() is not None
 
 
+def _reduce_messages_delta(
+    state: list[AnyMessage], writes: list[Any]
+) -> list[AnyMessage]:
+    """Inline copy of deepagents' ``_messages_delta_reducer``.
+
+    The upstream reducer lives in ``deepagents._messages_reducer`` (a
+    private module) and itself adapts langgraph's experimental
+    ``_messages_delta_reducer`` (PR #7729). Both surfaces are
+    pre-stable — langgraph marks DeltaChannel as Beta, and the deepagents
+    file's leading underscore signals it's not part of the public API.
+
+    We copy the implementation here so a future upstream rename or
+    semantic shift doesn't silently break thread reconstruction.
+    Behavior MUST stay equivalent: dedups by message ``id``, tombstones
+    via ``RemoveMessage``, resets on ``REMOVE_ALL_MESSAGES``. ID-less
+    messages are appended without ID assignment — checkpointers
+    serialize pending writes before ``update()`` runs, so IDs assigned
+    inside the reducer never reach stored writes and would differ on
+    replay, defeating deduplication.
+
+    Raw dict / string / tuple inputs are coerced to typed ``BaseMessage``
+    so HTTP-driven graphs (and persisted blobs that round-tripped
+    through JSON) reconstruct correctly without a separate coercion
+    step.
+    """
+    flat: list[Any] = []
+    for w in writes:
+        if isinstance(w, list):
+            flat.extend(w)
+        else:
+            flat.append(w)
+    # Steady-state writes from this module already typed; only raw input
+    # (deserialized blobs, dict shorthands) needs ``convert_to_messages``.
+    state_msgs: list[AnyMessage] = (
+        state
+        if state and isinstance(state[0], BaseMessage)
+        else convert_to_messages(state)  # type: ignore[arg-type]
+    )
+    msgs: list[AnyMessage] = convert_to_messages(flat)  # type: ignore[assignment]
+
+    # ``REMOVE_ALL_MESSAGES`` resets everything; honor the last sentinel
+    # in the batch — discard prior state plus every write before it.
+    remove_all_idx: int | None = None
+    for idx, m in enumerate(msgs):
+        if isinstance(m, RemoveMessage) and m.id == REMOVE_ALL_MESSAGES:
+            remove_all_idx = idx
+    if remove_all_idx is not None:
+        state_msgs = []
+        msgs = msgs[remove_all_idx + 1 :]
+
+    index: dict[str, int] = {
+        m.id: i for i, m in enumerate(state_msgs) if m.id is not None
+    }
+    result: list[AnyMessage | None] = list(state_msgs)
+    for msg in msgs:
+        mid = msg.id
+        if mid is None:
+            result.append(msg)
+        elif isinstance(msg, RemoveMessage):
+            if mid in index:
+                result[index[mid]] = None
+                del index[mid]
+        elif mid in index:
+            result[index[mid]] = msg
+        else:
+            index[mid] = len(result)
+            result.append(msg)
+    return [m for m in result if m is not None]
+
+
 async def _load_checkpoint_messages(
-    conn: aiosqlite.Connection,
+    saver: AsyncSqliteSaver,
     thread_id: str,
-    serde: JsonPlusSerializer,
 ) -> list:
     """Load messages from the most recent checkpoint for *thread_id*.
 
+    Delegates the ``messages`` DeltaChannel walk to upstream
+    ``BaseCheckpointSaver.aget_delta_channel_history`` — it finds the
+    nearest ancestor whose ``channel_values["messages"]`` carries a seed
+    (``_DeltaSnapshot`` blob or plain list) and returns that plus every
+    on-path pending write oldest→newest. The local
+    ``_reduce_messages_delta`` (inline copy of deepagents' reducer; see
+    that function's docstring) is then applied in a single batched call,
+    preserving dedup-by-id, ``RemoveMessage`` tombstones, and
+    ``REMOVE_ALL_MESSAGES`` reset semantics.
+
+    ``Overwrite`` (``langgraph.types.Overwrite``) is not a message-like
+    and the reducer doesn't recognize it — split the batch at each
+    occurrence, replacing accumulated state with the wrapped value before
+    resuming reducer application.
+
+    ``_summarization_event`` doesn't ride on the ``messages`` channel,
+    so it's fetched separately from the latest checkpoint's
+    ``channel_values``.
+
     Returns a list of LangChain message objects, or an empty list on failure.
     """
-    channel_values = await _load_checkpoint_channel_values(conn, thread_id, serde)
-    messages = channel_values.get("messages", [])
-    if not isinstance(messages, list):
-        return []
-    event = channel_values.get("_summarization_event")
-    return _apply_summarization_event(
-        messages, event if isinstance(event, dict) else None
+    # Pre-resolve the latest EvoScientist checkpoint_id with an
+    # ``agent_name`` filter, then pin it into the config so
+    # ``aget_tuple`` fetches THAT specific row. Without the pin,
+    # ``aget_tuple`` returns the latest by ``checkpoint_id`` alone — in
+    # a multi-agent DB where a third-party tool shares the same
+    # ``(thread_id, checkpoint_ns)`` and happens to have a higher id,
+    # we'd leak that agent's transcript into our /resume. The ancestor
+    # walk via ``parent_checkpoint_id`` chain is unambiguous (specific
+    # ids), so pinning the head is sufficient — the rest of the chain
+    # follows EvoScientist's parent links.
+    head_query = (
+        "SELECT checkpoint_id FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = '' "
+        "  AND json_extract(metadata, '$.agent_name') = ? "
+        "ORDER BY checkpoint_id DESC LIMIT 1"
     )
+    async with saver.conn.execute(head_query, (thread_id, AGENT_NAME)) as cur:
+        head_row = await cur.fetchone()
+    if head_row is None:
+        return []
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": head_row[0],
+        }
+    }
+    target = await saver.aget_tuple(config)
+    if target is None:
+        return []
+
+    # ``aget_delta_channel_history`` walks from ``target.parent_config`` —
+    # it deliberately excludes the target itself (its caller is the
+    # runtime preparing to apply a NEW delta on top). For /resume we want
+    # the state AT the latest checkpoint, so check the target's own
+    # ``channel_values`` first, falling back to the ancestor walk only
+    # when no seed is materialized locally.
+    target_cv = target.checkpoint.get("channel_values") or {}
+    target_seed = _unwrap_messages_seed(target_cv.get("messages"))
+    if target_seed is not None:
+        accumulated: list = target_seed
+        writes: list = [w for w in (target.pending_writes or []) if w[1] == "messages"]
+    else:
+        history = await saver.aget_delta_channel_history(
+            config=config, channels=["messages"]
+        )
+        entry = history.get("messages", {})
+        accumulated = _unwrap_messages_seed(entry.get("seed")) or []
+        writes = list(entry.get("writes", []))
+        # ``target.pending_writes`` are the deltas recorded at this step;
+        # apply them on top of whatever the ancestor walk reconstructed.
+        writes.extend(w for w in (target.pending_writes or []) if w[1] == "messages")
+
+    # Batched reducer: collect contiguous message-like writes and flush
+    # in one call. Overwrite splits the batch because it resets state
+    # rather than appending.
+    batch: list = []
+
+    def _flush() -> None:
+        nonlocal accumulated
+        if not batch:
+            return
+        try:
+            accumulated = _reduce_messages_delta(accumulated, batch)
+        except Exception as exc:
+            _logger.warning(
+                "Failed to apply %d messages deltas for thread %s: %s",
+                len(batch),
+                thread_id,
+                exc,
+            )
+        batch.clear()
+
+    for _task_id, _channel, delta in writes:
+        # ``Overwrite`` wraps a value with "replace this channel"
+        # semantics — flush any pending writes first, then reset state
+        # to the wrapped value.
+        if isinstance(delta, Overwrite):
+            _flush()
+            inner = getattr(delta, "value", None)
+            accumulated = (
+                list(inner)
+                if isinstance(inner, list)
+                else ([inner] if inner is not None else [])
+            )
+        else:
+            batch.append(delta)
+    _flush()
+
+    # ``_summarization_event`` rides on its own channel; pick it off the
+    # target's ``channel_values`` we already deserialized above.
+    event = target_cv.get("_summarization_event")
+    summarization_event = event if isinstance(event, dict) else None
+
+    if not accumulated:
+        await _log_orphan_warning_if_pruned(saver.conn, thread_id)
+
+    if not isinstance(accumulated, list):
+        return []
+    return _apply_summarization_event(accumulated, summarization_event)
 
 
-async def _load_checkpoint_channel_values(
-    conn: aiosqlite.Connection,
-    thread_id: str,
-    serde: JsonPlusSerializer,
-) -> dict:
-    """Load channel_values from the most recent checkpoint for *thread_id*."""
+async def _log_orphan_warning_if_pruned(
+    conn: aiosqlite.Connection, thread_id: str
+) -> None:
+    """Emit a WARNING if *thread_id* has orphan ``parent_checkpoint_id`` refs.
+
+    Empty reconstructed history + a broken parent chain is the signature
+    of a pre-fix DB where the old ``keep_per_ns=10`` default pruned early
+    writes before the snapshot frequency materialized a ``_DeltaSnapshot``
+    seed. The DB has no path to recover those messages — log so /resume
+    showing a stub history isn't silent.
+    """
     query = """
-        SELECT type, checkpoint
-        FROM checkpoints
-        WHERE thread_id = ?
-          AND json_extract(metadata, '$.agent_name') = ?
-        ORDER BY checkpoint_id DESC
+        SELECT 1 FROM checkpoints c1
+        WHERE c1.thread_id = ? AND c1.checkpoint_ns = ''
+          AND c1.parent_checkpoint_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM checkpoints c2
+              WHERE c2.thread_id = c1.thread_id
+                AND c2.checkpoint_ns = ''
+                AND c2.checkpoint_id = c1.parent_checkpoint_id
+          )
         LIMIT 1
     """
-    async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
-        row = await cur.fetchone()
-        if not row or not row[0] or not row[1]:
-            return {}
-        try:
-            data = serde.loads_typed((row[0], row[1]))
-            channel_values = data.get("channel_values", {})
-            return channel_values if isinstance(channel_values, dict) else {}
-        except (ValueError, TypeError, KeyError):
-            return {}
+    async with conn.execute(query, (thread_id,)) as cur:
+        if await cur.fetchone():
+            _logger.warning(
+                "Thread %s has orphan checkpoints (pre-fix pruning) "
+                "and no surviving DeltaChannel snapshot; reconstructed "
+                "history is empty. Early messages cannot be recovered.",
+                thread_id,
+            )
+
+
+def _unwrap_messages_seed(value: object) -> list | None:
+    """Coerce a ``channel_values["messages"]`` snapshot seed into a plain list.
+
+    LangGraph 1.2 stores snapshot blobs as ``_DeltaSnapshot(value=[...])``
+    (a ``NamedTuple``, NOT a list subclass), so a bare ``isinstance(v, list)``
+    check silently ignores the seed and reconstruction starts from whatever
+    writes survived pruning. Pre-migration / non-DeltaChannel checkpoints
+    still store a plain list. Returns ``None`` when no usable seed is
+    present (caller leaves accumulated state untouched).
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return list(value)
+    inner = getattr(value, "value", None)
+    if isinstance(inner, list):
+        return list(inner)
+    return None
 
 
 def _apply_summarization_event(messages: list, event: dict | None) -> list:
@@ -532,9 +876,11 @@ async def list_threads(
         ]
 
         if (include_message_count or include_preview) and threads:
+            # Share one saver across all threads so ``setup()`` runs once.
             serde = JsonPlusSerializer()
+            saver = AsyncSqliteSaver(conn, serde=serde)
             for t in threads:
-                msgs = await _load_checkpoint_messages(conn, t["thread_id"], serde)
+                msgs = await _load_checkpoint_messages(saver, t["thread_id"])
                 if include_message_count:
                     t["message_count"] = len(msgs)
                 if include_preview:
@@ -677,6 +1023,11 @@ async def get_thread_messages(thread_id: str) -> list:
 
     Only returns messages for EvoScientist threads.
     Returns an empty list if the thread has no checkpoints.
+
+    Reconstructs the full message history by walking the checkpoint chain
+    and applying pending writes — required under deepagents 0.6
+    ``DeltaChannel`` where messages live in the ``writes`` table rather
+    than the latest checkpoint's ``channel_values``.
     """
     db_path = str(get_db_path())
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
@@ -692,10 +1043,8 @@ async def get_thread_messages(thread_id: str) -> list:
             if not await cur.fetchone():
                 return []
         serde = JsonPlusSerializer()
-        channel_values = await _load_checkpoint_channel_values(conn, thread_id, serde)
-        messages = channel_values.get("messages", [])
-        event = channel_values.get("_summarization_event")
-        return _apply_summarization_event(messages, event)
+        saver = AsyncSqliteSaver(conn, serde=serde)
+        return await _load_checkpoint_messages(saver, thread_id)
 
 
 # ---------------------------------------------------------------------------
@@ -850,9 +1199,6 @@ async def _run_migration_sweep(
             return 0
         if await _get_user_version(conn) >= _MIGRATION_VERSION:
             return 0
-        # ``writes`` is optional on legacy DBs: skip the writes DELETE
-        # if the table is absent rather than aborting the whole sweep.
-        has_writes = await _table_exists(conn, "writes")
 
         async with conn.execute(
             "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
@@ -861,62 +1207,23 @@ async def _run_migration_sweep(
         ) as cur:
             pairs = await cur.fetchall()
 
-        del_writes = (
-            "DELETE FROM writes "
-            "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND checkpoint_id IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            "      AND checkpoint_id NOT IN ("
-            "        SELECT checkpoint_id FROM checkpoints "
-            "        WHERE thread_id = ? AND checkpoint_ns = ? "
-            "          AND json_extract(metadata, '$.agent_name') = ? "
-            "        ORDER BY checkpoint_id DESC LIMIT ?"
-            "      )"
-            "  )"
-        )
-        del_checkpoints = (
-            "DELETE FROM checkpoints "
-            "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND json_extract(metadata, '$.agent_name') = ? "
-            "  AND checkpoint_id NOT IN ("
-            "    SELECT checkpoint_id FROM checkpoints "
-            "    WHERE thread_id = ? AND checkpoint_ns = ? "
-            "      AND json_extract(metadata, '$.agent_name') = ? "
-            "    ORDER BY checkpoint_id DESC LIMIT ?"
-            "  )"
-        )
+        # Reuse the DeltaChannel-aware prune logic from PruningCheckpointer
+        # instead of running naive keep_latest SQL: legacy DBs almost always
+        # have threads where the latest N checkpoints sit ABOVE a
+        # ``_DeltaSnapshot`` ancestor, and the naive form would sever the
+        # snapshot chain — exactly the failure mode the steady-state Fix
+        # already prevents. Sharing one saver across all pairs means
+        # ``setup()`` and the in-class lock are constructed once.
+        #
+        # We invoke ``_prune_after_put`` directly (not ``aput``) — the
+        # sweep is a bulk cleanup, not a checkpoint write. As a result
+        # ``saver._aput_lock`` (the outer put+prune pair lock) is
+        # intentionally unused here; only the inner ``self.lock`` that
+        # ``_prune_after_put`` itself acquires runs.
+        saver = PruningCheckpointer(conn, keep_per_ns=keep)
         for thread_id, checkpoint_ns in pairs:
             ns = checkpoint_ns or ""
-            if has_writes:
-                await conn.execute(
-                    del_writes,
-                    (
-                        thread_id,
-                        ns,
-                        thread_id,
-                        ns,
-                        AGENT_NAME,
-                        thread_id,
-                        ns,
-                        AGENT_NAME,
-                        keep,
-                    ),
-                )
-            await conn.execute(
-                del_checkpoints,
-                (
-                    thread_id,
-                    ns,
-                    AGENT_NAME,
-                    thread_id,
-                    ns,
-                    AGENT_NAME,
-                    keep,
-                ),
-            )
-            await conn.commit()
+            await saver._prune_after_put(str(thread_id), ns)
             pairs_pruned += 1
             if progress_cb is not None:
                 try:

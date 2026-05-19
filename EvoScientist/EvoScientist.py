@@ -468,6 +468,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         ContextOverflowMapperMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
+        create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_middleware,
         create_tool_selector_middleware,
@@ -497,6 +498,13 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
+
+    mw.append(
+        create_code_interpreter_middleware(
+            timeout=cfg.code_interpreter_timeout,
+            max_result_chars=cfg.code_interpreter_max_result_chars,
+        )
+    )
     return mw
 
 
