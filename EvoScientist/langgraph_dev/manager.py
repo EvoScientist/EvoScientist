@@ -12,6 +12,7 @@ Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import shutil
@@ -53,6 +54,87 @@ _PID_DIR = Path.home() / ".config" / "evoscientist"
 _PID_FILE = _PID_DIR / "langgraph_dev.pid"
 _LOG_FILE = _PID_DIR / "langgraph_dev.log"
 
+# Workspace fingerprint sidecar — JSON recording the workspace + pid of the
+# running langgraph dev. Cross-process callers (e.g. TUI starting up while
+# ``EvoSci deploy`` is already running) read this on the reuse path to refuse
+# silently operating on a different workspace's files. Missing/corrupt sidecar
+# degrades gracefully to a log warning for backward compatibility with
+# langgraph devs started before this protocol existed.
+_WORKSPACE_SIDECAR = _PID_DIR / "langgraph_dev.workspace.json"
+
+
+class WorkspaceMismatchError(RuntimeError):
+    """Raised when a caller would reuse a langgraph dev whose recorded
+    workspace differs from the workspace the caller requested.
+
+    Surfaced by ``ensure_langgraph_dev`` on the cross-process reuse path so
+    callers (CLI / serve) can print a clear refuse-with-hint message instead
+    of silently routing async sub-agent calls to a process pinned to a
+    different workspace.
+    """
+
+
+def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
+    """Record the workspace + pid of the langgraph dev we just started.
+
+    Atomic write via temp-file + ``os.replace``: without this, a concurrent
+    reader could observe a partially-written file, fail JSON parse, and
+    silently downgrade to the "no sidecar" fallback path — which skips the
+    workspace mismatch check entirely. ``os.replace`` is atomic on POSIX
+    and on Windows; the temp file lives in the same directory so the rename
+    stays within one filesystem.
+
+    Best-effort: failures are logged and swallowed. A missing sidecar
+    degrades gracefully to the pre-feature behavior (log-warning only) in
+    ``ensure_langgraph_dev``.
+    """
+    try:
+        _PID_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _WORKSPACE_SIDECAR.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"workspace": str(workspace_dir), "pid": pid}))
+        os.replace(tmp, _WORKSPACE_SIDECAR)
+    except OSError as exc:
+        logger.warning(
+            "Failed to write workspace sidecar %s: %s", _WORKSPACE_SIDECAR, exc
+        )
+
+
+def _read_workspace_sidecar() -> dict | None:
+    """Read the workspace sidecar. Returns None if missing, corrupt, or
+    structurally wrong (must be a dict whose ``workspace`` value is a
+    non-empty string).
+
+    Schema validation matters because the reuse branch in
+    ``_ensure_langgraph_dev_locked`` runs ``Path(sidecar["workspace"]).resolve()``
+    directly — without the value-type check, a payload like
+    ``{"workspace": null}`` or ``{"workspace": []}`` would parse fine, pass
+    a naive ``"workspace" in data`` check, then raise ``TypeError`` inside
+    ``Path(...)`` and surface as an unhandled exception instead of the
+    documented log-warning fallback.
+    """
+    if not _WORKSPACE_SIDECAR.exists():
+        return None
+    try:
+        data = json.loads(_WORKSPACE_SIDECAR.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    workspace = data.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        return None
+    return data
+
+
+def _unlink_workspace_sidecar() -> None:
+    """Best-effort sidecar removal — called alongside every ``_PID_FILE.unlink()``
+    so the workspace fingerprint never outlives the PID file it pairs with."""
+    try:
+        _WORKSPACE_SIDECAR.unlink()
+    except OSError:
+        pass
+
+
 # Cross-process file lock for ``ensure_langgraph_dev``. Without this, two
 # concurrent CLI shells racing on the cold-start window can SIGKILL each
 # other's still-booting subprocesses (Shell B sees Shell A's port-bound but
@@ -80,15 +162,15 @@ _PROCESS_WORKSPACE: Path | None = None
 #   on startup failure so ``_maybe_swap_async_subagents`` can fall back to
 #   in-process sync delegation instead of routing tool calls at a dead URL.
 # - langgraph dev subprocess spawned by ``EvoSci deploy``: starts True via
-#   ``EVOSCIENTIST_DEPLOY_MODE=true`` env var. The deployed main agent IS the
+#   ``EVOSCIENTIST_DEPLOY_MODE=full`` env var. The deployed main agent IS the
 #   langgraph dev server, so http://localhost:{port} is always reachable for
 #   self-loop async sub-agent dispatch.
 # - langgraph dev subprocess spawned by ``EvoSci`` / ``EvoSci serve``: env
-#   var is unset (NO_MCP path), stays False — the deployed main agent in that
-#   subprocess is dead code (only sub-agent graphs are invoked), so async swap
-#   is unnecessary.
+#   var is ``stripped``, stays False — the deployed main agent in that
+#   subprocess is dead code (only sub-agent graphs are invoked), so async
+#   swap is unnecessary.
 _ASYNC_SUBAGENTS_AVAILABLE: bool = (
-    os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "true"
+    os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "full"
 )
 
 
@@ -276,6 +358,7 @@ def _kill_owned_stale_process(port: int) -> bool:
             _PID_FILE.unlink()
         except OSError:
             pass
+        _unlink_workspace_sidecar()
         return False
     except psutil.AccessDenied:
         return False
@@ -305,6 +388,7 @@ def _kill_owned_stale_process(port: int) -> bool:
             _PID_FILE.unlink()
         except OSError:
             pass
+        _unlink_workspace_sidecar()
         return False
 
     try:
@@ -315,6 +399,7 @@ def _kill_owned_stale_process(port: int) -> bool:
         _PID_FILE.unlink()
     except OSError:
         pass
+    _unlink_workspace_sidecar()
     return True
 
 
@@ -462,29 +547,28 @@ def start_langgraph_dev(
     if not file_persistence:
         sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
 
-    # Subprocess mode flag: deploy-mode → fully equipped main agent (MCP +
-    # async self-loop); default → stripped main agent (no MCP, sub-agent
-    # graphs only). The two env vars are mutually exclusive by design — only
-    # one is ever set, controlled here in a single place.
+    # Subprocess mode flag — single env var with enum values:
     #
-    # - ``EvoSci deploy`` (deploy_mode=True): sets ``EVOSCIENTIST_DEPLOY_MODE``.
-    #   Deployed main agent loads MCP + flips ``_ASYNC_SUBAGENTS_AVAILABLE``
-    #   to True at module init, enabling self-loop async dispatch.
-    # - ``EvoSci`` / ``EvoSci serve`` (deploy_mode=False): sets
-    #   ``EVOSCIENTIST_DEPLOYED_NO_MCP``. The CLI's main agent already loaded
-    #   MCP in the foreground process; without this guard, the subprocess
-    #   would spawn a SECOND copy of every MCP server. The deployed main
-    #   agent there is dead code (only sub-agent graphs are invoked), so the
-    #   duplicate MCP pool is pure waste.
+    #   - ``EVOSCIENTIST_DEPLOY_MODE=full`` (deploy_mode=True): set by
+    #     ``EvoSci deploy``. Subprocess is the primary programmatic entry
+    #     point; main agent loads MCP and ``_ASYNC_SUBAGENTS_AVAILABLE``
+    #     flips to True at module load, enabling self-loop async dispatch.
     #
-    # Strip any inherited values first so a user who exported one of these in
-    # their shell cannot break the mutual exclusion contract.
+    #   - ``EVOSCIENTIST_DEPLOY_MODE=stripped`` (deploy_mode=False): set by
+    #     ``EvoSci`` / ``EvoSci serve``. The CLI's main agent already loaded
+    #     MCP in the foreground process; the subprocess skips MCP to avoid
+    #     spawning a SECOND copy of every MCP server. The deployed main
+    #     agent in this mode is dead code — only sub-agent graphs are
+    #     invoked over HTTP — so the duplicate MCP pool would be pure waste.
+    #
+    #   - (unset): parent process or plain ``import EvoScientist``. Loads
+    #     MCP normally; async sub-agents stay disabled (no langgraph dev
+    #     server to self-loop into).
+    #
+    # Strip any inherited value first so a stray export in the user's shell
+    # cannot override the mode resolved by this caller.
     sub_env.pop("EVOSCIENTIST_DEPLOY_MODE", None)
-    sub_env.pop("EVOSCIENTIST_DEPLOYED_NO_MCP", None)
-    if deploy_mode:
-        sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "true"
-    else:
-        sub_env["EVOSCIENTIST_DEPLOYED_NO_MCP"] = "true"
+    sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "full" if deploy_mode else "stripped"
 
     try:
         proc = subprocess.Popen(
@@ -513,6 +597,7 @@ def start_langgraph_dev(
         except Exception:
             pass
     _PID_FILE.write_text(str(proc.pid))
+    _write_workspace_sidecar(workspace_dir=workspace_dir, pid=proc.pid)
     global _PROCESS_WORKSPACE
     _PROCESS = proc
     _PROCESS_WORKSPACE = workspace_dir
@@ -567,52 +652,57 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     with _LOCK:
         proc = proc if proc is not None else _PROCESS
         if proc is None:
-            return
-
-        if proc.poll() is None:
-            # Cross-platform process-tree shutdown: walk children explicitly
-            # because POSIX process groups (``os.killpg``) don't exist on
-            # Windows. ``psutil.Process.children(recursive=True)`` works on
-            # both — we mirror the previous SIGTERM-then-SIGKILL escalation.
-            try:
-                parent = psutil.Process(proc.pid)
-                descendants = parent.children(recursive=True)
-                for child in descendants:
-                    try:
-                        child.terminate()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                parent.terminate()
-                proc.wait(timeout=5)
-            except psutil.NoSuchProcess:
-                pass
-            except subprocess.TimeoutExpired:
+            # No live process to stop, but stale PID/sidecar files may still
+            # be on disk from a previous run that died unexpectedly — fall
+            # through to the unconditional file cleanup below so subsequent
+            # ensure_langgraph_dev calls don't read stale workspace info.
+            pass
+        else:
+            if proc.poll() is None:
+                # Cross-platform process-tree shutdown: walk children explicitly
+                # because POSIX process groups (``os.killpg``) don't exist on
+                # Windows. ``psutil.Process.children(recursive=True)`` works on
+                # both — we mirror the previous SIGTERM-then-SIGKILL escalation.
                 try:
                     parent = psutil.Process(proc.pid)
-                    for child in parent.children(recursive=True):
+                    descendants = parent.children(recursive=True)
+                    for child in descendants:
                         try:
-                            child.kill()
+                            child.terminate()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-                    parent.kill()
+                    parent.terminate()
+                    proc.wait(timeout=5)
                 except psutil.NoSuchProcess:
                     pass
-                # Reap the Popen handle so we don't leave a zombie until
-                # the CLI itself exits. Short timeout because parent.kill()
-                # above already issued SIGKILL to the process tree.
-                try:
-                    proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    pass
+                    try:
+                        parent = psutil.Process(proc.pid)
+                        for child in parent.children(recursive=True):
+                            try:
+                                child.kill()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        parent.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                    # Reap the Popen handle so we don't leave a zombie until
+                    # the CLI itself exits. Short timeout because parent.kill()
+                    # above already issued SIGKILL to the process tree.
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
 
-        if proc is _PROCESS:
-            _PROCESS = None
-            _PROCESS_WORKSPACE = None
+            if proc is _PROCESS:
+                _PROCESS = None
+                _PROCESS_WORKSPACE = None
     if _PID_FILE.exists():
         try:
             _PID_FILE.unlink()
         except OSError:
             pass
+    _unlink_workspace_sidecar()
 
     # Note: ``.langgraph_api/`` is intentionally NOT removed — it holds
     # langgraph dev's persisted async-task / scheduler / Store state that
@@ -724,19 +814,40 @@ def _ensure_langgraph_dev_locked(
 
     if is_langgraph_dev_running(port=port):
         # If WE own the running process, workspace was already verified above
-        # via _PROCESS_WORKSPACE comparison. If we DON'T own it (some other
-        # langgraph dev started by the user / another CLI), we have no way to
-        # confirm its workspace matches what was just requested — async
-        # sub-agents could end up operating on a different project's files.
-        # Warn loudly so the user notices.
+        # via _PROCESS_WORKSPACE comparison. If we DON'T own it (e.g. EvoSci
+        # deploy in another terminal, or a langgraph dev the user spawned
+        # manually), check the workspace sidecar — it's the only cross-process
+        # source of truth for the externally-managed instance's workspace.
         if _PROCESS is None and ws_path is not None:
-            logger.warning(
-                "Reusing externally-managed langgraph dev on %s — cannot verify "
-                "its workspace matches the requested %s. Async sub-agents may "
-                "operate on a different workspace's files.",
-                _base_url(port),
-                ws_path,
-            )
+            sidecar = _read_workspace_sidecar()
+            if sidecar is not None:
+                recorded = Path(sidecar["workspace"]).resolve()
+                if recorded != ws_path.resolve():
+                    raise WorkspaceMismatchError(
+                        f"An EvoSci langgraph dev is already running on "
+                        f"{_base_url(port)} for workspace {recorded}, but the "
+                        f"current process requested workspace {ws_path}. "
+                        f"Stop the other EvoSci session (deploy / TUI / serve) "
+                        f"or rerun with --workdir {recorded}."
+                    )
+                logger.info(
+                    "Reusing externally-managed langgraph dev on %s; sidecar "
+                    "confirms matching workspace %s.",
+                    _base_url(port),
+                    recorded,
+                )
+            else:
+                # Pre-feature langgraph dev — no sidecar to verify against.
+                # Fall back to the original log-warning behavior so users
+                # running an older subprocess don't get bricked.
+                logger.warning(
+                    "Reusing externally-managed langgraph dev on %s — no "
+                    "workspace sidecar, cannot verify it matches the requested "
+                    "%s. Async sub-agents may operate on a different workspace's "
+                    "files.",
+                    _base_url(port),
+                    ws_path,
+                )
         else:
             logger.info("langgraph dev already running on %s, reusing", _base_url(port))
         _ASYNC_SUBAGENTS_AVAILABLE = True

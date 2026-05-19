@@ -1,8 +1,9 @@
 """Tests for ``start_langgraph_dev(deploy_mode=...)`` env var injection.
 
-Verifies the mutually-exclusive env var routing:
-- ``deploy_mode=True``  → sets ``EVOSCIENTIST_DEPLOY_MODE`` only
-- ``deploy_mode=False`` → sets ``EVOSCIENTIST_DEPLOYED_NO_MCP`` only
+Verifies the single-env-var enum routing:
+- ``deploy_mode=True``  → ``EVOSCIENTIST_DEPLOY_MODE=full``
+- ``deploy_mode=False`` → ``EVOSCIENTIST_DEPLOY_MODE=stripped``
+- (parent process / plain import) → ``EVOSCIENTIST_DEPLOY_MODE`` unset
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path) -> dict:
     return captured
 
 
-def test_deploy_mode_true_sets_deploy_env_only(monkeypatch, tmp_path):
+def test_deploy_mode_true_sets_full(monkeypatch, tmp_path):
     captured = _patch_start_prereqs(monkeypatch, tmp_path)
 
     with pytest.raises(_PopenAbort):
@@ -67,15 +68,12 @@ def test_deploy_mode_true_sets_deploy_env_only(monkeypatch, tmp_path):
         )
 
     env = captured["env"]
-    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "true", (
-        "deploy_mode=True must inject EVOSCIENTIST_DEPLOY_MODE=true"
-    )
-    assert "EVOSCIENTIST_DEPLOYED_NO_MCP" not in env, (
-        "deploy_mode=True must NOT inject EVOSCIENTIST_DEPLOYED_NO_MCP"
+    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "full", (
+        "deploy_mode=True must inject EVOSCIENTIST_DEPLOY_MODE=full"
     )
 
 
-def test_deploy_mode_false_default_sets_no_mcp_only(monkeypatch, tmp_path):
+def test_deploy_mode_false_default_sets_stripped(monkeypatch, tmp_path):
     captured = _patch_start_prereqs(monkeypatch, tmp_path)
 
     with pytest.raises(_PopenAbort):
@@ -86,15 +84,12 @@ def test_deploy_mode_false_default_sets_no_mcp_only(monkeypatch, tmp_path):
         )
 
     env = captured["env"]
-    assert env.get("EVOSCIENTIST_DEPLOYED_NO_MCP") == "true", (
-        "deploy_mode=False (default) must inject EVOSCIENTIST_DEPLOYED_NO_MCP=true"
-    )
-    assert "EVOSCIENTIST_DEPLOY_MODE" not in env, (
-        "deploy_mode=False must NOT inject EVOSCIENTIST_DEPLOY_MODE"
+    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "stripped", (
+        "deploy_mode=False (default) must inject EVOSCIENTIST_DEPLOY_MODE=stripped"
     )
 
 
-def test_deploy_mode_explicitly_false_sets_no_mcp_only(monkeypatch, tmp_path):
+def test_deploy_mode_explicitly_false_sets_stripped(monkeypatch, tmp_path):
     """Same as default, but with deploy_mode=False stated explicitly."""
     captured = _patch_start_prereqs(monkeypatch, tmp_path)
 
@@ -106,14 +101,13 @@ def test_deploy_mode_explicitly_false_sets_no_mcp_only(monkeypatch, tmp_path):
         )
 
     env = captured["env"]
-    assert env.get("EVOSCIENTIST_DEPLOYED_NO_MCP") == "true"
-    assert "EVOSCIENTIST_DEPLOY_MODE" not in env
+    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "stripped"
 
 
-def test_both_env_vars_never_set_simultaneously(monkeypatch, tmp_path):
-    """Regression: confirm the two env vars are mutually exclusive in
-    every code path."""
-    for deploy_mode in (True, False):
+def test_deploy_mode_always_set_to_one_of_full_or_stripped(monkeypatch, tmp_path):
+    """Regression: the subprocess always sees exactly one of the two enum
+    values for ``EVOSCIENTIST_DEPLOY_MODE`` — never unset, never garbage."""
+    for deploy_mode, expected in ((True, "full"), (False, "stripped")):
         captured = _patch_start_prereqs(monkeypatch, tmp_path)
         with pytest.raises(_PopenAbort):
             manager.start_langgraph_dev(
@@ -122,20 +116,17 @@ def test_both_env_vars_never_set_simultaneously(monkeypatch, tmp_path):
                 deploy_mode=deploy_mode,
             )
         env = captured["env"]
-        has_deploy = "EVOSCIENTIST_DEPLOY_MODE" in env
-        has_no_mcp = "EVOSCIENTIST_DEPLOYED_NO_MCP" in env
-        assert has_deploy ^ has_no_mcp, (
-            f"deploy_mode={deploy_mode}: exactly ONE of "
-            "EVOSCIENTIST_DEPLOY_MODE / EVOSCIENTIST_DEPLOYED_NO_MCP must be set "
-            f"(deploy={has_deploy}, no_mcp={has_no_mcp})"
+        assert env.get("EVOSCIENTIST_DEPLOY_MODE") == expected, (
+            f"deploy_mode={deploy_mode}: expected EVOSCIENTIST_DEPLOY_MODE="
+            f"{expected!r}, got {env.get('EVOSCIENTIST_DEPLOY_MODE')!r}"
         )
 
 
-def test_inherited_opposite_env_var_is_stripped_deploy_true(monkeypatch, tmp_path):
-    """If the parent process already exports ``EVOSCIENTIST_DEPLOYED_NO_MCP``
-    and we ask for deploy mode, the subprocess env must NOT carry the leaked
-    NO_MCP flag (otherwise the mutual exclusion contract breaks)."""
-    monkeypatch.setenv("EVOSCIENTIST_DEPLOYED_NO_MCP", "true")
+def test_inherited_stripped_overridden_when_deploy_mode_true(monkeypatch, tmp_path):
+    """If the parent process exports ``EVOSCIENTIST_DEPLOY_MODE=stripped`` and
+    we ask for deploy mode, the subprocess env must see the resolved value
+    (``full``), not the stale inherited one."""
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
     captured = _patch_start_prereqs(monkeypatch, tmp_path)
 
     with pytest.raises(_PopenAbort):
@@ -146,17 +137,16 @@ def test_inherited_opposite_env_var_is_stripped_deploy_true(monkeypatch, tmp_pat
         )
 
     env = captured["env"]
-    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "true"
-    assert "EVOSCIENTIST_DEPLOYED_NO_MCP" not in env, (
-        "inherited NO_MCP flag must be stripped when deploy_mode=True"
+    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "full", (
+        "inherited stripped value must be overridden when deploy_mode=True"
     )
 
 
-def test_inherited_opposite_env_var_is_stripped_deploy_false(monkeypatch, tmp_path):
-    """Symmetric: parent exports ``EVOSCIENTIST_DEPLOY_MODE``, CLI/serve calls
-    start_langgraph_dev with default (deploy_mode=False), inherited DEPLOY_MODE
-    must be stripped."""
-    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "true")
+def test_inherited_full_overridden_when_deploy_mode_false(monkeypatch, tmp_path):
+    """Symmetric: parent exports ``EVOSCIENTIST_DEPLOY_MODE=full``, CLI/serve
+    calls start_langgraph_dev with default (deploy_mode=False), inherited
+    value must be overridden to ``stripped``."""
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
     captured = _patch_start_prereqs(monkeypatch, tmp_path)
 
     with pytest.raises(_PopenAbort):
@@ -166,37 +156,33 @@ def test_inherited_opposite_env_var_is_stripped_deploy_false(monkeypatch, tmp_pa
         )
 
     env = captured["env"]
-    assert env.get("EVOSCIENTIST_DEPLOYED_NO_MCP") == "true"
-    assert "EVOSCIENTIST_DEPLOY_MODE" not in env, (
-        "inherited DEPLOY_MODE flag must be stripped when deploy_mode=False"
+    assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "stripped", (
+        "inherited full value must be overridden when deploy_mode=False"
     )
 
 
-def test_inherited_both_env_vars_stripped_then_one_set(monkeypatch, tmp_path):
-    """Worst case: parent has BOTH flags exported. start_langgraph_dev must
-    still produce exactly one in the subprocess env."""
-    for deploy_mode, expected_set, expected_unset in (
-        (True, "EVOSCIENTIST_DEPLOY_MODE", "EVOSCIENTIST_DEPLOYED_NO_MCP"),
-        (False, "EVOSCIENTIST_DEPLOYED_NO_MCP", "EVOSCIENTIST_DEPLOY_MODE"),
-    ):
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "true")
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOYED_NO_MCP", "true")
-        captured = _patch_start_prereqs(monkeypatch, tmp_path)
+def test_inherited_arbitrary_value_overridden(monkeypatch, tmp_path):
+    """Defense against an unexpected inherited value (e.g. legacy ``true``
+    from before the enum rename, or any user-set garbage). The resolved
+    deploy_mode always wins."""
+    for inherited in ("true", "garbage", "FULL", ""):
+        for deploy_mode, expected in ((True, "full"), (False, "stripped")):
+            monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", inherited)
+            captured = _patch_start_prereqs(monkeypatch, tmp_path)
 
-        with pytest.raises(_PopenAbort):
-            manager.start_langgraph_dev(
-                workspace_dir=tmp_path,
-                port=16182,
-                deploy_mode=deploy_mode,
+            with pytest.raises(_PopenAbort):
+                manager.start_langgraph_dev(
+                    workspace_dir=tmp_path,
+                    port=16182,
+                    deploy_mode=deploy_mode,
+                )
+
+            env = captured["env"]
+            assert env.get("EVOSCIENTIST_DEPLOY_MODE") == expected, (
+                f"inherited={inherited!r}, deploy_mode={deploy_mode}: "
+                f"expected EVOSCIENTIST_DEPLOY_MODE={expected!r}, "
+                f"got {env.get('EVOSCIENTIST_DEPLOY_MODE')!r}"
             )
-
-        env = captured["env"]
-        assert env.get(expected_set) == "true", (
-            f"deploy_mode={deploy_mode}: {expected_set} must be set"
-        )
-        assert expected_unset not in env, (
-            f"deploy_mode={deploy_mode}: inherited {expected_unset} must be stripped"
-        )
 
 
 def test_workspace_dir_env_var_set_regardless_of_mode(monkeypatch, tmp_path):
@@ -217,13 +203,13 @@ def test_workspace_dir_env_var_set_regardless_of_mode(monkeypatch, tmp_path):
 # =============================================================================
 
 
-def test_async_subagents_available_init_from_env_true(monkeypatch):
-    """When ``EVOSCIENTIST_DEPLOY_MODE=true`` is set in the env at module
+def test_async_subagents_available_init_from_env_full(monkeypatch):
+    """When ``EVOSCIENTIST_DEPLOY_MODE=full`` is set in the env at module
     import time, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes to True so the
     deployed main agent's ``_maybe_swap_async_subagents`` swaps eagerly
     without waiting for ``start_langgraph_dev`` to flip the flag (which it
     can't — the deploy subprocess never calls that function on itself)."""
-    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "true")
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
     # Re-import the module to re-run the module-level initialization.
     import importlib
 
@@ -236,6 +222,23 @@ def test_async_subagents_available_init_from_env_true(monkeypatch):
     finally:
         # Restore: reload again without the env var so subsequent tests
         # see the normal initialization.
+        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        importlib.reload(mgr)
+
+
+def test_async_subagents_available_init_false_for_stripped(monkeypatch):
+    """``stripped`` is the CLI/serve subprocess mode — async sub-agents stay
+    disabled at module-load time (they get enabled later by ``ensure_langgraph_dev``
+    in the parent process, NOT by the subprocess flipping its own flag)."""
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+    import importlib
+
+    import EvoScientist.langgraph_dev.manager as mgr
+
+    reloaded = importlib.reload(mgr)
+    try:
+        assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is False
+    finally:
         monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
         importlib.reload(mgr)
 

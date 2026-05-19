@@ -8,12 +8,13 @@ Differs from ``EvoSci`` / ``EvoSci serve``: no in-process CLI agent,
 no session DB, no channel runtime, no TUI. The terminal only shows
 startup progress, the Ready banner, and then blocks until Ctrl+C.
 
-Mode dispatch happens via ``EVOSCIENTIST_DEPLOY_MODE=true`` env var
-injected by ``start_langgraph_dev(deploy_mode=True)``. The subprocess
-reads this at module-load time (``langgraph_dev/manager.py``) to flip
-``_ASYNC_SUBAGENTS_AVAILABLE`` to True, and the agent build code
-(``EvoScientist.py:_get_default_agent``) takes the MCP-loading branch
-because ``EVOSCIENTIST_DEPLOYED_NO_MCP`` is not set.
+Mode dispatch happens via the ``EVOSCIENTIST_DEPLOY_MODE`` env var
+injected by ``start_langgraph_dev``: ``full`` for the deploy subprocess
+(this command), ``stripped`` for CLI/serve subprocesses, unset for the
+parent process. The subprocess reads this at module-load time
+(``langgraph_dev/manager.py``) to flip ``_ASYNC_SUBAGENTS_AVAILABLE``,
+and the agent build code (``EvoScientist.py:_get_default_agent``)
+loads or skips MCP based on the value.
 """
 
 from __future__ import annotations
@@ -60,12 +61,12 @@ def deploy(
     from ..config import apply_config_to_env, get_effective_config
     from ..langgraph_dev.manager import (
         _DEFAULT_PORT,
+        _LOG_FILE,
         _is_port_occupied,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
     )
-    from ..paths import ensure_dirs, set_workspace_root
 
     # 1. Load config (no CLI overrides here — deploy is opinionated about
     # full MCP + async; user-facing flags are workspace/port/debug only).
@@ -87,9 +88,10 @@ def deploy(
         ws = os.path.abspath(os.path.expanduser(config.default_workdir))
     else:
         ws = os.getcwd()
+    # Subprocess inherits this path via EVOSCIENTIST_WORKSPACE_DIR (set inside
+    # start_langgraph_dev). Ensure the dir exists; do NOT mutate the parent
+    # process's paths module state — the deploy parent has no in-process agent.
     os.makedirs(ws, exist_ok=True)
-    set_workspace_root(ws)
-    ensure_dirs()
 
     # 3. Resolve port (explicit None check — don't treat --port 0 as "unset"),
     # then validate range so misconfigurations fail fast with a clear message
@@ -180,19 +182,12 @@ def deploy(
         console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
         raise typer.Exit(1) from exc
 
-    # 8. Wait for health (start_langgraph_dev returns after its own health
-    # poll, but we double-check to make the Ready banner honest).
-    if not is_langgraph_dev_running(port=effective_port):
-        console.print("[red]langgraph dev is not responding on /ok endpoint.[/red]")
-        console.print(
-            "[dim]Check the log file for MCP-spawn errors or import failures.[/dim]"
-        )
-        raise typer.Exit(1)
-
+    # start_langgraph_dev already health-polled before returning; if we got
+    # here, the subprocess is up.
     console.print("[green]✓[/green] langgraph dev ready")
 
     # 9. Ready banner
-    log_hint = "~/.config/evoscientist/langgraph_dev.log"
+    log_hint = _shorten(str(_LOG_FILE))
     console.print(
         Panel(
             Text.from_markup(
@@ -230,9 +225,12 @@ def deploy(
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
-        console.print("\n[dim]Shutting down...[/dim]")
-        # atexit handles stop_langgraph_dev + stop_ccproxy in correct order.
-        console.print("[dim]Stopped.[/dim]")
+        # stop_langgraph_dev + stop_ccproxy run via atexit during interpreter
+        # shutdown, so subprocess teardown happens AFTER this print returns.
+        # Don't claim "Stopped." here — that would be a lie until atexit fires.
+        console.print(
+            "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
+        )
 
 
 def _describe_auth(config: Any) -> str:

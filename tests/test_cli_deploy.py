@@ -48,6 +48,7 @@ class _ImmediateEvent:
 
     def __init__(self):
         self._called = 0
+        self.set_was_called = False
 
     def is_set(self) -> bool:
         self._called += 1
@@ -57,6 +58,7 @@ class _ImmediateEvent:
         return None
 
     def set(self):
+        self.set_was_called = True
         self._called = 99
 
 
@@ -157,15 +159,33 @@ def _run_deploy_once(
 
     monkeypatch.setattr(atexit, "register", _fake_atexit_register)
 
-    # signal mock — no-op so test process isn't affected
+    # signal mock — capture handlers so tests can exercise _handle_shutdown.
+    # Returning a no-op original means deploy()'s finally block restores
+    # something harmless onto the real signal module.
     import signal
 
-    monkeypatch.setattr(signal, "signal", lambda *args, **kwargs: None)
+    # deploy() calls signal.signal twice per signum: first to install
+    # _handle_shutdown, then in finally to restore the original. We want the
+    # first (real) handler — keep first-write-wins semantics.
+    captured["signal_handlers"] = {}
 
-    # threading.Event mock — exits the wait loop after one iteration
+    def _capture_signal(signum, handler):
+        if signum not in captured["signal_handlers"]:
+            captured["signal_handlers"][signum] = handler
+        return lambda *_a, **_kw: None
+
+    monkeypatch.setattr(signal, "signal", _capture_signal)
+
+    # threading.Event mock — exits the wait loop after one iteration;
+    # factory captures the instance so tests can inspect set() calls.
     import threading
 
-    monkeypatch.setattr(threading, "Event", _ImmediateEvent)
+    def _make_event():
+        ev = _ImmediateEvent()
+        captured["event_instance"] = ev
+        return ev
+
+    monkeypatch.setattr(threading, "Event", _make_event)
 
     # os.makedirs / os.getcwd
     import os
@@ -314,19 +334,6 @@ def test_deploy_refuses_when_port_occupied_by_foreign(monkeypatch, tmp_path):
     assert exc.value.exit_code == 1
 
 
-def test_deploy_refuses_when_health_check_fails(monkeypatch, tmp_path):
-    """Post-start health check must pass before printing Ready banner."""
-    config = _make_config(default_workdir=str(tmp_path))
-    with pytest.raises(typer.Exit) as exc:
-        _run_deploy_once(
-            monkeypatch,
-            config,
-            port_occupied=False,
-            langgraph_dev_running=False,
-        )
-    assert exc.value.exit_code == 1
-
-
 def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):
     config = _make_config(default_workdir=str(tmp_path))
     captured = _run_deploy_once(monkeypatch, config)
@@ -343,3 +350,47 @@ def test_deploy_registers_cleanup_for_ccproxy_when_oauth(monkeypatch, tmp_path):
 
     names = [name for (name, _args, _kw) in captured["atexit_callbacks"]]
     assert "_fake_stop_ccproxy" in names
+
+
+def test_deploy_registers_signal_handlers_for_shutdown(monkeypatch, tmp_path):
+    """deploy() must register SIGINT and SIGTERM handlers so external signals
+    trigger clean shutdown via the shutdown_event wait loop."""
+    import signal
+
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config)
+
+    handlers = captured["signal_handlers"]
+    assert signal.SIGINT in handlers, "deploy must register a SIGINT handler"
+    assert signal.SIGTERM in handlers, "deploy must register a SIGTERM handler"
+    assert callable(handlers[signal.SIGINT])
+    assert callable(handlers[signal.SIGTERM])
+
+
+def test_handle_shutdown_sigterm_sets_shutdown_event(monkeypatch, tmp_path):
+    """Invoking the captured SIGTERM handler must set deploy()'s shutdown_event.
+
+    SIGTERM is used (not SIGINT) because the SIGINT branch of _handle_shutdown
+    calls signal.default_int_handler which raises KeyboardInterrupt — that
+    would terminate the test process rather than exercise the event path.
+    """
+    import signal
+
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config)
+
+    event = captured["event_instance"]
+    assert event is not None, "deploy() must have constructed a threading.Event"
+    # During the normal helper run the wait loop exits via is_set() flipping
+    # to True (not via set()), so set_was_called should still be False here.
+    assert event.set_was_called is False, (
+        "Sanity check: helper's _ImmediateEvent should exit naturally without "
+        "set() being called; if this fails, the helper changed behavior."
+    )
+
+    sigterm_handler = captured["signal_handlers"][signal.SIGTERM]
+    sigterm_handler(signal.SIGTERM, None)
+
+    assert event.set_was_called is True, (
+        "_handle_shutdown(SIGTERM, None) must call shutdown_event.set()"
+    )

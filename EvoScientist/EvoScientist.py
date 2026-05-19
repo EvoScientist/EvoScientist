@@ -509,16 +509,27 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
 
 
 def _get_default_agent():
-    """Build the default agent (with MCP, no checkpointer) on first access.
+    """Build the default agent (no checkpointer) on first access.
 
-    When invoked from the langgraph dev subprocess (env var
-    ``EVOSCIENTIST_DEPLOYED_NO_MCP=true``, set by
-    ``langgraph_dev.manager.start_langgraph_dev``), MCP loading is skipped to
-    avoid duplicating the CLI's MCP server pool — the deployed main agent
-    is currently only reachable via HTTP for Web UI / SDK clients (none in
-    use yet), so paying for a second copy of the same MCP servers is pure
-    waste. Re-enable later by removing the env var when MCP-needing remote
-    callers are introduced.
+    MCP loading depends on which subprocess mode (if any) this agent is
+    being built in. ``langgraph_dev.manager.start_langgraph_dev`` injects
+    ``EVOSCIENTIST_DEPLOY_MODE`` into the subprocess with one of two values:
+
+    - ``EVOSCIENTIST_DEPLOY_MODE=full`` — set by ``EvoSci deploy``. The
+      subprocess is the *primary* programmatic entry point (Python scripts,
+      Jupyter, integration tests via ``langgraph_sdk``), so it needs the full
+      configuration: **load MCP**, and ``_ASYNC_SUBAGENTS_AVAILABLE`` flips on
+      at module load so async sub-agents self-loop through this same
+      langgraph dev server.
+
+    - ``EVOSCIENTIST_DEPLOY_MODE=stripped`` — set by ``EvoSci`` / ``EvoSci
+      serve``. The CLI's in-process main agent already loaded MCP; this
+      subprocess only services async sub-agent self-loops, so **skip MCP**
+      to avoid running a second copy of the same servers.
+
+    Plain ``from EvoScientist import EvoScientist_agent`` (env var unset)
+    loads MCP. Async sub-agents stay disabled in that case because there is
+    no langgraph dev server to self-loop into.
     """
     global _EvoScientist_agent
     if _EvoScientist_agent is None:
@@ -535,7 +546,7 @@ def _get_default_agent():
         if not cfg.auto_approve:
             mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
 
-        if os.environ.get("EVOSCIENTIST_DEPLOYED_NO_MCP", "").lower() == "true":
+        if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(be, mw)
         else:
             kwargs = load_mcp_and_build_kwargs(be, mw)
