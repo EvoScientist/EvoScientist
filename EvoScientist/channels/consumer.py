@@ -628,8 +628,10 @@ class InboundConsumer:
                 action_reqs = interrupt_data.get("action_requests", [])
                 n = len(action_reqs) or 1
 
-                # Session auto-approve (user previously chose "Approve all")
-                if session_key in self._auto_approve_sessions:
+                # Session auto-approve — but forced confirmation still overrides
+                if session_key in self._auto_approve_sessions and _should_auto_approve(
+                    action_reqs
+                ):
                     from langgraph.types import Command  # type: ignore[import-untyped]
 
                     stream_input = Command(
