@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import questionary
@@ -1415,6 +1416,43 @@ def _step_ollama_base_url(config: EvoScientistConfig) -> tuple[str, list[str]]:
     return url, detected_models
 
 
+def _get_api_key_from_config(config: EvoScientistConfig, provider: str) -> str:
+    """Extract the API key for *provider* from *config*.
+
+    Returns an empty string when no key is set.
+    """
+    attr_map = {
+        "openai": "openai_api_key",
+        "openrouter": "openrouter_api_key",
+        "deepseek": "deepseek_api_key",
+        "moonshot": "moonshot_api_key",
+        "siliconflow": "siliconflow_api_key",
+        "zhipu": "zhipu_api_key",
+        "zhipu-code": "zhipu_api_key",
+        "volcengine": "volcengine_api_key",
+        "dashscope": "dashscope_api_key",
+        "nvidia": "nvidia_api_key",
+        "google-genai": "google_api_key",
+        "minimax": "minimax_api_key",
+        "kimi-coding": "kimi_api_key",
+        "custom-openai": "custom_openai_api_key",
+        "custom-anthropic": "custom_anthropic_api_key",
+    }
+    attr = attr_map.get(provider, "")
+    return getattr(config, attr, "") if attr else ""
+
+
+def _get_base_url_from_config(config: EvoScientistConfig, provider: str) -> str | None:
+    """Return the configured base URL for *provider*, or ``None``."""
+    if provider == "custom-openai":
+        return config.custom_openai_base_url or None
+    if provider == "custom-anthropic":
+        return config.custom_anthropic_base_url or None
+    if provider == "minimax":
+        return config.minimax_base_url or None
+    return None
+
+
 def _step_model(
     config: EvoScientistConfig,
     provider: str,
@@ -1477,51 +1515,162 @@ def _step_model(
             console.print(f"  [dim]Using default: {model}[/dim]")
         return model
 
-    # Get models for the selected provider
-    entries = get_models_for_provider(provider)
+    # For OpenAI-compatible providers, try to fetch the live model list.
+    # Falls back to the static registry when the fetch fails or returns nothing.
+    _REFRESH_SENTINEL = "__refresh__"
+    _CUSTOM_SENTINEL = "__custom__"
 
-    if not entries:
-        # Custom / unknown provider: direct text input
-        model = questionary.text(
-            "Model name:",
+    def _build_and_ask(*, force: bool = False) -> str | None:
+        """Build the choice list and show the picker.  Returns ``_REFRESH_SENTINEL``
+        when the user wants to refresh, or the selected model name/id.
+        """
+        from ..llm.model_cache import (
+            fetch_models,
+            get_cached_models_entry,
+            is_supported,
+        )
+
+        dynamic_ids: list[str] | None = None
+        status_line = ""
+        warning_line = ""
+        if is_supported(provider):
+            api_key = _get_api_key_from_config(config, provider)
+            base_url = _get_base_url_from_config(config, provider)
+            cache_entry = get_cached_models_entry(provider, base_url=base_url)
+
+            if cache_entry is not None and not force:
+                dynamic_ids = cache_entry.get("models")
+                status_prefix = "Loading cached model list..."
+            else:
+                status_prefix = (
+                    "↻ Refresh model list..." if force else "Fetching model list..."
+                )
+                dynamic_ids = fetch_models(
+                    provider, api_key=api_key or None, base_url=base_url, force=force
+                )
+                cache_entry = get_cached_models_entry(provider, base_url=base_url)
+
+            if dynamic_ids:
+                if cache_entry is not None:
+                    age_seconds = time.time() - cache_entry.get("fetched_at", 0)
+                    if age_seconds < 10:
+                        age = "just now"
+                    elif age_seconds < 60:
+                        age = f"{int(age_seconds)}s ago"
+                    elif age_seconds < 3600:
+                        age = f"{int(age_seconds // 60)}m ago"
+                    elif age_seconds < 86400:
+                        age = f"{int(age_seconds // 3600)}h ago"
+                    else:
+                        age = f"{int(age_seconds // 86400)}d ago"
+                else:
+                    age = "just now"
+                status_line = (
+                    f"{status_prefix}  ✓ {len(dynamic_ids)} model(s) available "
+                    f"(last refresh: {age})"
+                )
+            else:
+                warning_line = "⚠ Unable to fetch model list (check API key/base URL)."
+                if provider == "custom-openai":
+                    console.print(f"  [yellow]{warning_line}[/yellow]")
+                    return None
+
+        # Build choice list.  Dynamic models (if any) take precedence; the
+        # static registry is used as a fallback.
+        static_entries = get_models_for_provider(provider)
+        choices: list[Choice] = []
+
+        if dynamic_ids:
+            # Build a lookup from model_id → short_name for the static registry
+            static_by_id: dict[str, str] = {mid: nm for nm, mid in static_entries}
+            for model_id in dynamic_ids:
+                short = static_by_id.get(model_id)
+                title = f"{short} ({model_id})" if short else model_id
+                value = short or model_id
+                choices.append(Choice(title=title, value=value))
+        else:
+            for name, model_id in static_entries:
+                choices.append(Choice(title=f"{name} ({model_id})", value=name))
+
+        if not choices and not static_entries:
+            # Completely unknown provider — fall through to free-text input
+            return None
+
+        if is_supported(provider):
+            choices.append(
+                Choice(title="↻ Refresh model list", value=_REFRESH_SENTINEL)
+            )
+        choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
+
+        selectable_values = [c.value for c in choices]
+        if not selectable_values:
+            return None
+
+        default = selectable_values[0]
+        if config.model in selectable_values:
+            default = config.model
+
+        instruction = "(Use arrow keys)"
+        extra_lines = []
+        if status_line:
+            extra_lines.append(status_line)
+        if warning_line:
+            extra_lines.append(warning_line)
+        if extra_lines:
+            instruction = "(Use arrow keys)\n" + "\n".join(extra_lines)
+
+        selected = questionary.select(
+            "Select model:",
+            choices=choices,
+            default=default,
             style=WIZARD_STYLE,
             qmark=QMARK,
-            placeholder=FormattedText([("fg:#858585", " e.g. owner/model-name")]),
+            use_indicator=True,
+            instruction=instruction,
         ).ask()
-        if model is None:
+        if selected is None:
             raise KeyboardInterrupt()
-        return model
-
-    provider_models = [name for name, _ in entries]
-
-    # Create choices with model IDs as hints
-    _CUSTOM_SENTINEL = "__custom__"
-    choices = []
-    for name, model_id in entries:
-        choices.append(Choice(title=f"{name} ({model_id})", value=name))
-    choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
-
-    # Determine default
-    if config.model in provider_models:
-        default = config.model
-    else:
-        default = provider_models[0]
-
-    selected = questionary.select(
-        "Select model:",
-        choices=choices,
-        default=default,
-        style=WIZARD_STYLE,
-        qmark=QMARK,
-        use_indicator=True,
-    ).ask()
-
-    if selected is None:
-        raise KeyboardInterrupt()
-
-    if selected != _CUSTOM_SENTINEL:
         return selected
 
+    # Check if the provider has any static entries at all before trying dynamic.
+    static_entries = get_models_for_provider(provider)
+    if not static_entries:
+        from ..llm.model_cache import is_supported as _is_supported
+
+        if not _is_supported(provider):
+            # Custom / unknown provider: direct text input
+            model = questionary.text(
+                "Model name:",
+                style=WIZARD_STYLE,
+                qmark=QMARK,
+                placeholder=FormattedText([("fg:#858585", " e.g. owner/model-name")]),
+            ).ask()
+            if model is None:
+                raise KeyboardInterrupt()
+            return model
+
+    # Main picker loop — re-shown when the user requests a refresh
+    force_fetch = False
+    while True:
+        selected = _build_and_ask(force=force_fetch)
+        force_fetch = False  # only force on explicit refresh
+
+        if selected is None:
+            # No choices available — fall back to free-text
+            break
+
+        if selected == _REFRESH_SENTINEL:
+            sys.stdout.write("\033[A\033[2K\r")
+            sys.stdout.flush()
+            force_fetch = True
+            continue
+
+        if selected != _CUSTOM_SENTINEL:
+            return selected
+        break  # user wants to type a name
+
+    # Free-text fallback
+    fallback_models = [name for name, _ in get_models_for_provider(provider)]
     model = questionary.text(
         "Model name:",
         style=WIZARD_STYLE,
@@ -1531,8 +1680,8 @@ def _step_model(
     if model is None:
         raise KeyboardInterrupt()
     model = model.strip()
-    if not model:
-        model = provider_models[0]
+    if not model and fallback_models:
+        model = fallback_models[0]
         console.print(f"  [dim]Using default: {model}[/dim]")
     return model
 
