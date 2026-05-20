@@ -376,6 +376,31 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
             .build()
         )
 
+        # Silently absorb events we don't have a handler for.  Feishu auto-
+        # subscribes a PersonalAgent app to many event types (reactions,
+        # read receipts, recalls, member changes…) that EvoScientist doesn't
+        # care about.  Without this wrapper, ``_do_without_validation``
+        # raises ``EventException("processor not found, type: ...")``,
+        # which lark-oapi's WS client (ws/client.py) catches and turns into
+        # an HTTP 500 reply on the WebSocket frame — Feishu then marks the
+        # event as failed and retries it.  This is especially noisy because
+        # our own ``_send_ack_reaction`` triggers ``im.message.reaction.
+        # created_v1`` on every inbound message, causing a feedback loop.
+        from lark_oapi.core.exception import EventException
+
+        _original_dispatch = handler._do_without_validation
+
+        def _silent_dispatch(payload: bytes):
+            try:
+                return _original_dispatch(payload)
+            except EventException as exc:
+                if "processor not found" in str(exc):
+                    logger.debug("Feishu: ignored unsubscribed event (%s)", exc)
+                    return None
+                raise
+
+        handler._do_without_validation = _silent_dispatch
+
         ws_client = lark.ws.Client(
             self.config.app_id,
             self.config.app_secret,
