@@ -2481,7 +2481,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         "telegram": ["python-telegram-bot>=21.0"],
         "discord": ["discord.py>=2.3"],
         "slack": ["slack-sdk>=3.27", "aiohttp>=3.9"],
-        "feishu": ["aiohttp>=3.9"],
+        "feishu": ["aiohttp>=3.9", "qrcode>=7.4"],
         "dingtalk": ["aiohttp>=3.9"],
         "wechat": [
             "pycryptodome>=3.20",
@@ -2704,6 +2704,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         # The bot must already exist at q.qq.com — scanning binds the
         # developer's QQ account to it and returns app_id + client_secret.
         _qq_scanned = False
+        _feishu_scanned = False
         if ch_name == "qq":
             scan_choices = [
                 Choice(
@@ -2769,6 +2770,108 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         f"  [green]✓ Bound QQ Bot (App ID: {creds['app_id']})[/green]"
                     )
                     _qq_scanned = True
+                else:
+                    console.print(
+                        "  [yellow]⚠ Scan did not complete — falling"
+                        " back to manual entry.[/yellow]"
+                    )
+
+        # Feishu: offer scan-to-create before falling back to manual entry.
+        # Unlike QQ, this provisions a brand-new PersonalAgent app with the
+        # required IM permissions attached, then returns app_id + app_secret.
+        if ch_name == "feishu":
+            scan_choices = [
+                Choice(
+                    title="Scan QR code  (recommended — auto-create app, fill App ID & Secret)",
+                    value="scan",
+                ),
+                Choice(title="Enter App ID and Secret manually", value="manual"),
+            ]
+            scan_choice = questionary.select(
+                "Configure Feishu / Lark:",
+                choices=scan_choices,
+                default="scan",
+                style=WIZARD_STYLE,
+                qmark=f"  {QMARK}",
+                use_indicator=True,
+            ).ask()
+            if scan_choice is None:
+                raise KeyboardInterrupt()
+
+            if scan_choice == "scan":
+                # `qrcode` is the only soft dep needed — onboard prints the URL
+                # if it's missing, but the UX is much worse, so offer to install.
+                try:
+                    import qrcode  # noqa: F401
+                except ImportError:
+                    console.print(
+                        '  [yellow]✗ QR scan looks best with "qrcode".[/yellow]'
+                    )
+                    install_now = questionary.confirm(
+                        'Install "qrcode" now?',
+                        default=True,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if install_now is None:
+                        raise KeyboardInterrupt() from None
+                    if install_now and install_library("qrcode>=7.4"):
+                        console.print("  [green]✓ Installed qrcode.[/green]")
+
+                # Region selection — accounts.feishu.cn vs accounts.larksuite.com.
+                # The poll endpoint auto-switches if the scanning user is on the
+                # other tenant, so this is just a starting hint.
+                region_choices = [
+                    Choice(title="Feishu (飞书, mainland China)", value="feishu"),
+                    Choice(title="Lark (overseas)", value="lark"),
+                ]
+                region = questionary.select(
+                    "Region:",
+                    choices=region_choices,
+                    default="feishu",
+                    style=WIZARD_STYLE,
+                    qmark=f"  {QMARK}",
+                    use_indicator=True,
+                ).ask()
+                if region is None:
+                    raise KeyboardInterrupt()
+
+            if scan_choice == "scan":
+                from ..channels.feishu.onboard import qr_register
+
+                console.print(
+                    "  [dim]A QR code will be printed below — open Feishu or"
+                    " Lark on your phone and scan it. The platform will"
+                    " auto-create a bot app with IM permissions and return"
+                    " the credentials here.[/dim]"
+                )
+                try:
+                    creds = qr_register(initial_domain=region)
+                except Exception as exc:
+                    console.print(f"  [red]✗ Scan failed: {exc}[/red]")
+                    creds = None
+
+                if creds:
+                    updates["feishu_app_id"] = creds["app_id"]
+                    updates["feishu_app_secret"] = creds["app_secret"]
+                    # Sync open-platform domain to the resolved region
+                    updates["feishu_domain"] = (
+                        "https://open.larksuite.com"
+                        if creds.get("domain") == "lark"
+                        else "https://open.feishu.cn"
+                    )
+                    bot_name = creds.get("bot_name")
+                    if bot_name:
+                        console.print(
+                            f'  [green]✓ Bound Feishu bot "{bot_name}"'
+                            f" (App ID: {creds['app_id']})[/green]"
+                        )
+                    else:
+                        console.print(
+                            f"  [green]✓ Bound Feishu app"
+                            f" (App ID: {creds['app_id']})[/green]"
+                        )
+                    _feishu_scanned = True
                 else:
                     console.print(
                         "  [yellow]⚠ Scan did not complete — falling"
@@ -2911,7 +3014,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     updates["wechat_personal_account_id"] = account_id.strip()
 
         # Prompt for required fields
-        if not _qq_scanned:
+        if not _qq_scanned and not _feishu_scanned:
             for field_name, prompt_label in required_fields:
                 current = getattr(config, field_name, "")
                 value = questionary.text(

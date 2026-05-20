@@ -1,7 +1,8 @@
 from ..channel_manager import _parse_csv, register_channel
 from .channel import FeishuChannel, FeishuConfig
+from .onboard import qr_register
 
-__all__ = ["FeishuChannel", "FeishuConfig"]
+__all__ = ["FeishuChannel", "FeishuConfig", "qr_register"]
 
 
 def create_from_config(config) -> FeishuChannel:
