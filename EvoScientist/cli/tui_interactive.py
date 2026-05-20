@@ -611,7 +611,6 @@ def run_textual_interactive(
             self, thread_id: str, workspace_dir: str | None = None
         ) -> None:
             if workspace_dir:
-                self._workspace_dir = workspace_dir
                 # Mirror the Rich CLI fix: when a /resume restores a thread
                 # whose workspace differs from the one the langgraph dev
                 # subprocess was launched with, the deployed sub-agents
@@ -622,11 +621,19 @@ def run_textual_interactive(
                 # loop keeps refreshing the UI during the up-to-60s wait, and
                 # show a live timer widget (like /compact) so the user sees
                 # progress instead of a frozen static line.
+                #
+                # ``self._workspace_dir`` is mutated AFTER the sync succeeds
+                # so a WorkspaceMismatchError leaves the session pointing at
+                # the existing workspace instead of half-resuming into the
+                # conflicting one.
                 from ..config import load_config
 
                 _resume_cfg = load_config()
                 if getattr(_resume_cfg, "enable_async_subagents", False):
-                    from ..langgraph_dev.manager import ensure_langgraph_dev
+                    from ..langgraph_dev.manager import (
+                        WorkspaceMismatchError,
+                        ensure_langgraph_dev,
+                    )
                     from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
                     sync_widget = WorkspaceSyncWidget()
@@ -639,8 +646,15 @@ def run_textual_interactive(
                             _resume_cfg,
                             workspace_dir=workspace_dir,
                         )
+                    except WorkspaceMismatchError as exc:
+                        # Another EvoSci process owns the langgraph dev for a
+                        # different workspace. Abort the resume without
+                        # mutating session state.
+                        self.notify(str(exc), severity="error", timeout=10)
+                        return
                     finally:
                         await sync_widget.cleanup()
+                self._workspace_dir = workspace_dir
 
             self._conversation_tid = thread_id
             # Background reload: history renders immediately; next turn awaits.
@@ -2976,6 +2990,7 @@ def run_textual_interactive(
                 if resolved:
                     meta = await get_thread_metadata(resolved)
                     ws = (meta or {}).get("workspace_dir", "")
+                    mismatch_aborted = False
                     if ws:
                         effective_workspace = ws
                         # Sync langgraph dev subprocess to the resumed
@@ -2984,10 +2999,14 @@ def run_textual_interactive(
                         # Without this, --resume against a thread from a
                         # different workspace would leave deployed sub-agents
                         # operating on the launch directory's files.
+                        from ..stream.console import console as _resume_console
+
                         try:
                             from ..config import load_config
-                            from ..langgraph_dev.manager import ensure_langgraph_dev
-                            from ..stream.console import console as _resume_console
+                            from ..langgraph_dev.manager import (
+                                WorkspaceMismatchError,
+                                ensure_langgraph_dev,
+                            )
 
                             _ws_cfg = load_config()
                             if getattr(_ws_cfg, "enable_async_subagents", False):
@@ -3001,6 +3020,15 @@ def run_textual_interactive(
                                         _ws_cfg,
                                         workspace_dir=ws,
                                     )
+                        except WorkspaceMismatchError as _ws_mismatch_exc:
+                            # Surface the user-actionable message via the
+                            # Rich console (TUI hasn't taken over the terminal
+                            # yet) and abort the resume so the TUI doesn't
+                            # start up pointing at the conflicting workspace
+                            # with async sub-agents routed at a server pinned
+                            # to a different workspace.
+                            _resume_console.print(f"[red]{_ws_mismatch_exc}[/red]")
+                            mismatch_aborted = True
                         except Exception as _ws_sync_exc:
                             # Non-fatal at startup — async sub-agents fall back
                             # to sync via the manager's own availability flag.
@@ -3013,8 +3041,20 @@ def run_textual_interactive(
                                 "to in-process sync delegation for this session.",
                                 _ws_sync_exc,
                             )
-                    effective_thread_id = resolved
-                    resumed = True
+                    if mismatch_aborted:
+                        # Revert the workspace mutation and fall through to the
+                        # ``effective_thread_id is None`` branch below, which
+                        # generates a fresh thread in the original launch
+                        # workspace. User keeps the TUI session; the requested
+                        # ``--thread-id`` resume is what we refuse.
+                        effective_workspace = workspace_dir
+                        resume_warning = (
+                            f"Resume of thread '{thread_id}' aborted due to "
+                            "workspace conflict. Starting new session."
+                        )
+                    else:
+                        effective_thread_id = resolved
+                        resumed = True
                 elif matches:
                     resume_warning = (
                         f"Thread prefix '{thread_id}' is ambiguous "

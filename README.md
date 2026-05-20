@@ -383,6 +383,7 @@ EvoSci --workdir /path/to/project # open in a specific directory
 EvoSci -m run                     # isolated per-session workspace
 EvoSci --ui cli                   # classic CLI (lightweight)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
+EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 ```
 
 </details>
