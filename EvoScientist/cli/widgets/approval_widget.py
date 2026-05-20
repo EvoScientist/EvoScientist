@@ -164,9 +164,13 @@ class ApprovalWidget(Widget):
 
         if self._help_widget:
             if forced_reason:
-                self._help_widget.update("↑/↓ navigate · Enter select · y/n quick keys · e expand · Esc reject")
+                self._help_widget.update(
+                    "↑/↓ navigate · Enter select · y/n quick keys · e expand · Esc reject"
+                )
             else:
-                self._help_widget.update("↑/↓ navigate · Enter select · y/n/a quick keys · e expand · Esc reject")
+                self._help_widget.update(
+                    "↑/↓ navigate · Enter select · y/n/a quick keys · e expand · Esc reject"
+                )
 
         n = len(self._action_requests)
         if forced_reason:

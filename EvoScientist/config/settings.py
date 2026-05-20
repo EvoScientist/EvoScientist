@@ -259,8 +259,22 @@ class EvoScientistConfig:
     # Agent features
     enable_ask_user: bool = True  # Enable ask_user tool for agent-initiated questions
 
+    # CodeInterpreterMiddleware (PTC — Parallel Tool Calls) tuning
+    # The PTC allowlist itself is hardcoded in
+    # ``EvoScientist/middleware/code_interpreter.py`` as a load-bearing safety
+    # decision (excludes ``execute`` so PTC can't bypass HITL approval,
+    # excludes ``write_file``/``edit_file`` because batched writes have no
+    # benefit). Only the resource budget knobs are user-tunable.
+    code_interpreter_timeout: float = 60.0  # seconds per JS eval
+    code_interpreter_max_result_chars: int = 10000  # truncate large JSON results
+
     # Checkpoint pruning (sessions.db retention per (thread_id, checkpoint_ns))
-    checkpoint_keep_per_thread: int = 10
+    # Safety net for runaway conversations. Under DeltaChannel (deepagents 0.6+)
+    # normal usage produces linear growth, so this default is set well above
+    # any realistic conversation length (~180-450 turns of dialogue) while
+    # still capping legacy bloat at upgrade time. 0 disables ongoing pruning
+    # entirely; the one-time legacy migration sweep still runs.
+    checkpoint_keep_per_thread: int = 1000
 
     # DM access control policy
     dm_policy: str = "allowlist"
@@ -358,6 +372,8 @@ def _coerce_value(value: Any, field_type: Any) -> Any:
         return bool(value)
     if field_type == "int" or field_type is int:
         return int(value)
+    if field_type == "float" or field_type is float:
+        return float(value)
     return str(value)
 
 
@@ -454,6 +470,8 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
+    "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",

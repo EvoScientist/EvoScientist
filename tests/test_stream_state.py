@@ -732,6 +732,243 @@ class TestUsageStatsAccumulated:
         assert result == "usage_stats"
 
 
+class TestComputePhase:
+    """Tests for StreamState.compute_phase() research phase derivation."""
+
+    def test_idle_by_default(self):
+        state = StreamState()
+        assert state.compute_phase() == "idle"
+
+    def test_thinking_phase(self):
+        state = StreamState()
+        state.handle_event({"type": "thinking", "content": "hmm"})
+        assert state.compute_phase() == "thinking"
+
+    def test_researching_while_tool_pending(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        assert state.compute_phase() == "researching"
+
+    def test_researching_after_tool_result(self):
+        """is_processing is True right after tool_result, so still researching."""
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        assert state.compute_phase() == "researching"
+
+    def test_writing_after_tools_done_and_text_starts(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event({"type": "text", "content": "Final report"})
+        assert state.compute_phase() == "writing"
+
+    def test_writing_for_pure_text_response(self):
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "Hello"})
+        assert state.compute_phase() == "writing"
+
+    def test_researching_with_active_subagent(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "subagent_start", "name": "research", "description": ""}
+        )
+        assert state.compute_phase() == "researching"
+
+    def test_writing_after_subagent_ends(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "subagent_start", "name": "research", "description": ""}
+        )
+        state.handle_event({"type": "subagent_end", "name": "research"})
+        state.handle_event({"type": "text", "content": "Report"})
+        assert state.compute_phase() == "writing"
+
+    def test_researching_before_text_when_tools_finished(self):
+        """Tools done but model hasn't emitted text yet — may call more tools."""
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.is_processing = False
+        assert state.compute_phase() == "researching"
+
+    def test_thinking_takes_priority_over_pending_tools(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "thinking", "content": "re-thinking"})
+        assert state.compute_phase() == "thinking"
+
+    def test_researching_with_task_only_orchestrator(self):
+        """Orchestrator delegates via 'task' tool — subagent drives the phase."""
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "task", "args": {}}
+        )
+        state.handle_event(
+            {"type": "subagent_start", "name": "code-agent", "description": ""}
+        )
+        assert state.compute_phase() == "researching"
+
+
+class TestHasPendingWork:
+    """Tests for StreamState.has_pending_work()."""
+
+    def test_no_work(self):
+        state = StreamState()
+        assert state.has_pending_work() is False
+
+    def test_pending_tool(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        assert state.has_pending_work() is True
+
+    def test_active_subagent(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "subagent_start", "name": "agent", "description": ""}
+        )
+        assert state.has_pending_work() is True
+
+    def test_is_processing(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        assert state.is_processing is True
+        assert state.has_pending_work() is True
+
+    def test_all_done(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event({"type": "text", "content": "done"})
+        assert state.has_pending_work() is False
+
+    def test_internal_tool_ignored(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "ExtractedMemory", "args": {}}
+        )
+        state.handle_event(
+            {"type": "tool_result", "name": "ExtractedMemory", "content": "ok"}
+        )
+        state.is_processing = False
+        assert state.has_pending_work() is False
+
+
+class TestVisibleToolCounts:
+    """Tests for StreamState.visible_tool_counts()."""
+
+    def test_empty(self):
+        state = StreamState()
+        assert state.visible_tool_counts() == (0, 0)
+
+    def test_one_pending(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        assert state.visible_tool_counts() == (0, 1)
+
+    def test_one_completed(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        assert state.visible_tool_counts() == (1, 1)
+
+    def test_internal_tool_excluded(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "ExtractedMemory", "args": {}}
+        )
+        assert state.visible_tool_counts() == (0, 0)
+
+    def test_mixed(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event(
+            {"type": "tool_call", "id": "tc2", "name": "ExtractedMemory", "args": {}}
+        )
+        state.handle_event(
+            {"type": "tool_call", "id": "tc3", "name": "search", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "name": "ExtractedMemory", "content": "ok"}
+        )
+        # execute done, ExtractedMemory done but invisible, search pending
+        assert state.visible_tool_counts() == (1, 2)
+
+
+class TestUsageWidgetElapsed:
+    """Tests for UsageWidget elapsed time display."""
+
+    def test_without_elapsed(self):
+        from EvoScientist.cli.widgets.usage_widget import UsageWidget
+
+        w = UsageWidget(1000, 500)
+        plain = w._Static__content.plain
+        assert "1,000" in plain
+        assert "500" in plain
+        assert "Elapsed" not in plain
+
+    def test_with_elapsed(self):
+        from EvoScientist.cli.widgets.usage_widget import UsageWidget
+
+        w = UsageWidget(1000, 500, elapsed="12s")
+        plain = w._Static__content.plain
+        assert "Elapsed: 12s" in plain
+
+
+class TestIsFinalResponseDelegation:
+    """Tests that _is_final_response delegates to StreamState.has_pending_work."""
+
+    def test_final_when_no_work(self):
+        from EvoScientist.cli.tui_interactive import _is_final_response
+
+        state = StreamState()
+        assert _is_final_response(state) is True
+
+    def test_not_final_during_tool(self):
+        from EvoScientist.cli.tui_interactive import _is_final_response
+
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        assert _is_final_response(state) is False
+
+    def test_consistent_with_has_pending_work(self):
+        from EvoScientist.cli.tui_interactive import _is_final_response
+
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event({"type": "text", "content": "done"})
+        assert _is_final_response(state) == (not state.has_pending_work())
+
+
 # =============================================================================
 # ChannelState queue mechanism (removed — replaced by bus mode in channel.py)
 # =============================================================================

@@ -42,6 +42,7 @@ class TestModelsRegistry:
         assert "zhipu-code" in providers
         assert "volcengine" in providers
         assert "dashscope" in providers
+        assert "dashscope-code" in providers
         assert "deepseek" in providers
         assert "moonshot" in providers
         assert "kimi-coding" in providers
@@ -60,6 +61,7 @@ class TestModelsRegistry:
             "zhipu-code",
             "volcengine",
             "dashscope",
+            "dashscope-code",
             "custom-openai",
             "custom-anthropic",
             "deepseek",
@@ -517,6 +519,21 @@ class TestThirdPartyRouting:
             == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         assert call_kwargs["api_key"] == "ds-key-456"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_dashscope_code_routes_through_openai(self, mock_init, monkeypatch):
+        """DashScope-Code (sk-sp-* subscription keys) routes through OpenAI
+        with the coding.dashscope.aliyuncs.com base URL, reusing DASHSCOPE_API_KEY.
+        """
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-sp-key-789")
+
+        get_chat_model("qwen3-coder", provider="dashscope-code")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://coding.dashscope.aliyuncs.com/v1"
+        assert call_kwargs["api_key"] == "sk-sp-key-789"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_routes_through_anthropic(self, mock_init, monkeypatch):

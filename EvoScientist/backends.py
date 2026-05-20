@@ -19,6 +19,12 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 
+from . import paths
+
+# Reproduced here to dodge a circular import from .EvoScientist (the canonical
+# SKILLS_DIR constant).
+_BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills"
+
 # System path prefixes that should never appear in virtual paths.
 # If the agent hallucinates an absolute system path, we block it.
 _SYSTEM_PATH_PREFIXES = (
@@ -73,7 +79,9 @@ _FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\$\("), "contains $() command substitution"),
     (re.compile(r"`"), "contains backtick command substitution"),
     (
-        re.compile(r"\b(?:pip|pip3|uv)\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b"),
+        re.compile(
+            r"\b(?:pip|pip3|uv)\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b"
+        ),
         "installs packages (may introduce malicious dependencies)",
     ),
     (re.compile(r"\buv\s+(?:add|remove|pip)\b"), "modifies project dependencies"),
@@ -172,12 +180,36 @@ def _collect_executable_positions(command: str) -> set[int]:
     return offsets
 
 
-def _extract_all_paths(command: str) -> list[str]:
+def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool:
+    """True if *path* equals a prefix or is a strict descendant.
+
+    Boundary-aware: ``str.startswith`` alone would let ``/A/skills_evil``
+    match the prefix ``/A/skills`` — anchoring on ``/`` blocks neighbour
+    directories that merely share a name prefix.
+    """
+    for prefix in allow_prefixes:
+        normalized = prefix.rstrip("/")
+        # Skip empty/root prefixes: they'd reduce the check to startswith("/")
+        # and admit every absolute path, silently disabling the allowlist.
+        if not normalized:
+            continue
+        if path == normalized or path.startswith(normalized + "/"):
+            return True
+    return False
+
+
+def _extract_all_paths(
+    command: str,
+    allow_prefixes: tuple[str, ...] = (),
+) -> list[str]:
     """Extract potential file paths from a command, including inside quoted strings.
 
     Scans both shell tokens and string literals (single/double quoted) to find
     paths that start with system prefixes like /Users/, /etc/, /tmp/, etc.
     Skips paths in executable position (command name) and pip install targets.
+
+    Paths matched by ``allow_prefixes`` (via ``_is_under_allowed_prefix``)
+    are dropped.
     """
     exe_offsets = _collect_executable_positions(command)
     paths: list[str] = []
@@ -193,13 +225,24 @@ def _extract_all_paths(command: str) -> list[str]:
         # Skip paths that land at an executable-position offset
         if m.start(1) in exe_offsets:
             continue
-        paths.append(m.group(1))
+        extracted = m.group(1)
+        if _is_under_allowed_prefix(extracted, allow_prefixes):
+            continue
+        paths.append(extracted)
     return paths
 
 
-def validate_command(command: str) -> str | None:
+def validate_command(
+    command: str,
+    allow_prefixes: tuple[str, ...] = (),
+) -> str | None:
     """
     Validate a shell command for safety.
+
+    Args:
+        command: Shell command string.
+        allow_prefixes: Absolute path prefixes exempt from the system-path
+            block list (matching rules in ``_is_under_allowed_prefix``).
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -225,7 +268,7 @@ def validate_command(command: str) -> str | None:
 
     # Check for absolute system paths (including inside quoted strings).
     # This catches attacks like: python -c "os.remove('/Users/foo/file')"
-    escaped_paths = _extract_all_paths(command)
+    escaped_paths = _extract_all_paths(command, allow_prefixes=allow_prefixes)
     if escaped_paths:
         path_sample = escaped_paths[0]
         return (
@@ -233,6 +276,61 @@ def validate_command(command: str) -> str | None:
             f"All file operations must use relative paths within the workspace. "
             f"Use relative paths (e.g., './file.py') instead."
         )
+
+    return None
+
+
+def _subpath_under_mount(token: str, mount: str) -> str | None:
+    """Return the subpath of *token* under *mount*, or ``None`` if not under it.
+
+    Bare ``mount`` and ``mount + "/"`` both return ``""`` so the caller can
+    join uniformly (``Path(tier) / ""`` is the tier itself).
+    """
+    if token == mount or token == mount + "/":
+        return ""
+    prefix = mount + "/"
+    if token.startswith(prefix):
+        return token[len(prefix) :]
+    return None
+
+
+def _skills_tier_paths() -> tuple[Path, Path | None, Path]:
+    """``(USER, GLOBAL or None, BUILTIN)`` — the tier priority chain that
+    ``MergedSkillsBackend._backends()`` honors. Single source of truth so
+    the resolver and the backend can't silently drift out of order.
+    """
+    return (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR, _BUILTIN_SKILLS_DIR)
+
+
+def _resolve_virtual_mount_path(token: str) -> str | None:
+    """Resolve a virtual mount token to a shell-safe token, or ``None`` when
+    *token* is not a registered virtual mount.
+
+    For ``/skills/...``: walks ``_skills_tier_paths()`` priority (USER →
+    GLOBAL → BUILTIN), returning ``shlex.quote`` of the first tier where the
+    path exists. On miss, returns a workspace-relative ``./skills/<rel>``
+    form — agent typed a virtual path, so the shell error should reference a
+    location they recognise (`USER_SKILLS_DIR` defaults to
+    ``WORKSPACE_ROOT / "skills"``, which is also where ``MergedSkillsBackend``
+    would write a new skill).
+
+    For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
+    absolute and ``shlex.quote``-wrapped. Memories live outside the
+    workspace, so a relative form would point at an unrelated location.
+    """
+    rel = _subpath_under_mount(token, "/skills")
+    if rel is not None:
+        for tier in _skills_tier_paths():
+            if tier is None:
+                continue
+            candidate = Path(tier) / rel
+            if candidate.exists():
+                return shlex.quote(str(candidate))
+        return shlex.quote("./skills/" + rel if rel else "./skills")
+
+    rel = _subpath_under_mount(token, "/memories")
+    if rel is not None:
+        return shlex.quote(str(Path(paths.MEMORIES_DIR) / rel))
 
     return None
 
@@ -246,6 +344,11 @@ def convert_virtual_paths_in_command(
 
     Also auto-corrects hallucinated system absolute paths that reference the
     workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
+
+    Tier-aware mounts (``/skills/...``, ``/memories/...``) are expanded to
+    absolute paths via ``_resolve_virtual_mount_path``. Callers that pass
+    the result through ``validate_command`` MUST whitelist the tier roots
+    via ``allow_prefixes`` to avoid false-positive system-path blocks.
 
     Args:
         command: Original command.
@@ -269,6 +372,10 @@ def convert_virtual_paths_in_command(
         # Skip content that looks like a URL
         if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
             return path
+
+        resolved = _resolve_virtual_mount_path(path)
+        if resolved is not None:
+            return resolved
 
         # Fix hallucinated system absolute paths that reference the workspace.
         # E.g. /Users/user/.../myproject/file.py → ./file.py
@@ -551,8 +658,16 @@ class CustomSandboxBackend(LocalShellBackend):
                 workspace_name=Path(str(self.cwd)).name,
             )
 
-        # Validate command safety (after path sanitization)
-        error = validate_command(command)
+        # USER_SKILLS_DIR must be in the allowlist: the workspace-literal
+        # replace above runs BEFORE the resolver, so any absolute path the
+        # resolver later injects reaches validate_command unstripped.
+        allow_prefixes = (
+            str(paths.USER_SKILLS_DIR),
+            str(paths.GLOBAL_SKILLS_DIR),
+            str(paths.MEMORIES_DIR),
+            str(_BUILTIN_SKILLS_DIR),
+        )
+        error = validate_command(command, allow_prefixes=allow_prefixes)
         if error:
             return ExecuteResponse(
                 output=error,

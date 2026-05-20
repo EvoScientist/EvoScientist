@@ -439,6 +439,45 @@ def test_auto_mode_disables_ask_user_middleware(
     assert "AskUserMiddleware" not in type_names
 
 
+@patch("EvoScientist.middleware.create_tool_selector_middleware", return_value=[])
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_for_async_subagent_omits_ask_user_middleware(
+    mock_config, mock_model, mock_tool_selector
+):
+    """``AskUserMiddleware`` uses ``interrupt()`` to wait on user input.
+
+    Async sub-agents run in the langgraph dev subprocess where the parent
+    only holds a ``task_id`` and has no UI path to surface or resume an
+    interrupt. Including ``AskUserMiddleware`` would deadlock the
+    sub-agent the first time the LLM calls ``ask_user``. The
+    ``for_async_subagent=True`` flag must suppress it even when the user
+    has globally enabled ``ask_user``.
+    """
+    cfg = MagicMock()
+    cfg.enable_ask_user = True
+    cfg.auto_approve = False
+    cfg.auto_mode = False
+    mock_config.return_value = cfg
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    # Sanity: with the default flag, ask_user IS present.
+    default_names = [type(m).__name__ for m in _get_default_middleware()]
+    assert "AskUserMiddleware" in default_names
+
+    # With for_async_subagent=True, ask_user is suppressed.
+    async_names = [
+        type(m).__name__ for m in _get_default_middleware(for_async_subagent=True)
+    ]
+    assert "AskUserMiddleware" not in async_names
+    # Other middleware must remain — only ask_user is filtered.
+    assert "ConfigurableModelMiddleware" in async_names
+    assert "ContextEditingMiddleware" in async_names
+    assert "ModelFallbackMiddleware" in async_names
+
+
 # ---------------------------------------------------------------------------
 # Rich CLI prompt (mocking input)
 # ---------------------------------------------------------------------------

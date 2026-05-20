@@ -3,8 +3,8 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, MiniMax
 (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, ZhipuAI, Volcengine,
-DashScope, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible endpoints) and
-convenient short names for common models.
+DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible
+endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_DASHSCOPE_CODE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
@@ -44,6 +45,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
     "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
     "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
+    "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -169,7 +171,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("doubao-seed-1.6", "doubao-seed-1.6", "volcengine"),
     ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
     ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
-    # DashScope (阿里云 — Qwen models)
+    # DashScope Coding Plan (阿里云代码计划 — subscription sk-sp-* endpoint)
+    ("qwen3-coder", "qwen3-coder-plus", "dashscope-code"),
+    ("qwen3-coder-next", "qwen3-coder-next", "dashscope-code"),
+    ("qwen3-max", "qwen3-max", "dashscope-code"),
+    ("qwen3.5-plus", "qwen3.5-plus", "dashscope-code"),
+    # DashScope (阿里云 — Qwen models, default for simple lookups)
     ("qwen3-coder", "qwen3-coder-plus", "dashscope"),
     ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
     ("qwen-max", "qwen-max", "dashscope"),
