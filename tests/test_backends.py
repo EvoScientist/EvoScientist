@@ -53,6 +53,14 @@ class TestValidateCommand:
         assert check_forced_confirmation("cat ~root/.ssh/id_rsa") is not None
         assert check_forced_confirmation("ls ~user/.bashrc") is not None
 
+    def test_python_m_pip_install_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        r = check_forced_confirmation("python -m pip install pandas")
+        assert r is not None and "install" in r.lower()
+        assert check_forced_confirmation("python3 -m pip install requests") is not None
+        assert check_forced_confirmation("python3.11 -m pip install foo") is not None
+
     def test_blocked_rm_rf_absolute(self):
         result = validate_command("rm -rf /important")
         assert result is not None

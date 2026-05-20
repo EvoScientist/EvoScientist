@@ -73,7 +73,7 @@ _FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\$\("), "contains $() command substitution"),
     (re.compile(r"`"), "contains backtick command substitution"),
     (
-        re.compile(r"\b(?:pip|pip3|uv)\s+install\b"),
+        re.compile(r"\b(?:pip|pip3|uv)\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b"),
         "installs packages (may introduce malicious dependencies)",
     ),
     (re.compile(r"\buv\s+(?:add|remove|pip)\b"), "modifies project dependencies"),
