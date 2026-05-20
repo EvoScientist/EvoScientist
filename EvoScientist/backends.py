@@ -43,9 +43,8 @@ _SYSTEM_PATH_PREFIXES = (
     "/root/",
 )
 
-# Dangerous patterns that could escape the workspace
+# Dangerous patterns that could escape the workspace (hard-blocked)
 BLOCKED_PATTERNS = [
-    r"~/",  # home directory
     r"\bcd\s+/",  # cd to absolute path
     r"\brm\s+-rf\s+/",  # rm -rf with absolute path
 ]
@@ -60,6 +59,48 @@ BLOCKED_COMMANDS = [
     "shutdown",
     "reboot",
 ]
+
+# Forced-confirmation patterns: NOT hard-blocked, but override all auto-approve
+# and require explicit user confirmation. Each entry: (regex, reason string).
+_FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"(?:^|\s)~(?:[A-Za-z0-9._-]*/|/|\s|$)"),
+        "references home directory '~' (may leak sensitive files)",
+    ),
+    (re.compile(r"\$[A-Za-z_{]"), "expands environment variables (may leak secrets)"),
+    (
+        re.compile(r"(?<!\|)\|(?!\|)"),
+        "contains pipe (output chained to another command)",
+    ),
+    (
+        re.compile(r"(?<![=\-<>])>{1,2}(?!=)"),
+        "contains output redirection (can overwrite files)",
+    ),
+    (re.compile(r"\$\("), "contains $() command substitution"),
+    (re.compile(r"`"), "contains backtick command substitution"),
+    (
+        re.compile(
+            r"\b(?:pip|pip3|uv)\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b"
+        ),
+        "installs packages (may introduce malicious dependencies)",
+    ),
+    (re.compile(r"\buv\s+(?:add|remove|pip)\b"), "modifies project dependencies"),
+]
+
+
+def check_forced_confirmation(command: str) -> str | None:
+    """Check if a command contains patterns that require forced confirmation.
+
+    Returns a short reason string if confirmation is required, None if clean.
+    Unlike validate_command() which hard-blocks, this soft-blocks: the command
+    can still run after explicit user approval.
+    """
+    if _has_traversal_component(command):
+        return "contains '..' path traversal (accesses files outside workspace)"
+    for pattern, reason in _FORCED_CONFIRMATION_PATTERNS:
+        if pattern.search(command):
+            return reason
+    return None
 
 
 def _split_shell_commands(command: str) -> list[str]:
@@ -85,13 +126,18 @@ def _split_shell_commands(command: str) -> list[str]:
 
 
 def _has_traversal_component(command: str) -> bool:
-    """Check if command contains '..' as a path component (not substring)."""
+    """Check if command contains '..' as a path component, including inside quotes."""
+    # Raw check catches ../  /..  and ../ inside any quoting style
+    if "../" in command or "/.." in command:
+        return True
+    # Token-level check for bare '..' at end of args (e.g. "ls ..")
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
     from pathlib import PurePosixPath
 
-    for token in command.split():
-        if ".." in PurePosixPath(token).parts:
-            return True
-    return False
+    return any(".." in PurePosixPath(t).parts for t in tokens)
 
 
 def _collect_executable_positions(command: str) -> set[int]:
@@ -201,13 +247,7 @@ def validate_command(
     Returns:
         None if command is safe, error message string if blocked.
     """
-    # Check for '..' path traversal as a path component
-    if _has_traversal_component(command):
-        return (
-            "Command blocked: contains '..' path traversal. "
-            "All commands must operate within the workspace directory. "
-            "Use relative paths (e.g., './file.py') instead."
-        )
+    # Note: '..' traversal and '~' are soft-blocked via check_forced_confirmation()
 
     # Check for dangerous patterns
     for pattern in BLOCKED_PATTERNS:

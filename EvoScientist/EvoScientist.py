@@ -23,7 +23,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
+from langchain.agents.middleware import AgentMiddleware
 
 from . import paths as _paths_mod
 from .config import apply_config_to_env, get_effective_config
@@ -539,12 +539,7 @@ def _get_default_agent():
         be = _get_default_backend()
         mw = _get_default_middleware()
 
-        # HITL on main agent only (mirrors create_cli_agent). Use middleware,
-        # not interrupt_on= kwarg — the kwarg propagates to every subagent and
-        # breaks parallel execute calls (multi-pending-interrupt LangGraph
-        # error). See PR #202.
-        if not cfg.auto_approve:
-            mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
+        hitl_interrupt_on = {"execute": True} if not cfg.auto_approve else None
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(be, mw)
@@ -553,6 +548,7 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
+            interrupt_on=hitl_interrupt_on,
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -658,11 +654,7 @@ def create_cli_agent(
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
     mw: list[AgentMiddleware] = _get_default_middleware()
 
-    # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
-    # would propagate it to every subagent, breaking parallel execute calls
-    # (multi-pending-interrupt LangGraph error).
-    if not cfg.auto_approve:
-        mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
+    hitl_interrupt_on = {"execute": True} if not cfg.auto_approve else None
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(be, mw, on_mcp_progress=on_mcp_progress)
@@ -670,4 +662,5 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
+        interrupt_on=hitl_interrupt_on,
     ).with_config({"recursion_limit": cfg.recursion_limit})

@@ -129,8 +129,9 @@ class StreamState:
         self.last_output_tokens = 0
         # Tool selection tracking (LLMToolSelectorMiddleware)
         self.selected_tools: list[str] = []
-        # HITL interrupt tracking
+        # HITL interrupt tracking (multiple sub-agents can interrupt in parallel)
         self.pending_interrupt: dict | None = None
+        self.pending_interrupts: dict[str, dict] = {}
         # ask_user interrupt tracking
         self.pending_ask_user: dict | None = None
         # Cached Markdown object for Rich CLI display (avoids O(n²) re-parsing)
@@ -305,6 +306,7 @@ class StreamState:
 
         elif event_type == "interrupt":
             self.pending_interrupt = event
+            self.pending_interrupts[event.get("interrupt_id", "default")] = event
 
         elif event_type == "ask_user":
             self.pending_ask_user = event

@@ -493,6 +493,21 @@ async def stream_agent_events(
                         else:
                             interrupt_value = getattr(interrupt_obj, "value", {})
 
+                        # Extract real interrupt ID (Interrupt.id hex hash)
+                        _raw_id = (
+                            interrupt_obj.get("id", "")
+                            if isinstance(interrupt_obj, dict)
+                            else getattr(interrupt_obj, "id", "")
+                        )
+                        if not _raw_id:
+                            ns_parts = (
+                                interrupt_obj.get("ns", [""])
+                                if isinstance(interrupt_obj, dict)
+                                else getattr(interrupt_obj, "ns", [""])
+                            )
+                            _raw_id = str(ns_parts[0]) if ns_parts else "default"
+                        _interrupt_id = str(_raw_id)
+
                         # Discriminate ask_user vs HITL interrupts
                         iv_type = (
                             interrupt_value.get("type")
@@ -510,14 +525,8 @@ async def stream_agent_events(
                                 if isinstance(interrupt_value, dict)
                                 else getattr(interrupt_value, "tool_call_id", "")
                             )
-                            ns_parts = (
-                                interrupt_obj.get("ns", [""])
-                                if isinstance(interrupt_obj, dict)
-                                else getattr(interrupt_obj, "ns", [""])
-                            )
-                            interrupt_id = str(ns_parts[0]) if ns_parts else "default"
                             yield emitter.ask_user_interrupt(
-                                interrupt_id, questions, tc_id
+                                _interrupt_id, questions, tc_id
                             ).data
                             continue
 
@@ -531,14 +540,8 @@ async def stream_agent_events(
                             )
                             review_cfgs = getattr(interrupt_value, "review_configs", [])
                         if action_reqs:
-                            ns_parts = (
-                                interrupt_obj.get("ns", [""])
-                                if isinstance(interrupt_obj, dict)
-                                else getattr(interrupt_obj, "ns", [""])
-                            )
-                            interrupt_id = str(ns_parts[0]) if ns_parts else "default"
                             yield emitter.interrupt(
-                                interrupt_id, action_reqs, review_cfgs
+                                _interrupt_id, action_reqs, review_cfgs
                             ).data
                 summarization_event = _find_summarization_event_payload(data)
                 if summarization_event and not _summarization_in_progress:

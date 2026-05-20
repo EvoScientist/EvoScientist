@@ -1730,93 +1730,9 @@ def run_textual_interactive(
                                 break  # re-enter outer HITL loop
 
                         elif event_type == "interrupt":
-                            action_reqs = event.get("action_requests", [])
-                            n = len(action_reqs) or 1
-
-                            # HITL: check session auto-approve first
-                            if self._hitl_auto_approve:
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
-
-                                _stream_input = Command(
-                                    resume={
-                                        "decisions": [
-                                            {"type": "approve"} for _ in range(n)
-                                        ]
-                                    }
-                                )
-                                _hitl_resuming = True
-                                break  # re-enter outer HITL loop
-
-                            # Channel messages: use channel-based text approval
-                            if channel_hitl_fn is not None:
-                                self._append_system(
-                                    "Waiting for channel user approval...",
-                                    style="dim italic",
-                                )
-                                decisions = await asyncio.to_thread(
-                                    channel_hitl_fn,
-                                    action_reqs,
-                                )
-                                if is_stream_cancel_requested(cancel_scope):
-                                    state.pending_interrupt = None
-                                    response = await _mark_cancelled_response()
-                                    break
-                                if decisions is not None:
-                                    from langgraph.types import (
-                                        Command,  # type: ignore[import-untyped]
-                                    )
-
-                                    _stream_input = Command(
-                                        resume={"decisions": decisions}
-                                    )
-                                    _hitl_resuming = True
-                                    break  # re-enter outer HITL loop
-                                else:
-                                    state.pending_interrupt = None
-                                    for tw in tool_widgets.values():
-                                        if tw._status == "running":
-                                            tw.set_rejected()
-                                    self._append_system(
-                                        "Tool execution rejected by channel user.",
-                                        style="yellow",
-                                    )
-                                continue
-
-                            # Interactive TUI: mount approval widget
-                            # Disable main prompt so it can't steal focus
-                            _prompt = self.query_one("#prompt", ChatTextArea)
-                            _prompt.disabled = True
-                            from .widgets.approval_widget import ApprovalWidget
-
-                            approval_w = ApprovalWidget(action_reqs)
-                            await container.mount(approval_w)
-                            _schedule_scroll()
-                            decided_event = await self._wait_for_approval(approval_w)
-                            await approval_w.remove()
-                            _prompt.disabled = False
-                            if decided_event and decided_event.decisions is not None:
-                                if decided_event.auto_approve_session:
-                                    self._hitl_auto_approve = True
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
-
-                                _stream_input = Command(
-                                    resume={"decisions": decided_event.decisions}
-                                )
-                                _hitl_resuming = True
-                                break  # re-enter outer HITL loop with resume
-                            else:
-                                state.pending_interrupt = None
-                                for tw in tool_widgets.values():
-                                    if tw._status == "running":
-                                        tw.set_rejected()
-                                self._append_system(
-                                    "Tool execution rejected.",
-                                    style="yellow",
-                                )
+                            # Accumulated in state.pending_interrupts by handle_event.
+                            # Resolved post-stream to handle parallel sub-agent interrupts.
+                            pass
 
                         elif event_type == "done":
                             # Clean up transient indicators
@@ -1841,8 +1757,12 @@ def run_textual_interactive(
                                     delays=(0.15, 0.4, 0.8, 1.5),
                                     immediate=False,
                                 )
-                            # Mount token usage stats with elapsed time
-                            if state.total_input_tokens or state.total_output_tokens:
+                            # Mount token usage stats (only on final done, not mid-HITL)
+                            if (
+                                (state.total_input_tokens or state.total_output_tokens)
+                                and not state.pending_interrupts
+                                and state.pending_ask_user is None
+                            ):
                                 elapsed = None
                                 if self._turn_started_at:
                                     elapsed = format_duration_compact(
@@ -1896,8 +1816,8 @@ def run_textual_interactive(
                     for w in (narration_w, processing_w):
                         await _remove_w(w)
                     # Mark any still-running tool widgets as interrupted
-                    # (skip if HITL approved — tools will continue next round)
-                    if not _hitl_resuming:
+                    # (skip if HITL approved or pending — tools will continue next round)
+                    if not _hitl_resuming and not state.pending_interrupts:
                         for tw in tool_widgets.values():
                             if tw._status == "running":
                                 try:
@@ -1905,12 +1825,14 @@ def run_textual_interactive(
                                 except Exception:
                                     pass
                     # Finalize any still-active sub-agents
-                    for sa_w in subagent_widgets.values():
-                        if sa_w._is_active:
-                            try:
-                                sa_w.finalize()
-                            except Exception:
-                                pass
+                    # (skip if HITL pending — sub-agents will continue next round)
+                    if not _hitl_resuming and not state.pending_interrupts:
+                        for sa_w in subagent_widgets.values():
+                            if sa_w._is_active:
+                                try:
+                                    sa_w.finalize()
+                                except Exception:
+                                    pass
                     # Finalize thinking widget
                     if thinking_w is not None and thinking_w._is_active:
                         try:
@@ -1931,14 +1853,108 @@ def run_textual_interactive(
                     # Final scrolls to ensure last content is visible.
                     self._schedule_scroll_to_bottom(container)
 
-                # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
-                if state.pending_interrupt is None and state.pending_ask_user is None:
-                    break  # normal completion or rejection — exit HITL loop
-                # Otherwise _stream_input was set to Command(resume=...)
-                # by the interrupt handler above; loop continues.
+
+                # Handle all pending interrupts (sub-agents may interrupt in parallel)
+                if state.pending_interrupts:
+                    from langgraph.types import Command  # type: ignore[import-untyped]
+
+                    from EvoScientist.backends import check_forced_confirmation
+
+                    def _has_forced(areqs):
+                        for r in areqs:
+                            n = r.get("name", "") if isinstance(r, dict) else ""
+                            if n != "execute":
+                                continue
+                            a = r.get("args", {}) if isinstance(r, dict) else {}
+                            c = a.get("command", "") if isinstance(a, dict) else ""
+                            if check_forced_confirmation(c):
+                                return True
+                        return False
+
+                    resume_map: dict[str, dict] = {}
+                    _cancelled = False
+                    for _iid, _iev in list(state.pending_interrupts.items()):
+                        if is_stream_cancel_requested(cancel_scope):
+                            _cancelled = True
+                            break
+
+                        _areqs = _iev.get("action_requests", [])
+                        _n = len(_areqs) or 1
+
+                        if self._hitl_auto_approve and not _has_forced(_areqs):
+                            resume_map[_iid] = {
+                                "decisions": [{"type": "approve"} for _ in range(_n)]
+                            }
+                            continue
+
+                        if channel_hitl_fn is not None:
+                            if is_stream_cancel_requested(cancel_scope):
+                                _cancelled = True
+                                break
+                            _decs = await asyncio.to_thread(channel_hitl_fn, _areqs)
+                            if is_stream_cancel_requested(cancel_scope):
+                                _cancelled = True
+                                break
+                            resume_map[_iid] = {
+                                "decisions": _decs
+                                or [
+                                    {"type": "reject", "message": "Rejected"}
+                                    for _ in range(_n)
+                                ]
+                            }
+                            continue
+
+                        _prompt = self.query_one("#prompt", ChatTextArea)
+                        _prompt.disabled = True
+                        from .widgets.approval_widget import ApprovalWidget
+
+                        _aw = ApprovalWidget(_areqs)
+                        await container.mount(_aw)
+                        self._schedule_scroll_to_bottom(container)
+                        if is_stream_cancel_requested(cancel_scope):
+                            await _aw.remove()
+                            _prompt.disabled = False
+                            _cancelled = True
+                            break
+                        _decided = await self._wait_for_approval(_aw)
+                        await _aw.remove()
+                        _prompt.disabled = False
+                        if is_stream_cancel_requested(cancel_scope):
+                            _cancelled = True
+                            break
+
+                        if _decided and _decided.decisions is not None:
+                            if _decided.auto_approve_session:
+                                self._hitl_auto_approve = True
+                            resume_map[_iid] = {"decisions": _decided.decisions}
+                        else:
+                            resume_map[_iid] = {
+                                "decisions": [
+                                    {"type": "reject", "message": "Rejected by user"}
+                                    for _ in range(_n)
+                                ]
+                            }
+
+                    if _cancelled:
+                        response = await _mark_cancelled_response()
+                        break
+
+                    if resume_map:
+                        _stream_input = Command(resume=resume_map)
+                        state.pending_interrupt = None
+                        state.pending_interrupts.clear()
+                        _hitl_resuming = True
+                        continue
+
+                if (
+                    not state.pending_interrupts
+                    and state.pending_interrupt is None
+                    and state.pending_ask_user is None
+                ):
+                    break
 
             return response
 
