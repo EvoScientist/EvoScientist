@@ -1816,8 +1816,8 @@ def run_textual_interactive(
                     for w in (narration_w, processing_w):
                         await _remove_w(w)
                     # Mark any still-running tool widgets as interrupted
-                    # (skip if HITL approved — tools will continue next round)
-                    if not _hitl_resuming:
+                    # (skip if HITL approved or pending — tools will continue next round)
+                    if not _hitl_resuming and not state.pending_interrupts:
                         for tw in tool_widgets.values():
                             if tw._status == "running":
                                 try:
@@ -1825,12 +1825,14 @@ def run_textual_interactive(
                                 except Exception:
                                     pass
                     # Finalize any still-active sub-agents
-                    for sa_w in subagent_widgets.values():
-                        if sa_w._is_active:
-                            try:
-                                sa_w.finalize()
-                            except Exception:
-                                pass
+                    # (skip if HITL pending — sub-agents will continue next round)
+                    if not _hitl_resuming and not state.pending_interrupts:
+                        for sa_w in subagent_widgets.values():
+                            if sa_w._is_active:
+                                try:
+                                    sa_w.finalize()
+                                except Exception:
+                                    pass
                     # Finalize thinking widget
                     if thinking_w is not None and thinking_w._is_active:
                         try:
@@ -1859,7 +1861,18 @@ def run_textual_interactive(
                 if state.pending_interrupts:
                     from langgraph.types import Command  # type: ignore[import-untyped]
 
-                    from EvoScientist.channels.consumer import _should_auto_approve
+                    from EvoScientist.backends import check_forced_confirmation
+
+                    def _has_forced(areqs):
+                        for r in areqs:
+                            n = r.get("name", "") if isinstance(r, dict) else ""
+                            if n != "execute":
+                                continue
+                            a = r.get("args", {}) if isinstance(r, dict) else {}
+                            c = a.get("command", "") if isinstance(a, dict) else ""
+                            if check_forced_confirmation(c):
+                                return True
+                        return False
 
                     resume_map: dict[str, dict] = {}
                     _cancelled = False
@@ -1871,7 +1884,7 @@ def run_textual_interactive(
                         _areqs = _iev.get("action_requests", [])
                         _n = len(_areqs) or 1
 
-                        if self._hitl_auto_approve and _should_auto_approve(_areqs):
+                        if self._hitl_auto_approve and not _has_forced(_areqs):
                             resume_map[_iid] = {
                                 "decisions": [{"type": "approve"} for _ in range(_n)]
                             }
