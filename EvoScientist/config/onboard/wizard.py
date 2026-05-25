@@ -340,6 +340,21 @@ def run_onboard(
             if p and p.skip_set:
                 sections_to_run = sections_to_run - p.skip_set
 
+            # In strict --non-interactive mode, optional sections that have
+            # no flag-driven equivalent (skills / mcp / latex / channels)
+            # would otherwise still open their interactive pickers — that
+            # breaks the "no prompts" contract advertised by the flag.
+            # Auto-skip them unless the caller explicitly opted in by NOT
+            # passing the corresponding --skip-* flag AND providing answers.
+            # Today none of these have preset support, so always auto-skip.
+            if strict:
+                sections_to_run = sections_to_run - {
+                    "skills",
+                    "mcp",
+                    "latex",
+                    "channels",
+                }
+
             console.print(
                 "[dim]  Progress is autosaved after every step. Ctrl+C is safe.[/dim]"
             )

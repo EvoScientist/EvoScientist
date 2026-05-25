@@ -381,6 +381,8 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
                 style=CONFIRM_STYLE,
                 qmark=QMARK,
             ).ask()
+            if relogin is None:
+                raise KeyboardInterrupt()
             if relogin:
                 _run_ccproxy_login("claude_api", "OAuth")
         else:
@@ -391,6 +393,8 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
                 style=CONFIRM_STYLE,
                 qmark=QMARK,
             ).ask()
+            if login is None:
+                raise KeyboardInterrupt()
             if login:
                 _run_ccproxy_login("claude_api", "OAuth")
 
@@ -483,6 +487,8 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
                 style=CONFIRM_STYLE,
                 qmark=QMARK,
             ).ask()
+            if relogin is None:
+                raise KeyboardInterrupt()
             if relogin:
                 _run_ccproxy_login("codex", "Codex OAuth")
         else:
@@ -493,6 +499,8 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
                 style=CONFIRM_STYLE,
                 qmark=QMARK,
             ).ask()
+            if login is None:
+                raise KeyboardInterrupt()
             if login:
                 _run_ccproxy_login("codex", "Codex OAuth")
 
@@ -656,16 +664,27 @@ def _step_model(
     entries = get_models_for_provider(provider)
 
     if not entries:
-        # Custom / unknown provider: direct text input
-        model = questionary.text(
-            "Model name:",
-            style=WIZARD_STYLE,
-            qmark=QMARK,
-            placeholder=FormattedText([("fg:#858585", " e.g. owner/model-name")]),
-        ).ask()
-        if model is None:
-            raise KeyboardInterrupt()
-        return model
+        # Custom / unknown provider: direct text input.
+        # Keep prompting until a non-empty model name is provided — saving an
+        # empty string here leaves the first request broken with an opaque
+        # "model required" error from the provider SDK.
+        while True:
+            model = questionary.text(
+                "Model name:",
+                style=WIZARD_STYLE,
+                qmark=QMARK,
+                placeholder=FormattedText([("fg:#858585", " e.g. owner/model-name")]),
+                default=config.model or "",
+            ).ask()
+            if model is None:
+                raise KeyboardInterrupt()
+            model = model.strip()
+            if model:
+                return model
+            console.print(
+                "  [yellow]Model name cannot be empty for a custom provider. "
+                "Press Ctrl+C to cancel.[/yellow]"
+            )
 
     provider_models = [name for name, _ in entries]
 
@@ -1044,13 +1063,28 @@ def _step_skills() -> list[str]:
             choices.append(Choice(title=skill["label"], value=src))
 
     all_installed = all(_is_installed(skill["source"]) for skill in _RECOMMENDED_SKILLS)
+    has_updates = any(_has_update(skill["source"]) for skill in _RECOMMENDED_SKILLS)
     if all_installed:
-        console.print(
-            "  [green]✓ All recommended skills are already installed.[/green]"
-        )
-        return []
+        if has_updates:
+            console.print(
+                "  [green]✓ All recommended skills installed; "
+                "[yellow]updates available[/yellow] — re-select any to sync.[/green]"
+            )
+        else:
+            console.print(
+                "  [green]✓ All recommended skills are already installed "
+                "and up to date.[/green]"
+            )
+            # No updates AND nothing new to install — nothing useful the
+            # picker can do.
+            return []
 
-    selected = _checkbox_ask(choices, "Install or Sync predefined skills:")
+    prompt_label = (
+        "Re-select installed skills to sync, or pick new ones:"
+        if all_installed
+        else "Install or Sync predefined skills:"
+    )
+    selected = _checkbox_ask(choices, prompt_label)
 
     if selected is None:
         raise KeyboardInterrupt()
@@ -1107,8 +1141,13 @@ def _step_mcp_servers() -> list[str]:
 
     try:
         all_servers = fetch_marketplace_index()
-    except Exception:
-        all_servers = []
+    except Exception as exc:
+        console.print(
+            "  [yellow]\u26a0 Could not fetch MCP marketplace index "
+            f"({type(exc).__name__}). Skipping MCP setup \u2014 "
+            "you can re-run with [bold]EvoSci configure mcp[/bold] later.[/yellow]"
+        )
+        return []
     servers = [s for s in all_servers if "onboarding" in s.tags]
     existing_config = _load_user_config()
 
@@ -1128,10 +1167,17 @@ def _step_mcp_servers() -> list[str]:
         else:
             choices.append(Choice(title=srv.label, value=srv.name))
 
-    all_installed = all(srv.name in existing_config for srv in servers)
-    if all_installed:
+    # Only declare "all configured" when there ARE recommended servers AND
+    # every one is already in the user's config \u2014 distinct from "marketplace
+    # returned nothing" (a transient failure) which is handled above.
+    if servers and all(srv.name in existing_config for srv in servers):
         console.print(
             "[green]\u2713 All recommended MCP servers are already configured.[/green]"
+        )
+        return []
+    if not servers:
+        console.print(
+            "  [dim]No recommended MCP servers are tagged for onboarding right now.[/dim]"
         )
         return []
 

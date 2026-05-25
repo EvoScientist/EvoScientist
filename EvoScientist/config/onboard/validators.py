@@ -112,10 +112,15 @@ def validate_nvidia_key(api_key: str) -> tuple[bool, str]:
     if not api_key:
         return True, "Skipped (no key provided)"
 
+    # NOTE: ``ChatNVIDIA(api_key=...)`` does NOT send a network request — it
+    # only stores the key in a client object. We must actually invoke the
+    # API (e.g. ``get_available_models()``) to verify the key is good.
     try:
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
-        ChatNVIDIA(api_key=api_key, model="meta/llama-3.1-8b-instruct")
+        client = ChatNVIDIA(api_key=api_key, model="meta/llama-3.1-8b-instruct")
+        # Force a real authenticated request via model discovery.
+        client.get_available_models()
         return True, "Valid"
 
     except Exception as e:
@@ -259,7 +264,13 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         )
         if resp.status_code == 200:
             return True, "Valid"
-        return False, "Invalid API key"
+        # Only 401/403 mean the key is actually rejected. 429 (rate-limit)
+        # and 5xx (OpenRouter incident) leave the key validity unknown —
+        # surface the real status so the user doesn't go re-roll a good key
+        # during an outage.
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
     except Exception as e:
         return False, f"Error: {e}"
 

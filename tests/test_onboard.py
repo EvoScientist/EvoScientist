@@ -77,6 +77,61 @@ class TestConstants:
         assert CONFIRM_STYLE is not WIZARD_STYLE
 
 
+class TestSharedConstantsAlignment:
+    """Drift guard: the canonical valid-value sets in
+    ``EvoScientist.config.onboard.constants`` must match the actual
+    ``Choice(value=...)`` ids built by the interactive step functions in
+    ``steps.py``. Without this, adding a new provider to one file but not
+    the other would silently break either CLI flag validation or the
+    interactive picker.
+    """
+
+    def test_provider_constants_match_step_choices(self):
+        """Every value in `_step_provider`'s Choice list must be in
+        ``VALID_PROVIDERS`` — and vice versa."""
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.config.onboard.constants import VALID_PROVIDERS
+        from EvoScientist.config.onboard.steps import _step_provider
+
+        # Intercept questionary.select to capture the choices list before
+        # any user prompt happens.
+        captured = {}
+
+        def _capture(*args, **kwargs):
+            captured["choices"] = kwargs.get("choices") or (
+                args[1] if len(args) > 1 else []
+            )
+            fake = MagicMock()
+            fake.ask.return_value = "anthropic"
+            return fake
+
+        with patch(
+            "EvoScientist.config.onboard.steps.questionary.select",
+            side_effect=_capture,
+        ):
+            _step_provider(EvoScientistConfig())
+
+        actual_provider_ids = {c.value for c in captured["choices"]}
+        assert actual_provider_ids == set(VALID_PROVIDERS), (
+            "VALID_PROVIDERS in constants.py drifted from _step_provider's "
+            f"choices. Only-in-constants: {set(VALID_PROVIDERS) - actual_provider_ids}; "
+            f"only-in-choices: {actual_provider_ids - set(VALID_PROVIDERS)}"
+        )
+
+    def test_ui_constants_match_step_choices(self):
+        from EvoScientist.config.onboard.constants import VALID_UI_BACKENDS
+
+        # _step_ui_backend hard-codes "tui" and "cli" — small enough to
+        # check by direct lookup against the canonical set.
+        assert VALID_UI_BACKENDS == frozenset({"tui", "cli"})
+
+    def test_workspace_mode_constants_match_step_choices(self):
+        from EvoScientist.config.onboard.constants import VALID_WORKSPACE_MODES
+
+        assert VALID_WORKSPACE_MODES == frozenset({"daemon", "run"})
+
+
 # =============================================================================
 # Test render_progress
 # =============================================================================
@@ -865,7 +920,9 @@ class TestStepChannels:
             patch("builtins.__import__", side_effect=_fake_import),
         ):
             mock_q.checkbox.return_value.ask.return_value = ["telegram"]
-            mock_q.text.return_value.ask.return_value = "test-token"
+            # Bot token is a secret → prompted via questionary.password.
+            mock_q.password.return_value.ask.return_value = "test-token"
+            mock_q.text.return_value.ask.return_value = ""
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "telegram"
@@ -894,7 +951,9 @@ class TestStepChannels:
             patch("builtins.__import__", side_effect=_fake_import),
         ):
             mock_q.checkbox.return_value.ask.return_value = ["discord"]
-            mock_q.text.return_value.ask.return_value = "discord-token"
+            # Bot token is a secret → prompted via questionary.password.
+            mock_q.password.return_value.ask.return_value = "discord-token"
+            mock_q.text.return_value.ask.return_value = ""
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "discord"

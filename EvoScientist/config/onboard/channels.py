@@ -66,20 +66,24 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         "qq": ["qq-botpy>=1.0", "cryptography>=41.0", "qrcode>=7.4"],
     }
 
-    # Channel definitions: (value, display_name, required_fields, import_check, pip_extra)
-    # import_check: module name to try importing; None = no check needed
+    # Channel definitions:
+    #   (value, display_name, required_fields, import_check, pip_extra)
+    # required_fields entries are (field_name, prompt_label, is_secret).
+    # ``is_secret=True`` triggers a password prompt (no echo, no default echo)
+    # so bot tokens / OAuth secrets / IMAP+SMTP passwords don't leak into
+    # terminal scrollback, screen recordings, or support sessions.
     _CHANNELS = [
         (
             "telegram",
             "Telegram",
-            [("telegram_bot_token", "Bot token (from @BotFather)")],
+            [("telegram_bot_token", "Bot token (from @BotFather)", True)],
             "telegram",
             "telegram",
         ),
         (
             "discord",
             "Discord",
-            [("discord_bot_token", "Bot token")],
+            [("discord_bot_token", "Bot token", True)],
             "discord",
             "discord",
         ),
@@ -87,8 +91,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             "slack",
             "Slack",
             [
-                ("slack_bot_token", "Bot token (xoxb-...)"),
-                ("slack_app_token", "App token for Socket Mode (xapp-...)"),
+                ("slack_bot_token", "Bot token (xoxb-...)", True),
+                ("slack_app_token", "App token for Socket Mode (xapp-...)", True),
             ],
             "slack_sdk",
             "slack",
@@ -96,7 +100,10 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         (
             "feishu",
             "Feishu",
-            [("feishu_app_id", "App ID"), ("feishu_app_secret", "App Secret")],
+            [
+                ("feishu_app_id", "App ID", False),
+                ("feishu_app_secret", "App Secret", True),
+            ],
             "aiohttp",
             "feishu",
         ),
@@ -104,8 +111,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             "dingtalk",
             "DingTalk",
             [
-                ("dingtalk_client_id", "Client ID (AppKey)"),
-                ("dingtalk_client_secret", "Client Secret (AppSecret)"),
+                ("dingtalk_client_id", "Client ID (AppKey)", False),
+                ("dingtalk_client_secret", "Client Secret (AppSecret)", True),
             ],
             "aiohttp",
             "dingtalk",
@@ -121,13 +128,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             "email",
             "Email",
             [
-                ("email_imap_host", "IMAP host"),
-                ("email_imap_username", "IMAP username"),
-                ("email_imap_password", "IMAP password"),
-                ("email_smtp_host", "SMTP host"),
-                ("email_smtp_username", "SMTP username"),
-                ("email_smtp_password", "SMTP password"),
-                ("email_from_address", "From address"),
+                ("email_imap_host", "IMAP host", False),
+                ("email_imap_username", "IMAP username", False),
+                ("email_imap_password", "IMAP password", True),
+                ("email_smtp_host", "SMTP host", False),
+                ("email_smtp_username", "SMTP username", False),
+                ("email_smtp_password", "SMTP password", True),
+                ("email_from_address", "From address", False),
             ],
             None,
             None,
@@ -135,14 +142,17 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         (
             "qq",
             "QQ",
-            [("qq_app_id", "App ID"), ("qq_app_secret", "App Secret")],
+            [
+                ("qq_app_id", "App ID", False),
+                ("qq_app_secret", "App Secret", True),
+            ],
             "botpy",
             "qq",
         ),
         (
             "signal",
             "Signal",
-            [("signal_phone_number", "Phone number (E.164)")],
+            [("signal_phone_number", "Phone number (E.164)", False)],
             None,
             None,
         ),
@@ -587,19 +597,36 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         raise KeyboardInterrupt()
                     updates["wechat_personal_account_id"] = account_id.strip()
 
-        # Prompt for required fields
+        # Prompt for required fields. Secret fields use ``questionary.password``
+        # so the entered value (and the existing one shown as a hint) are
+        # never echoed to the terminal — see _CHANNELS docstring above.
         if not _qq_scanned and not _feishu_scanned:
-            for field_name, prompt_label in required_fields:
+            for field_name, prompt_label, is_secret in required_fields:
                 current = getattr(config, field_name, "")
-                value = questionary.text(
-                    f"{prompt_label}:",
-                    default=current,
-                    style=WIZARD_STYLE,
-                    qmark=f"  {QMARK}",
-                ).ask()
-                if value is None:
-                    raise KeyboardInterrupt()
-                updates[field_name] = value.strip()
+                if is_secret:
+                    masked_hint = f" (current: ***{current[-4:]})" if current else ""
+                    value = questionary.password(
+                        f"{prompt_label}{masked_hint}:",
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    value = value.strip()
+                    # Empty input keeps the existing secret untouched.
+                    if not value and current:
+                        continue
+                    updates[field_name] = value
+                else:
+                    value = questionary.text(
+                        f"{prompt_label}:",
+                        default=current,
+                        style=WIZARD_STYLE,
+                        qmark=f"  {QMARK}",
+                    ).ask()
+                    if value is None:
+                        raise KeyboardInterrupt()
+                    updates[field_name] = value.strip()
 
         # Feishu: subscription mode + optional fields
         if ch_name == "feishu":
@@ -652,7 +679,8 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                                 '"lark-oapi>=1.4.0"'
                             )
             else:
-                # Webhook mode: prompt optional verification/encryption fields
+                # Webhook mode: prompt optional verification/encryption fields.
+                # Both are credentials — use password() so they don't echo.
                 console.print(
                     "  [dim]The following fields are optional"
                     " (press Enter to skip):[/dim]"
@@ -662,15 +690,19 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     ("feishu_encrypt_key", "Encrypt Key (optional)"),
                 ]:
                     current = getattr(config, field_name, "")
-                    value = questionary.text(
-                        f"{prompt_label}:",
-                        default=current,
+                    masked_hint = f" (current: ***{current[-4:]})" if current else ""
+                    value = questionary.password(
+                        f"{prompt_label}{masked_hint}:",
                         style=WIZARD_STYLE,
                         qmark=f"  {QMARK}",
                     ).ask()
                     if value is None:
                         raise KeyboardInterrupt()
-                    updates[field_name] = value.strip()
+                    value = value.strip()
+                    if not value and current:
+                        # Keep existing value when user just presses Enter.
+                        continue
+                    updates[field_name] = value
 
         # Allowed senders (common for all channels)
         senders_field = f"{ch_name}_allowed_senders"

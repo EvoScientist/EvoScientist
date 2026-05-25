@@ -107,7 +107,32 @@ def onboard(
     missing required answer aborts the wizard.
     """
     from ..config import run_onboard
+    from ..config.onboard.constants import (
+        VALID_PROVIDERS,
+        VALID_UI_BACKENDS,
+        VALID_WORKSPACE_MODES,
+    )
     from ..config.onboard.prompter import NonInteractivePrompter
+
+    # Validate constrained string flags up-front so a typo doesn't silently
+    # poison the saved config. Allowed-value sets live in
+    # ``EvoScientist/config/onboard/constants.py``; a drift test in
+    # ``tests/test_onboard.py`` keeps them aligned with the interactive
+    # ``Choice(value=...)`` lists in ``steps.py``.
+    if ui is not None and ui not in VALID_UI_BACKENDS:
+        raise typer.BadParameter(
+            f"--ui must be one of {sorted(VALID_UI_BACKENDS)}", param_hint="--ui"
+        )
+    if workspace_mode is not None and workspace_mode not in VALID_WORKSPACE_MODES:
+        raise typer.BadParameter(
+            f"--workspace-mode must be one of {sorted(VALID_WORKSPACE_MODES)}",
+            param_hint="--workspace-mode",
+        )
+    if provider is not None and provider not in VALID_PROVIDERS:
+        raise typer.BadParameter(
+            f"--provider must be one of {sorted(VALID_PROVIDERS)}",
+            param_hint="--provider",
+        )
 
     # Collect flag-supplied answers keyed by the prompt_id wizard steps use.
     answers: dict = {}

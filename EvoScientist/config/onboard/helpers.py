@@ -211,6 +211,9 @@ def _prompt_ccproxy_port(config: EvoScientistConfig) -> None:
             style=WIZARD_STYLE,
             qmark=QMARK,
         ).ask()
+        if raw is None:
+            raise KeyboardInterrupt()
+        raw = raw.strip()
         ccproxy_port = int(raw) if raw else current_port
     except (ValueError, TypeError):
         ccproxy_port = current_port
