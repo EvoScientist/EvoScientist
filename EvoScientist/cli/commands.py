@@ -17,7 +17,7 @@ from rich.table import Table
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
 from ..stream.console import console
-from ._app import app, channel_app, config_app, mcp_app, sessions_app
+from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
     _create_session_workspace,
@@ -56,15 +56,198 @@ def onboard(
     skip_validation: bool = typer.Option(
         False, "--skip-validation", help="Skip API key validation during setup"
     ),
+    # ---- Pre-fill answers (any subset; remaining prompts stay interactive)
+    provider: str | None = typer.Option(
+        None, "--provider", help="Pre-set LLM provider (e.g. anthropic, openai)"
+    ),
+    model: str | None = typer.Option(None, "--model", help="Pre-set model name"),
+    api_key: str | None = typer.Option(
+        None, "--api-key", help="Pre-set API key for the chosen --provider"
+    ),
+    tavily_key: str | None = typer.Option(
+        None, "--tavily-key", help="Pre-set Tavily API key"
+    ),
+    workspace_mode: str | None = typer.Option(
+        None,
+        "--workspace-mode",
+        help="Pre-set workspace mode (daemon | run)",
+    ),
+    show_thinking: bool | None = typer.Option(
+        None,
+        "--show-thinking/--no-show-thinking",
+        help="Pre-set thinking-panel visibility",
+    ),
+    ui: str | None = typer.Option(None, "--ui", help="Pre-set UI backend (tui | cli)"),
+    port: int | None = typer.Option(
+        None, "--port", help="Pre-set langgraph dev server port"
+    ),
+    # ---- Skip flags
+    skip_skills: bool = typer.Option(
+        False, "--skip-skills", help="Skip skills install"
+    ),
+    skip_mcp: bool = typer.Option(False, "--skip-mcp", help="Skip MCP server setup"),
+    skip_latex: bool = typer.Option(False, "--skip-latex", help="Skip LaTeX setup"),
+    skip_channels: bool = typer.Option(
+        False, "--skip-channels", help="Skip channels setup"
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Run without prompts — every required answer must come from a flag",
+    ),
 ):
-    """Interactive setup wizard for EvoScientist
+    """Interactive setup wizard for EvoScientist.
 
     Guides you through configuring API keys, model selection,
     workspace settings, and agent parameters.
+
+    Any answer can be pre-set via a flag (``--provider anthropic
+    --model claude-sonnet-4-5 ...``); prompts for unset answers stay
+    interactive unless ``--non-interactive`` is passed, in which case any
+    missing required answer aborts the wizard.
     """
     from ..config import run_onboard
+    from ..config.onboard.prompter import NonInteractivePrompter
 
-    run_onboard(skip_validation=skip_validation)
+    # Collect flag-supplied answers keyed by the prompt_id wizard steps use.
+    answers: dict = {}
+    if ui is not None:
+        answers["ui"] = ui
+    if port is not None:
+        answers["port"] = str(port)
+    if provider is not None:
+        answers["provider"] = provider
+    if model is not None:
+        answers["model"] = model
+    if api_key is not None:
+        answers["api_key"] = api_key
+    if tavily_key is not None:
+        answers["tavily_key"] = tavily_key
+    if workspace_mode is not None:
+        answers["workspace_mode"] = workspace_mode
+    if show_thinking is not None:
+        answers["show_thinking"] = show_thinking
+
+    skip_set = {
+        section
+        for section, flag in (
+            ("skills", skip_skills),
+            ("mcp", skip_mcp),
+            ("latex", skip_latex),
+            ("channels", skip_channels),
+        )
+        if flag
+    }
+
+    prompter = None
+    if answers or skip_set or non_interactive:
+        prompter = NonInteractivePrompter(
+            answers=answers,
+            skip_set=skip_set,
+        )
+        prompter._strict_non_interactive = non_interactive  # type: ignore[attr-defined]
+
+    run_onboard(skip_validation=skip_validation, prompter=prompter)
+
+
+# =============================================================================
+# `EvoSci configure <section>` — re-run one onboarding section
+# =============================================================================
+
+
+_CONFIGURE_SECTIONS = {
+    "ui": "UI backend",
+    "port": "LangGraph server port",
+    "provider": "LLM provider + auth + API key",
+    "model": "Model + reasoning effort",
+    "tavily": "Tavily search key",
+    "workspace": "Workspace mode",
+    "thinking": "Thinking panel",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "latex": "LaTeX (TinyTeX)",
+    "channels": "Channels",
+}
+
+
+def _configure_section(section: str, skip_validation: bool = False) -> None:
+    """Run a single onboarding section, reusing the wizard's step logic."""
+    from ..config import run_onboard
+
+    run_onboard(
+        skip_validation=skip_validation,
+        only_sections={section},
+    )
+
+
+@configure_app.command("ui")
+def configure_ui():
+    """Re-run UI backend (TUI / CLI) selection."""
+    _configure_section("ui")
+
+
+@configure_app.command("port")
+def configure_port():
+    """Re-run langgraph dev server port selection."""
+    _configure_section("port")
+
+
+@configure_app.command("provider")
+def configure_provider(
+    skip_validation: bool = typer.Option(False, "--skip-validation"),
+):
+    """Re-run LLM provider, auth mode, and API key prompts."""
+    _configure_section("provider", skip_validation=skip_validation)
+
+
+@configure_app.command("model")
+def configure_model():
+    """Re-run model selection (and reasoning effort for OpenRouter)."""
+    _configure_section("model")
+
+
+@configure_app.command("tavily")
+def configure_tavily(
+    skip_validation: bool = typer.Option(False, "--skip-validation"),
+):
+    """Re-run Tavily search-key prompt."""
+    _configure_section("tavily", skip_validation=skip_validation)
+
+
+@configure_app.command("workspace")
+def configure_workspace():
+    """Re-run workspace mode (daemon/run) selection."""
+    _configure_section("workspace")
+
+
+@configure_app.command("thinking")
+def configure_thinking():
+    """Re-run thinking-panel visibility selection."""
+    _configure_section("thinking")
+
+
+@configure_app.command("skills")
+def configure_skills():
+    """Re-run skills install/sync."""
+    _configure_section("skills")
+
+
+@configure_app.command("mcp")
+def configure_mcp():
+    """Re-run MCP server selection."""
+    _configure_section("mcp")
+
+
+@configure_app.command("latex")
+def configure_latex():
+    """Re-run LaTeX (TinyTeX) setup."""
+    _configure_section("latex")
+
+
+@configure_app.command("channels")
+def configure_channels():
+    """Re-run channels selection and per-channel configuration."""
+    _configure_section("channels")
 
 
 # =============================================================================
