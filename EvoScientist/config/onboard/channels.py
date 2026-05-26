@@ -492,41 +492,55 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                 raise KeyboardInterrupt()
             updates["wechat_backend"] = wechat_backend
 
+            # Both WeCom and WeChat MP need the same non-empty-required
+            # treatment as the generic required_fields loop below — newly
+            # enabling either with blank credentials would leave the channel
+            # half-configured and only fail at first message.
+            wechat_newly_enabled = "wechat" not in _currently_enabled
+            wechat_fields_for_backend: list[tuple[str, str, bool]] = []
             if wechat_backend == "wecom":
-                wechat_fields = [
+                wechat_fields_for_backend = [
                     ("wechat_wecom_corp_id", "WeCom Corp ID", False),
                     ("wechat_wecom_agent_id", "WeCom Agent ID", False),
                     ("wechat_wecom_secret", "WeCom Secret", True),
                 ]
-                for field_name, prompt_label, is_secret in wechat_fields:
-                    current = getattr(config, field_name, "")
-                    prompt_fn = questionary.password if is_secret else questionary.text
-                    value = prompt_fn(
-                        f"{prompt_label}:",
-                        default=current,
-                        style=WIZARD_STYLE,
-                        qmark=f"  {QMARK}",
-                    ).ask()
-                    if value is None:
-                        raise KeyboardInterrupt()
-                    updates[field_name] = value.strip()
             elif wechat_backend == "wechatmp":
-                wechat_fields = [
+                wechat_fields_for_backend = [
                     ("wechat_mp_app_id", "Official Account App ID", False),
                     ("wechat_mp_app_secret", "Official Account App Secret", True),
                 ]
-                for field_name, prompt_label, is_secret in wechat_fields:
-                    current = getattr(config, field_name, "")
-                    prompt_fn = questionary.password if is_secret else questionary.text
-                    value = prompt_fn(
-                        f"{prompt_label}:",
-                        default=current,
-                        style=WIZARD_STYLE,
-                        qmark=f"  {QMARK}",
-                    ).ask()
+            for field_name, prompt_label, is_secret in wechat_fields_for_backend:
+                current = getattr(config, field_name, "")
+                while True:
+                    if is_secret:
+                        masked_hint = (
+                            f" (current: ***{current[-4:]})" if current else ""
+                        )
+                        value = questionary.password(
+                            f"{prompt_label}{masked_hint}:",
+                            style=WIZARD_STYLE,
+                            qmark=f"  {QMARK}",
+                        ).ask()
+                    else:
+                        value = questionary.text(
+                            f"{prompt_label}:",
+                            default=current,
+                            style=WIZARD_STYLE,
+                            qmark=f"  {QMARK}",
+                        ).ask()
                     if value is None:
                         raise KeyboardInterrupt()
-                    updates[field_name] = value.strip()
+                    value = value.strip()
+                    if not value and current:
+                        break  # keep existing
+                    if not value and wechat_newly_enabled:
+                        console.print(
+                            f"  [yellow]{prompt_label} is required to "
+                            "enable WeChat. Press Ctrl+C to cancel.[/yellow]"
+                        )
+                        continue
+                    updates[field_name] = value
+                    break
             else:  # personal
                 personal_choices = [
                     Choice(
