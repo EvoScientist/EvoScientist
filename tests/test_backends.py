@@ -68,6 +68,10 @@ class TestValidateCommand:
         )
         assert validate_command(command) is None
 
+    def test_ssh_remote_bash_lc_absolute_paths_are_not_local_paths(self):
+        command = 'ssh host bash -lc "cd /home/username/project && pwd"'
+        assert validate_command(command) is None
+
     def test_ssh_remote_system_paths_are_allowed(self):
         command = 'ssh host "cat /etc/hosts && ls /tmp && ls /media/user/project"'
         assert validate_command(command) is None
@@ -86,6 +90,18 @@ class TestValidateCommand:
 
     def test_ssh_remote_dd_is_blocked(self):
         result = validate_command('ssh host "dd if=/dev/zero of=/tmp/blob bs=1M"')
+        assert result is not None
+        assert "Remote command blocked" in result
+        assert "dd" in result
+
+    def test_ssh_remote_absolute_sudo_is_blocked(self):
+        result = validate_command('ssh host "/usr/bin/sudo reboot"')
+        assert result is not None
+        assert "Remote command blocked" in result
+        assert "sudo" in result
+
+    def test_ssh_remote_absolute_dd_is_blocked(self):
+        result = validate_command('ssh host "/bin/dd if=/dev/zero of=/tmp/x"')
         assert result is not None
         assert "Remote command blocked" in result
         assert "dd" in result
@@ -213,6 +229,10 @@ class TestConvertVirtualPaths:
             'ssh -p 2222 -i ~/.ssh/id_ed25519 user@host '
             '"cd /home/username/project; pwd"'
         )
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_ssh_remote_bash_lc_absolute_paths_are_preserved(self):
+        command = 'ssh host bash -lc "cd /home/username/project && pwd"'
         assert convert_virtual_paths_in_command(command) == command
 
     def test_local_paths_still_rewrite_around_ssh_remote_command(self):

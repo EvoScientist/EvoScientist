@@ -191,11 +191,11 @@ def _is_ssh_executable(token: str) -> bool:
 
 
 def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
-    """Return quoted remote-command spans in SSH invocations.
+    """Return remote-command argv spans in SSH invocations.
 
-    Only quoted remote commands are masked. Unquoted remote commands are too
-    ambiguous to distinguish from local shell structure without a full parser,
-    so they keep the existing conservative behavior.
+    Everything after the destination host is remote argv and must not be
+    treated as local workspace syntax. Plain ``ssh host`` has no remote argv
+    and therefore returns no spans.
 
     Examples:
         >>> _ssh_remote_command_spans('ssh host "ls /home/u/project"')
@@ -203,7 +203,7 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
         >>> _ssh_remote_command_spans('cat /tmp/x && ssh host "pwd"')
         [(23, 28)]
         >>> _ssh_remote_command_spans('ssh host ls /home/u/project')
-        []
+        [(9, 27)]
     """
     tokens = _shell_token_spans(command)
     spans: list[tuple[int, int]] = []
@@ -229,15 +229,11 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
 
         host_idx = idx
         remote_idx = host_idx + 1
-        if (
-            host_idx < len(words)
-            and remote_idx < len(words)
-            and bool(words[remote_idx].get("quoted"))
-        ):
+        if host_idx < len(words) and remote_idx < len(words):
             spans.append(
                 (
                     int(words[remote_idx]["start"]),
-                    int(words[remote_idx]["end"]),
+                    int(words[-1]["end"]),
                 )
             )
 
@@ -277,44 +273,48 @@ def _restore_spans(command: str, replacements: dict[str, str]) -> str:
 
 
 def _mask_ssh_remote_commands(command: str) -> tuple[str, dict[str, str]]:
-    """Mask quoted SSH remote commands so local path logic can skip them.
+    """Mask SSH remote argv so local path logic can skip it.
 
     Examples:
         >>> _mask_ssh_remote_commands('ssh host "ls /home/u/project"')
         ('ssh host __EVOSCI_SSH_REMOTE_0__', {'__EVOSCI_SSH_REMOTE_0__': '"ls /home/u/project"'})
+        >>> _mask_ssh_remote_commands('ssh host bash -lc "pwd"')
+        ('ssh host __EVOSCI_SSH_REMOTE_0__', {'__EVOSCI_SSH_REMOTE_0__': 'bash -lc "pwd"'})
         >>> _restore_spans(*_mask_ssh_remote_commands('ssh host "pwd"'))
         'ssh host "pwd"'
     """
     return _mask_spans(command, _ssh_remote_command_spans(command))
 
 
-def _decode_shell_word(word: str) -> str:
-    """Decode a single shell word, falling back to the raw word on parse error.
+def _decode_remote_argv(argv: str) -> str:
+    """Decode SSH remote argv, falling back to the raw argv on parse error.
 
     Examples:
-        >>> _decode_shell_word('"cd /home/u/project && pwd"')
+        >>> _decode_remote_argv('"cd /home/u/project && pwd"')
         'cd /home/u/project && pwd'
-        >>> _decode_shell_word("'ls /media/u/project'")
-        'ls /media/u/project'
+        >>> _decode_remote_argv("bash -lc 'ls /media/u/project'")
+        'bash -lc ls /media/u/project'
     """
     try:
-        parts = shlex.split(word)
+        parts = shlex.split(argv)
     except ValueError:
-        return word
-    return parts[0] if parts else word
+        return argv
+    return " ".join(parts) if parts else argv
 
 
 def _extract_ssh_remote_commands(command: str) -> list[str]:
-    """Extract quoted SSH remote commands in unquoted form.
+    """Extract SSH remote argv spans in decoded form.
 
     Examples:
         >>> _extract_ssh_remote_commands('ssh host "ls /home/u/project"')
         ['ls /home/u/project']
+        >>> _extract_ssh_remote_commands('ssh host bash -lc "pwd"')
+        ['bash -lc pwd']
         >>> _extract_ssh_remote_commands('ssh host ls /home/u/project')
-        []
+        ['ls /home/u/project']
     """
     _, replacements = _mask_ssh_remote_commands(command)
-    return [_decode_shell_word(value) for value in replacements.values()]
+    return [_decode_remote_argv(value) for value in replacements.values()]
 
 
 def validate_remote_command(command: str) -> str | None:
@@ -337,8 +337,9 @@ def validate_remote_command(command: str) -> str | None:
             )
 
     for base_cmd in _split_shell_commands(command):
-        if base_cmd in REMOTE_BLOCKED_COMMANDS:
-            return f"Remote command blocked: '{base_cmd}' is not allowed over ssh."
+        cmd_name = Path(base_cmd).name
+        if cmd_name in REMOTE_BLOCKED_COMMANDS:
+            return f"Remote command blocked: '{cmd_name}' is not allowed over ssh."
 
     return None
 
