@@ -61,6 +61,287 @@ BLOCKED_COMMANDS = [
     "reboot",
 ]
 
+# Remote commands run outside the local workspace sandbox, so only block
+# clearly high-risk operations. Absolute remote paths like /home or /media
+# are valid and must not be treated as local sandbox escapes.
+REMOTE_BLOCKED_COMMANDS = [
+    "sudo",
+    "su",
+    "mkfs",
+    "dd",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    "halt",
+]
+
+REMOTE_BLOCKED_PATTERNS = [
+    r"\brm\b(?=[^;&|]*\s-[^\s;&|]*r)(?=[^;&|]*\s-[^\s;&|]*f)[^;&|]*\s/(?:\s|$|[;&|*])",
+    r"\bchmod\s+-R\s+777\s+/",
+    r"\bchown\s+-R\b",
+    r">\s*/etc/",
+    r">\s*/boot/",
+]
+
+
+def _shell_token_spans(command: str) -> list[dict[str, object]]:
+    """Tokenize enough shell syntax to find quoted SSH remote commands.
+
+    This is intentionally small: it tracks words, quotes, and command
+    separators, but does not try to be a full POSIX shell parser.
+    """
+    tokens: list[dict[str, object]] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        if command[i].isspace():
+            i += 1
+            continue
+        if command.startswith(("&&", "||"), i):
+            tokens.append(
+                {"type": "op", "value": command[i : i + 2], "start": i, "end": i + 2}
+            )
+            i += 2
+            continue
+        if command[i] in ";|":
+            tokens.append(
+                {"type": "op", "value": command[i], "start": i, "end": i + 1}
+            )
+            i += 1
+            continue
+
+        start = i
+        value: list[str] = []
+        quoted = False
+        while i < n:
+            ch = command[i]
+            if ch.isspace() or ch in ";|":
+                break
+            if command.startswith(("&&", "||"), i):
+                break
+            if ch in ("'", '"'):
+                quoted = True
+                quote = ch
+                i += 1
+                while i < n:
+                    inner = command[i]
+                    if inner == quote:
+                        i += 1
+                        break
+                    if inner == "\\" and quote == '"' and i + 1 < n:
+                        value.append(command[i + 1])
+                        i += 2
+                    else:
+                        value.append(inner)
+                        i += 1
+                continue
+            if ch == "\\" and i + 1 < n:
+                value.append(command[i + 1])
+                i += 2
+                continue
+            value.append(ch)
+            i += 1
+
+        tokens.append(
+            {
+                "type": "word",
+                "value": "".join(value),
+                "start": start,
+                "end": i,
+                "quoted": quoted,
+            }
+        )
+    return tokens
+
+
+_SSH_OPTIONS_WITH_VALUE = {
+    "-B",
+    "-b",
+    "-c",
+    "-D",
+    "-E",
+    "-e",
+    "-F",
+    "-I",
+    "-i",
+    "-J",
+    "-L",
+    "-l",
+    "-m",
+    "-O",
+    "-o",
+    "-p",
+    "-Q",
+    "-R",
+    "-S",
+    "-W",
+    "-w",
+}
+
+
+def _ssh_option_consumes_next(token: str) -> bool:
+    """Return whether an SSH option token consumes the following argument."""
+    if token in _SSH_OPTIONS_WITH_VALUE:
+        return True
+    return False
+
+
+def _is_ssh_executable(token: str) -> bool:
+    return token == "ssh" or token.endswith("/ssh")
+
+
+def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
+    """Return quoted remote-command spans in SSH invocations.
+
+    Only quoted remote commands are masked. Unquoted remote commands are too
+    ambiguous to distinguish from local shell structure without a full parser,
+    so they keep the existing conservative behavior.
+
+    Examples:
+        >>> _ssh_remote_command_spans('ssh host "ls /home/u/project"')
+        [(9, 29)]
+        >>> _ssh_remote_command_spans('cat /tmp/x && ssh host "pwd"')
+        [(23, 28)]
+        >>> _ssh_remote_command_spans('ssh host ls /home/u/project')
+        []
+    """
+    tokens = _shell_token_spans(command)
+    spans: list[tuple[int, int]] = []
+    segment: list[dict[str, object]] = []
+
+    def flush_segment() -> None:
+        if not segment:
+            return
+        words = [tok for tok in segment if tok.get("type") == "word"]
+        if not words or not _is_ssh_executable(str(words[0].get("value", ""))):
+            return
+
+        idx = 1
+        while idx < len(words):
+            value = str(words[idx].get("value", ""))
+            if value == "--":
+                idx += 1
+                break
+            if value.startswith("-") and value != "-":
+                idx += 2 if _ssh_option_consumes_next(value) else 1
+                continue
+            break
+
+        host_idx = idx
+        remote_idx = host_idx + 1
+        if (
+            host_idx < len(words)
+            and remote_idx < len(words)
+            and bool(words[remote_idx].get("quoted"))
+        ):
+            spans.append(
+                (
+                    int(words[remote_idx]["start"]),
+                    int(words[remote_idx]["end"]),
+                )
+            )
+
+    for token in tokens:
+        if token.get("type") == "op":
+            flush_segment()
+            segment = []
+        else:
+            segment.append(token)
+    flush_segment()
+    return spans
+
+
+def _mask_spans(command: str, spans: list[tuple[int, int]]) -> tuple[str, dict[str, str]]:
+    """Replace spans with placeholders and return the restoration map."""
+    if not spans:
+        return command, {}
+    pieces: list[str] = []
+    replacements: dict[str, str] = {}
+    cursor = 0
+    for index, (start, end) in enumerate(sorted(spans)):
+        if start < cursor:
+            continue
+        placeholder = f"__EVOSCI_SSH_REMOTE_{index}__"
+        pieces.append(command[cursor:start])
+        pieces.append(placeholder)
+        replacements[placeholder] = command[start:end]
+        cursor = end
+    pieces.append(command[cursor:])
+    return "".join(pieces), replacements
+
+
+def _restore_spans(command: str, replacements: dict[str, str]) -> str:
+    for placeholder, original in replacements.items():
+        command = command.replace(placeholder, original)
+    return command
+
+
+def _mask_ssh_remote_commands(command: str) -> tuple[str, dict[str, str]]:
+    """Mask quoted SSH remote commands so local path logic can skip them.
+
+    Examples:
+        >>> _mask_ssh_remote_commands('ssh host "ls /home/u/project"')
+        ('ssh host __EVOSCI_SSH_REMOTE_0__', {'__EVOSCI_SSH_REMOTE_0__': '"ls /home/u/project"'})
+        >>> _restore_spans(*_mask_ssh_remote_commands('ssh host "pwd"'))
+        'ssh host "pwd"'
+    """
+    return _mask_spans(command, _ssh_remote_command_spans(command))
+
+
+def _decode_shell_word(word: str) -> str:
+    """Decode a single shell word, falling back to the raw word on parse error.
+
+    Examples:
+        >>> _decode_shell_word('"cd /home/u/project && pwd"')
+        'cd /home/u/project && pwd'
+        >>> _decode_shell_word("'ls /media/u/project'")
+        'ls /media/u/project'
+    """
+    try:
+        parts = shlex.split(word)
+    except ValueError:
+        return word
+    return parts[0] if parts else word
+
+
+def _extract_ssh_remote_commands(command: str) -> list[str]:
+    """Extract quoted SSH remote commands in unquoted form.
+
+    Examples:
+        >>> _extract_ssh_remote_commands('ssh host "ls /home/u/project"')
+        ['ls /home/u/project']
+        >>> _extract_ssh_remote_commands('ssh host ls /home/u/project')
+        []
+    """
+    _, replacements = _mask_ssh_remote_commands(command)
+    return [_decode_shell_word(value) for value in replacements.values()]
+
+
+def validate_remote_command(command: str) -> str | None:
+    """Validate an SSH remote command without applying local workspace rules.
+
+    Remote validation deliberately allows absolute paths such as /home,
+    /media, and /tmp, but blocks clearly dangerous host-level operations.
+
+    Examples:
+        >>> validate_remote_command("cd /home/u/project && ls /media/u")
+        >>> validate_remote_command("sudo reboot")
+        "Remote command blocked: 'sudo' is not allowed over ssh."
+    """
+    for pattern in REMOTE_BLOCKED_PATTERNS:
+        if re.search(pattern, command):
+            return (
+                f"Remote command blocked: contains forbidden pattern '{pattern}'. "
+                "SSH remote commands may use absolute paths, but destructive "
+                "host-level operations are not allowed."
+            )
+
+    for base_cmd in _split_shell_commands(command):
+        if base_cmd in REMOTE_BLOCKED_COMMANDS:
+            return f"Remote command blocked: '{base_cmd}' is not allowed over ssh."
+
+    return None
+
 
 def _split_shell_commands(command: str) -> list[str]:
     """Split a compound shell command into individual base commands.
@@ -201,6 +482,9 @@ def validate_command(
     Returns:
         None if command is safe, error message string if blocked.
     """
+    remote_commands = _extract_ssh_remote_commands(command)
+    command, _ = _mask_ssh_remote_commands(command)
+
     # Check for '..' path traversal as a path component
     if _has_traversal_component(command):
         return (
@@ -236,6 +520,11 @@ def validate_command(
             f"All file operations must use relative paths within the workspace. "
             f"Use relative paths (e.g., './file.py') instead."
         )
+
+    for remote_command in remote_commands:
+        error = validate_remote_command(remote_command)
+        if error:
+            return error
 
     return None
 
@@ -325,12 +614,16 @@ def convert_virtual_paths_in_command(
         ...     "mkdir -p /Users/u/proj/dir", workspace_name="proj")
         'mkdir -p ./dir'
     """
+    masked_command, replacements = _mask_ssh_remote_commands(command)
 
     def replace_virtual_path(match: re.Match[str]) -> str:
         path = match.group(0)
 
         # Skip content that looks like a URL
-        if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
+        if (
+            "://"
+            in masked_command[max(0, match.start() - 10) : match.end() + 10]
+        ):
             return path
 
         resolved = _resolve_virtual_mount_path(path)
@@ -364,9 +657,9 @@ def convert_virtual_paths_in_command(
 
     # Match pattern: paths starting with / (but not URLs)
     pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'
-    converted = re.sub(pattern, replace_virtual_path, command)
+    converted = re.sub(pattern, replace_virtual_path, masked_command)
 
-    return converted
+    return _restore_spans(converted, replacements)
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):

@@ -61,6 +61,44 @@ class TestValidateCommand:
     def test_safe_grep(self):
         assert validate_command("grep -r 'pattern' .") is None
 
+    def test_ssh_remote_absolute_paths_are_not_local_paths(self):
+        command = (
+            'ssh host "ls -la /media/username/project; '
+            'cd /home/username/project && pwd"'
+        )
+        assert validate_command(command) is None
+
+    def test_ssh_remote_system_paths_are_allowed(self):
+        command = 'ssh host "cat /etc/hosts && ls /tmp && ls /media/user/project"'
+        assert validate_command(command) is None
+
+    def test_ssh_local_absolute_path_still_blocked(self):
+        command = 'cat /etc/passwd && ssh host "ls -la /home/username/project"'
+        result = validate_command(command)
+        assert result is not None
+        assert "/etc/passwd" in result
+
+    def test_ssh_remote_sudo_is_blocked(self):
+        result = validate_command('ssh host "sudo systemctl restart service"')
+        assert result is not None
+        assert "Remote command blocked" in result
+        assert "sudo" in result
+
+    def test_ssh_remote_dd_is_blocked(self):
+        result = validate_command('ssh host "dd if=/dev/zero of=/tmp/blob bs=1M"')
+        assert result is not None
+        assert "Remote command blocked" in result
+        assert "dd" in result
+
+    def test_ssh_remote_rm_rf_root_is_blocked(self):
+        result = validate_command('ssh host "rm -rf /"')
+        assert result is not None
+        assert "Remote command blocked" in result
+
+    def test_ssh_remote_rm_rf_absolute_subdir_is_not_root_pattern(self):
+        command = 'ssh host "rm -rf /tmp/old-run && ls /tmp"'
+        assert validate_command(command) is None
+
 
 # === convert_virtual_paths_in_command ===
 
@@ -162,6 +200,25 @@ class TestConvertVirtualPaths:
             workspace_name="workspace",
         )
         assert result == "cat ./debate_sim.py"
+
+    def test_ssh_remote_absolute_paths_are_preserved(self):
+        command = (
+            'ssh host "ls -la /media/username/project; '
+            'ls -la /home/username/project"'
+        )
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_ssh_remote_absolute_paths_with_options_are_preserved(self):
+        command = (
+            'ssh -p 2222 -i ~/.ssh/id_ed25519 user@host '
+            '"cd /home/username/project; pwd"'
+        )
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_local_paths_still_rewrite_around_ssh_remote_command(self):
+        command = 'cat /data/file.txt && ssh host "ls -la /home/username/project"'
+        result = convert_virtual_paths_in_command(command)
+        assert result == 'cat ./data/file.txt && ssh host "ls -la /home/username/project"'
 
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
@@ -715,6 +772,30 @@ class TestExecuteCwdSanitization:
         # The dir should be created at workspace/test-sanitized, not nested
         assert (Path(tmp_workspace) / "test-sanitized").is_dir()
         assert not (Path(tmp_workspace) / tmp_workspace.lstrip("/")).exists()
+
+    def test_ssh_remote_paths_survive_execute_preprocessing(
+        self, tmp_workspace, monkeypatch
+    ):
+        """execute() must preserve quoted SSH remote paths end-to-end."""
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            captured["timeout"] = timeout
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        command = (
+            'ssh host "ls -la /media/username/project; '
+            'ls -la /home/username/project"'
+        )
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == command
+        assert captured["timeout"] == 30
 
     def test_execute_e2e_parent_path_contains_workspace_name(self, tmp_path):
         """End-to-end regression: when cwd's parent path *and* basename both
