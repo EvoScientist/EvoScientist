@@ -509,39 +509,41 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                     ("wechat_mp_app_id", "Official Account App ID", False),
                     ("wechat_mp_app_secret", "Official Account App Secret", True),
                 ]
-            for field_name, prompt_label, is_secret in wechat_fields_for_backend:
-                current = getattr(config, field_name, "")
-                while True:
-                    if is_secret:
-                        masked_hint = (
-                            f" (current: ***{current[-4:]})" if current else ""
-                        )
-                        value = questionary.password(
-                            f"{prompt_label}{masked_hint}:",
-                            style=WIZARD_STYLE,
-                            qmark=f"  {QMARK}",
-                        ).ask()
-                    else:
-                        value = questionary.text(
-                            f"{prompt_label}:",
-                            default=current,
-                            style=WIZARD_STYLE,
-                            qmark=f"  {QMARK}",
-                        ).ask()
-                    if value is None:
-                        raise KeyboardInterrupt()
-                    value = value.strip()
-                    if not value and current:
-                        break  # keep existing
-                    if not value and wechat_newly_enabled:
-                        console.print(
-                            f"  [yellow]{prompt_label} is required to "
-                            "enable WeChat. Press Ctrl+C to cancel.[/yellow]"
-                        )
-                        continue
-                    updates[field_name] = value
-                    break
-            else:  # personal
+
+            if wechat_backend in ("wecom", "wechatmp"):
+                for field_name, prompt_label, is_secret in wechat_fields_for_backend:
+                    current = getattr(config, field_name, "")
+                    while True:
+                        if is_secret:
+                            masked_hint = (
+                                f" (current: ***{current[-4:]})" if current else ""
+                            )
+                            value = questionary.password(
+                                f"{prompt_label}{masked_hint}:",
+                                style=WIZARD_STYLE,
+                                qmark=f"  {QMARK}",
+                            ).ask()
+                        else:
+                            value = questionary.text(
+                                f"{prompt_label}:",
+                                default=current,
+                                style=WIZARD_STYLE,
+                                qmark=f"  {QMARK}",
+                            ).ask()
+                        if value is None:
+                            raise KeyboardInterrupt()
+                        value = value.strip()
+                        if not value and current:
+                            break  # keep existing
+                        if not value and wechat_newly_enabled:
+                            console.print(
+                                f"  [yellow]{prompt_label} is required to "
+                                "enable WeChat. Press Ctrl+C to cancel.[/yellow]"
+                            )
+                            continue
+                        updates[field_name] = value
+                        break
+            elif wechat_backend == "personal":
                 personal_choices = [
                     Choice(
                         title="Scan QR code now (recommended — login to a personal WeChat account)",
