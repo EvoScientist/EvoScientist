@@ -225,11 +225,17 @@ WRITING_GUIDELINES = """# Writing Guidelines
 # Shell execution guidelines (rules for the `execute` tool)
 # =============================================================================
 
+# NOTE: the "300s" default below is intentionally hardcoded static text, not
+# templated from config. get_system_prompt() must stay byte-stable for prompt
+# caching, so the configured value is NOT injected here. The actually-enforced
+# timeout is cfg.sandbox_execute_timeout (CustomSandboxBackend); this number is
+# just the documented default, and the per-command `timeout` override is the
+# mechanism that matters to the agent.
 SHELL_GUIDELINES = """# Shell Execution Guidelines
 
 When using the `execute` tool for shell commands:
 
-**Sandbox limits**: Commands time out after 300 seconds (exit code 124) and output is truncated at 100 KB. Plan accordingly.
+**Sandbox limits**: Commands default to a 300s timeout and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below).
 
 **Short commands** (< 30 seconds): Run directly
 ```bash
@@ -239,21 +245,21 @@ pip install pandas
 
 **Long-running commands** (> 30 seconds): Run in background, then check results
 ```bash
-# Step 1: Start in background, redirect output to log
+# Step 1: Start in background, redirect output to log, and capture the PID
 python long_task.py > /output.log 2>&1 &
+echo "PID: $!"          # remember this PID to check or stop the job later
 
 # Step 2: Check if still running
-ps aux | grep long_task
+ps -p <PID>             # or: ps aux | grep long_task
 
 # Step 3: Read results when done
 cat /output.log
+
+# (Optional) Stop the job early
+kill <PID>
 ```
 
 **Before heavy compute**: Estimate runtime. If likely > 5 minutes, use background execution from the start. If GPU memory is uncertain, start with a small test run (1 epoch, small batch) before the full run.
-
-**After a timeout (exit code 124)**: Do NOT re-run the same command. Instead:
-1. Re-launch in background with output logging
-2. Or reduce the workload (fewer epochs, smaller model, subset of data)
 
 This prevents blocking the conversation during long operations.
 """

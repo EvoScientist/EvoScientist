@@ -1033,6 +1033,14 @@ class TestExecuteTimeoutRecovery:
         assert "sleep 10" in resp.output
         assert "> /output.log 2>&1 &" in resp.output
 
+    def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
+        resp = backend.execute("sleep 10")
+        # Background recovery captures the PID so the job can be managed later.
+        assert "PID: $!" in resp.output
+        # Recovery also offers re-running with a larger per-command timeout.
+        assert "timeout=600" in resp.output
+
     def test_timeout_preserves_original_error(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
         resp = backend.execute("sleep 10")

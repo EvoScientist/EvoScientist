@@ -419,6 +419,7 @@ def _get_default_backend():
 
     from .backends import CustomSandboxBackend, MergedSkillsBackend
 
+    cfg = _ensure_config()
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
@@ -428,7 +429,7 @@ def _get_default_backend():
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
         virtual_mode=True,
-        timeout=300,
+        timeout=cfg.sandbox_execute_timeout,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -634,7 +635,7 @@ def create_cli_agent(
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
         virtual_mode=True,
-        timeout=300,
+        timeout=cfg.sandbox_execute_timeout,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,

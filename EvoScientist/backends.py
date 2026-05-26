@@ -658,14 +658,18 @@ class CustomSandboxBackend(LocalShellBackend):
         if response.exit_code == 124:
             cmd_words = command.split()
             grep_hint = cmd_words[0] if cmd_words else "process"
-            bg_cmd = f"{command} > /output.log 2>&1 &"
+            bg_cmd = f'{command} > /output.log 2>&1 & echo "PID: $!"'
             response = ExecuteResponse(
                 output=(
                     f"{response.output}\n\n"
-                    f"Recovery: re-run in background to avoid the sandbox timeout:\n"
-                    f"  {bg_cmd}\n"
-                    f"Then check progress: ps aux | grep {grep_hint}\n"
-                    f"Read results: cat /output.log"
+                    f"Recovery — pick one:\n"
+                    f"  1. Needs more time? Re-run with a larger timeout (up to 3600s): "
+                    f"execute(command=..., timeout=600)\n"
+                    f"  2. Runs indefinitely? Run it in the background and keep the PID:\n"
+                    f"       {bg_cmd}\n"
+                    f"     Check: ps -p <PID>  (or: ps aux | grep {grep_hint})  ·  "
+                    f"Read: cat /output.log  ·  Stop: kill <PID>\n"
+                    f"  3. Too heavy? Reduce the workload (fewer epochs, smaller model, subset of data)."
                 ),
                 exit_code=response.exit_code,
                 truncated=response.truncated,

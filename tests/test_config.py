@@ -381,6 +381,37 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.channel_debug_tracing is True
 
+    def test_sandbox_execute_timeout_default(self, temp_config_dir, clean_env):
+        """Sandbox execute timeout defaults to 300 seconds."""
+        assert EvoScientistConfig().sandbox_execute_timeout == 300
+        assert get_effective_config().sandbox_execute_timeout == 300
+
+    def test_env_sandbox_execute_timeout_override(self, temp_config_dir, monkeypatch):
+        """Sandbox execute timeout can be set via env var and coerces to int."""
+        monkeypatch.setenv("EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT", "600")
+        config = get_effective_config()
+        assert config.sandbox_execute_timeout == 600
+        assert isinstance(config.sandbox_execute_timeout, int)
+
+    def test_sandbox_execute_timeout_invalid_falls_back(self):
+        """Non-positive / non-int values fall back to the default (would
+        otherwise crash CustomSandboxBackend construction at startup)."""
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout=0).sandbox_execute_timeout == 300
+        )
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout=-5).sandbox_execute_timeout
+            == 300
+        )
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout="abc").sandbox_execute_timeout
+            == 300
+        )
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout=True).sandbox_execute_timeout
+            == 300
+        )
+
     def test_env_api_key_override(self, temp_config_dir, monkeypatch):
         """Test API keys from env override file."""
         save_config(EvoScientistConfig(anthropic_api_key="file-key"))

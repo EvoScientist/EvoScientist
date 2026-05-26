@@ -7,6 +7,7 @@ with the following priority (highest to lowest):
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -268,6 +269,11 @@ class EvoScientistConfig:
     code_interpreter_timeout: float = 60.0  # seconds per JS eval
     code_interpreter_max_result_chars: int = 10000  # truncate large JSON results
 
+    # Default per-command timeout (seconds) for the sandbox `execute` tool.
+    # Only the default — the agent can still override per command up to the
+    # deepagents max_execute_timeout cap (3600s).
+    sandbox_execute_timeout: int = 300
+
     # Checkpoint pruning (sessions.db retention per (thread_id, checkpoint_ns))
     # Safety net for runaway conversations. Under DeltaChannel (deepagents 0.6+)
     # normal usage produces linear growth, so this default is set well above
@@ -291,6 +297,19 @@ class EvoScientistConfig:
     stt_model: str = ""  # override model id; empty = auto-select by language
     stt_device: str = "cpu"  # "cpu" | "cuda"
     stt_compute_type: str = "int8"  # "int8" | "float16" | "float32"
+
+    def __post_init__(self) -> None:
+        # A non-positive or non-int sandbox_execute_timeout (e.g. a hand-edited
+        # config file value — load_config does not coerce file values — or a
+        # 0/negative env value) would raise inside CustomSandboxBackend.__init__
+        # and crash agent/CLI startup. Fall back to the default instead, matching
+        # how malformed env values already degrade to defaults.
+        t = self.sandbox_execute_timeout
+        if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
+            logging.getLogger(__name__).warning(
+                "Invalid sandbox_execute_timeout %r; falling back to 300.", t
+            )
+            self.sandbox_execute_timeout = 300
 
 
 # =============================================================================
@@ -472,6 +491,7 @@ _ENV_MAPPINGS = {
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
     "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
+    "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
