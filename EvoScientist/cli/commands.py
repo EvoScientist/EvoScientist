@@ -133,6 +133,14 @@ def onboard(
             f"--provider must be one of {sorted(VALID_PROVIDERS)}",
             param_hint="--provider",
         )
+    # Match the interactive prompt's range (1024 < port < 65536). Without
+    # this check, --port 80 or --port 99999 would land in config and break
+    # the langgraph dev server on startup.
+    if port is not None and not (1024 < port < 65536):
+        raise typer.BadParameter(
+            "--port must be in the user-port range (1025 — 65535)",
+            param_hint="--port",
+        )
 
     # Collect flag-supplied answers keyed by the prompt_id wizard steps use.
     answers: dict = {}

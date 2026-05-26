@@ -587,46 +587,78 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
 
                 if personal_choice == "manual":
                     current_id = getattr(config, "wechat_personal_account_id", "")
-                    account_id = questionary.text(
-                        "iLink account_id (from a previous --qr-login run):",
-                        default=current_id,
-                        style=WIZARD_STYLE,
-                        qmark=f"  {QMARK}",
-                    ).ask()
-                    if account_id is None:
-                        raise KeyboardInterrupt()
-                    updates["wechat_personal_account_id"] = account_id.strip()
+                    wechat_newly_enabled = "wechat" not in _currently_enabled
+                    while True:
+                        account_id = questionary.text(
+                            "iLink account_id (from a previous --qr-login run):",
+                            default=current_id,
+                            style=WIZARD_STYLE,
+                            qmark=f"  {QMARK}",
+                        ).ask()
+                        if account_id is None:
+                            raise KeyboardInterrupt()
+                        account_id = account_id.strip()
+                        if not account_id and current_id:
+                            break  # keep existing
+                        if not account_id and wechat_newly_enabled:
+                            console.print(
+                                "  [yellow]account_id is required to enable "
+                                "WeChat Personal. Press Ctrl+C to cancel.[/yellow]"
+                            )
+                            continue
+                        updates["wechat_personal_account_id"] = account_id
+                        break
 
         # Prompt for required fields. Secret fields use ``questionary.password``
         # so the entered value (and the existing one shown as a hint) are
         # never echoed to the terminal — see _CHANNELS docstring above.
         if not _qq_scanned and not _feishu_scanned:
+            # "Newly enabled" = this channel wasn't in the user's prior
+            # ``channel_enabled`` list. Required fields with no existing
+            # value must be non-empty for newly enabled channels — saving
+            # blanks leaves the channel half-configured and only surfaces
+            # the problem on the first message.
+            newly_enabled = ch_name not in _currently_enabled
             for field_name, prompt_label, is_secret in required_fields:
                 current = getattr(config, field_name, "")
-                if is_secret:
-                    masked_hint = f" (current: ***{current[-4:]})" if current else ""
-                    value = questionary.password(
-                        f"{prompt_label}{masked_hint}:",
-                        style=WIZARD_STYLE,
-                        qmark=f"  {QMARK}",
-                    ).ask()
+                while True:
+                    if is_secret:
+                        masked_hint = (
+                            f" (current: ***{current[-4:]})" if current else ""
+                        )
+                        value = questionary.password(
+                            f"{prompt_label}{masked_hint}:",
+                            style=WIZARD_STYLE,
+                            qmark=f"  {QMARK}",
+                        ).ask()
+                    else:
+                        value = questionary.text(
+                            f"{prompt_label}:",
+                            default=current,
+                            style=WIZARD_STYLE,
+                            qmark=f"  {QMARK}",
+                        ).ask()
                     if value is None:
                         raise KeyboardInterrupt()
                     value = value.strip()
-                    # Empty input keeps the existing secret untouched.
+
+                    # Empty input + existing value → keep existing (this is
+                    # the "re-run wizard, no change to this field" path).
                     if not value and current:
+                        break
+                    # Empty input + newly enabling channel → not OK; the
+                    # channel would be enabled with broken creds. Re-prompt.
+                    if not value and newly_enabled:
+                        console.print(
+                            f"  [yellow]{prompt_label} is required to enable "
+                            f"{display}. Press Ctrl+C to cancel instead.[/yellow]"
+                        )
                         continue
+                    # Empty input + previously enabled but never set
+                    # (unlikely, but tolerate) → still allow blank-through
+                    # so the user isn't blocked re-running configure later.
                     updates[field_name] = value
-                else:
-                    value = questionary.text(
-                        f"{prompt_label}:",
-                        default=current,
-                        style=WIZARD_STYLE,
-                        qmark=f"  {QMARK}",
-                    ).ask()
-                    if value is None:
-                        raise KeyboardInterrupt()
-                    updates[field_name] = value.strip()
+                    break
 
         # Feishu: subscription mode + optional fields
         if ch_name == "feishu":
