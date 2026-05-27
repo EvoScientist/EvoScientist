@@ -68,8 +68,15 @@ class TestValidateCommand:
         )
         assert validate_command(command) is None
 
-    def test_ssh_remote_bash_lc_absolute_paths_are_not_local_paths(self):
-        command = 'ssh host bash -lc "cd /home/username/project && pwd"'
+    def test_ssh_remote_bash_lc_must_be_single_quoted_argument(self):
+        result = validate_command(
+            'ssh host bash -lc "cd /home/username/project && pwd"'
+        )
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_ssh_remote_bash_lc_is_allowed_when_wrapped_as_remote_argument(self):
+        command = "ssh host 'bash -lc \"cd /home/username/project && pwd\"'"
         assert validate_command(command) is None
 
     def test_ssh_remote_system_paths_are_allowed(self):
@@ -82,38 +89,67 @@ class TestValidateCommand:
         assert result is not None
         assert "/etc/passwd" in result
 
-    def test_ssh_remote_sudo_is_blocked(self):
-        result = validate_command('ssh host "sudo systemctl restart service"')
-        assert result is not None
-        assert "Remote command blocked" in result
-        assert "sudo" in result
-
-    def test_ssh_remote_dd_is_blocked(self):
-        result = validate_command('ssh host "dd if=/dev/zero of=/tmp/blob bs=1M"')
-        assert result is not None
-        assert "Remote command blocked" in result
-        assert "dd" in result
-
-    def test_ssh_remote_absolute_sudo_is_blocked(self):
-        result = validate_command('ssh host "/usr/bin/sudo reboot"')
-        assert result is not None
-        assert "Remote command blocked" in result
-        assert "sudo" in result
-
-    def test_ssh_remote_absolute_dd_is_blocked(self):
-        result = validate_command('ssh host "/bin/dd if=/dev/zero of=/tmp/x"')
-        assert result is not None
-        assert "Remote command blocked" in result
-        assert "dd" in result
-
-    def test_ssh_remote_rm_rf_root_is_blocked(self):
-        result = validate_command('ssh host "rm -rf /"')
-        assert result is not None
-        assert "Remote command blocked" in result
+    def test_ssh_remote_commands_are_not_locally_safety_checked(self):
+        assert validate_command('ssh host "sudo systemctl restart service"') is None
+        assert validate_command('ssh host "dd if=/dev/zero of=/tmp/blob bs=1M"') is None
+        assert validate_command('ssh host "/usr/bin/sudo reboot"') is None
+        assert validate_command('ssh host "/bin/dd if=/dev/zero of=/tmp/x"') is None
+        assert validate_command('ssh host "rm -rf /"') is None
 
     def test_ssh_remote_rm_rf_absolute_subdir_is_not_root_pattern(self):
         command = 'ssh host "rm -rf /tmp/old-run && ls /tmp"'
         assert validate_command(command) is None
+
+    def test_ssh_remote_unquoted_absolute_path_is_rejected(self):
+        result = validate_command("ssh host ls /home/username/project")
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_subshell_ssh_remote_unquoted_absolute_path_is_rejected(self):
+        result = validate_command("(ssh host ls /home/username/project)")
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_backtick_ssh_remote_unquoted_absolute_path_is_rejected(self):
+        result = validate_command("`ssh host ls /home/username/project`")
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_assignment_prefixed_ssh_remote_unquoted_absolute_path_is_rejected(self):
+        result = validate_command("ENV_VAR=value ssh host ls /home/username/project")
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_ssh_remote_extra_argv_after_quoted_command_is_rejected(self):
+        result = validate_command('ssh host "pwd" extra')
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_ssh_local_shell_after_remote_is_still_validated(self):
+        result = validate_command('ssh host "pwd" && cat /etc/passwd')
+        assert result is not None
+        assert "/etc/passwd" in result
+
+    def test_ssh_local_pipeline_after_remote_is_still_validated(self):
+        result = validate_command('ssh host "pwd" | sudo tee out')
+        assert result is not None
+        assert "sudo" in result
+
+    def test_ssh_local_background_after_remote_is_still_validated(self):
+        result = validate_command('ssh host "pwd" & sudo reboot')
+        assert result is not None
+        assert "sudo" in result
+
+    def test_ssh_remote_post_host_options_are_remote_argv_and_rejected(self):
+        result = validate_command("ssh host -i key")
+        assert result is not None
+        assert "single quoted argument" in result
+
+    def test_ssh_options_before_host_are_allowed(self):
+        assert validate_command("ssh -N host") is None
+        assert validate_command("ssh -i key host") is None
+        assert validate_command("ssh -o StrictHostKeyChecking=no host") is None
+        assert validate_command('ssh -t host "pwd"') is None
 
 
 # === convert_virtual_paths_in_command ===
@@ -231,7 +267,7 @@ class TestConvertVirtualPaths:
         assert convert_virtual_paths_in_command(command) == command
 
     def test_ssh_remote_bash_lc_absolute_paths_are_preserved(self):
-        command = 'ssh host bash -lc "cd /home/username/project && pwd"'
+        command = "ssh host 'bash -lc \"cd /home/username/project && pwd\"'"
         assert convert_virtual_paths_in_command(command) == command
 
     def test_local_paths_still_rewrite_around_ssh_remote_command(self):
@@ -240,6 +276,37 @@ class TestConvertVirtualPaths:
         assert (
             result == 'cat ./data/file.txt && ssh host "ls -la /home/username/project"'
         )
+
+    def test_local_redirect_still_rewrites_after_ssh_remote_command(self):
+        command = 'ssh host "ls -la /home/username/project" > /tmp/out'
+        result = convert_virtual_paths_in_command(command)
+        assert result == 'ssh host "ls -la /home/username/project" > ./tmp/out'
+
+    def test_local_ampersand_redirect_rewrites_after_ssh_remote_command(self):
+        command = 'ssh host "ls -la /home/username/project" &> /tmp/out'
+        result = convert_virtual_paths_in_command(command)
+        assert result == 'ssh host "ls -la /home/username/project" &> ./tmp/out'
+
+    def test_subshell_ssh_remote_absolute_paths_are_preserved(self):
+        command = '(ssh host "ls /media/user/project")'
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_backtick_ssh_remote_absolute_paths_are_preserved(self):
+        command = '`ssh host "cat /etc/passwd"`'
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_assignment_prefixed_ssh_remote_absolute_paths_are_preserved(self):
+        command = 'ENV_VAR=value ssh host "ls /media/user/project"'
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_quoted_assignment_prefixed_ssh_remote_absolute_paths_are_preserved(self):
+        command = 'ENV_VAR="with space" ssh host "ls /media/user/project"'
+        assert convert_virtual_paths_in_command(command) == command
+
+    def test_ssh_remote_placeholder_does_not_replace_user_input(self):
+        command = 'echo __EVOSCI_SSH_REMOTE_0__ && ssh host "ls /home"'
+        result = convert_virtual_paths_in_command(command)
+        assert result == command
 
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
@@ -816,6 +883,16 @@ class TestExecuteCwdSanitization:
         assert resp.exit_code == 0
         assert captured["command"] == command
         assert captured["timeout"] == 30
+
+    def test_execute_rejects_unquoted_ssh_remote_before_path_conversion(
+        self, tmp_workspace
+    ):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute("ssh host ls /home/username/project", timeout=30)
+
+        assert resp.exit_code == 1
+        assert "single quoted argument" in resp.output
 
     def test_execute_e2e_parent_path_contains_workspace_name(self, tmp_path):
         """End-to-end regression: when cwd's parent path *and* basename both
