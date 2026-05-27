@@ -881,6 +881,7 @@ name = "evoscientist"
 version = "0.1.1"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "deepagents", extra = ["quickjs"] },
     { name = "filelock" },
     { name = "httpx" },
@@ -972,6 +973,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'all-channels'", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'wechat'", specifier = ">=3.9" },

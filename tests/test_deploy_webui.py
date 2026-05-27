@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from EvoScientist.deploy.webui import (
+    WebUIConfig,
+    WebUIConfigurationError,
+    WebUIControlServer,
+)
+
+
+def _request(headers=None, **query):
+    return SimpleNamespace(
+        headers={"Host": "localhost", **(headers or {})},
+        query=query,
+        match_info={},
+    )
+
+
+def _server(tmp_path, **config):
+    return WebUIControlServer(
+        WebUIConfig(**config),
+        workspace_dir=tmp_path,
+        langgraph_base_url="http://localhost:6174",
+    )
+
+
+def test_webui_route_normalizes_configured_base_path(tmp_path):
+    server = _server(tmp_path, base_path="webui/")
+
+    assert server._route("/healthz") == "/webui/healthz"
+
+
+def test_webui_health_reports_auth_required_without_rejecting(tmp_path):
+    server = _server(tmp_path, api_key="secret")
+
+    response = asyncio.run(server._handle_health(_request()))
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["authRequired"] is True
+    assert payload["authenticated"] is False
+
+
+def test_webui_health_reports_authenticated_with_api_key(tmp_path):
+    server = _server(tmp_path, api_key="secret")
+
+    response = asyncio.run(
+        server._handle_health(_request(headers={"X-API-Key": "secret"}))
+    )
+    payload = json.loads(response.text)
+
+    assert payload["authRequired"] is True
+    assert payload["authenticated"] is True
+
+
+def test_webui_rejects_non_loopback_without_api_key(tmp_path):
+    server = _server(tmp_path, bind_host="0.0.0.0", api_key="")
+
+    with pytest.raises(WebUIConfigurationError) as exc_info:
+        server._validate_start_security()
+
+    assert "webui_api_key is required" in str(exc_info.value)
+
+
+def test_webui_cors_allows_configured_public_origin(tmp_path):
+    server = _server(tmp_path, allowed_origins="https://ui.example.com")
+    request = _request(headers={"Origin": "https://ui.example.com"})
+
+    response = asyncio.run(server._handle_options(request))
+
+    assert response.status == 204
+    assert response.headers["Access-Control-Allow-Origin"] == "https://ui.example.com"
+
+
+def test_webui_cors_does_not_reflect_unknown_private_origin(tmp_path):
+    server = _server(tmp_path)
+    request = _request(headers={"Origin": "http://192.168.1.100:3000"})
+
+    response = asyncio.run(server._handle_options(request))
+
+    assert response.status == 403
+    assert "Access-Control-Allow-Origin" not in response.headers
+
+
+def test_webui_file_tree_rejects_invalid_path(tmp_path):
+    server = _server(tmp_path)
+
+    response = asyncio.run(server._handle_ui_files_tree(_request(path="../secret")))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {"error": "invalid path"}
+
+
+def test_webui_file_read_rejects_invalid_path(tmp_path):
+    server = _server(tmp_path)
+
+    response = asyncio.run(server._handle_ui_files_read(_request(path="../secret")))
+
+    assert response.status == 400
+    assert json.loads(response.text) == {"error": "invalid path"}
+
+
+def test_webui_file_read_is_bounded_and_marks_truncated(tmp_path):
+    (tmp_path / "large.txt").write_text("a" * (256 * 1024 + 5))
+    server = _server(tmp_path)
+
+    response = asyncio.run(server._handle_ui_files_read(_request(path="large.txt")))
+    payload = json.loads(response.text)
+
+    assert payload["truncated"] is True
+    assert len(payload["content"]) == 256 * 1024
+
+
+def test_webui_file_tree_hides_dotfiles_and_internal_state(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello")
+    (tmp_path / ".env").write_text("SECRET=1")
+    (tmp_path / ".langgraph_api").mkdir()
+    server = _server(tmp_path)
+
+    response = asyncio.run(server._handle_ui_files_tree(_request()))
+    payload = json.loads(response.text)
+
+    assert [entry["name"] for entry in payload["entries"]] == ["notes.txt"]
+
+
+def test_webui_workspace_zip_excludes_dotfiles_and_internal_state(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello")
+    (tmp_path / ".env").write_text("SECRET=1")
+    (tmp_path / ".langgraph_api").mkdir()
+    (tmp_path / ".langgraph_api" / "store.sqlite").write_text("secret")
+    server = _server(tmp_path)
+
+    archive_path = server._create_workspace_zip_sync(tmp_path)
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            assert archive.namelist() == ["notes.txt"]
+            assert archive.read("notes.txt") == b"hello"
+    finally:
+        Path(archive_path).unlink()

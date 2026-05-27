@@ -186,13 +186,48 @@ def deploy(
     # here, the subprocess is up.
     console.print("[green]✓[/green] langgraph dev ready")
 
+    webui_url = None
+    webui_server = None
+    if bool(getattr(config, "webui_enabled", True)):
+        from .webui import (
+            WebUIConfigurationError,
+            WebUIControlServer,
+            config_from_evosci,
+            webui_base_url,
+        )
+
+        webui_config = config_from_evosci(config)
+        webui_url = webui_base_url(webui_config)
+        try:
+            with console.status(
+                "[dim]Starting WebUI control API...[/dim]",
+                spinner="dots",
+            ):
+                webui_server = WebUIControlServer(
+                    webui_config,
+                    workspace_dir=Path(ws),
+                    langgraph_base_url=f"http://localhost:{effective_port}",
+                    assistant_id="EvoScientist",
+                )
+                webui_server.start()
+            atexit.register(webui_server.stop)
+            console.print(f"[green]✓[/green] WebUI control API ready: {webui_url}")
+        except WebUIConfigurationError as exc:
+            console.print(f"[red]WebUI configuration error:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        except Exception as exc:
+            console.print(f"[red]WebUI control API startup failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
     # 9. Ready banner
     log_hint = _shorten(str(_LOG_FILE))
+    webui_line = f"[bold]WebUI API:[/bold]    {webui_url}\n" if webui_url else ""
     console.print(
         Panel(
             Text.from_markup(
                 f"[bold]Endpoint:[/bold]     "
                 f"http://localhost:{effective_port}\n"
+                f"{webui_line}"
                 f"[bold]Assistant ID:[/bold] EvoScientist\n"
                 f"[bold]Connect via:[/bold]  any LangChain SDK / "
                 f"LangGraph-compatible UI\n"

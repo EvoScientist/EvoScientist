@@ -776,6 +776,7 @@ def _ensure_langgraph_dev_locked(
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE
+    async_enabled = bool(getattr(config, "enable_async_subagents", False))
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
@@ -855,7 +856,7 @@ def _ensure_langgraph_dev_locked(
                 )
         else:
             logger.info("langgraph dev already running on %s, reusing", _base_url(port))
-        _ASYNC_SUBAGENTS_AVAILABLE = True
+        _ASYNC_SUBAGENTS_AVAILABLE = async_enabled
         return None
 
     try:
@@ -871,12 +872,12 @@ def _ensure_langgraph_dev_locked(
         # calls at a dead URL.
         _ASYNC_SUBAGENTS_AVAILABLE = False
         logger.warning(
-            "Failed to start langgraph dev — async sub-agents disabled, "
-            "falling back to in-process sync delegation. %s",
+            "Failed to start langgraph dev — %s. %s",
+            "async sub-agents disabled, falling back to in-process sync delegation",
             exc,
         )
         return None
 
-    _ASYNC_SUBAGENTS_AVAILABLE = True
+    _ASYNC_SUBAGENTS_AVAILABLE = async_enabled
     atexit.register(stop_langgraph_dev, proc)
     return proc

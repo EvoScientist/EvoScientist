@@ -82,6 +82,8 @@ def _run_deploy_once(
         "ccproxy_stopped": False,
         "langgraph_dev_started": False,
         "langgraph_dev_stopped": False,
+        "webui_started": False,
+        "webui_stopped": False,
         "deploy_mode_passed": None,
         "workspace_passed": None,
         "port_passed": None,
@@ -136,6 +138,32 @@ def _run_deploy_once(
 
     monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop_langgraph_dev)
+
+    # WebUI control API mock — deploy owns orchestration here; endpoint behavior
+    # is covered in tests/test_deploy_webui.py.
+    from EvoScientist.deploy import webui as webui_mod
+
+    class _FakeWebUIControlServer:
+        def __init__(
+            self,
+            webui_config,
+            *,
+            workspace_dir,
+            langgraph_base_url,
+            assistant_id="EvoScientist",
+        ):
+            captured["webui_config"] = webui_config
+            captured["webui_workspace"] = str(workspace_dir)
+            captured["webui_langgraph_base_url"] = langgraph_base_url
+            captured["webui_assistant_id"] = assistant_id
+
+        def start(self):
+            captured["webui_started"] = True
+
+        def stop(self):
+            captured["webui_stopped"] = True
+
+    monkeypatch.setattr(webui_mod, "WebUIControlServer", _FakeWebUIControlServer)
 
     # ccproxy mocks
     from EvoScientist import ccproxy_manager as ccp
@@ -342,6 +370,18 @@ def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):
     assert "_fake_stop_langgraph_dev" in names, (
         "deploy must register stop_langgraph_dev via atexit for clean shutdown"
     )
+
+
+def test_deploy_starts_webui_control_api(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, port=7000)
+
+    assert captured["webui_started"] is True
+    assert captured["webui_workspace"] == str(tmp_path)
+    assert captured["webui_langgraph_base_url"] == "http://localhost:7000"
+
+    names = [name for (name, _args, _kw) in captured["atexit_callbacks"]]
+    assert "stop" in names
 
 
 def test_deploy_registers_cleanup_for_ccproxy_when_oauth(monkeypatch, tmp_path):
