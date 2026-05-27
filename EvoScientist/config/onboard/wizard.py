@@ -428,6 +428,15 @@ def run_onboard(
                     console.print(
                         f"  [green]✓ Port: {preset_port}[/green]   [dim](--port)[/dim]"
                     )
+                elif strict:
+                    # ``--non-interactive`` without ``--port`` — keep the
+                    # existing config value (has a sensible default in
+                    # ``EvoScientistConfig``) instead of opening the
+                    # questionary prompt and hanging the wizard.
+                    console.print(
+                        f"  [green]✓ Port: {config.langgraph_dev_port} "
+                        "(kept)[/green]   [dim](no --port; non-interactive)[/dim]"
+                    )
                 else:
                     config.langgraph_dev_port = _step_langgraph_dev_port(config)
                 _autosave(config)
@@ -556,13 +565,19 @@ def run_onboard(
                     except GoBack:
                         # User picked "← Back" — restore config to its state at the
                         # top of this iteration (drops any base_url / region /
-                        # provider writes), then discard the preset and re-prompt.
+                        # provider writes), then discard ALL provider-coupled
+                        # presets and re-prompt. Clearing only ``provider``
+                        # leaves a stale ``--model`` / ``--api-key`` that would
+                        # be re-applied under a different provider, producing
+                        # an invalid pair (e.g. ``provider=openai`` +
+                        # ``model=claude-sonnet-4-5``).
                         for field_name in vars(loop_snapshot):
                             setattr(
                                 config, field_name, getattr(loop_snapshot, field_name)
                             )
                         if p:
-                            p.answers.pop("provider", None)
+                            for stale_key in ("provider", "model", "api_key"):
+                                p.answers.pop(stale_key, None)
                         ollama_detected_models = []
                         console.print("  [dim]↩ Returning to provider selection.[/dim]")
                         continue
@@ -650,6 +665,15 @@ def run_onboard(
                         f"  [green]✓ Tavily key: ***{preset_tavily[-4:]}[/green]"
                         "   [dim](--tavily-key)[/dim]"
                     )
+                elif strict:
+                    # ``--non-interactive`` without ``--tavily-key`` — Tavily
+                    # is optional (web search). Keep whatever's in config
+                    # (likely empty for first-time setup); never open the
+                    # interactive password prompt under strict.
+                    if config.tavily_api_key:
+                        _print_step_skipped("Tavily Key", "kept current")
+                    else:
+                        _print_step_skipped("Tavily Key", "not set")
                 else:
                     new_tavily_key = _step_tavily_key(config, skip_validation)
                     if new_tavily_key is not None:

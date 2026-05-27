@@ -283,7 +283,13 @@ class NonInteractivePrompter:
     def text(self, prompt_id, message, *, default="", validate=None, placeholder=None):
         value = self._get(prompt_id, message)
         resolved = value if value != "" else default
-        if validate is not None and resolved:
+        # Validate even when ``resolved`` is empty — a strict validator
+        # (e.g. ``ChoiceValidator(allow_empty=False)``) needs the chance to
+        # reject blank input, matching what the interactive prompt would do.
+        # Validators that tolerate empty (``IntegerValidator``,
+        # ``ChoiceValidator`` with the default ``allow_empty=True``) are
+        # unaffected.
+        if validate is not None:
             # ``validate`` follows one of two prompt_toolkit-compatible forms:
             # (a) a ``Validator`` subclass instance — has ``.validate(document)``
             #     and raises ``ValidationError`` on failure;
