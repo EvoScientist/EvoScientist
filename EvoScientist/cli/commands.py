@@ -177,8 +177,8 @@ def onboard(
         prompter = NonInteractivePrompter(
             answers=answers,
             skip_set=skip_set,
+            strict=non_interactive,
         )
-        prompter._strict_non_interactive = non_interactive  # type: ignore[attr-defined]
 
     run_onboard(skip_validation=skip_validation, prompter=prompter)
 
@@ -229,8 +229,19 @@ def configure_port():
 def configure_provider(
     skip_validation: bool = typer.Option(False, "--skip-validation"),
 ):
-    """Re-run LLM provider, auth mode, and API key prompts."""
-    _configure_section("provider", skip_validation=skip_validation)
+    """Re-run LLM provider, auth mode, and API key prompts.
+
+    Model selection is automatically re-run after provider — the model list
+    depends on the provider, and silently leaving e.g. ``model="claude-...""``
+    when the provider was switched to ``openai`` would break the first
+    request. Press Enter on the model picker to keep the current default.
+    """
+    from ..config import run_onboard
+
+    run_onboard(
+        skip_validation=skip_validation,
+        only_sections={"provider", "model"},
+    )
 
 
 @configure_app.command("model")
@@ -303,7 +314,7 @@ def channel_setup():
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     from ..config import load_config, save_config
-    from ..config.onboard import _step_channels
+    from ..config.onboard.channels import _step_channels
 
     config = load_config()
     updates = _step_channels(config)

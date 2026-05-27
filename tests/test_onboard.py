@@ -7,12 +7,16 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from EvoScientist.config import EvoScientistConfig
-from EvoScientist.config.onboard import (
+from EvoScientist.config.onboard.style import (
     CONFIRM_STYLE,
-    STEPS,
     WIZARD_STYLE,
+)
+from EvoScientist.config.onboard.validators import (
     ChoiceValidator,
     IntegerValidator,
+)
+from EvoScientist.config.onboard.wizard import (
+    STEPS,
     render_progress,
 )
 
@@ -297,7 +301,7 @@ class TestChoiceValidator:
 class TestStepProvider:
     def test_returns_selected_provider(self):
         """Test that _step_provider returns selected provider."""
-        from EvoScientist.config.onboard import _step_provider
+        from EvoScientist.config.onboard.steps import _step_provider
 
         config = EvoScientistConfig()
 
@@ -310,7 +314,7 @@ class TestStepProvider:
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test that _step_provider raises KeyboardInterrupt on cancel."""
-        from EvoScientist.config.onboard import _step_provider
+        from EvoScientist.config.onboard.steps import _step_provider
 
         config = EvoScientistConfig()
 
@@ -323,7 +327,7 @@ class TestStepProvider:
 class TestStepModel:
     def test_returns_selected_model(self):
         """Test that _step_model returns selected model."""
-        from EvoScientist.config.onboard import _step_model
+        from EvoScientist.config.onboard.steps import _step_model
 
         config = EvoScientistConfig()
 
@@ -335,7 +339,7 @@ class TestStepModel:
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test that _step_model raises KeyboardInterrupt on cancel."""
-        from EvoScientist.config.onboard import _step_model
+        from EvoScientist.config.onboard.steps import _step_model
 
         config = EvoScientistConfig()
 
@@ -348,7 +352,7 @@ class TestStepModel:
 class TestStepWorkspace:
     def test_returns_daemon_mode(self):
         """Test workspace step returns selected mode."""
-        from EvoScientist.config.onboard import _step_workspace
+        from EvoScientist.config.onboard.steps import _step_workspace
 
         config = EvoScientistConfig()
 
@@ -360,7 +364,7 @@ class TestStepWorkspace:
 
     def test_returns_run_mode(self):
         """Test workspace step returns run mode."""
-        from EvoScientist.config.onboard import _step_workspace
+        from EvoScientist.config.onboard.steps import _step_workspace
 
         config = EvoScientistConfig()
 
@@ -374,7 +378,7 @@ class TestStepWorkspace:
 class TestPromptAndValidateApiKey:
     def test_keep_existing_key_still_validates(self):
         """Pressing Enter to keep current key should validate the existing key."""
-        from EvoScientist.config.onboard import _prompt_and_validate_api_key
+        from EvoScientist.config.onboard.helpers import _prompt_and_validate_api_key
 
         validate_fn = Mock(return_value=(True, "Valid"))
 
@@ -395,7 +399,7 @@ class TestPromptAndValidateApiKey:
 
     def test_new_key_still_validates(self):
         """Entering a new key should still run validation."""
-        from EvoScientist.config.onboard import _prompt_and_validate_api_key
+        from EvoScientist.config.onboard.helpers import _prompt_and_validate_api_key
 
         validate_fn = Mock(return_value=(True, "valid"))
 
@@ -415,7 +419,7 @@ class TestPromptAndValidateApiKey:
 class TestValidateImessage:
     def test_valid_when_cli_found_with_rpc(self):
         """Test validate_imessage returns valid when imsg CLI found and RPC works."""
-        from EvoScientist.config.onboard import validate_imessage
+        from EvoScientist.config.onboard.helpers import validate_imessage
 
         version_result = Mock(returncode=0, stdout="imsg 1.2.3")
         rpc_result = Mock(returncode=0)
@@ -436,7 +440,7 @@ class TestValidateImessage:
 
     def test_invalid_when_cli_not_found(self):
         """Test validate_imessage returns not_installed when imsg CLI missing."""
-        from EvoScientist.config.onboard import validate_imessage
+        from EvoScientist.config.onboard.helpers import validate_imessage
 
         with (
             patch("EvoScientist.config.onboard.helpers.sys") as mock_sys,
@@ -451,7 +455,7 @@ class TestValidateImessage:
 
     def test_invalid_on_non_macos(self):
         """Test validate_imessage returns invalid on non-macOS."""
-        from EvoScientist.config.onboard import validate_imessage
+        from EvoScientist.config.onboard.helpers import validate_imessage
 
         with patch("EvoScientist.config.onboard.helpers.sys") as mock_sys:
             mock_sys.platform = "linux"
@@ -462,7 +466,7 @@ class TestValidateImessage:
 
     def test_invalid_when_rpc_not_supported(self):
         """Test validate_imessage returns invalid when RPC check fails."""
-        from EvoScientist.config.onboard import validate_imessage
+        from EvoScientist.config.onboard.helpers import validate_imessage
 
         version_result = Mock(returncode=0, stdout="imsg 0.1.0")
         rpc_result = Mock(returncode=1)
@@ -484,7 +488,7 @@ class TestValidateImessage:
 class TestInstallImsg:
     def test_install_success(self):
         """Test _install_imsg returns True on success."""
-        from EvoScientist.config.onboard import _install_imsg
+        from EvoScientist.config.onboard.helpers import _install_imsg
 
         with patch("EvoScientist.config.onboard.helpers.subprocess") as mock_sub:
             mock_sub.run.return_value = Mock(returncode=0)
@@ -495,7 +499,7 @@ class TestInstallImsg:
 
     def test_install_brew_not_found(self):
         """Test _install_imsg handles missing Homebrew."""
-        from EvoScientist.config.onboard import _install_imsg
+        from EvoScientist.config.onboard.helpers import _install_imsg
 
         with (
             patch("EvoScientist.config.onboard.helpers.subprocess") as mock_sub,
@@ -509,7 +513,7 @@ class TestInstallImsg:
 
     def test_install_failure(self):
         """Test _install_imsg returns False on non-zero exit."""
-        from EvoScientist.config.onboard import _install_imsg
+        from EvoScientist.config.onboard.helpers import _install_imsg
 
         with patch("EvoScientist.config.onboard.helpers.subprocess") as mock_sub:
             mock_sub.run.return_value = Mock(returncode=1)
@@ -522,7 +526,7 @@ class TestInstallImsg:
 class TestSetupImessage:
     def test_already_installed(self):
         """Test _setup_imessage returns True when already installed."""
-        from EvoScientist.config.onboard import _setup_imessage
+        from EvoScientist.config.onboard.helpers import _setup_imessage
 
         with (
             patch(
@@ -537,7 +541,7 @@ class TestSetupImessage:
 
     def test_not_macos(self):
         """Test _setup_imessage returns False on non-macOS."""
-        from EvoScientist.config.onboard import _setup_imessage
+        from EvoScientist.config.onboard.helpers import _setup_imessage
 
         with (
             patch(
@@ -552,7 +556,7 @@ class TestSetupImessage:
 
     def test_install_then_valid(self):
         """Test _setup_imessage installs and re-validates successfully."""
-        from EvoScientist.config.onboard import _setup_imessage
+        from EvoScientist.config.onboard.helpers import _setup_imessage
 
         with (
             patch("EvoScientist.config.onboard.helpers.validate_imessage") as mock_val,
@@ -573,7 +577,7 @@ class TestSetupImessage:
 
     def test_user_declines_install(self):
         """Test _setup_imessage returns False when user declines install."""
-        from EvoScientist.config.onboard import _setup_imessage
+        from EvoScientist.config.onboard.helpers import _setup_imessage
 
         with (
             patch(
@@ -592,7 +596,7 @@ class TestSetupImessage:
 class TestStepSkills:
     def test_returns_empty_when_none_selected(self):
         """Test skills step returns empty list when user selects nothing."""
-        from EvoScientist.config.onboard import _step_skills
+        from EvoScientist.config.onboard.steps import _step_skills
 
         with (
             patch("EvoScientist.config.onboard.style.questionary") as mock_q,
@@ -605,7 +609,7 @@ class TestStepSkills:
 
     def test_installs_selected_skills(self):
         """Test skills step installs selected skills and returns sources."""
-        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+        from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
         source = _RECOMMENDED_SKILLS[0]["source"]
 
@@ -623,7 +627,7 @@ class TestStepSkills:
 
     def test_handles_install_failure(self):
         """Test skills step handles installation errors gracefully."""
-        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+        from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
         source = _RECOMMENDED_SKILLS[0]["source"]
 
@@ -640,7 +644,7 @@ class TestStepSkills:
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test skills step raises KeyboardInterrupt on cancel."""
-        from EvoScientist.config.onboard import _step_skills
+        from EvoScientist.config.onboard.steps import _step_skills
 
         with patch("EvoScientist.config.onboard.style.questionary") as mock_q:
             mock_q.checkbox.return_value.ask.return_value = None
@@ -650,7 +654,7 @@ class TestStepSkills:
     def test_detects_pack_via_manifest(self, tmp_path):
         """A pack source recorded in the manifest is detected as installed
         even when none of the unpacked child dir names match the source."""
-        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+        from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
         # Recreate the EvoSkills-style layout: child dirs in GLOBAL_SKILLS_DIR
         # whose names share nothing with the pack source URL.
@@ -702,7 +706,7 @@ class TestStepSkills:
     def test_surfaces_update_available_when_upstream_moved(self, tmp_path):
         """When a pack records an install-time commit and `git ls-remote`
         reports a different SHA, the choice label should call out the update."""
-        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+        from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
         pack_source = _RECOMMENDED_SKILLS[0]["source"]
         global_dir = tmp_path / "global"
@@ -748,7 +752,7 @@ class TestStepSkills:
     def test_no_update_hint_when_remote_check_fails(self, tmp_path):
         """If `git ls-remote` returns None (offline, timeout, etc.), the label
         must fall back to plain 'installed' — never falsely claim 'update'."""
-        from EvoScientist.config.onboard import _RECOMMENDED_SKILLS, _step_skills
+        from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
         pack_source = _RECOMMENDED_SKILLS[0]["source"]
         global_dir = tmp_path / "global"
@@ -794,7 +798,7 @@ class TestStepSkills:
 class TestStepChannels:
     def test_returns_disabled_when_skip(self):
         """Test channels step returns empty dict when user selects nothing."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -806,7 +810,7 @@ class TestStepChannels:
 
     def test_returns_enabled_when_setup_passes(self):
         """Test channels step returns enabled when iMessage setup succeeds."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -826,7 +830,7 @@ class TestStepChannels:
 
     def test_returns_enabled_with_senders(self):
         """Test channels step returns enabled with specific senders."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -847,7 +851,7 @@ class TestStepChannels:
 
     def test_setup_fails_user_declines(self):
         """Test channels step skips iMessage when setup fails and user declines."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -867,7 +871,7 @@ class TestStepChannels:
 
     def test_setup_fails_user_enables_anyway(self):
         """Test channels step enables iMessage when setup fails but user confirms."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -888,7 +892,7 @@ class TestStepChannels:
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test channels step raises KeyboardInterrupt on cancel."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -899,7 +903,7 @@ class TestStepChannels:
 
     def test_telegram_channel_selected(self):
         """Test channels step handles Telegram selection."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -930,7 +934,7 @@ class TestStepChannels:
 
     def test_discord_channel_selected(self):
         """Test channels step handles Discord selection."""
-        from EvoScientist.config.onboard import _step_channels
+        from EvoScientist.config.onboard.channels import _step_channels
 
         config = EvoScientistConfig()
 
@@ -983,7 +987,7 @@ class TestStepMcpServersNpxFailure:
 
     def test_npx_failure_skips_npx_servers(self):
         """When _ensure_npx returns False, npx-dependent servers must be skipped."""
-        from EvoScientist.config.onboard import _step_mcp_servers
+        from EvoScientist.config.onboard.steps import _step_mcp_servers
 
         servers = self._make_test_servers()
 
@@ -1014,7 +1018,7 @@ class TestStepMcpServersNpxFailure:
 
     def test_npx_failure_returns_empty_when_all_npx(self):
         """When all selected servers are npx-based and npx fails, return []."""
-        from EvoScientist.config.onboard import _step_mcp_servers
+        from EvoScientist.config.onboard.steps import _step_mcp_servers
 
         servers = self._make_test_servers()
         npx_names = [s.name for s in servers if s.command == "npx"]
@@ -1043,7 +1047,7 @@ class TestStepMcpServersNpxFailure:
 class TestStepThinking:
     def test_returns_show_thinking(self):
         """Test thinking step returns selected value."""
-        from EvoScientist.config.onboard import _step_thinking
+        from EvoScientist.config.onboard.steps import _step_thinking
 
         config = EvoScientistConfig()
 
@@ -1055,7 +1059,7 @@ class TestStepThinking:
 
     def test_returns_false_when_off(self):
         """Test thinking step returns False when user selects Off."""
-        from EvoScientist.config.onboard import _step_thinking
+        from EvoScientist.config.onboard.steps import _step_thinking
 
         config = EvoScientistConfig(show_thinking=False)
 
@@ -1074,7 +1078,7 @@ class TestStepThinking:
 class TestRunOnboard:
     def test_returns_true_on_save(self):
         """Test that run_onboard returns True when config is saved."""
-        from EvoScientist.config.onboard import run_onboard
+        from EvoScientist.config.onboard.wizard import run_onboard
 
         mock_q = MagicMock()
         with (
@@ -1130,7 +1134,7 @@ class TestRunOnboard:
 
     def test_returns_false_on_cancel(self):
         """Test that run_onboard returns False when cancelled."""
-        from EvoScientist.config.onboard import run_onboard
+        from EvoScientist.config.onboard.wizard import run_onboard
 
         mock_q = MagicMock()
         with (
@@ -1153,7 +1157,7 @@ class TestRunOnboard:
 
     def test_returns_false_when_not_saving(self):
         """Test that run_onboard returns False when user declines to save."""
-        from EvoScientist.config.onboard import run_onboard
+        from EvoScientist.config.onboard.wizard import run_onboard
 
         mock_q = MagicMock()
         with (
@@ -1199,7 +1203,7 @@ class TestRunOnboard:
         Reproduces a bug where the snapshot was refreshed after Reset, so
         declining the save silently wiped the user's previous settings.
         """
-        from EvoScientist.config.onboard import run_onboard
+        from EvoScientist.config.onboard.wizard import run_onboard
 
         # Existing config: user previously configured OpenAI + gpt-5
         existing = EvoScientistConfig(
@@ -1260,7 +1264,7 @@ class TestCheckLatexComponents:
 
     def test_all_available(self):
         """All three components found → all True."""
-        from EvoScientist.config.onboard import _check_latex_components
+        from EvoScientist.config.onboard.helpers import _check_latex_components
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1274,7 +1278,7 @@ class TestCheckLatexComponents:
 
     def test_only_pdflatex(self):
         """Only pdflatex available."""
-        from EvoScientist.config.onboard import _check_latex_components
+        from EvoScientist.config.onboard.helpers import _check_latex_components
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1294,7 +1298,7 @@ class TestCheckLatexComponents:
 
     def test_none_available(self):
         """Nothing found → all False."""
-        from EvoScientist.config.onboard import _check_latex_components
+        from EvoScientist.config.onboard.helpers import _check_latex_components
 
         with patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh:
             mock_sh.which.return_value = None
@@ -1311,7 +1315,7 @@ class TestAutoInstallLatexmk:
 
     def test_success(self):
         """tlmgr install latexmk succeeds."""
-        from EvoScientist.config.onboard import _auto_install_latexmk
+        from EvoScientist.config.onboard.helpers import _auto_install_latexmk
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1329,7 +1333,7 @@ class TestAutoInstallLatexmk:
 
     def test_tlmgr_not_found(self):
         """tlmgr not on PATH → does nothing."""
-        from EvoScientist.config.onboard import _auto_install_latexmk
+        from EvoScientist.config.onboard.helpers import _auto_install_latexmk
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1342,7 +1346,7 @@ class TestAutoInstallLatexmk:
 
     def test_install_fails(self):
         """tlmgr install returns nonzero → warns."""
-        from EvoScientist.config.onboard import _auto_install_latexmk
+        from EvoScientist.config.onboard.helpers import _auto_install_latexmk
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1366,7 +1370,7 @@ class TestCheckTinytex:
 
     def test_found_pdflatex(self):
         """pdflatex found and working → True."""
-        from EvoScientist.config.onboard import _check_tinytex
+        from EvoScientist.config.onboard.helpers import _check_tinytex
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1379,7 +1383,7 @@ class TestCheckTinytex:
 
     def test_tlmgr_only_not_enough(self):
         """pdflatex missing but tlmgr found → False (pdflatex is required)."""
-        from EvoScientist.config.onboard import _check_tinytex
+        from EvoScientist.config.onboard.helpers import _check_tinytex
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1394,7 +1398,7 @@ class TestCheckTinytex:
 
     def test_not_found(self):
         """Neither pdflatex nor tlmgr found → False."""
-        from EvoScientist.config.onboard import _check_tinytex
+        from EvoScientist.config.onboard.helpers import _check_tinytex
 
         with patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh:
             mock_sh.which.return_value = None
@@ -1402,7 +1406,7 @@ class TestCheckTinytex:
 
     def test_version_timeout(self):
         """Command found but --version times out → False."""
-        from EvoScientist.config.onboard import _check_tinytex
+        from EvoScientist.config.onboard.helpers import _check_tinytex
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1415,7 +1419,7 @@ class TestCheckTinytex:
 
     def test_version_nonzero(self):
         """Command found but --version returns nonzero → False."""
-        from EvoScientist.config.onboard import _check_tinytex
+        from EvoScientist.config.onboard.helpers import _check_tinytex
 
         with (
             patch("EvoScientist.config.onboard.helpers.shutil") as mock_sh,
@@ -1435,7 +1439,7 @@ class TestDetectTinytexInstallMethod:
 
     def test_macos_with_curl(self):
         """macOS with curl → curl method."""
-        from EvoScientist.config.onboard import _detect_tinytex_install_method
+        from EvoScientist.config.onboard.helpers import _detect_tinytex_install_method
 
         with (
             patch("EvoScientist.config.onboard.helpers.sys") as mock_sys,
@@ -1451,7 +1455,7 @@ class TestDetectTinytexInstallMethod:
 
     def test_linux_wget_fallback(self):
         """Linux without curl, with wget → wget method."""
-        from EvoScientist.config.onboard import _detect_tinytex_install_method
+        from EvoScientist.config.onboard.helpers import _detect_tinytex_install_method
 
         with (
             patch("EvoScientist.config.onboard.helpers.sys") as mock_sys,
@@ -1467,7 +1471,7 @@ class TestDetectTinytexInstallMethod:
 
     def test_windows_choco(self):
         """Windows with choco → choco method."""
-        from EvoScientist.config.onboard import _detect_tinytex_install_method
+        from EvoScientist.config.onboard.helpers import _detect_tinytex_install_method
 
         with (
             patch("EvoScientist.config.onboard.helpers.sys") as mock_sys,
@@ -1483,7 +1487,7 @@ class TestDetectTinytexInstallMethod:
 
     def test_windows_scoop(self):
         """Windows with scoop (no choco) → scoop method."""
-        from EvoScientist.config.onboard import _detect_tinytex_install_method
+        from EvoScientist.config.onboard.helpers import _detect_tinytex_install_method
 
         with (
             patch("EvoScientist.config.onboard.helpers.sys") as mock_sys,
@@ -1499,7 +1503,7 @@ class TestDetectTinytexInstallMethod:
 
     def test_no_tools(self):
         """No tools available → manual method."""
-        from EvoScientist.config.onboard import _detect_tinytex_install_method
+        from EvoScientist.config.onboard.helpers import _detect_tinytex_install_method
 
         with (
             patch("EvoScientist.config.onboard.helpers.sys") as mock_sys,
@@ -1517,7 +1521,7 @@ class TestInstallTinytex:
 
     def test_curl_install_success(self):
         """curl install succeeds → True."""
-        from EvoScientist.config.onboard import _install_tinytex
+        from EvoScientist.config.onboard.helpers import _install_tinytex
 
         with patch("EvoScientist.config.onboard.helpers.subprocess") as mock_sp:
             mock_sp.run.return_value = Mock(returncode=0)
@@ -1530,7 +1534,7 @@ class TestInstallTinytex:
 
     def test_curl_install_timeout(self):
         """curl install times out → False."""
-        from EvoScientist.config.onboard import _install_tinytex
+        from EvoScientist.config.onboard.helpers import _install_tinytex
 
         with (
             patch("EvoScientist.config.onboard.helpers.subprocess") as mock_sp,
@@ -1542,7 +1546,7 @@ class TestInstallTinytex:
 
     def test_choco_install_success(self):
         """choco install succeeds → True."""
-        from EvoScientist.config.onboard import _install_tinytex
+        from EvoScientist.config.onboard.helpers import _install_tinytex
 
         with (
             patch("EvoScientist.config.onboard.helpers.subprocess") as mock_sp,
@@ -1555,7 +1559,7 @@ class TestInstallTinytex:
 
     def test_manual_returns_false(self):
         """manual method → False immediately."""
-        from EvoScientist.config.onboard import _install_tinytex
+        from EvoScientist.config.onboard.helpers import _install_tinytex
 
         assert _install_tinytex("manual", "https://yihui.org/tinytex/") is False
 
@@ -1565,7 +1569,7 @@ class TestStepTinytex:
 
     def test_user_declines_prepare(self):
         """User says No to 'Prepare LaTeX environment?' → skipped."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         with (
             patch("EvoScientist.config.onboard.steps.questionary") as mock_q,
@@ -1578,7 +1582,7 @@ class TestStepTinytex:
 
     def test_already_installed_all_components(self):
         """User says Yes, all components available → prints detailed status."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         with (
             patch("EvoScientist.config.onboard.steps.questionary") as mock_q,
@@ -1601,7 +1605,7 @@ class TestStepTinytex:
 
     def test_already_installed_missing_latexmk(self):
         """pdflatex + tlmgr present but latexmk missing → auto-installs."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         with (
             patch("EvoScientist.config.onboard.steps.questionary") as mock_q,
@@ -1625,7 +1629,7 @@ class TestStepTinytex:
 
     def test_user_installs_successfully(self):
         """Yes → not found → confirms install → succeeds → re-check passes."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
         all_true = {"pdflatex": True, "latexmk": True, "tlmgr": True}
@@ -1654,7 +1658,7 @@ class TestStepTinytex:
 
     def test_user_declines_install(self):
         """Yes to prepare → not found → declines install → skipped."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
         with (
@@ -1677,7 +1681,7 @@ class TestStepTinytex:
 
     def test_install_fails(self):
         """Yes → not found → confirms install → install fails."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
         with (
@@ -1706,7 +1710,7 @@ class TestStepTinytex:
 
     def test_installed_but_not_in_path(self):
         """Install succeeds but pdflatex not yet in PATH → warns user."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
         with (
@@ -1739,7 +1743,7 @@ class TestStepTinytex:
 
     def test_manual_method(self):
         """Yes to prepare → not found → manual method → prints URL, no install prompt."""
-        from EvoScientist.config.onboard import _step_tinytex
+        from EvoScientist.config.onboard.steps import _step_tinytex
 
         all_false = {"pdflatex": False, "latexmk": False, "tlmgr": False}
         with (

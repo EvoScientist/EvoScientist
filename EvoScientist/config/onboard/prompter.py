@@ -81,12 +81,6 @@ def install_navigation_keys(
     )
 
 
-# Backward-compatible alias for the older two-call-site helper.
-def install_back_keys(question, sentinel: str = BACK_SENTINEL) -> None:
-    """Alias for ``install_navigation_keys(question, with_back=True)``."""
-    install_navigation_keys(question, with_back=True, sentinel=sentinel)
-
-
 from contextlib import contextmanager  # noqa: E402 — colocated with usage below
 
 
@@ -250,9 +244,22 @@ class NonInteractivePrompter:
         self,
         answers: dict[str, Any] | None = None,
         skip_set: set[str] | None = None,
+        strict: bool = False,
     ):
+        """
+        Args:
+            answers: pre-filled prompt answers keyed by ``prompt_id``.
+            skip_set: section ids to skip entirely.
+            strict: when True, the wizard treats this as "must run without any
+                interactive prompt" — optional sections (skills/mcp/latex/
+                channels) and provider sub-prompts (base_url / auth_mode)
+                that have no preset are auto-skipped instead of falling back
+                to interactive. Set this through the constructor; do not
+                monkey-set the attribute on an existing instance.
+        """
         self.answers: dict[str, Any] = dict(answers or {})
         self.skip_set: set[str] = set(skip_set or ())
+        self.strict: bool = bool(strict)
 
     def has(self, prompt_id: str) -> bool:
         return prompt_id in self.answers
@@ -275,7 +282,41 @@ class NonInteractivePrompter:
 
     def text(self, prompt_id, message, *, default="", validate=None, placeholder=None):
         value = self._get(prompt_id, message)
-        return value if value != "" else default
+        resolved = value if value != "" else default
+        if validate is not None and resolved:
+            # ``validate`` follows one of two prompt_toolkit-compatible forms:
+            # (a) a ``Validator`` subclass instance — has ``.validate(document)``
+            #     and raises ``ValidationError`` on failure;
+            # (b) a plain callable taking the string and returning ``True`` /
+            #     ``False`` / a string error message.
+            # ``QuestionaryPrompter`` passes either form straight to
+            # questionary, which handles both; we must do the same here so the
+            # non-interactive path doesn't silently accept invalid presets.
+            from prompt_toolkit.document import Document
+            from prompt_toolkit.validation import ValidationError, Validator
+
+            def _reject(msg: str) -> None:
+                raise RuntimeError(
+                    f"Non-interactive mode: preset value for {prompt_id!r} "
+                    f"({resolved!r}) rejected by validator: {msg}"
+                )
+
+            if isinstance(validate, Validator):
+                try:
+                    validate.validate(Document(text=str(resolved)))
+                except ValidationError as exc:
+                    _reject(exc.message or "invalid value")
+            elif callable(validate):
+                try:
+                    result = validate(resolved)
+                except ValidationError as exc:
+                    _reject(exc.message or "invalid value")
+                else:
+                    if result is False or isinstance(result, str):
+                        _reject(result if isinstance(result, str) else "invalid value")
+            # Any other type (None ruled out above) — silently ignore: the
+            # interactive path would also have nothing reasonable to do with it.
+        return resolved
 
     def password(self, prompt_id, message, *, placeholder=None):
         return self._get(prompt_id, message)

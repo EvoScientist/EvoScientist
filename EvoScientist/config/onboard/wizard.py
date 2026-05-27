@@ -154,6 +154,34 @@ _SECTION_LABELS: list[tuple[str, str]] = [
 ]
 _ALL_SECTIONS: frozenset[str] = frozenset(s for s, _ in _SECTION_LABELS)
 
+# Each preset flag implies the section(s) it would change. ``--provider`` also
+# cascades into ``model`` because the model list depends on the provider —
+# silently keeping a stale model id would leave the first request broken.
+_FLAG_TO_SECTIONS: dict[str, frozenset[str]] = {
+    "ui": frozenset({"ui"}),
+    "port": frozenset({"port"}),
+    "provider": frozenset({"provider", "model"}),
+    "api_key": frozenset({"provider"}),
+    "model": frozenset({"model"}),
+    "tavily_key": frozenset({"tavily"}),
+    "workspace_mode": frozenset({"workspace"}),
+    "show_thinking": frozenset({"thinking"}),
+}
+
+
+def _sections_implied_by_flags(prompter) -> frozenset[str]:
+    """Sections the user's flag-supplied answers imply should run.
+
+    Empty frozenset means no preset flags were passed (only ``--skip-*`` or
+    ``--non-interactive`` or no flags at all).
+    """
+    if prompter is None:
+        return frozenset()
+    out: set[str] = set()
+    for pid in prompter.answers:
+        out |= _FLAG_TO_SECTIONS.get(pid, set())
+    return frozenset(out)
+
 
 def _config_has_meaningful_settings(config: EvoScientistConfig) -> bool:
     """True if the user has been through onboarding before.
@@ -277,7 +305,7 @@ def run_onboard(
     from .prompter import NonInteractivePrompter, select_navigation_active
 
     p = prompter if isinstance(prompter, NonInteractivePrompter) else None
-    strict = bool(p and getattr(p, "_strict_non_interactive", False))
+    strict = bool(p and p.strict)
 
     _PROVIDER_API_KEY_FLAG_MAP = {
         "anthropic": "anthropic_api_key",
@@ -318,11 +346,32 @@ def run_onboard(
             config = load_config()
             snapshot = copy.deepcopy(config)
 
-            # When `only_sections` is given (e.g. `configure provider`), bypass
-            # Keep/Modify/Reset and run only those sections.
+            # Decide which sections this run should cover.
+            #
+            #   - ``only_sections`` (programmatic, e.g. ``configure provider``):
+            #     run exactly those sections, no Keep/Modify/Reset prompt.
+            #   - Any preset flag (``--provider``/``--model``/…): treat as
+            #     explicit user intent — skip Keep/Modify/Reset and run ONLY
+            #     the sections each flag implies (see ``_FLAG_TO_SECTIONS``).
+            #   - Strict ``--non-interactive`` with no preset flags: run all
+            #     sections; the inner ``_require()`` calls will raise on
+            #     missing answers.
+            #   - Otherwise: full wizard, with Keep/Modify/Reset offered when
+            #     an existing config is detected.
             sections_to_run: frozenset[str]
+            implied_sections = _sections_implied_by_flags(p)
             if only_sections is not None:
                 sections_to_run = frozenset(only_sections)
+            elif implied_sections:
+                sections_to_run = implied_sections
+                console.print(
+                    "[dim]  CLI flags detected — running only the implied "
+                    f"sections: {', '.join(sorted(implied_sections))}.[/dim]"
+                )
+                console.print(
+                    "[dim]  (Use 'EvoSci configure <section>' or 'EvoSci "
+                    "onboard' with no flags to revisit other sections.)[/dim]"
+                )
             else:
                 sections_to_run = _ALL_SECTIONS
                 if not strict and _config_has_meaningful_settings(config):
@@ -408,30 +457,79 @@ def run_onboard(
                         provider = _step_provider(config)
                         config.provider = provider
 
-                    # Step 2a: Base URL (custom-openai, custom-anthropic, minimax, ollama)
+                    # Step 2a: Base URL (custom-openai, custom-anthropic,
+                    # minimax, ollama). In strict non-interactive mode we
+                    # never call the interactive _step_base_url /
+                    # _step_minimax_region / _step_ollama_base_url helpers —
+                    # fall back to the existing config value or the
+                    # CUSTOM_*_BASE_URL / OLLAMA_BASE_URL env var instead.
+                    # If neither is set for a provider that needs it, raise
+                    # so the user sees the same "missing required answer"
+                    # error as for other required prompts.
                     if provider == "custom-openai":
                         current_base_url = (
                             config.custom_openai_base_url
                             or os.environ.get("CUSTOM_OPENAI_BASE_URL", "")
                         )
-                        config.custom_openai_base_url = _step_base_url(
-                            config, current_value=current_base_url
-                        )
+                        if strict:
+                            if not current_base_url:
+                                raise RuntimeError(
+                                    "--non-interactive: custom-openai provider "
+                                    "needs a base URL. Set the "
+                                    "CUSTOM_OPENAI_BASE_URL env var or run "
+                                    "without --non-interactive."
+                                )
+                            config.custom_openai_base_url = current_base_url
+                        else:
+                            config.custom_openai_base_url = _step_base_url(
+                                config, current_value=current_base_url
+                            )
                     elif provider == "custom-anthropic":
                         current_base_url = (
                             config.custom_anthropic_base_url
                             or os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", "")
                         )
-                        config.custom_anthropic_base_url = _step_base_url(
-                            config, current_value=current_base_url
-                        )
+                        if strict:
+                            if not current_base_url:
+                                raise RuntimeError(
+                                    "--non-interactive: custom-anthropic "
+                                    "provider needs a base URL. Set the "
+                                    "CUSTOM_ANTHROPIC_BASE_URL env var or run "
+                                    "without --non-interactive."
+                                )
+                            config.custom_anthropic_base_url = current_base_url
+                        else:
+                            config.custom_anthropic_base_url = _step_base_url(
+                                config, current_value=current_base_url
+                            )
                     elif provider == "minimax":
-                        config.minimax_base_url = _step_minimax_region(config)
+                        if strict:
+                            # MiniMax has 2 region URLs; default to whatever
+                            # is already in config, else the Global endpoint.
+                            config.minimax_base_url = (
+                                config.minimax_base_url
+                                or "https://api.minimax.io/anthropic"
+                            )
+                        else:
+                            config.minimax_base_url = _step_minimax_region(config)
                     elif provider == "ollama":
-                        ollama_url, ollama_detected_models = _step_ollama_base_url(
-                            config
-                        )
-                        config.ollama_base_url = ollama_url
+                        if strict:
+                            # Ollama: existing config value > env var >
+                            # localhost default. Skip the live connection
+                            # validation under strict — model discovery
+                            # happens at runtime anyway.
+                            config.ollama_base_url = (
+                                config.ollama_base_url
+                                or os.environ.get("OLLAMA_BASE_URL", "")
+                                or "http://localhost:11434"
+                            )
+                            # ollama_detected_models stays [] — model picker
+                            # will fall back to free-text or the preset.
+                        else:
+                            ollama_url, ollama_detected_models = _step_ollama_base_url(
+                                config
+                            )
+                            config.ollama_base_url = ollama_url
 
                     # Step 2b: Auth mode (Anthropic or OpenAI — API key vs OAuth).
                     # In strict non-interactive mode we assume "api_key".
@@ -483,6 +581,31 @@ def run_onboard(
                     key_attr = _PROVIDER_KEY_ATTR.get(provider, "openai_api_key")
                     preset_api_key = _preset("api_key")
                     if preset_api_key is not None:
+                        # Validate the preset key against the same validator
+                        # the interactive path uses, unless --skip-validation
+                        # was passed. Interactive flow shows a "Save anyway?"
+                        # confirm on failure; the non-interactive path has no
+                        # way to ask, so a failed validation is fatal.
+                        if not skip_validation:
+                            from .helpers import _provider_key_info
+
+                            _info = _provider_key_info(config, provider)
+                            validate_fn = _info[2] if _info else None
+                            if validate_fn is not None:
+                                console.print(
+                                    "  [dim]Validating preset API key...[/dim]",
+                                    end="",
+                                )
+                                valid, msg = validate_fn(preset_api_key)
+                                if valid:
+                                    console.print(f"\r  [green]✓ {msg}[/green]      ")
+                                else:
+                                    console.print(f"\r  [red]✗ {msg}[/red]      ")
+                                    raise RuntimeError(
+                                        f"--api-key rejected by {provider} "
+                                        f"validator: {msg}. Pass "
+                                        "--skip-validation to override."
+                                    )
                         setattr(config, key_attr, preset_api_key)
                         console.print(
                             f"  [green]✓ API key: ***{preset_api_key[-4:]}[/green]"

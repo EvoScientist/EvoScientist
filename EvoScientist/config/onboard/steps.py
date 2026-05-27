@@ -306,7 +306,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
 
     ccproxy_available = is_ccproxy_available()
 
-    from .prompter import BACK_SENTINEL, GoBack, install_back_keys
+    from .prompter import BACK_SENTINEL, GoBack, install_navigation_keys
 
     choices = [
         Choice(title="API Key (direct Anthropic access)", value="api_key"),
@@ -335,7 +335,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
         qmark=QMARK,
         use_indicator=True,
     )
-    install_back_keys(question)
+    install_navigation_keys(question, with_back=True)
     auth_mode = question.ask()
 
     if auth_mode is None:
@@ -414,7 +414,7 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
 
     ccproxy_available = is_ccproxy_available()
 
-    from .prompter import BACK_SENTINEL, GoBack, install_back_keys
+    from .prompter import BACK_SENTINEL, GoBack, install_navigation_keys
 
     choices = [
         Choice(title="API Key (direct OpenAI access)", value="api_key"),
@@ -443,7 +443,7 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
         qmark=QMARK,
         use_indicator=True,
     )
-    install_back_keys(question)
+    install_navigation_keys(question, with_back=True)
     auth_mode = question.ask()
 
     if auth_mode is None:
