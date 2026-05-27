@@ -859,6 +859,36 @@ class TestStepChannels:
         assert result["channel_enabled"] == "discord"
         assert result["discord_bot_token"] == "discord-token"
 
+    def test_webui_deploy_rejects_occupied_port(self):
+        """Test WebUI setup asks again when the selected port is not bindable."""
+        from EvoScientist.config.onboard import _step_webui
+
+        config = EvoScientistConfig()
+
+        with (
+            patch("EvoScientist.config.onboard.questionary") as mock_q,
+            patch(
+                "EvoScientist.langgraph_dev.manager._can_bind_port",
+                side_effect=[False, True],
+            ),
+        ):
+            mock_q.confirm.return_value.ask.return_value = True
+            mock_q.text.return_value.ask.side_effect = [
+                "127.0.0.1",
+                "8010",
+                "8011",
+                "/webui",
+                "https://ui.example.com",
+                "api.example.com",
+            ]
+            mock_q.password.return_value.ask.return_value = ""
+            result = _step_webui(config)
+
+        assert result["webui_enabled"] is True
+        assert result["webui_port"] == 8011
+        assert result["webui_allowed_origins"] == "https://ui.example.com"
+        assert result["webui_allowed_hosts"] == "api.example.com"
+
 
 class TestStepMcpServersNpxFailure:
     def _make_test_servers(self):
@@ -997,6 +1027,7 @@ class TestRunOnboard:
                 "",  # Tavily key (keep current)
             ]
             mock_q.confirm.return_value.ask.side_effect = [
+                False,  # WebUI deploy API: disabled
                 True,  # Save config
             ]
             mock_q.text.return_value.ask.side_effect = [
@@ -1051,6 +1082,7 @@ class TestRunOnboard:
             ]
             mock_q.password.return_value.ask.side_effect = ["", ""]
             mock_q.confirm.return_value.ask.side_effect = [
+                False,  # WebUI deploy API: disabled
                 False,  # Save config - NO
             ]
             mock_q.text.return_value.ask.side_effect = [

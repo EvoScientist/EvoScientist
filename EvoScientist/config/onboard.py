@@ -6,6 +6,7 @@ workspace settings, and agent parameters. Uses flow-style arrow-key selection UI
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
 import subprocess
@@ -2447,6 +2448,137 @@ def _setup_imessage() -> bool:
         return False
 
 
+def _split_host_port(value: str) -> str:
+    host = (value or "").strip()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else host
+    if host.count(":") == 1:
+        return host.rsplit(":", 1)[0]
+    return host
+
+
+def _is_loopback_bind_host(host: str) -> bool:
+    normalized = _split_host_port(host).strip().lower().rstrip(".")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _normalize_webui_base_path(base_path: str) -> str:
+    normalized = (base_path or "/webui").strip() or "/webui"
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/") or "/webui"
+
+
+def _step_webui(config: EvoScientistConfig) -> dict[str, object]:
+    """Step: Configure the deploy-mode WebUI control API."""
+    console.print("\n  [bold cyan]── Web UI ──[/bold cyan]")
+    enabled = questionary.confirm(
+        "Enable WebUI control API for EvoSci deploy?",
+        default=bool(getattr(config, "webui_enabled", True)),
+        style=CONFIRM_STYLE,
+        qmark=f"  {QMARK}",
+    ).ask()
+    if enabled is None:
+        raise KeyboardInterrupt()
+
+    updates: dict[str, object] = {"webui_enabled": bool(enabled)}
+    if not enabled:
+        return updates
+
+    bind_host = questionary.text(
+        "Web UI bind host (127.0.0.1 = local only):",
+        default=str(getattr(config, "webui_bind_host", "127.0.0.1")),
+        style=WIZARD_STYLE,
+        qmark=f"  {QMARK}",
+    ).ask()
+    if bind_host is None:
+        raise KeyboardInterrupt()
+    bind_host = (bind_host or "127.0.0.1").strip()
+    updates["webui_bind_host"] = bind_host
+
+    while True:
+        port_text = questionary.text(
+            "Web UI port:",
+            default=str(getattr(config, "webui_port", 8010)),
+            style=WIZARD_STYLE,
+            qmark=f"  {QMARK}",
+        ).ask()
+        if port_text is None:
+            raise KeyboardInterrupt()
+        try:
+            port = int((port_text or "8010").strip())
+        except ValueError:
+            console.print("  [red]Port must be a number.[/red]")
+            continue
+        if not 1 <= port <= 65535:
+            console.print("  [red]Port must be between 1 and 65535.[/red]")
+            continue
+        from ..langgraph_dev.manager import _can_bind_port
+
+        if not _can_bind_port(port):
+            console.print(
+                f"  [red]Port {port} is already in use. Pick another port.[/red]"
+            )
+            continue
+        updates["webui_port"] = port
+        break
+
+    base_path = questionary.text(
+        "Web UI API base path:",
+        default=str(getattr(config, "webui_base_path", "/webui")),
+        style=WIZARD_STYLE,
+        qmark=f"  {QMARK}",
+    ).ask()
+    if base_path is None:
+        raise KeyboardInterrupt()
+    updates["webui_base_path"] = _normalize_webui_base_path(base_path)
+
+    while True:
+        api_key = questionary.password(
+            "Web UI API key (required for non-local bind):",
+            default=str(getattr(config, "webui_api_key", "")),
+            style=WIZARD_STYLE,
+            qmark=f"  {QMARK}",
+        ).ask()
+        if api_key is None:
+            raise KeyboardInterrupt()
+        api_key = api_key.strip()
+        if not api_key and not _is_loopback_bind_host(bind_host):
+            console.print(
+                "  [red]API key is required when WebUI is not bound to loopback.[/red]"
+            )
+            continue
+        updates["webui_api_key"] = api_key
+        break
+
+    allowed_origins = questionary.text(
+        "Allowed Web UI frontend origins (comma-separated, empty = localhost dev):",
+        default=str(getattr(config, "webui_allowed_origins", "")),
+        style=WIZARD_STYLE,
+        qmark=f"  {QMARK}",
+    ).ask()
+    if allowed_origins is None:
+        raise KeyboardInterrupt()
+    updates["webui_allowed_origins"] = allowed_origins.strip()
+
+    allowed_hosts = questionary.text(
+        "Allowed Web UI backend hosts (comma-separated, empty = direct local/private IPs):",
+        default=str(getattr(config, "webui_allowed_hosts", "")),
+        style=WIZARD_STYLE,
+        qmark=f"  {QMARK}",
+    ).ask()
+    if allowed_hosts is None:
+        raise KeyboardInterrupt()
+    updates["webui_allowed_hosts"] = allowed_hosts.strip()
+    return updates
+
+
 def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
     """Step: Select channels to enable on startup.
 
@@ -3463,7 +3595,12 @@ def run_onboard(skip_validation: bool = False) -> bool:
         # Step 9: LaTeX (TinyTeX)
         _step_tinytex()
 
-        # Step 10: Channels
+        # Step 10: WebUI deploy control API
+        webui_updates = _step_webui(config)
+        for key, value in webui_updates.items():
+            setattr(config, key, value)
+
+        # Step 11: Channels
         channel_updates = _step_channels(config)
         for key, value in channel_updates.items():
             setattr(config, key, value)
