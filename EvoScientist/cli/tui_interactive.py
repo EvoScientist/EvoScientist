@@ -590,6 +590,7 @@ def run_textual_interactive(
             # Clear all widgets except #welcome
             self.clear_chat()
 
+            _ch_mod.forget_channel_origin(self._conversation_tid)
             if not workspace_fixed:
                 self._workspace_dir = create_session_workspace(run_name)
             self._conversation_tid = generate_thread_id()
@@ -656,6 +657,7 @@ def run_textual_interactive(
                         await sync_widget.cleanup()
                 self._workspace_dir = workspace_dir
 
+            _ch_mod.forget_channel_origin(self._conversation_tid)
             self._conversation_tid = thread_id
             # Background reload: history renders immediately; next turn awaits.
             self._start_background_agent_load(self._workspace_dir)
@@ -895,14 +897,18 @@ def run_textual_interactive(
             # get viewport-follow during streaming (only after completion).
             # Mark busy synchronously so the next poll tick doesn't re-enter.
             self._busy = True
-            self._run_task = asyncio.ensure_future(
-                self._run_turn(
+            effective_tid = target_thread_id or self._conversation_tid
+
+            async def _run_and_publish() -> None:
+                response = await self._run_turn(
                     text,
                     skip_user_message=True,
                     resolve_mentions=False,
                     thread_id_override=target_thread_id,
                 )
-            )
+                _ch_mod.publish_to_channel_origin(effective_tid, response or "")
+
+            self._run_task = asyncio.ensure_future(_run_and_publish())
 
         async def _read_async_tasks_tui(
             self, target_thread_id: str | None
@@ -1949,8 +1955,13 @@ def run_textual_interactive(
             skip_user_message: bool = False,
             resolve_mentions: bool = True,
             thread_id_override: str | None = None,
-        ) -> None:
+        ) -> str:
             """Handle a user turn: stream agent response with widgets.
+
+            Returns the final response text from ``_stream_with_widgets`` so
+            callers (notably the async-notifier path) can forward it onward —
+            e.g. push it back to the originating channel. Returns ``""`` if
+            the turn was cancelled or the agent failed to load.
 
             Args:
                 user_text: The user's message text.
@@ -1968,6 +1979,7 @@ def run_textual_interactive(
                     to the live tid when ``None``.
             """
             cancelled = False
+            response = ""
             try:
                 self._busy = True
                 self._turn_started_at = datetime.now()
@@ -1992,9 +2004,9 @@ def run_textual_interactive(
                 try:
                     await self._await_agent_ready()
                 except Exception:
-                    return
+                    return ""
 
-                await self._stream_with_widgets(
+                response = await self._stream_with_widgets(
                     message_to_send,
                     display_text=user_text,
                     file_warnings=file_warnings,
@@ -2018,6 +2030,8 @@ def run_textual_interactive(
                 self._render_queue_indicator()
                 self._run_task = asyncio.ensure_future(self._run_turn(next_msg))
 
+            return response
+
         async def _process_channel_message(self, msg: ChannelMessage) -> None:
             """Process a channel message: stream agent response and reply.
 
@@ -2030,6 +2044,7 @@ def run_textual_interactive(
             prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
+            _ch_mod.remember_channel_origin(self._conversation_tid, msg)
             try:
                 self._busy = True
                 self._turn_started_at = datetime.now()

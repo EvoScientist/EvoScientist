@@ -604,6 +604,7 @@ def cmd_interactive(
                 and kick off background agent reload. The dispatch block
                 refreshes the status bar post-execute (symmetric with
                 /compact)."""
+                _ch_mod.forget_channel_origin(state.get("thread_id"))
                 if not workspace_fixed:
                     state["workspace_dir"] = _create_session_workspace(run_name)
                 state["thread_id"] = generate_thread_id()
@@ -665,6 +666,7 @@ def cmd_interactive(
                             console.print(f"[red]{exc}[/red]")
                             return
                     state["workspace_dir"] = workspace_dir
+                _ch_mod.forget_channel_origin(state.get("thread_id"))
                 state["thread_id"] = thread_id
                 state["resumed"] = True
                 state["status_started_at"] = datetime.now()
@@ -800,6 +802,8 @@ def cmd_interactive(
                 """
                 if not _ch_mod._claim_or_complete_channel_request(msg):
                     return
+
+                _ch_mod.remember_channel_origin(state["thread_id"], msg)
 
                 try:
                     # Clear the waiting ❯ prompt line
@@ -1010,7 +1014,7 @@ def cmd_interactive(
                     console.print(line_text, style=line_style, markup=False)
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
-                run_streaming(
+                response = run_streaming(
                     ui_backend=state["ui_backend"],
                     agent=await _await_agent_ready(),
                     message=text,
@@ -1025,6 +1029,9 @@ def cmd_interactive(
                     metadata=meta,
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
+                )
+                _ch_mod.publish_to_channel_origin(
+                    target_thread_id or state["thread_id"], response
                 )
                 await _refresh_status_snapshot(reset_streaming_text=True)
                 console.print()

@@ -37,6 +37,9 @@ from .channel import (
     channel_ask_user_prompt,
     channel_hitl_prompt,
     dispatch_channel_slash_command,
+    forget_channel_origin,
+    publish_to_channel_origin,
+    remember_channel_origin,
 )
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
@@ -790,6 +793,7 @@ def _make_serve_start_new_session_cb(
         from ..sessions import generate_thread_id
 
         new_tid = generate_thread_id()
+        forget_channel_origin(agent_holder.get("thread_id"))
         agent_holder["thread_id"] = new_tid
         if channel_runtime is not None:
             channel_runtime.thread_id = new_tid
@@ -837,6 +841,7 @@ def _make_serve_cmd_completed_hook(
         new_tid = getattr(ctx, "thread_id", None)
         thread_changed = bool(new_tid) and new_tid != agent_holder.get("thread_id")
         if thread_changed:
+            forget_channel_origin(agent_holder.get("thread_id"))
             agent_holder["thread_id"] = new_tid
             if channel_runtime is not None:
                 channel_runtime.thread_id = new_tid
@@ -895,6 +900,8 @@ def _serve_process_message(
 
     if not _claim_or_complete_channel_request(msg):
         return
+
+    remember_channel_origin(agent_holder.get("thread_id"), msg)
 
     runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
 
@@ -1079,18 +1086,21 @@ def _serve_drain_notifications(
         # session-rebind callback), falling back to the startup value.
         runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
         meta = build_metadata(runtime_workspace, model)
+        tid = agent_holder["thread_id"]
         try:
-            run_streaming(
+            response = run_streaming(
                 ui_backend="cli",
                 agent=agent_holder["agent"],
                 message=text,
-                thread_id=agent_holder["thread_id"],
+                thread_id=tid,
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
+            return
+        publish_to_channel_origin(tid, response or "")
 
     async def _run_notification_message_async(text: str, notifs: list) -> None:
         await _aio.to_thread(_run_notification_message, text, notifs)
