@@ -219,14 +219,13 @@ class TestConvertVirtualPaths:
 
     def test_ssh_remote_absolute_paths_are_preserved(self):
         command = (
-            'ssh host "ls -la /media/username/project; '
-            'ls -la /home/username/project"'
+            'ssh host "ls -la /media/username/project; ls -la /home/username/project"'
         )
         assert convert_virtual_paths_in_command(command) == command
 
     def test_ssh_remote_absolute_paths_with_options_are_preserved(self):
         command = (
-            'ssh -p 2222 -i ~/.ssh/id_ed25519 user@host '
+            "ssh -p 2222 -i ~/.ssh/id_ed25519 user@host "
             '"cd /home/username/project; pwd"'
         )
         assert convert_virtual_paths_in_command(command) == command
@@ -238,7 +237,9 @@ class TestConvertVirtualPaths:
     def test_local_paths_still_rewrite_around_ssh_remote_command(self):
         command = 'cat /data/file.txt && ssh host "ls -la /home/username/project"'
         result = convert_virtual_paths_in_command(command)
-        assert result == 'cat ./data/file.txt && ssh host "ls -la /home/username/project"'
+        assert (
+            result == 'cat ./data/file.txt && ssh host "ls -la /home/username/project"'
+        )
 
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
@@ -807,8 +808,7 @@ class TestExecuteCwdSanitization:
         monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = (
-            'ssh host "ls -la /media/username/project; '
-            'ls -la /home/username/project"'
+            'ssh host "ls -la /media/username/project; ls -la /home/username/project"'
         )
 
         resp = backend.execute(command, timeout=30)

@@ -104,9 +104,7 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
             i += 2
             continue
         if command[i] in ";|":
-            tokens.append(
-                {"type": "op", "value": command[i], "start": i, "end": i + 1}
-            )
+            tokens.append({"type": "op", "value": command[i], "start": i, "end": i + 1})
             i += 1
             continue
 
@@ -247,7 +245,9 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _mask_spans(command: str, spans: list[tuple[int, int]]) -> tuple[str, dict[str, str]]:
+def _mask_spans(
+    command: str, spans: list[tuple[int, int]]
+) -> tuple[str, dict[str, str]]:
     """Replace spans with placeholders and return the restoration map."""
     if not spans:
         return command, {}
@@ -621,10 +621,7 @@ def convert_virtual_paths_in_command(
         path = match.group(0)
 
         # Skip content that looks like a URL
-        if (
-            "://"
-            in masked_command[max(0, match.start() - 10) : match.end() + 10]
-        ):
+        if "://" in masked_command[max(0, match.start() - 10) : match.end() + 10]:
             return path
 
         resolved = _resolve_virtual_mount_path(path)
