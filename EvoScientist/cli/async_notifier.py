@@ -374,10 +374,19 @@ def dedup_notifications(
     so lexicographic comparison is correct). Also skip if `last_checked_at`
     is empty (brand-new task where agent hasn't checked yet).
     """
-    if not async_tasks:
-        return notifs
+    from .. import background  # cli -> core import; lazy to avoid import-order issues
+
+    async_tasks = async_tasks or {}
     survivors: list[AsyncTaskNotification] = []
     for n in notifs:
+        if n.agent_name.startswith("shell:"):
+            # Background process: skip if the agent already inspected it after it
+            # finished (check_process / list_processes) — mirrors the task dedup below.
+            if background.was_observed_done(n.task_id):
+                logger.debug("Dedup: skipping shell notification for %s", n.task_id)
+                continue
+            survivors.append(n)
+            continue
         task = async_tasks.get(n.task_id)
         if (
             task
@@ -393,45 +402,34 @@ def dedup_notifications(
     return survivors
 
 
-def format_notification_lines(
-    notifs: list[AsyncTaskNotification],
+def _render_notification_group(
+    notifs: list[AsyncTaskNotification], title: str, label: str
 ) -> list[tuple[str, str]]:
-    """Render notifications as compact tool-result-style lines for screen display.
+    """Render one group of notifications inside a titled open-right frame.
 
-    Returns a list of (text, rich_style) tuples — one per notification.
-    Used by both Rich CLI (console.print) and TUI (_append_system).
-    The LLM still receives the full format_batch_message text; this is
-    purely a visual representation for the human operator.
+    Open-right compact frame; bottom matches the top's width:
+        ╭──  ✦ Agent Teams ✦  ────
+             ✔ writing  Task: ...  success
+        ╰─────────────────────────
     """
-    if not notifs:
-        return []
-    # Open-right compact frame: short symmetric dashes around the title.
-    # Bottom matches the top's width so the visual is balanced.
-    #   ╭── ✦ Agent Teams ✦ ──
-    #        ✔ writing  Task: ...  success
-    #   ╰─────────────────────
-    title = " ✦ Agent Teams ✦ "
     top_divider = "╭──" + title + "────"  # 4 dashes on the right (2x of left)
     bottom_divider = "╰" + "─" * (len(top_divider) - 1)
     lines: list[tuple[str, str]] = [(top_divider, "dim")]
     for n in notifs:
-        # Strip the "-agent" suffix so it doesn't redundantly echo the header.
-        # `writing-agent` → `writing`, `data-analysis-agent` → `data-analysis`.
-        name = n.agent_name.removesuffix("-agent")
+        # `shell:test-20s` → `test-20s`; `writing-agent` → `writing`.
+        name = n.agent_name.removeprefix("shell:").removesuffix("-agent")
         if n.status == "success":
             icon, color = "✔", "#e67e22"  # carrot orange (CSS hex; Rich+Textual)
         elif n.status == "error":
             icon, color = "✗", "red"
         else:  # cancelled, timeout, interrupted
             icon, color = "⚠", "yellow"
-        # Body format (5-space indent under "Agent:" header):
-        #   ✔ writing             Task: <prompt preview>  success
-        # Collapse newlines, truncate prompt to 60 chars.
+        # Collapse newlines, truncate prompt/command preview to 60 chars.
         prompt_preview = (n.prompt or "").replace("\n", " ").strip()
         if len(prompt_preview) > 60:
             prompt_preview = prompt_preview[:60] + "…"
         if prompt_preview:
-            text = f"     {icon} {name:18s}  Task: {prompt_preview}  {n.status}"
+            text = f"     {icon} {name:18s}  {label}: {prompt_preview}  {n.status}"
         else:
             # Fallback: short task_id when no prompt is available
             short_tid = (
@@ -442,6 +440,28 @@ def format_notification_lines(
             text = f"     {icon} {name:18s}  ({short_tid})  {n.status}"
         lines.append((text, color))
     lines.append((bottom_divider, "dim"))
+    return lines
+
+
+def format_notification_lines(
+    notifs: list[AsyncTaskNotification],
+) -> list[tuple[str, str]]:
+    """Render notifications as compact tool-result-style lines for screen display.
+
+    Async sub-agents and background processes get SEPARATE titled frames so a shell
+    background process is never mislabeled as an "Agent Team". Returns (text, rich_style)
+    tuples. The LLM still receives the full ``format_batch_message`` text; this is purely
+    the visual representation for the human operator.
+    """
+    if not notifs:
+        return []
+    tasks = [n for n in notifs if not n.agent_name.startswith("shell:")]
+    shell = [n for n in notifs if n.agent_name.startswith("shell:")]
+    lines: list[tuple[str, str]] = []
+    if tasks:
+        lines += _render_notification_group(tasks, " ✦ Agent Teams ✦ ", "Task")
+    if shell:
+        lines += _render_notification_group(shell, " ✦ Background ✦ ", "Cmd")
     return lines
 
 
@@ -463,9 +483,16 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
                 ensure_ascii=False,
             )
         )
+    # Shell background processes (agent_name "shell:…") are inspected with
+    # check_process; async sub-agents with check_async_task. Name the right tool(s).
+    hints: list[str] = []
+    if any(not n.agent_name.startswith("shell:") for n in notifs):
+        hints.append("check_async_task (sub-agents)")
+    if any(n.agent_name.startswith("shell:") for n in notifs):
+        hints.append("check_process (background processes)")
     lines.append(
-        "(Signal only — fetch via check_async_task if relevant to current step, "
-        "else acknowledge & continue.)"
+        f"(Signal only — fetch full result via {' or '.join(hints)} if relevant to "
+        "the current step, else acknowledge & continue.)"
     )
     return "\n".join(lines)
 

@@ -11,15 +11,57 @@ sub-agents are *tasks*, future cron is *schedules*).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from langchain.agents.middleware import AgentMiddleware
+from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
 from .. import background, paths
 from ..backends import prepare_sandbox_command
 
 
+def _origin_thread_id(runtime: ToolRuntime | None) -> str | None:
+    """Best-effort current CLI thread_id, used to route the completion notification."""
+    try:
+        return (runtime.config or {}).get("configurable", {}).get("thread_id")
+    except Exception:
+        return None
+
+
+def _notify_done(proc: background.BgProcess, origin_thread_id: str | None) -> None:
+    """Watcher ``on_exit`` hook: enqueue a completion notification (reuses async_notifier).
+
+    Skipped for user-stopped processes (the user already knows). The notifier is imported
+    lazily to keep this module free of a load-time dependency on the CLI layer.
+    """
+    if proc.stopped:
+        return
+    rc = proc.returncode
+    if rc == 0:
+        status = "success"
+    elif rc is not None and rc < 0:
+        status = "interrupted"  # terminated by a signal
+    else:
+        status = "error"
+    from ..cli import async_notifier
+
+    async_notifier._enqueue(
+        async_notifier.AsyncTaskNotification(
+            task_id=proc.process_id,
+            agent_name=f"shell:{proc.name}",
+            status=status,
+            received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            prompt=proc.command,
+            origin_cli_thread_id=origin_thread_id,
+        )
+    )
+
+
 @tool(parse_docstring=True)
-def run_in_background(command: str, name: str | None = None) -> str:
+def run_in_background(
+    command: str, name: str | None = None, runtime: ToolRuntime = None
+) -> str:
     """Launch a long-running shell command in the background and return immediately.
 
     Use for unbounded or very long tasks (model training, large downloads, servers)
@@ -37,7 +79,10 @@ def run_in_background(command: str, name: str | None = None) -> str:
     command, error = prepare_sandbox_command(command, cwd)
     if error:
         return error
-    process_id = background.launch(command, cwd, name)
+    tid = _origin_thread_id(runtime)
+    process_id = background.launch(
+        command, cwd, name, on_exit=lambda p: _notify_done(p, tid)
+    )
     label = f" (name={name!r})" if name else ""
     return (
         f"Started background process {process_id}{label}. "

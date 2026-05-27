@@ -67,6 +67,29 @@ def test_exited_elapsed_is_frozen(tmp_path):
     assert bg._elapsed(proc) == first  # frozen, not ticking up
 
 
+def test_watcher_records_exit_without_polling(tmp_path):
+    """The daemon watcher records exit on its own (no status() call needed)."""
+    pid = bg.launch("true", str(tmp_path))
+    time.sleep(0.6)  # let the watcher wait() + record
+    proc = bg._PROCESSES[pid]
+    assert proc.finished_ts is not None
+    assert proc.returncode == 0
+
+
+def test_on_exit_callback_fires(tmp_path):
+    """on_exit is invoked with the BgProcess once the process exits."""
+    fired = {}
+
+    def cb(proc):
+        fired["pid"] = proc.process_id
+        fired["rc"] = proc.returncode
+
+    pid = bg.launch("true", str(tmp_path), on_exit=cb)
+    time.sleep(0.6)
+    assert fired.get("pid") == pid
+    assert fired.get("rc") == 0
+
+
 def test_unknown_id_errors_gracefully():
     assert "No such background process" in bg.status("deadbeef")
     assert "No such background process" in bg.stop("deadbeef")

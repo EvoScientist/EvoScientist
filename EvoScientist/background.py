@@ -16,15 +16,19 @@ and is safe to unit-test on its own. A future scheduler (cron) would reuse ``lau
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _BG_DIRNAME = ".bg_processes"
 _KILL_GRACE_SECONDS = 2.0
@@ -45,6 +49,8 @@ class BgProcess:
     returncode: int | None = None
     finished_at: str | None = None
     finished_ts: float | None = None  # epoch at exit; freezes elapsed once done
+    stopped: bool = False  # set by stop(); suppresses the completion notification
+    last_checked_ts: float | None = None  # epoch the agent last checked (status/list)
 
 
 _PROCESSES: dict[str, BgProcess] = {}
@@ -58,10 +64,10 @@ def _now_iso() -> str:
 def _record_exit(proc: BgProcess) -> None:
     """Record terminal state on first observed exit. Caller MUST hold ``_LOCK``.
 
-    ``finished_ts`` is when we first *observed* the exit (via ``poll()``), not the true
-    OS exit time — a process polled long after it ended shows an inflated elapsed.
-    Precise exit timing needs a per-process watcher (deferred to the Phase 3 completion
-    notifier); for Phase 2 this observation-time approximation is acceptable.
+    ``finished_ts`` is set when the exit is first observed. The per-process daemon
+    watcher (:func:`_watch`) calls this right after ``popen.wait()`` returns, so in
+    practice ``finished_ts`` ≈ the real exit time. Calls from ``status`` / ``list_all`` /
+    ``stop`` are a fallback for the brief window before the watcher runs.
     """
     rc = proc.popen.poll()
     if rc is not None and proc.returncode is None:
@@ -76,6 +82,20 @@ def _elapsed(proc: BgProcess) -> int:
     return int(end - proc.started_ts)
 
 
+def was_observed_done(process_id: str) -> bool:
+    """True if the agent already saw this process's completion itself.
+
+    i.e. the process has exited AND was checked (``status``/``list_all``) at or after it
+    finished. Used to dedup the completion notification — mirrors the async sub-agent
+    dedup, so the agent isn't pinged about something it already inspected.
+    """
+    with _LOCK:
+        proc = _PROCESSES.get(process_id)
+        if proc is None or proc.finished_ts is None or proc.last_checked_ts is None:
+            return False
+        return proc.last_checked_ts >= proc.finished_ts
+
+
 def _read_tail(log_path: Path, tail_bytes: int) -> str:
     try:
         data = log_path.read_bytes()
@@ -88,13 +108,43 @@ def _read_tail(log_path: Path, tail_bytes: int) -> str:
     return data.decode("utf-8", "replace")
 
 
-def launch(command: str, cwd: str, name: str | None = None) -> str:
+def _watch(proc: BgProcess, on_exit: Callable[[BgProcess], None] | None) -> None:
+    """Block until ``proc`` exits, record the exit promptly, then fire ``on_exit``.
+
+    Running in a daemon thread, ``popen.wait()`` lets us record ``finished_ts`` at (very
+    close to) the real exit time — fixing the observation-time inflation — and gives a
+    hook the CLI layer wires to a completion notification, without ``background.py``
+    importing the notifier (kept decoupled via the callback).
+    """
+    try:
+        proc.popen.wait()
+    except Exception:
+        pass
+    with _LOCK:
+        _record_exit(proc)
+    if on_exit is not None:
+        try:
+            on_exit(proc)
+        except Exception:
+            logger.warning("background on_exit callback failed", exc_info=True)
+
+
+def launch(
+    command: str,
+    cwd: str,
+    name: str | None = None,
+    *,
+    on_exit: Callable[[BgProcess], None] | None = None,
+) -> str:
     """Launch ``command`` detached in ``cwd``; return a short ``process_id``.
 
     The command is run via ``shell=True`` with output redirected to a per-process log
     file under ``<cwd>/.bg_processes/`` and ``start_new_session=True`` so the child is a
     process-group leader (survives this call's return and can be killed as a group).
     The caller is responsible for validating ``command`` first.
+
+    ``on_exit`` (optional) is called with the ``BgProcess`` from a daemon watcher thread
+    once the process exits — used by the CLI layer to emit a completion notification.
     """
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
@@ -129,6 +179,8 @@ def launch(command: str, cwd: str, name: str | None = None) -> str:
     )
     with _LOCK:
         _PROCESSES[process_id] = proc
+    # Daemon watcher: records the precise exit time and fires on_exit when done.
+    threading.Thread(target=_watch, args=(proc, on_exit), daemon=True).start()
     return process_id
 
 
@@ -142,6 +194,7 @@ def status(process_id: str, *, tail_bytes: int = 16_000) -> str:
                 "Use list_processes to see tracked processes."
             )
         _record_exit(proc)
+        proc.last_checked_ts = time.time()  # agent observed this process
         running = proc.returncode is None
         elapsed = _elapsed(proc)
         name, pid, command, returncode, log_path = (
@@ -170,6 +223,9 @@ def stop(process_id: str) -> str:
         if proc.popen.poll() is not None:
             _record_exit(proc)
             return f"Process {process_id} already finished (code {proc.returncode})."
+        # Mark as user-stopped so the watcher's on_exit suppresses the completion
+        # notification (the user already knows — no need to ping them).
+        proc.stopped = True
         # Holding the lock across poll()+killpg() means no concurrent caller can
         # poll()/reap this child in between, so the pid can't be recycled before we
         # signal it — closes the PID-reuse window.
@@ -208,8 +264,10 @@ def list_all() -> str:
         if not procs:
             return "No background processes tracked."
         lines = []
+        now = time.time()
         for p in procs:
             _record_exit(p)
+            p.last_checked_ts = now  # agent observed this process
             state = "RUNNING" if p.returncode is None else f"exited({p.returncode})"
             lines.append(
                 f"  {p.process_id}  {state:12}  {_elapsed(p)}s  name={p.name!r}"

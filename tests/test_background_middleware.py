@@ -1,5 +1,7 @@
 """Tests for BackgroundExecutionMiddleware and its tools."""
 
+import time
+
 import pytest
 
 from EvoScientist import background as bg
@@ -14,7 +16,10 @@ from EvoScientist.middleware.background import (
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
+    from EvoScientist.cli import async_notifier
+
     bg._PROCESSES.clear()
+    async_notifier.drain_notifications(None)
     yield
     for proc in list(bg._PROCESSES.values()):
         try:
@@ -22,6 +27,7 @@ def _clean_registry():
         except Exception:
             pass
     bg._PROCESSES.clear()
+    async_notifier.drain_notifications(None)
 
 
 def test_middleware_registers_four_tools():
@@ -68,7 +74,7 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     captured = {}
 
-    def _spy(command, cwd, name=None):
+    def _spy(command, cwd, name=None, on_exit=None):
         captured["command"] = command
         return "pidX"
 
@@ -76,6 +82,140 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     run_in_background.invoke({"command": "python /train.py"})
     # virtual absolute path -> workspace-relative, same as execute would produce
     assert captured["command"] == "python ./train.py"
+
+
+def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
+    """A finished background process enqueues a shell completion notification."""
+    from EvoScientist.cli import async_notifier
+
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    run_in_background.invoke({"command": "true", "name": "quick"})
+    time.sleep(0.8)  # let it exit + the watcher fire on_exit
+    notifs = async_notifier.drain_notifications(None)
+    assert any(
+        n.agent_name.startswith("shell:") and n.status == "success" for n in notifs
+    )
+
+
+def test_origin_thread_id_reads_runtime_config():
+    """thread_id is read from runtime.config['configurable'] (graph-injected)."""
+    from types import SimpleNamespace
+
+    from EvoScientist.middleware.background import _origin_thread_id
+
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "T-7"}})
+    assert _origin_thread_id(runtime) == "T-7"
+    assert _origin_thread_id(None) is None  # direct .invoke() / no runtime
+
+
+def test_notify_done_routes_to_origin_thread(tmp_path):
+    """_notify_done enqueues the completion notification to the launching thread."""
+    from EvoScientist.cli import async_notifier
+    from EvoScientist.middleware.background import _notify_done
+
+    pid = bg.launch("true", str(tmp_path))  # no on_exit -> no auto-notify here
+    time.sleep(0.5)  # exit
+    _notify_done(bg._PROCESSES[pid], "T-123")
+    routed = async_notifier.drain_notifications("T-123")
+    assert any(n.task_id == pid and n.origin_cli_thread_id == "T-123" for n in routed)
+
+
+def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
+    """A user-stopped process must NOT emit a completion notification."""
+    from EvoScientist.cli import async_notifier
+
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    run_in_background.invoke({"command": "sleep 600"})
+    (pid,) = list(bg._PROCESSES.keys())
+    stop_process.invoke({"process_id": pid})
+    time.sleep(0.5)
+    notifs = async_notifier.drain_notifications(None)
+    assert not any(n.task_id == pid for n in notifs)
+
+
+def test_checked_after_exit_dedups_notification(tmp_path):
+    """Agent checking a finished process suppresses its completion notification."""
+    from EvoScientist.cli.async_notifier import (
+        AsyncTaskNotification,
+        dedup_notifications,
+    )
+
+    pid = bg.launch("true", str(tmp_path))
+    time.sleep(0.5)  # exit
+    bg.status(pid)  # agent checks AFTER exit
+    assert bg.was_observed_done(pid) is True
+    n = AsyncTaskNotification(
+        task_id=pid, agent_name="shell:x", status="success", received_at="t"
+    )
+    assert dedup_notifications([n], {}) == []  # deduped
+
+
+def test_not_checked_after_exit_keeps_notification(tmp_path):
+    """A finished process the agent never checked still notifies."""
+    from EvoScientist.cli.async_notifier import (
+        AsyncTaskNotification,
+        dedup_notifications,
+    )
+
+    pid = bg.launch("true", str(tmp_path))
+    time.sleep(0.5)  # exit, but do NOT check
+    assert bg.was_observed_done(pid) is False
+    n = AsyncTaskNotification(
+        task_id=pid, agent_name="shell:x", status="success", received_at="t"
+    )
+    assert dedup_notifications([n], {}) == [n]  # survives
+
+
+def test_shell_notification_renders_own_background_frame():
+    """Shell notifications render under '✦ Background ✦', not 'Agent Teams'."""
+    from EvoScientist.cli.async_notifier import (
+        AsyncTaskNotification,
+        format_notification_lines,
+    )
+
+    n = AsyncTaskNotification(
+        task_id="fe60ce9c",
+        agent_name="shell:test-20s",
+        status="success",
+        received_at="",
+        prompt="python train.py",
+    )
+    lines = format_notification_lines([n])
+    top, body = lines[0][0], lines[1][0]
+    assert "Background" in top
+    assert "Agent Teams" not in top
+    assert "test-20s" in body  # shell: prefix stripped
+    assert "shell:" not in body
+    assert "Cmd:" in body
+
+
+def test_mixed_notifications_render_two_frames():
+    """A mixed batch shows both an Agent Teams frame and a Background frame."""
+    from EvoScientist.cli.async_notifier import (
+        AsyncTaskNotification,
+        format_notification_lines,
+    )
+
+    task = AsyncTaskNotification("t1", "writing-agent", "success", "", "")
+    shell = AsyncTaskNotification("p1", "shell:demo", "success", "", "")
+    blob = "\n".join(t for t, _ in format_notification_lines([task, shell]))
+    assert "Agent Teams" in blob
+    assert "Background" in blob
+
+
+def test_shell_notification_hints_check_process():
+    """format_batch_message points shell processes to check_process, not check_async_task."""
+    from EvoScientist.cli.async_notifier import (
+        AsyncTaskNotification,
+        format_batch_message,
+    )
+
+    n = AsyncTaskNotification(
+        task_id="ab12", agent_name="shell:demo", status="success", received_at="x"
+    )
+    msg = format_batch_message([n])
+    assert "check_process" in msg
+    assert "check_async_task" not in msg  # shell-only batch -> no sub-agent hint
 
 
 def test_check_and_list_route_to_manager(tmp_path, monkeypatch):
