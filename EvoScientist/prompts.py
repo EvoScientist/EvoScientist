@@ -243,20 +243,12 @@ python script.py
 pip install pandas
 ```
 
-**Long-running commands** (> 30 seconds): Run in background, then check results
+**Long-running commands** (> 30 seconds): prefer the `run_in_background` tool — it launches the command detached, streams output to a log, and returns a process id immediately. Then use `check_process(<id>)` for status + recent output, `stop_process(<id>)` to kill it, and `list_processes()` to see all background processes.
+
+If you must background manually instead, you MUST redirect output to a file (otherwise the call blocks) and capture the PID:
 ```bash
-# Step 1: Start in background, redirect output to log, and capture the PID
 python long_task.py > /output.log 2>&1 &
-echo "PID: $!"          # remember this PID to check or stop the job later
-
-# Step 2: Check if still running
-ps -p <PID>             # or: ps aux | grep long_task
-
-# Step 3: Read results when done
-cat /output.log
-
-# (Optional) Stop the job early
-kill <PID>
+echo "PID: $!"          # check: ps -p <PID>   ·   stop: kill <PID>   ·   read: cat /output.log
 ```
 
 **Before heavy compute**: Estimate runtime. If likely > 5 minutes, use background execution from the start. If GPU memory is uncertain, start with a small test run (1 epoch, small batch) before the full run.
