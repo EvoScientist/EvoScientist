@@ -135,6 +135,47 @@ class TestSharedConstantsAlignment:
 
         assert VALID_WORKSPACE_MODES == frozenset({"daemon", "run"})
 
+    def test_valid_providers_aligns_with_provider_key_attr(self):
+        """Every provider in ``VALID_PROVIDERS`` (except ``openai`` and
+        ``ollama``, which the wizard handles via fallbacks) must appear in
+        ``_PROVIDER_KEY_ATTR`` — otherwise the auth-mode flow won't know
+        which config attribute to write the validated key to."""
+        from EvoScientist.config.onboard.constants import VALID_PROVIDERS
+        from EvoScientist.config.onboard.wizard import _PROVIDER_KEY_ATTR
+
+        expected = set(VALID_PROVIDERS) - {"openai", "ollama"}
+        missing = expected - set(_PROVIDER_KEY_ATTR.keys())
+        assert not missing, (
+            "VALID_PROVIDERS has providers missing from _PROVIDER_KEY_ATTR "
+            f"in wizard.py: {missing}"
+        )
+        extra = set(_PROVIDER_KEY_ATTR.keys()) - expected
+        assert not extra, (
+            f"_PROVIDER_KEY_ATTR in wizard.py has keys not in VALID_PROVIDERS: {extra}"
+        )
+
+    def test_valid_providers_aligns_with_provider_key_info(self):
+        """``_provider_key_info`` uses ``mapping.get(provider, <openai
+        fallback>)``, so an unknown provider silently behaves like OpenAI.
+        Verify every non-``openai`` provider in ``VALID_PROVIDERS`` has an
+        explicit entry — detected by checking the returned display name is
+        not the OpenAI fallback string."""
+        from EvoScientist.config.onboard.constants import VALID_PROVIDERS
+        from EvoScientist.config.onboard.helpers import _provider_key_info
+
+        cfg = EvoScientistConfig()
+        for provider in VALID_PROVIDERS:
+            display_name, _, _ = _provider_key_info(cfg, provider)
+            if provider == "openai":
+                assert display_name == "OpenAI"
+            else:
+                assert display_name != "OpenAI", (
+                    f"Provider {provider!r} is missing from _provider_key_info "
+                    "in helpers.py — it falls through to the OpenAI default, "
+                    "which would silently send the wrong validator and "
+                    "current-key lookup."
+                )
+
 
 # =============================================================================
 # Test render_progress

@@ -11,8 +11,9 @@ Everything else lives in submodules — import directly from them:
   npx/node, LaTeX, iMessage helpers
 - :mod:`EvoScientist.config.onboard.style` — Rich styles + ``_checkbox_ask``
 - :mod:`EvoScientist.config.onboard.validators` — input validators
-- :mod:`EvoScientist.config.onboard.prompter` — ``Prompter`` Protocol +
-  ``QuestionaryPrompter`` / ``NonInteractivePrompter``
+- :mod:`EvoScientist.config.onboard.prompter` — ``NonInteractivePrompter``
+  (CLI-answer container) + ``select_navigation_active`` / ``GoBack`` for
+  keyboard nav
 - :mod:`EvoScientist.config.onboard.constants` — canonical valid-value sets
 
 This module used to re-export every symbol from every submodule for

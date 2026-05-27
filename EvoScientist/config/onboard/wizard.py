@@ -272,11 +272,10 @@ def run_onboard(
 
     Args:
         skip_validation: Skip API key validation.
-        prompter: Optional :class:`Prompter` instance. When a
-            :class:`NonInteractivePrompter` is passed, prompts whose answers
-            are pre-supplied (via ``--provider``, ``--model``, …) skip their
-            interactive form; sections in the prompter's ``skip_set`` are
-            skipped entirely.
+        prompter: Optional :class:`NonInteractivePrompter` carrying
+            CLI-supplied answers (``--provider``, ``--model``, …) and
+            ``skip_set`` (sections to bypass). When None, all prompts
+            fall through to the interactive questionary form.
         only_sections: If given, restrict the wizard to exactly these section
             ids — the Keep/Modify/Reset prompt is skipped. Used by ``EvoSci
             configure <section>`` to re-run a single phase.
@@ -306,24 +305,6 @@ def run_onboard(
 
     p = prompter if isinstance(prompter, NonInteractivePrompter) else None
     strict = bool(p and p.strict)
-
-    _PROVIDER_API_KEY_FLAG_MAP = {
-        "anthropic": "anthropic_api_key",
-        "openai": "openai_api_key",
-        "minimax": "minimax_api_key",
-        "nvidia": "nvidia_api_key",
-        "google-genai": "google_api_key",
-        "siliconflow": "siliconflow_api_key",
-        "openrouter": "openrouter_api_key",
-        "deepseek": "deepseek_api_key",
-        "zhipu": "zhipu_api_key",
-        "volcengine": "volcengine_api_key",
-        "dashscope": "dashscope_api_key",
-        "moonshot": "moonshot_api_key",
-        "kimi-coding": "kimi_api_key",
-        "custom-openai": "custom_openai_api_key",
-        "custom-anthropic": "custom_anthropic_api_key",
-    }
 
     def _preset(pid: str):
         """Return preset answer for ``pid`` if available, else None."""

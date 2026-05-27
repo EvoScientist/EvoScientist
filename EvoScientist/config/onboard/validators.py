@@ -50,6 +50,53 @@ class ChoiceValidator(Validator):
 # =============================================================================
 
 
+# Avoids bare "invalid" — collides with "Invalid request: model X not found".
+_AUTH_FAILURE_HINTS = (
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "authentication",
+    "invalid api key",
+    "invalid_api_key",
+    "incorrect api key",
+    "incorrect_api_key",
+    "api key not valid",
+    "invalid token",
+)
+
+_TRANSIENT_HINTS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "500",
+    "502",
+    "503",
+    "504",
+    "timeout",
+    "timed out",
+    "connection",
+    "service unavailable",
+    "temporarily unavailable",
+    "upstream",
+)
+
+
+def _classify_validation_error(error: BaseException) -> tuple[bool, str] | None:
+    """Classify a validator exception as auth failure, transient, or unknown.
+
+    Returns ``(False, msg)`` for the first two, ``None`` for unknown so the
+    caller can fall back to ``f"Error: {e}"``.
+    """
+    s = str(error).lower()
+    if any(h in s for h in _AUTH_FAILURE_HINTS):
+        return False, "Invalid API key"
+    if any(h in s for h in _TRANSIENT_HINTS):
+        return False, "Validation inconclusive — transient error, try again later"
+    return None
+
+
 def validate_anthropic_key(api_key: str) -> tuple[bool, str]:
     """Validate an Anthropic API key by making a test request.
 
@@ -72,6 +119,9 @@ def validate_anthropic_key(api_key: str) -> tuple[bool, str]:
     except anthropic.AuthenticationError:
         return False, "Invalid API key"
     except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -97,6 +147,9 @@ def validate_openai_key(api_key: str) -> tuple[bool, str]:
     except openai.AuthenticationError:
         return False, "Invalid API key"
     except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -124,14 +177,9 @@ def validate_nvidia_key(api_key: str) -> tuple[bool, str]:
         return True, "Valid"
 
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -159,15 +207,12 @@ def validate_google_key(api_key: str) -> tuple[bool, str]:
         # Empty result but request succeeded — key is valid
         return True, "Valid"
     except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        # Google-specific 400 phrasing not in the shared hint list.
         error_str = str(e).lower()
-        if (
-            "400" in error_str
-            or "401" in error_str
-            or "403" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "api key" in error_str
-        ):
+        if "api_key_invalid" in error_str or "api key invalid" in error_str:
             return False, "Invalid API key"
         return False, f"Error: {e}"
 
@@ -213,6 +258,9 @@ def validate_minimax_key(
         # etc.) means the key itself was accepted → treat as valid.
         return True, "Valid"
     except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -234,14 +282,9 @@ def validate_siliconflow_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -272,6 +315,9 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
             return False, "Invalid API key"
         return False, f"Validation inconclusive (HTTP {resp.status_code})"
     except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -291,14 +337,9 @@ def validate_deepseek_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -323,14 +364,9 @@ def validate_zhipu_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -353,14 +389,9 @@ def validate_volcengine_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -383,14 +414,9 @@ def validate_dashscope_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -421,14 +447,9 @@ def validate_dashscope_code_key(api_key: str) -> tuple[bool, str]:
         )
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid_api_key" in error_str
-            or "authentication" in error_str
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -451,11 +472,9 @@ def validate_moonshot_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if any(
-            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -481,11 +500,9 @@ def validate_kimi_key(api_key: str) -> tuple[bool, str]:
         client.models.list()
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if any(
-            k in error_str for k in ("401", "unauthorized", "invalid", "authentication")
-        ):
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 
@@ -509,9 +526,9 @@ def validate_tavily_key(api_key: str) -> tuple[bool, str]:
         client.search("test", max_results=1)
         return True, "Valid"
     except Exception as e:
-        error_str = str(e).lower()
-        if "invalid" in error_str or "unauthorized" in error_str or "401" in error_str:
-            return False, "Invalid API key"
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
         return False, f"Error: {e}"
 
 

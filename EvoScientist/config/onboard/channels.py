@@ -253,6 +253,17 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                             f"  [dim]Run manually:[/dim] {pip_install_hint()} {_pkg_display}"
                         )
             if not _pkg_ready:
+                # Previously-enabled channels are silently dropped from
+                # ``channel_enabled`` if we just ``continue`` — warn.
+                if ch_name in _currently_enabled:
+                    console.print(
+                        f"  [bold yellow]⚠ {display} will be DISABLED[/bold yellow]"
+                        " [dim](dependency missing — re-run after install)[/dim]"
+                    )
+                else:
+                    console.print(
+                        f"  [dim]Skipping {display} — dependency not installed.[/dim]"
+                    )
                 continue
 
         # Special handling for iMessage
@@ -401,7 +412,13 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         raise KeyboardInterrupt() from None
                     if install_now and install_library("qrcode>=7.4"):
                         console.print("  [green]✓ Installed qrcode.[/green]")
+                    else:
+                        console.print(
+                            "  [yellow]⚠ Falling back to manual entry.[/yellow]"
+                        )
+                        scan_choice = "manual"
 
+            if scan_choice == "scan":
                 # Region selection — accounts.feishu.cn vs accounts.larksuite.com.
                 # The poll endpoint auto-switches if the scanning user is on the
                 # other tenant, so this is just a starting hint.
