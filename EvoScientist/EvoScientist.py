@@ -539,7 +539,7 @@ def _get_default_agent():
         be = _get_default_backend()
         mw = _get_default_middleware()
 
-        hitl_interrupt_on = {"execute": True} if not cfg.auto_approve else None
+        hitl_interrupt_on = {"execute": True}
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(be, mw)
@@ -654,7 +654,7 @@ def create_cli_agent(
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
     mw: list[AgentMiddleware] = _get_default_middleware()
 
-    hitl_interrupt_on = {"execute": True} if not cfg.auto_approve else None
+    hitl_interrupt_on = {"execute": True}
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(be, mw, on_mcp_progress=on_mcp_progress)

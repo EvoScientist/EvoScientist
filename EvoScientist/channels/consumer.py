@@ -507,6 +507,7 @@ class InboundConsumer:
                 subagent_text_buffers: dict[str, tuple[str, list[str]]] = {}
                 thinking_sent = False
                 interrupt_data: dict | None = None
+                pending_hitl_interrupts: dict[str, dict] = {}
 
                 async def _flush_thinking_buffer(
                     buffer: list[str] = thinking_buffer,
@@ -582,8 +583,8 @@ class InboundConsumer:
                         final_content = event.get("content", "") or final_content
 
                     elif event_type == "interrupt":
-                        interrupt_data = event
-                        break  # exit async for to handle interrupt
+                        _iid = event.get("interrupt_id", "default")
+                        pending_hitl_interrupts[_iid] = event
 
                     elif event_type == "ask_user":
                         interrupt_data = event
@@ -593,7 +594,7 @@ class InboundConsumer:
                 await _flush_thinking_buffer()
 
                 # No interrupt — normal completion
-                if interrupt_data is None:
+                if interrupt_data is None and not pending_hitl_interrupts:
                     outbound = OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
@@ -624,100 +625,103 @@ class InboundConsumer:
                     stream_input = Command(resume=result)
                     continue
 
-                # HITL: resolve the interrupt
-                action_reqs = interrupt_data.get("action_requests", [])
-                n = len(action_reqs) or 1
+                # HITL: resolve all pending interrupts
+                from langgraph.types import Command  # type: ignore[import-untyped]
 
-                # Session auto-approve — but forced confirmation still overrides
-                if session_key in self._auto_approve_sessions and _should_auto_approve(
-                    action_reqs
-                ):
-                    from langgraph.types import Command  # type: ignore[import-untyped]
-
-                    stream_input = Command(
-                        resume={"decisions": [{"type": "approve"} for _ in range(n)]}
-                    )
-                    continue
-
-                # Config auto-approve (auto_approve, non-execute, allow_list)
-                if _should_auto_approve(action_reqs):
-                    from langgraph.types import Command  # type: ignore[import-untyped]
-
-                    stream_input = Command(
-                        resume={"decisions": [{"type": "approve"} for _ in range(n)]}
-                    )
-                    continue
-
-                # Needs user approval — send prompt to channel
                 has_buttons = (
                     channel is not None and channel.capabilities.inline_buttons
                 )
-                prompt_text = _format_approval_prompt(
-                    action_reqs, with_buttons=has_buttons
-                )
-                approval_metadata = _approval_prompt_metadata(
-                    msg.metadata, with_buttons=has_buttons
-                )
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=prompt_text,
-                        metadata=approval_metadata,
+                resume_map: dict[str, dict] = {}
+
+                for _iid, _iev in pending_hitl_interrupts.items():
+                    action_reqs = _iev.get("action_requests", [])
+                    n = len(action_reqs) or 1
+
+                    # Auto-approve (session + config, respects forced confirmation)
+                    if (
+                        session_key in self._auto_approve_sessions
+                        or _should_auto_approve(action_reqs)
+                    ) and _should_auto_approve(action_reqs):
+                        resume_map[_iid] = {
+                            "decisions": [{"type": "approve"} for _ in range(n)]
+                        }
+                        continue
+
+                    # Needs user approval
+                    prompt_text = _format_approval_prompt(
+                        action_reqs, with_buttons=has_buttons
                     )
-                )
-
-                # Wait for user reply
-                pending = _PendingInterrupt(
-                    thread_id=thread_id,
-                    action_requests=action_reqs,
-                    event=asyncio.Event(),
-                )
-                self._pending_interrupts[session_key] = pending
-
-                try:
-                    await asyncio.wait_for(
-                        pending.event.wait(),
-                        timeout=_HITL_APPROVAL_TIMEOUT,
-                    )
-                except TimeoutError:
-                    pending.decision = "reject"
-                finally:
-                    self._pending_interrupts.pop(session_key, None)
-
-                decision = pending.decision or "reject"
-
-                # Visible confirmation so the click/reply registers (QQ has no
-                # message recall API for C2C).  Only fires when the user
-                # actually responded — silent on timeout to avoid claiming
-                # the user approved when they just walked away.
-                if pending.event.is_set():
-                    feedback_text = {
-                        "approve": "\u2705 已批准",
-                        "auto": "\u2705 已批准（后续自动通过）",
-                        "reject": "\u274c 已拒绝",
-                    }.get(decision)
-                    if feedback_text:
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content=feedback_text,
-                                metadata=msg.metadata,
-                            )
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=prompt_text,
+                            metadata=_approval_prompt_metadata(
+                                msg.metadata, with_buttons=has_buttons
+                            ),
                         )
+                    )
 
-                if decision == "reject":
-                    return
+                    pending = _PendingInterrupt(
+                        thread_id=thread_id,
+                        action_requests=action_reqs,
+                        event=asyncio.Event(),
+                    )
+                    self._pending_interrupts[session_key] = pending
+                    try:
+                        await asyncio.wait_for(
+                            pending.event.wait(),
+                            timeout=_HITL_APPROVAL_TIMEOUT,
+                        )
+                    except TimeoutError:
+                        pending.decision = "reject"
+                    finally:
+                        self._pending_interrupts.pop(session_key, None)
 
-                if decision == "auto":
-                    self._auto_approve_sessions.add(session_key)
+                    decision = pending.decision or "reject"
 
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                    if pending.event.is_set():
+                        feedback = {
+                            "approve": "\u2705 已批准",
+                            "auto": "\u2705 已批准（后续自动通过）",
+                            "reject": "\u274c 已拒绝",
+                        }.get(decision)
+                        if feedback:
+                            await self.bus.publish_outbound(
+                                OutboundMessage(
+                                    channel=msg.channel,
+                                    chat_id=msg.chat_id,
+                                    content=feedback,
+                                    metadata=msg.metadata,
+                                )
+                            )
 
-                stream_input = Command(
-                    resume={"decisions": [{"type": "approve"} for _ in range(n)]}
-                )
+                    if decision == "reject":
+                        # Reject this + fill remaining with rejects
+                        resume_map[_iid] = {
+                            "decisions": [
+                                {"type": "reject", "message": "Rejected"}
+                                for _ in range(n)
+                            ]
+                        }
+                        for _rid, _rev in pending_hitl_interrupts.items():
+                            if _rid not in resume_map:
+                                _rn = len(_rev.get("action_requests", [])) or 1
+                                resume_map[_rid] = {
+                                    "decisions": [
+                                        {"type": "reject", "message": "Rejected"}
+                                        for _ in range(_rn)
+                                    ]
+                                }
+                        break
+
+                    if decision == "auto":
+                        self._auto_approve_sessions.add(session_key)
+                    resume_map[_iid] = {
+                        "decisions": [{"type": "approve"} for _ in range(n)]
+                    }
+
+                stream_input = Command(resume=resume_map)
                 # continue to next HITL round
 
         except TimeoutError:

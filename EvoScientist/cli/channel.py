@@ -629,9 +629,20 @@ def channel_hitl_prompt(
     )
 
     # Check session auto-approve (set by a previous "3" reply)
+    # Forced-confirmation patterns still require manual approval
     session_key = f"{msg.channel_type}:{msg.chat_id}"
     if session_key in _hitl_auto_approve:
-        return [{"type": "approve"} for _ in action_requests]
+        from ..backends import check_forced_confirmation
+
+        has_forced = any(
+            check_forced_confirmation(
+                (r.get("args", {}) if isinstance(r, dict) else {}).get("command", "")
+            )
+            for r in action_requests
+            if (r.get("name", "") if isinstance(r, dict) else "") == "execute"
+        )
+        if not has_forced:
+            return [{"type": "approve"} for _ in action_requests]
 
     bus_loop = _bus_loop
     if not (bus_loop and msg.bus_ref):
