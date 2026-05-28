@@ -59,11 +59,20 @@ class TestValidateCommand:
     def test_python_m_pip_install_flagged(self):
         from EvoScientist.backends import check_forced_confirmation
 
-        r = check_forced_confirmation("python -m pip install pandas")
-        assert r is not None
-        assert "install" in r.lower()
-        assert check_forced_confirmation("python3 -m pip install requests") is not None
-        assert check_forced_confirmation("python3.11 -m pip install foo") is not None
+        for cmd in [
+            "python -m pip install pandas",
+            "python3 -m pip install requests",
+            "python3.11 -m pip install foo",
+        ]:
+            assert validate_command(cmd) is None, (
+                f"should be soft-blocked, not hard: {cmd}"
+            )
+            r = check_forced_confirmation(cmd)
+            assert r is not None, f"should be flagged: {cmd}"
+        assert (
+            "install"
+            in check_forced_confirmation("python -m pip install pandas").lower()
+        )
 
     def test_blocked_rm_rf_absolute(self):
         result = validate_command("rm -rf /important")

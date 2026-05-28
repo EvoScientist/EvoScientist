@@ -642,10 +642,13 @@ class InboundConsumer:
                     # Auto-approve: session flag or config, but forced confirmation overrides
                     _has_forced = any(
                         check_forced_confirmation(
-                            (r.get("args", {}) if isinstance(r, dict) else {}).get("command", "")
+                            (r.get("args", {}) if isinstance(r, dict) else {}).get(
+                                "command", ""
+                            )
                         )
                         for r in action_reqs
-                        if (r.get("name", "") if isinstance(r, dict) else "") == "execute"
+                        if (r.get("name", "") if isinstance(r, dict) else "")
+                        == "execute"
                     )
                     if not _has_forced and (
                         session_key in self._auto_approve_sessions
