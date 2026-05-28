@@ -662,6 +662,24 @@ def run_onboard(
             if "tavily" in sections_to_run:
                 preset_tavily = _preset("tavily_key")
                 if preset_tavily is not None:
+                    # Validate the preset key like the --api-key path does;
+                    # the non-interactive flow can't show a "Save anyway?"
+                    # prompt, so a failed validation is fatal.
+                    if not skip_validation:
+                        from .validators import validate_tavily_key
+
+                        console.print(
+                            "  [dim]Validating preset Tavily key...[/dim]", end=""
+                        )
+                        valid, msg = validate_tavily_key(preset_tavily)
+                        if valid:
+                            console.print(f"\r  [green]✓ {msg}[/green]      ")
+                        else:
+                            console.print(f"\r  [red]✗ {msg}[/red]      ")
+                            raise RuntimeError(
+                                f"--tavily-key rejected by validator: {msg}. "
+                                "Pass --skip-validation to override."
+                            )
                     config.tavily_api_key = preset_tavily
                     console.print(
                         f"  [green]✓ Tavily key: ***{preset_tavily[-4:]}[/green]"

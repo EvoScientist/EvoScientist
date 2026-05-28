@@ -1351,6 +1351,88 @@ class TestRunOnboard:
             "during the wizard run"
         )
 
+    def test_preset_tavily_key_rejected_by_validator_is_fatal(self):
+        """``--tavily-key`` preset must be validated like ``--api-key``;
+        a rejected key raises rather than silently saving."""
+        import pytest
+
+        from EvoScientist.config.onboard.prompter import NonInteractivePrompter
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        prompter = NonInteractivePrompter(answers={"tavily_key": "tvly-bad"})
+
+        with (
+            patch(
+                "EvoScientist.config.onboard.wizard.load_config",
+                return_value=EvoScientistConfig(),
+            ),
+            patch("EvoScientist.config.onboard.wizard.save_config"),
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch(
+                "EvoScientist.config.onboard.validators.validate_tavily_key",
+                return_value=(False, "Invalid API key"),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="--tavily-key rejected"):
+                run_onboard(
+                    skip_validation=False,
+                    prompter=prompter,
+                    only_sections={"tavily"},
+                )
+
+    def test_preset_tavily_key_skips_validation_when_flagged(self):
+        """``--skip-validation`` must bypass the preset tavily check."""
+        from EvoScientist.config.onboard.prompter import NonInteractivePrompter
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        prompter = NonInteractivePrompter(answers={"tavily_key": "tvly-bad"})
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch(
+                "EvoScientist.config.onboard.wizard.load_config",
+                return_value=EvoScientistConfig(),
+            ),
+            patch("EvoScientist.config.onboard.wizard.save_config"),
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch(
+                "EvoScientist.config.onboard.validators.validate_tavily_key"
+            ) as mock_validate,
+        ):
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save? = Yes
+            run_onboard(
+                skip_validation=True,
+                prompter=prompter,
+                only_sections={"tavily"},
+            )
+            mock_validate.assert_not_called()
+
+
+class TestOnboardCliErrorPresentation:
+    """The CLI must turn the wizard's non-interactive ``RuntimeError`` signals
+    into a clean message + exit code 1, not a raw Python traceback."""
+
+    def test_runtime_error_becomes_clean_typer_exit(self):
+        import typer
+
+        from EvoScientist.cli.commands import _run_onboard_cli
+
+        with (
+            patch(
+                "EvoScientist.config.onboard.run_onboard",
+                side_effect=RuntimeError("--tavily-key rejected by validator: nope"),
+            ),
+            patch("EvoScientist.cli.commands.console") as mock_console,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                _run_onboard_cli(skip_validation=False)
+
+        assert exc_info.value.exit_code == 1
+        # The error message reaches the user via console, not a traceback.
+        printed = " ".join(str(c.args[0]) for c in mock_console.print.call_args_list)
+        assert "rejected by validator" in printed
+
 
 # =============================================================================
 # Test TinyTeX helpers

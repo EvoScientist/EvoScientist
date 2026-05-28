@@ -106,7 +106,6 @@ def onboard(
     interactive unless ``--non-interactive`` is passed, in which case any
     missing required answer aborts the wizard.
     """
-    from ..config import run_onboard
     from ..config.onboard.constants import (
         VALID_PROVIDERS,
         VALID_UI_BACKENDS,
@@ -180,7 +179,7 @@ def onboard(
             strict=non_interactive,
         )
 
-    run_onboard(skip_validation=skip_validation, prompter=prompter)
+    _run_onboard_cli(skip_validation=skip_validation, prompter=prompter)
 
 
 # =============================================================================
@@ -203,11 +202,28 @@ _CONFIGURE_SECTIONS = {
 }
 
 
-def _configure_section(section: str, skip_validation: bool = False) -> None:
-    """Run a single onboarding section, reusing the wizard's step logic."""
+def _run_onboard_cli(**kwargs: Any) -> None:
+    """Invoke the wizard, presenting non-interactive errors as a clean
+    message + exit code 1 instead of a raw Python traceback.
+
+    The wizard raises ``RuntimeError`` for *expected* non-interactive
+    failures: rejected ``--api-key`` / ``--tavily-key`` presets, missing
+    required flags under ``--non-interactive``, or a missing base URL.
+    Those are user-input problems, not bugs — surface them like any other
+    CLI validation error rather than dumping a stack trace.
+    """
     from ..config import run_onboard
 
-    run_onboard(
+    try:
+        run_onboard(**kwargs)
+    except RuntimeError as exc:
+        console.print(f"[red]✗ {escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
+
+
+def _configure_section(section: str, skip_validation: bool = False) -> None:
+    """Run a single onboarding section, reusing the wizard's step logic."""
+    _run_onboard_cli(
         skip_validation=skip_validation,
         only_sections={section},
     )
@@ -236,9 +252,7 @@ def configure_provider(
     when the provider was switched to ``openai`` would break the first
     request. Press Enter on the model picker to keep the current default.
     """
-    from ..config import run_onboard
-
-    run_onboard(
+    _run_onboard_cli(
         skip_validation=skip_validation,
         only_sections={"provider", "model"},
     )
