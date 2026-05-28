@@ -97,32 +97,104 @@ class ModelCommand(Command):
             )
             return
 
-        entries = list_models_by_provider()
+        async def _build_entries() -> list[tuple[str, str, str]]:
+            """Build the (name, model_id, provider) entry list.
 
-        # Ollama models are locally-installed — probe the daemon for the list
-        # the user has actually pulled. Gated on ollama_base_url being set
-        # (issue non-goal forbids implicit localhost detection).
-        ollama_base_url = getattr(cfg, "ollama_base_url", None)
-        if ollama_base_url:
-            from ...llm.ollama_discovery import discover_ollama_models
+            For all supported providers, dynamic models from the cache are used.
+            If dynamic models are available for a provider, they REPLACE the
+            static registry models for that provider.
+            """
+            entries = list_models_by_provider()
 
-            detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
-            for detected_name in detected:
-                entries.append((detected_name, detected_name, "ollama"))
-            # Always append the sentinel so users can type a name even when
-            # the daemon is down or no models have been pulled yet. The widget
-            # swaps the sentinel name for the typed value before posting Picked.
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+            from ...llm.model_cache import (
+                _SUPPORTED,
+                PRIORITY_MODELS,
+                get_cached_models,
+            )
+
+            # 1. Map provider -> dynamic models from cache
+            dynamic_cache: dict[str, list[str]] = {}
+            for provider_name in _SUPPORTED:
+                base_url = None
+                if provider_name.startswith("custom-"):
+                    attr_name = f"{provider_name.replace('-', '_')}_base_url"
+                    base_url = getattr(cfg, attr_name, None)
+
+                dynamic_ids = get_cached_models(provider_name, base_url=base_url)
+                if dynamic_ids:
+                    dynamic_cache[provider_name] = dynamic_ids
+
+            # 2. Rebuild the list: if a provider has dynamic models, discard its
+            # static ones and use the dynamic ones instead.
+            if dynamic_cache:
+                new_entries: list[tuple[str, str, str]] = []
+                handled_dynamic: set[str] = set()
+
+                for nm, mid, prov in entries:
+                    if prov in dynamic_cache:
+                        if prov not in handled_dynamic:
+                            # First time seeing this provider: insert all its dynamic models
+                            # Sort using PRIORITY_MODELS
+                            priority_entries = []
+                            other_entries = []
+                            for d_id in dynamic_cache[prov]:
+                                clean_id = d_id.split("/")[-1] if "/" in d_id else d_id
+                                if clean_id in PRIORITY_MODELS:
+                                    priority_entries.append((d_id, d_id, prov))
+                                else:
+                                    other_entries.append((d_id, d_id, prov))
+                            new_entries.extend(priority_entries)
+                            new_entries.extend(other_entries)
+                            handled_dynamic.add(prov)
+                        # Skip the static entry
+                        continue
+                    new_entries.append((nm, mid, prov))
+
+                # Add any dynamic models for providers that HAD NO static entries
+                for prov, d_ids in dynamic_cache.items():
+                    if prov not in handled_dynamic:
+                        priority_entries = []
+                        other_entries = []
+                        for d_id in d_ids:
+                            clean_id = d_id.split("/")[-1] if "/" in d_id else d_id
+                            if clean_id in PRIORITY_MODELS:
+                                priority_entries.append((d_id, d_id, prov))
+                            else:
+                                other_entries.append((d_id, d_id, prov))
+                        new_entries.extend(priority_entries)
+                        new_entries.extend(other_entries)
+                entries = new_entries
+
+            # 3. Ollama models are locally-installed — probe the daemon for the list
+            # the user has actually pulled. Gated on ollama_base_url being set.
+            ollama_base_url = getattr(cfg, "ollama_base_url", None)
+            if ollama_base_url:
+                from ...llm.ollama_discovery import discover_ollama_models
+
+                detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
+                for detected_name in detected:
+                    entries.append((detected_name, detected_name, "ollama"))
+                # Always append the sentinel so users can type a name even when
+                # the daemon is down or no models have been pulled yet.
+                entries.append(
+                    ("Custom Ollama model...", "__custom_ollama__", "ollama")
+                )
+
+            return entries
+
+        entries = await _build_entries()
 
         result = await ctx.ui.wait_for_model_pick(
             entries,
             current_model=current_model,
             current_provider=current_provider,
         )
+
         if result is None:
             return
 
         name, provider = result
+
         # Defense-in-depth: the widget should have replaced the sentinel with
         # the user-typed name. If it didn't, treat as cancel rather than try
         # to switch to a literal "__custom_ollama__" model.
@@ -132,6 +204,7 @@ class ModelCommand(Command):
         ):
             return
         await self._apply_model(ctx, name, provider, save=save)
+        return
 
     async def _apply_model(
         self,

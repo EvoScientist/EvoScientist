@@ -31,6 +31,20 @@ from .validators import (
 )
 
 
+def _get_base_url_from_config(config: EvoScientistConfig, provider: str) -> str | None:
+    """Return the configured base URL for *provider*, or ``None``."""
+    if provider == "custom-openai":
+        return config.custom_openai_base_url or None
+    if provider == "custom-anthropic":
+        return config.custom_anthropic_base_url or None
+    if provider == "minimax":
+        url = config.minimax_base_url or ""
+        if url:
+            return url.replace("/anthropic", "/v1")
+        return None
+    return None
+
+
 def _provider_key_info(config: EvoScientistConfig, provider: str):
     """Return (display_name, current_value, validate_fn) for a provider."""
     mapping = {
