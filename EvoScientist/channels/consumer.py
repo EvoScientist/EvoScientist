@@ -628,6 +628,8 @@ class InboundConsumer:
                 # HITL: resolve all pending interrupts
                 from langgraph.types import Command  # type: ignore[import-untyped]
 
+                from ..backends import check_forced_confirmation
+
                 has_buttons = (
                     channel is not None and channel.capabilities.inline_buttons
                 )
@@ -637,11 +639,18 @@ class InboundConsumer:
                     action_reqs = _iev.get("action_requests", [])
                     n = len(action_reqs) or 1
 
-                    # Auto-approve (session + config, respects forced confirmation)
-                    if (
+                    # Auto-approve: session flag or config, but forced confirmation overrides
+                    _has_forced = any(
+                        check_forced_confirmation(
+                            (r.get("args", {}) if isinstance(r, dict) else {}).get("command", "")
+                        )
+                        for r in action_reqs
+                        if (r.get("name", "") if isinstance(r, dict) else "") == "execute"
+                    )
+                    if not _has_forced and (
                         session_key in self._auto_approve_sessions
                         or _should_auto_approve(action_reqs)
-                    ) and _should_auto_approve(action_reqs):
+                    ):
                         resume_map[_iid] = {
                             "decisions": [{"type": "approve"} for _ in range(n)]
                         }
