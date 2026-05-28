@@ -429,9 +429,17 @@ def set_config_value(key: str, value: Any) -> bool:
     field_info = next(f for f in fields(EvoScientistConfig) if f.name == key)
     field_type = field_info.type
 
+    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
+    # (_coerce_value(True, int) would turn it into 1 and slip past).
+    if key == "sandbox_execute_timeout" and isinstance(value, bool):
+        return False
+
     try:
         value = _coerce_value(value, field_type)
     except (ValueError, TypeError):
+        return False
+
+    if key == "sandbox_execute_timeout" and value <= 0:
         return False
 
     setattr(config, key, value)

@@ -235,7 +235,7 @@ SHELL_GUIDELINES = """# Shell Execution Guidelines
 
 When using the `execute` tool for shell commands:
 
-**Sandbox limits**: Commands default to a 300s timeout and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below).
+**Sandbox limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below).
 
 **Short commands** (< 30 seconds): Run directly
 ```bash

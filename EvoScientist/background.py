@@ -86,8 +86,8 @@ def was_observed_done(process_id: str) -> bool:
     """True if the agent already saw this process's completion itself.
 
     i.e. the process has exited AND was checked (``status``/``list_all``) at or after it
-    finished. Used to dedup the completion notification — mirrors the async sub-agent
-    dedup, so the agent isn't pinged about something it already inspected.
+    finished. Used to dedup the completion notification. ``last_checked_ts`` is global, not
+    per-thread (intentional — worst case is a missed auto-ping, never a false one).
     """
     with _LOCK:
         proc = _PROCESSES.get(process_id)
@@ -97,14 +97,20 @@ def was_observed_done(process_id: str) -> bool:
 
 
 def _read_tail(log_path: Path, tail_bytes: int) -> str:
+    # Seek from the end so a huge log isn't fully read into memory on each status check.
     try:
-        data = log_path.read_bytes()
+        with log_path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                return "(no output yet)"
+            if size > tail_bytes:
+                f.seek(-tail_bytes, os.SEEK_END)
+                return "...(truncated)...\n" + f.read().decode("utf-8", "replace")
+            f.seek(0)
+            data = f.read()
     except OSError:
         return "(no output captured yet)"
-    if not data:
-        return "(no output yet)"
-    if len(data) > tail_bytes:
-        return "...(truncated)...\n" + data[-tail_bytes:].decode("utf-8", "replace")
     return data.decode("utf-8", "replace")
 
 
@@ -226,9 +232,9 @@ def stop(process_id: str) -> str:
         # Mark as user-stopped so the watcher's on_exit suppresses the completion
         # notification (the user already knows — no need to ping them).
         proc.stopped = True
-        # Holding the lock across poll()+killpg() means no concurrent caller can
-        # poll()/reap this child in between, so the pid can't be recycled before we
-        # signal it — closes the PID-reuse window.
+        # The watcher's popen.wait() reaps without the lock, so a tiny PID-reuse race
+        # remains (getpgid on a recycled pid). ProcessLookupError handles the common case;
+        # the window is too narrow to be worth coordinating the watcher.
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except ProcessLookupError:

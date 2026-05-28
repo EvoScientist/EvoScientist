@@ -412,6 +412,21 @@ class TestPriorityChain:
             == 300
         )
 
+    def test_set_sandbox_execute_timeout_rejects_invalid(
+        self, temp_config_dir, clean_env
+    ):
+        """set_config_value must reject (not silently persist) a non-positive timeout."""
+        save_config(EvoScientistConfig(sandbox_execute_timeout=120))
+        assert set_config_value("sandbox_execute_timeout", 0) is False
+        assert set_config_value("sandbox_execute_timeout", -5) is False
+        # bool is an int subclass; reject it before coercion turns True into 1.
+        assert set_config_value("sandbox_execute_timeout", True) is False
+        # The earlier valid value is untouched on disk.
+        assert get_config_value("sandbox_execute_timeout") == 120
+        # A valid value still goes through.
+        assert set_config_value("sandbox_execute_timeout", 600) is True
+        assert get_config_value("sandbox_execute_timeout") == 600
+
     def test_env_api_key_override(self, temp_config_dir, monkeypatch):
         """Test API keys from env override file."""
         save_config(EvoScientistConfig(anthropic_api_key="file-key"))

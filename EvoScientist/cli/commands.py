@@ -1395,7 +1395,7 @@ def config_set(
     if set_config_value(key, value):
         console.print(f"[green]Set {escape(key)}[/green]")
     else:
-        console.print(f"[red]Invalid key: {escape(key)}[/red]")
+        console.print(f"[red]Could not set {escape(key)}: invalid key or value[/red]")
         raise typer.Exit(1)
 
 

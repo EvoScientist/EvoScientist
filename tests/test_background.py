@@ -7,6 +7,16 @@ import pytest
 from EvoScientist import background as bg
 
 
+def _wait_until(predicate, timeout=4.0, interval=0.05):
+    """Poll ``predicate`` until true or ``timeout`` — avoids flaky fixed sleeps on slow CI."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry():
     """Isolate each test: clear the module-global registry and reap leftovers."""
@@ -29,7 +39,7 @@ def test_launch_returns_id_and_creates_log(tmp_path):
 def test_status_running_then_exited(tmp_path):
     pid = bg.launch("sleep 1", str(tmp_path))
     assert "RUNNING" in bg.status(pid)
-    time.sleep(1.6)
+    assert _wait_until(lambda: "EXITED" in bg.status(pid))
     out = bg.status(pid)
     assert "EXITED" in out
     assert "code 0" in out
@@ -37,8 +47,18 @@ def test_status_running_then_exited(tmp_path):
 
 def test_output_captured_in_status(tmp_path):
     pid = bg.launch("echo hello-from-bg", str(tmp_path))
-    time.sleep(0.6)
-    assert "hello-from-bg" in bg.status(pid)
+    assert _wait_until(lambda: "hello-from-bg" in bg.status(pid))
+
+
+def test_large_log_returns_truncated_tail(tmp_path):
+    """status() preserves the truncation contract for a large log (output shape, not I/O)."""
+    pid = bg.launch("true", str(tmp_path))
+    log_path = tmp_path / ".bg_processes" / f"{pid}.log"
+    log_path.write_bytes(b"A" * 5000 + b"TAIL_MARKER")
+    out = bg.status(pid, tail_bytes=64)
+    assert "...(truncated)..." in out
+    assert "TAIL_MARKER" in out
+    assert "A" * 5000 not in out  # the head was not loaded
 
 
 def test_stop_kills_running_process(tmp_path):
@@ -51,26 +71,26 @@ def test_stop_kills_running_process(tmp_path):
 
 def test_stop_already_finished_is_graceful(tmp_path):
     pid = bg.launch("true", str(tmp_path))
-    time.sleep(0.4)
+    assert _wait_until(lambda: bg._PROCESSES[pid].popen.poll() is not None)
     assert "already finished" in bg.stop(pid)
 
 
 def test_exited_elapsed_is_frozen(tmp_path):
     """Elapsed for an exited process freezes at its runtime, it must not keep growing."""
     pid = bg.launch("true", str(tmp_path))
-    time.sleep(0.3)
+    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     bg.status(pid)  # observe exit -> records finished_ts
     proc = bg._PROCESSES[pid]
     assert proc.finished_ts is not None
     first = bg._elapsed(proc)
-    time.sleep(1.1)
-    assert bg._elapsed(proc) == first  # frozen, not ticking up
+    time.sleep(1.1)  # intentional: prove elapsed stays frozen, not ticking up
+    assert bg._elapsed(proc) == first
 
 
 def test_watcher_records_exit_without_polling(tmp_path):
     """The daemon watcher records exit on its own (no status() call needed)."""
     pid = bg.launch("true", str(tmp_path))
-    time.sleep(0.6)  # let the watcher wait() + record
+    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     proc = bg._PROCESSES[pid]
     assert proc.finished_ts is not None
     assert proc.returncode == 0
@@ -85,7 +105,7 @@ def test_on_exit_callback_fires(tmp_path):
         fired["rc"] = proc.returncode
 
     pid = bg.launch("true", str(tmp_path), on_exit=cb)
-    time.sleep(0.6)
+    assert _wait_until(lambda: fired.get("pid") == pid and fired.get("rc") == 0)
     assert fired.get("pid") == pid
     assert fired.get("rc") == 0
 
