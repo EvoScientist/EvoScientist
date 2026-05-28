@@ -1237,16 +1237,19 @@ class TestRunOnboard:
         # snapshot back when the user declines — so save_config IS called.
         mock_save.assert_called()
 
-    def test_reset_then_no_restores_pre_wizard_config(self):
-        """Regression: Reset → No must restore the original user config,
+    def test_reset_then_no_restores_pre_wizard_config(self, tmp_path):
+        """Regression: Reset → No must restore the original user file,
         NOT overwrite it with ``EvoScientistConfig()`` defaults.
 
         Reproduces a bug where the snapshot was refreshed after Reset, so
         declining the save silently wiped the user's previous settings.
+        Verifies the raw-bytes revert path introduced for CodeRabbit's
+        "file absence on cancel" comment.
         """
         from EvoScientist.config.onboard.wizard import run_onboard
+        from EvoScientist.config.settings import save_config
 
-        # Existing config: user previously configured OpenAI + gpt-5
+        config_file = tmp_path / "config.yaml"
         existing = EvoScientistConfig(
             provider="openai",
             model="gpt-5",
@@ -1255,28 +1258,85 @@ class TestRunOnboard:
         )
 
         mock_q = MagicMock()
+        with patch(
+            "EvoScientist.config.settings.get_config_path", return_value=config_file
+        ):
+            save_config(existing)
+            # Append a comment that ``save_config`` would strip on
+            # re-serialization. The test then proves revert restored the
+            # EXACT bytes (not just rewrote the snapshot via save_config
+            # and got lucky because logical content matched).
+            with config_file.open("ab") as f:
+                f.write(b"\n# user manual comment - must survive revert\n")
+            original_bytes = config_file.read_bytes()
+
+            with (
+                _patch_all_questionary(mock_q),
+                patch(
+                    "EvoScientist.config.onboard.wizard.get_config_path",
+                    return_value=config_file,
+                ),
+                patch("EvoScientist.config.onboard.wizard.console"),
+                patch("EvoScientist.config.onboard.steps.console"),
+                patch("EvoScientist.config.onboard.channels.console"),
+                patch("EvoScientist.config.onboard.helpers.console"),
+                patch("EvoScientist.config.onboard.wizard._step_tinytex"),
+            ):
+                mock_q.select.return_value.ask.side_effect = [
+                    "reset",  # Keep/Modify/Reset → Reset
+                    "tui",
+                    "anthropic",
+                    "api_key",
+                    "claude-sonnet-4-5",
+                    "daemon",
+                    True,
+                ]
+                mock_q.password.return_value.ask.side_effect = ["", ""]
+                mock_q.confirm.return_value.ask.side_effect = [False]  # Save? = No
+                mock_q.text.return_value.ask.side_effect = [""]
+                mock_q.checkbox.return_value.ask.return_value = []
+
+                result = run_onboard(skip_validation=True)
+
+        assert result is False
+        assert config_file.exists(), "file should still exist after revert"
+        assert config_file.read_bytes() == original_bytes, (
+            "revert must restore EXACT pre-wizard bytes, not autosaved state"
+        )
+
+    def test_revert_removes_file_when_none_existed(self, tmp_path):
+        """Brand-new user (no config.yaml) declines the final save: the file
+        created by autosaves should be deleted to match the original state.
+        """
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        config_file = tmp_path / "config.yaml"
+        assert not config_file.exists()
+
+        mock_q = MagicMock()
         with (
             _patch_all_questionary(mock_q),
             patch(
-                "EvoScientist.config.onboard.wizard.load_config", return_value=existing
+                "EvoScientist.config.settings.get_config_path",
+                return_value=config_file,
             ),
-            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch(
+                "EvoScientist.config.onboard.wizard.get_config_path",
+                return_value=config_file,
+            ),
             patch("EvoScientist.config.onboard.wizard.console"),
             patch("EvoScientist.config.onboard.steps.console"),
             patch("EvoScientist.config.onboard.channels.console"),
             patch("EvoScientist.config.onboard.helpers.console"),
             patch("EvoScientist.config.onboard.wizard._step_tinytex"),
         ):
-            # Keep/Modify/Reset prompt → Reset; then complete the wizard,
-            # then say No to "Save?".
             mock_q.select.return_value.ask.side_effect = [
-                "reset",  # Keep/Modify/Reset → Reset
-                "tui",  # UI backend
-                "anthropic",  # Provider
-                "api_key",  # Anthropic auth mode
-                "claude-sonnet-4-5",  # Model
-                "daemon",  # Workspace mode
-                True,  # Show thinking
+                "tui",
+                "anthropic",
+                "api_key",
+                "claude-sonnet-4-5",
+                "daemon",
+                True,
             ]
             mock_q.password.return_value.ask.side_effect = ["", ""]
             mock_q.confirm.return_value.ask.side_effect = [False]  # Save? = No
@@ -1286,13 +1346,10 @@ class TestRunOnboard:
             result = run_onboard(skip_validation=True)
 
         assert result is False
-        # The LAST save_config call must contain the *original* config,
-        # not the default-EvoScientistConfig() that Reset produced.
-        final_saved = mock_save.call_args_list[-1].args[0]
-        assert final_saved.provider == "openai"
-        assert final_saved.model == "gpt-5"
-        assert final_saved.openai_api_key == "sk-existing"
-        assert final_saved.ui_backend == "cli"
+        assert not config_file.exists(), (
+            "revert must delete file that was autosaved into existence "
+            "during the wizard run"
+        )
 
 
 # =============================================================================

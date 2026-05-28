@@ -161,7 +161,9 @@ _FLAG_TO_SECTIONS: dict[str, frozenset[str]] = {
     "ui": frozenset({"ui"}),
     "port": frozenset({"port"}),
     "provider": frozenset({"provider", "model"}),
-    "api_key": frozenset({"provider"}),
+    # ``--api-key`` re-runs the provider section, which can change provider —
+    # cascade to model for the same reason ``--provider`` does.
+    "api_key": frozenset({"provider", "model"}),
     "model": frozenset({"model"}),
     "tavily_key": frozenset({"tavily"}),
     "workspace_mode": frozenset({"workspace"}),
@@ -324,8 +326,27 @@ def run_onboard(
             _print_header()
 
             # Load existing config as starting point + snapshot for revert.
+            # Also capture raw file state so a "No" at the final save can
+            # restore the exact pre-wizard byte content (or remove the file
+            # entirely if it did not exist before). ``existed`` and
+            # ``bytes`` are tracked independently so a read failure on a
+            # file that DID exist doesn't get downgraded to "no file" —
+            # which would cause revert to delete the user's config.
             config = load_config()
             snapshot = copy.deepcopy(config)
+            config_path = get_config_path()
+            original_file_existed = config_path.exists()
+            original_file_bytes: bytes | None = None
+            if original_file_existed:
+                try:
+                    original_file_bytes = config_path.read_bytes()
+                except OSError as exc:
+                    console.print(
+                        "[yellow]Warning: could not snapshot existing config "
+                        f"bytes ({exc}); revert will fall back to a re-serialized "
+                        "snapshot, which may not preserve comments / unknown "
+                        "fields.[/yellow]"
+                    )
 
             # Decide which sections this run should cover.
             #
@@ -727,8 +748,30 @@ def run_onboard(
                 console.print()
                 return True
             else:
-                # User declined — restore the pre-wizard snapshot.
-                save_config(snapshot)
+                # User declined — restore exact pre-wizard file state.
+                # Three cases driven by the capture-time flags:
+                #   1. ``existed=False`` → file is new, delete it (autosaves
+                #      during the run created it).
+                #   2. ``existed=True`` + bytes captured → restore bytes
+                #      verbatim, preserves comments / unknown fields.
+                #   3. ``existed=True`` + bytes None (read failed at capture)
+                #      → fall back to ``save_config(snapshot)`` since we
+                #      can't restore the exact bytes; still better than
+                #      leaving the mid-wizard state in place.
+                try:
+                    if not original_file_existed:
+                        if config_path.exists():
+                            config_path.unlink()
+                    elif original_file_bytes is not None:
+                        config_path.write_bytes(original_file_bytes)
+                    else:
+                        save_config(snapshot)
+                except OSError as exc:
+                    save_config(snapshot)
+                    console.print(
+                        f"[yellow]Revert via raw bytes failed ({exc}); "
+                        "wrote parsed snapshot instead.[/yellow]"
+                    )
                 console.print()
                 console.print(
                     "[yellow]Reverted to previous configuration "
