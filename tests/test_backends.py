@@ -170,6 +170,17 @@ class TestConvertVirtualPaths:
         )
         assert result == "cat ./tmp/somefile"
 
+    def test_system_path_workspace_name_appears_twice(self):
+        """Regression: workspace_name appears in BOTH the parent path and the
+        workspace dir itself (e.g. ~/workspace/.../workspace). Must strip at
+        the LAST occurrence — first-occurrence would leave the path nested.
+        """
+        result = convert_virtual_paths_in_command(
+            "cat /Users/xizhang/workspace/EvoSci/EvoScientist/workspace/debate_sim.py",
+            workspace_name="workspace",
+        )
+        assert result == "cat ./debate_sim.py"
+
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
 
@@ -644,6 +655,45 @@ class TestResolvePath:
         resolved = backend._resolve_path("/src/main.py")
         assert str(resolved).endswith("src/main.py")
 
+    def test_parent_path_contains_workspace_name(self, tmp_path):
+        """Regression: cwd's parent path also contains '/<ws_name>/'.
+
+        E.g. cwd = ~/workspace/EvoSci/EvoScientist/workspace — there is a
+        '/workspace/' in the parent (~/workspace) AND the cwd basename is
+        'workspace'. The old code used ``find()`` which matched the outer
+        '/workspace/' and produced a nested write target.
+        """
+        outer = tmp_path / "workspace" / "EvoSci" / "EvoScientist"
+        ws = outer / "workspace"
+        ws.mkdir(parents=True)
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+
+        # Agent supplies the full literal cwd path
+        resolved = backend._resolve_path(str(ws) + "/debate_sim.py")
+        expected = (ws / "debate_sim.py").resolve()
+        assert Path(resolved).resolve() == expected, (
+            f"resolved={resolved} expected={expected}"
+        )
+
+    def test_parent_path_contains_workspace_name_subdir(self, tmp_path):
+        """Same edge case, but the agent path is for a sub-directory file."""
+        outer = tmp_path / "workspace" / "proj"
+        ws = outer / "workspace"
+        (ws / "sub").mkdir(parents=True)
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+
+        resolved = backend._resolve_path(str(ws) + "/sub/file.py")
+        expected = (ws / "sub" / "file.py").resolve()
+        assert Path(resolved).resolve() == expected
+
+    def test_exact_cwd_equals_root(self, tmp_workspace):
+        """Direct cover of the new ``key == cwd_str`` exact-equality branch:
+        passing the literal cwd string (no trailing slash, no extra path)
+        must resolve to the same path as the virtual root ``/``.
+        """
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        assert backend._resolve_path(tmp_workspace) == backend._resolve_path("/")
+
 
 # === CustomSandboxBackend.id ===
 
@@ -683,6 +733,29 @@ class TestExecuteCwdSanitization:
         # The dir should be created at workspace/test-sanitized, not nested
         assert (Path(tmp_workspace) / "test-sanitized").is_dir()
         assert not (Path(tmp_workspace) / tmp_workspace.lstrip("/")).exists()
+
+    def test_execute_e2e_parent_path_contains_workspace_name(self, tmp_path):
+        """End-to-end regression: when cwd's parent path *and* basename both
+        contain '/<ws_name>/' (e.g. ~/workspace/.../workspace), an absolute
+        write command must land inside cwd, not in a nested location.
+        Pre-fix, ``find()`` matched the outer '/workspace/' and produced
+        ``./<intermediate>/workspace/file.txt`` — the file existed, but not
+        where the agent thinks it does.
+        """
+        outer = tmp_path / "workspace" / "EvoSci" / "EvoScientist"
+        ws = outer / "workspace"
+        ws.mkdir(parents=True)
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+
+        target = ws / "probe.txt"
+        resp = backend.execute(f"echo hi > {target}")
+        assert resp.exit_code == 0, resp.output
+
+        # File must land at cwd/probe.txt, NOT at cwd/EvoSci/EvoScientist/workspace/probe.txt
+        assert target.is_file(), f"file not at expected location: {target}"
+        assert target.read_text().strip() == "hi"
+        nested = ws / "EvoSci" / "EvoScientist" / "workspace" / "probe.txt"
+        assert not nested.exists(), f"file leaked into nested path: {nested}"
 
 
 # === execute() output truncation ===

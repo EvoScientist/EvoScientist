@@ -68,7 +68,10 @@ _FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "references home directory '~' (may leak sensitive files)",
     ),
     (re.compile(r"\$[A-Za-z_{]"), "expands environment variables (may leak secrets)"),
-    (re.compile(r"\b(?:printenv|env)\b"), "reads environment variables (may leak secrets)"),
+    (
+        re.compile(r"\b(?:printenv|env)\b"),
+        "reads environment variables (may leak secrets)",
+    ),
     (
         re.compile(r"(?<!\|)\|(?!\|)"),
         "contains pipe (output chained to another command)",
@@ -385,7 +388,11 @@ def convert_virtual_paths_in_command(
             for prefix in _SYSTEM_PATH_PREFIXES:
                 if path.startswith(prefix):
                     marker = f"/{workspace_name}/"
-                    idx = path.find(marker)
+                    # rfind, not find: the workspace's parent path may itself
+                    # contain "/<workspace_name>/" (e.g. dev tree under
+                    # ~/workspace/.../workspace). Last occurrence is the
+                    # boundary closest to the file.
+                    idx = path.rfind(marker)
                     if idx != -1:
                         relative = path[idx + len(marker) :]
                         return "./" + relative if relative else "."
@@ -605,11 +612,21 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Intercepts all file operations (read, write, edit, ls, grep, glob).
         Auto-corrects common LLM path mistakes instead of crashing:
-          1. /<ws_name>/file.py            → /file.py
-          2. /Users/name/.../<ws_name>/f   → /f  (strip up to ws dir)
-          3. /Users/name/file.py           → /file.py (keep basename)
+          1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
+          2. /<ws_name>/file.py            → /file.py
+          3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
+          4. /Users/name/file.py           → /file.py (keep basename)
         """
-        ws_name = Path(str(self.cwd)).name  # e.g. "workspace", "my-project"
+        cwd_str = str(self.cwd).rstrip("/")
+        ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
+
+        # Prefer the full cwd match so a parent path that happens to contain
+        # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
+        # confuse the basename-based fallback below.
+        if key == cwd_str:
+            return super()._resolve_path("/")
+        if key.startswith(cwd_str + "/"):
+            return super()._resolve_path("/" + key[len(cwd_str) + 1 :])
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
@@ -621,8 +638,10 @@ class CustomSandboxBackend(LocalShellBackend):
         # Auto-correct system absolute paths
         for prefix in _SYSTEM_PATH_PREFIXES:
             if key.startswith(prefix):
-                # Try to extract path after "<ws_name>/"
-                idx = key.find(ws_prefix)
+                # rfind, not find: the cwd's parent path may itself contain
+                # "/<ws_name>/" as a substring, and we want the boundary
+                # nearest the file — the workspace mount.
+                idx = key.rfind(ws_prefix)
                 if idx != -1:
                     key = "/" + key[idx + len(ws_prefix) :]
                 elif key.endswith(f"/{ws_name}"):

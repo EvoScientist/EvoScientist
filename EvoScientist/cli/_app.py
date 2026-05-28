@@ -58,3 +58,12 @@ sessions_app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(sessions_app, name="sessions")
+
+# Configure subcommand group — re-run a single onboarding section.
+configure_app = typer.Typer(
+    help=(
+        "Re-run one onboarding section without going through the full wizard.\n"
+        "Example: EvoSci configure provider"
+    ),
+)
+app.add_typer(configure_app, name="configure")
