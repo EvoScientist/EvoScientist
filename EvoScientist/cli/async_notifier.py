@@ -40,6 +40,7 @@ class AsyncTaskNotification:
     status: str  # one of TERMINAL_STATUSES
     received_at: str  # ISO-8601 UTC timestamp
     prompt: str = ""  # original task description sent to the sub-agent
+    kind: str = "agent"  # "agent" (sub-agent) | "bg-process" (background shell)
     # The CLI/main-agent thread_id under which the watcher was spawned. Used
     # to route the notification back to the originating CLI session so a
     # /new between launch and completion does not inject the synthetic
@@ -379,10 +380,11 @@ def dedup_notifications(
     async_tasks = async_tasks or {}
     survivors: list[AsyncTaskNotification] = []
     for n in notifs:
-        if n.agent_name.startswith("shell:"):
-            # Background process: skip if the agent already inspected it after it
-            # finished (check_process / list_processes) — mirrors the task dedup below.
-            if background.was_observed_done(n.task_id):
+        if n.kind == "bg-process":
+            # Background process: skip if the launching session already inspected it
+            # after it finished (check_process / list_processes) — mirrors the task
+            # dedup below. Per-thread: another session's check doesn't suppress this.
+            if background.was_observed_done(n.task_id, n.origin_cli_thread_id):
                 logger.debug("Dedup: skipping shell notification for %s", n.task_id)
                 continue
             survivors.append(n)
@@ -416,8 +418,8 @@ def _render_notification_group(
     bottom_divider = "╰" + "─" * (len(top_divider) - 1)
     lines: list[tuple[str, str]] = [(top_divider, "dim")]
     for n in notifs:
-        # `shell:test-20s` → `test-20s`; `writing-agent` → `writing`.
-        name = n.agent_name.removeprefix("shell:").removesuffix("-agent")
+        # `writing-agent` → `writing`.
+        name = n.agent_name.removesuffix("-agent")
         if n.status == "success":
             icon, color = "✔", "#e67e22"  # carrot orange (CSS hex; Rich+Textual)
         elif n.status == "error":
@@ -455,8 +457,8 @@ def format_notification_lines(
     """
     if not notifs:
         return []
-    tasks = [n for n in notifs if not n.agent_name.startswith("shell:")]
-    shell = [n for n in notifs if n.agent_name.startswith("shell:")]
+    tasks = [n for n in notifs if n.kind != "bg-process"]
+    shell = [n for n in notifs if n.kind == "bg-process"]
     lines: list[tuple[str, str]] = []
     if tasks:
         lines += _render_notification_group(tasks, " ✦ Agent Teams ✦ ", "Task")
@@ -479,16 +481,20 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
     for n in notifs:
         lines.append(
             json.dumps(
-                {"agent": n.agent_name, "status": n.status, "task_id": n.task_id},
+                {
+                    "agent": n.agent_name,
+                    "kind": n.kind,
+                    "status": n.status,
+                    "task_id": n.task_id,
+                },
                 ensure_ascii=False,
             )
         )
-    # Shell background processes (agent_name "shell:…") are inspected with
-    # check_process; async sub-agents with check_async_task. Name the right tool(s).
+    # bg-process is inspected with check_process; sub-agents with check_async_task.
     hints: list[str] = []
-    if any(not n.agent_name.startswith("shell:") for n in notifs):
+    if any(n.kind != "bg-process" for n in notifs):
         hints.append("check_async_task (sub-agents)")
-    if any(n.agent_name.startswith("shell:") for n in notifs):
+    if any(n.kind == "bg-process" for n in notifs):
         hints.append("check_process (background processes)")
     lines.append(
         f"(Signal only — fetch full result via {' or '.join(hints)} if relevant to "

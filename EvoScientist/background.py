@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,11 +46,14 @@ class BgProcess:
     log_path: Path
     started_at: str  # ISO-8601 UTC (record/display)
     started_ts: float  # epoch seconds (elapsed computation)
+    origin_thread_id: str | None = None  # CLI thread/session that launched it
     returncode: int | None = None
     finished_at: str | None = None
     finished_ts: float | None = None  # epoch at exit; freezes elapsed once done
     stopped: bool = False  # set by stop(); suppresses the completion notification
-    last_checked_ts: float | None = None  # epoch the agent last checked (status/list)
+    # epoch each thread last checked this process (status/list); keyed by thread_id
+    # so a check from one session can't dedup another session's completion ping.
+    last_checked_by_thread: dict[str | None, float] = field(default_factory=dict)
 
 
 _PROCESSES: dict[str, BgProcess] = {}
@@ -82,18 +85,19 @@ def _elapsed(proc: BgProcess) -> int:
     return int(end - proc.started_ts)
 
 
-def was_observed_done(process_id: str) -> bool:
-    """True if the agent already saw this process's completion itself.
+def was_observed_done(process_id: str, origin_thread_id: str | None = None) -> bool:
+    """True if ``origin_thread_id`` already saw this process's completion itself.
 
-    i.e. the process has exited AND was checked (``status``/``list_all``) at or after it
-    finished. Used to dedup the completion notification. ``last_checked_ts`` is global, not
-    per-thread (intentional — worst case is a missed auto-ping, never a false one).
+    i.e. the process has exited AND was checked (``status``/``list_all``) from that thread
+    at or after it finished. Used to dedup the completion notification (routed to the
+    launching thread), so a check from a *different* session can't suppress it.
     """
     with _LOCK:
         proc = _PROCESSES.get(process_id)
-        if proc is None or proc.finished_ts is None or proc.last_checked_ts is None:
+        if proc is None or proc.finished_ts is None:
             return False
-        return proc.last_checked_ts >= proc.finished_ts
+        seen_ts = proc.last_checked_by_thread.get(origin_thread_id)
+        return seen_ts is not None and seen_ts >= proc.finished_ts
 
 
 def _read_tail(log_path: Path, tail_bytes: int) -> str:
@@ -140,6 +144,7 @@ def launch(
     cwd: str,
     name: str | None = None,
     *,
+    origin_thread_id: str | None = None,
     on_exit: Callable[[BgProcess], None] | None = None,
 ) -> str:
     """Launch ``command`` detached in ``cwd``; return a short ``process_id``.
@@ -149,6 +154,7 @@ def launch(
     process-group leader (survives this call's return and can be killed as a group).
     The caller is responsible for validating ``command`` first.
 
+    ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
     ``on_exit`` (optional) is called with the ``BgProcess`` from a daemon watcher thread
     once the process exits — used by the CLI layer to emit a completion notification.
     """
@@ -182,6 +188,7 @@ def launch(
         log_path=log_path,
         started_at=_now_iso(),
         started_ts=time.time(),
+        origin_thread_id=origin_thread_id,
     )
     with _LOCK:
         _PROCESSES[process_id] = proc
@@ -190,7 +197,9 @@ def launch(
     return process_id
 
 
-def status(process_id: str, *, tail_bytes: int = 16_000) -> str:
+def status(
+    process_id: str, *, thread_id: str | None = None, tail_bytes: int = 16_000
+) -> str:
     """Return a human-readable status + recent output tail for ``process_id``."""
     with _LOCK:
         proc = _PROCESSES.get(process_id)
@@ -200,7 +209,7 @@ def status(process_id: str, *, tail_bytes: int = 16_000) -> str:
                 "Use list_processes to see tracked processes."
             )
         _record_exit(proc)
-        proc.last_checked_ts = time.time()  # agent observed this process
+        proc.last_checked_by_thread[thread_id] = time.time()  # this thread observed it
         running = proc.returncode is None
         elapsed = _elapsed(proc)
         name, pid, command, returncode, log_path = (
@@ -263,17 +272,30 @@ def stop(process_id: str) -> str:
     return f"Stopped background process {process_id} (name={name!r})."
 
 
-def list_all() -> str:
-    """List all tracked background processes with live statuses."""
+def list_all(thread_id: str | None = None, *, include_all: bool = False) -> str:
+    """List tracked background processes with live statuses.
+
+    Scoped to the launching session (``thread_id``) unless ``include_all`` is set.
+    """
     with _LOCK:
-        procs = list(_PROCESSES.values())
+        all_procs = list(_PROCESSES.values())
+        procs = (
+            all_procs
+            if include_all
+            else [p for p in all_procs if p.origin_thread_id == thread_id]
+        )
         if not procs:
+            if all_procs and not include_all:
+                return (
+                    "No background processes in this session "
+                    f"({len(all_procs)} in other sessions — pass all_threads=True to see them)."
+                )
             return "No background processes tracked."
         lines = []
         now = time.time()
         for p in procs:
             _record_exit(p)
-            p.last_checked_ts = now  # agent observed this process
+            p.last_checked_by_thread[thread_id] = now  # this thread observed it
             state = "RUNNING" if p.returncode is None else f"exited({p.returncode})"
             lines.append(
                 f"  {p.process_id}  {state:12}  {_elapsed(p)}s  name={p.name!r}"

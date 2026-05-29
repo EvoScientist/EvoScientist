@@ -16,6 +16,12 @@ from typing import Any, Literal
 import yaml
 from dotenv import find_dotenv, load_dotenv
 
+# Tools that run shell commands and need manual HITL approval (subject to
+# shell_allow_list). Single source of truth for every interrupt consumer
+# (stream/display.py, channels/consumer.py) — keep aligned with the agent's
+# `interrupt_on` set in EvoScientist.py.
+HITL_SHELL_TOOLS = ("execute", "run_in_background")
+
 # =============================================================================
 # Configuration paths
 # =============================================================================

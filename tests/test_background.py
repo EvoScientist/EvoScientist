@@ -121,3 +121,32 @@ def test_list_all(tmp_path):
     listing = bg.list_all()
     assert pid in listing
     assert "RUNNING" in listing
+
+
+def test_list_all_scopes_to_origin_thread(tmp_path):
+    """list_all defaults to the launching session; include_all sees every session."""
+    pid_a = bg.launch("sleep 1", str(tmp_path), origin_thread_id="A")
+    pid_b = bg.launch("sleep 1", str(tmp_path), origin_thread_id="B")
+    listing_a = bg.list_all("A")
+    assert pid_a in listing_a
+    assert pid_b not in listing_a  # B's process is hidden from session A
+    everything = bg.list_all("A", include_all=True)
+    assert pid_a in everything
+    assert pid_b in everything
+
+
+def test_list_all_hints_at_other_sessions(tmp_path):
+    """A session with no processes of its own is told others exist."""
+    bg.launch("sleep 1", str(tmp_path), origin_thread_id="A")
+    out = bg.list_all("B")  # a different session
+    assert "other sessions" in out
+    assert "all_threads=True" in out
+
+
+def test_dedup_is_per_thread(tmp_path):
+    """A check from one session must not suppress another session's completion ping."""
+    pid = bg.launch("true", str(tmp_path), origin_thread_id="A")
+    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
+    bg.status(pid, thread_id="B")  # a DIFFERENT session inspects it
+    assert bg.was_observed_done(pid, "B") is True  # B saw it
+    assert bg.was_observed_done(pid, "A") is False  # launcher A did not -> still notify

@@ -394,8 +394,18 @@ def test_format_batch_message_multiple():
     assert lines[0] == "[Async tasks update]"
     obj1 = __import__("json").loads(lines[1])
     obj2 = __import__("json").loads(lines[2])
-    assert obj1 == {"agent": "writing-agent", "status": "success", "task_id": "t1"}
-    assert obj2 == {"agent": "data-analysis-agent", "status": "error", "task_id": "t2"}
+    assert obj1 == {
+        "agent": "writing-agent",
+        "kind": "agent",
+        "status": "success",
+        "task_id": "t1",
+    }
+    assert obj2 == {
+        "agent": "data-analysis-agent",
+        "kind": "agent",
+        "status": "error",
+        "task_id": "t2",
+    }
     assert "check_async_task" in msg.lower()  # hint to LLM
 
 

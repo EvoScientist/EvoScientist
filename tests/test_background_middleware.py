@@ -14,6 +14,16 @@ from EvoScientist.middleware.background import (
 )
 
 
+def _wait_until(predicate, timeout=4.0, interval=0.05):
+    """Poll ``predicate`` until true or ``timeout`` — avoids flaky fixed sleeps on slow CI."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry():
     from EvoScientist.cli import async_notifier
@@ -74,7 +84,7 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     captured = {}
 
-    def _spy(command, cwd, name=None, on_exit=None):
+    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
         captured["command"] = command
         return "pidX"
 
@@ -90,11 +100,15 @@ def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
 
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     run_in_background.invoke({"command": "true", "name": "quick"})
-    time.sleep(0.8)  # let it exit + the watcher fire on_exit
-    notifs = async_notifier.drain_notifications(None)
-    assert any(
-        n.agent_name.startswith("shell:") and n.status == "success" for n in notifs
-    )
+    # drain consumes, so accumulate across polls until the watcher's on_exit enqueues.
+    notifs = []
+    deadline = time.time() + 4.0
+    while time.time() < deadline:
+        notifs.extend(async_notifier.drain_notifications(None))
+        if any(n.kind == "bg-process" for n in notifs):
+            break
+        time.sleep(0.05)
+    assert any(n.kind == "bg-process" and n.status == "success" for n in notifs)
 
 
 def test_origin_thread_id_reads_runtime_config():
@@ -114,7 +128,7 @@ def test_notify_done_routes_to_origin_thread(tmp_path):
     from EvoScientist.middleware.background import _notify_done
 
     pid = bg.launch("true", str(tmp_path))  # no on_exit -> no auto-notify here
-    time.sleep(0.5)  # exit
+    _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     _notify_done(bg._PROCESSES[pid], "T-123")
     routed = async_notifier.drain_notifications("T-123")
     assert any(n.task_id == pid and n.origin_cli_thread_id == "T-123" for n in routed)
@@ -128,7 +142,9 @@ def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
     run_in_background.invoke({"command": "sleep 600"})
     (pid,) = list(bg._PROCESSES.keys())
     stop_process.invoke({"process_id": pid})
-    time.sleep(0.5)
+    # Wait until the watcher observed the exit — it would have enqueued here if the
+    # process weren't user-stopped. _notify_done is a no-op for stopped processes.
+    _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     notifs = async_notifier.drain_notifications(None)
     assert not any(n.task_id == pid for n in notifs)
 
@@ -141,11 +157,15 @@ def test_checked_after_exit_dedups_notification(tmp_path):
     )
 
     pid = bg.launch("true", str(tmp_path))
-    time.sleep(0.5)  # exit
+    _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     bg.status(pid)  # agent checks AFTER exit
     assert bg.was_observed_done(pid) is True
     n = AsyncTaskNotification(
-        task_id=pid, agent_name="shell:x", status="success", received_at="t"
+        task_id=pid,
+        agent_name="x",
+        status="success",
+        received_at="t",
+        kind="bg-process",
     )
     assert dedup_notifications([n], {}) == []  # deduped
 
@@ -158,10 +178,16 @@ def test_not_checked_after_exit_keeps_notification(tmp_path):
     )
 
     pid = bg.launch("true", str(tmp_path))
-    time.sleep(0.5)  # exit, but do NOT check
+    _wait_until(
+        lambda: bg._PROCESSES[pid].finished_ts is not None
+    )  # exit, but do NOT check
     assert bg.was_observed_done(pid) is False
     n = AsyncTaskNotification(
-        task_id=pid, agent_name="shell:x", status="success", received_at="t"
+        task_id=pid,
+        agent_name="x",
+        status="success",
+        received_at="t",
+        kind="bg-process",
     )
     assert dedup_notifications([n], {}) == [n]  # survives
 
@@ -175,17 +201,17 @@ def test_shell_notification_renders_own_background_frame():
 
     n = AsyncTaskNotification(
         task_id="fe60ce9c",
-        agent_name="shell:test-20s",
+        agent_name="test-20s",
         status="success",
         received_at="",
         prompt="python train.py",
+        kind="bg-process",
     )
     lines = format_notification_lines([n])
     top, body = lines[0][0], lines[1][0]
     assert "Background" in top
     assert "Agent Teams" not in top
-    assert "test-20s" in body  # shell: prefix stripped
-    assert "shell:" not in body
+    assert "test-20s" in body
     assert "Cmd:" in body
 
 
@@ -197,7 +223,7 @@ def test_mixed_notifications_render_two_frames():
     )
 
     task = AsyncTaskNotification("t1", "writing-agent", "success", "", "")
-    shell = AsyncTaskNotification("p1", "shell:demo", "success", "", "")
+    shell = AsyncTaskNotification("p1", "demo", "success", "", "", kind="bg-process")
     blob = "\n".join(t for t, _ in format_notification_lines([task, shell]))
     assert "Agent Teams" in blob
     assert "Background" in blob
@@ -211,7 +237,11 @@ def test_shell_notification_hints_check_process():
     )
 
     n = AsyncTaskNotification(
-        task_id="ab12", agent_name="shell:demo", status="success", received_at="x"
+        task_id="ab12",
+        agent_name="demo",
+        status="success",
+        received_at="x",
+        kind="bg-process",
     )
     msg = format_batch_message([n])
     assert "check_process" in msg
@@ -227,3 +257,18 @@ def test_check_and_list_route_to_manager(tmp_path, monkeypatch):
     assert "Stopped" in stop_process.invoke(
         {"process_id": pid}
     ) or "finished" in stop_process.invoke({"process_id": pid})
+
+
+def test_list_processes_forwards_all_threads(monkeypatch):
+    """The all_threads tool arg is forwarded to background.list_all(include_all=...)."""
+    captured = {}
+
+    def _spy(thread_id=None, *, include_all=False):
+        captured["include_all"] = include_all
+        return "ok"
+
+    monkeypatch.setattr(bg, "list_all", _spy)
+    list_processes.invoke({"all_threads": True})
+    assert captured["include_all"] is True
+    list_processes.invoke({})
+    assert captured["include_all"] is False

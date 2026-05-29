@@ -49,10 +49,11 @@ def _notify_done(proc: background.BgProcess, origin_thread_id: str | None) -> No
     async_notifier._enqueue(
         async_notifier.AsyncTaskNotification(
             task_id=proc.process_id,
-            agent_name=f"shell:{proc.name}",
+            agent_name=proc.name,
             status=status,
             received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             prompt=proc.command,
+            kind="bg-process",
             origin_cli_thread_id=origin_thread_id,
         )
     )
@@ -81,7 +82,7 @@ def run_in_background(
         return error
     tid = _origin_thread_id(runtime)
     process_id = background.launch(
-        command, cwd, name, on_exit=lambda p: _notify_done(p, tid)
+        command, cwd, name, origin_thread_id=tid, on_exit=lambda p: _notify_done(p, tid)
     )
     label = f" (name={name!r})" if name else ""
     return (
@@ -92,13 +93,13 @@ def run_in_background(
 
 
 @tool(parse_docstring=True)
-def check_process(process_id: str) -> str:
+def check_process(process_id: str, runtime: ToolRuntime = None) -> str:
     """Check a background process's status and recent output.
 
     Args:
         process_id: The id returned by run_in_background.
     """
-    return background.status(process_id)
+    return background.status(process_id, thread_id=_origin_thread_id(runtime))
 
 
 @tool(parse_docstring=True)
@@ -112,9 +113,13 @@ def stop_process(process_id: str) -> str:
 
 
 @tool(parse_docstring=True)
-def list_processes() -> str:
-    """List all background processes launched this session with their live statuses."""
-    return background.list_all()
+def list_processes(all_threads: bool = False, runtime: ToolRuntime = None) -> str:
+    """List background processes launched this session with their live statuses.
+
+    Args:
+        all_threads: List processes from every session, not just the current one.
+    """
+    return background.list_all(_origin_thread_id(runtime), include_all=all_threads)
 
 
 class BackgroundExecutionMiddleware(AgentMiddleware):
