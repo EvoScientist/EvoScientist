@@ -166,12 +166,16 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
 
 
 def _format_approval_prompt(
-    action_requests: list[dict], *, with_buttons: bool = False
+    action_requests: list[dict],
+    *,
+    with_buttons: bool = False,
+    forced: bool = False,
 ) -> str:
     """Format an approval prompt as a text message for channel users.
 
     When *with_buttons* is True, the trailing "Reply: 1=Approve..."
     instruction is dropped — the buttons replace the textual cue.
+    When *forced* is True, the "3=Approve all" option is hidden.
     """
     lines = ["\u26a0\ufe0f Approval Required\n"]
     for i, req in enumerate(action_requests, 1):
@@ -191,7 +195,10 @@ def _format_approval_prompt(
             lines.append(f"  {i}. {name}")
     if not with_buttons:
         lines.append("")
-        lines.append("Reply: 1=Approve, 2=Reject, 3=Approve all")
+        if forced:
+            lines.append("Reply: 1=Approve, 2=Reject")
+        else:
+            lines.append("Reply: 1=Approve, 2=Reject, 3=Approve all")
         lines.append("(Auto-reject in 2 min if no reply)")
     return "\n".join(lines)
 
@@ -212,21 +219,22 @@ def _parse_approval_reply(text: str) -> str | None:
 
 
 def _approval_prompt_metadata(
-    base_metadata: dict | None, *, with_buttons: bool
+    base_metadata: dict | None, *, with_buttons: bool, forced: bool = False
 ) -> dict:
     """Outbound metadata for the HITL approval prompt.
 
-    When *with_buttons* is True, attaches Approve/Reject/Auto buttons whose
-    values match ``_parse_approval_reply`` so a click flows through the same
-    path as a typed ``"1"``/``"2"``/``"3"`` reply.
+    When *with_buttons* is True, attaches Approve/Reject/Auto buttons.
+    When *forced* is True, the "Approve all" button is omitted.
     """
     metadata = dict(base_metadata or {})
     if with_buttons:
-        metadata["buttons"] = [
+        buttons = [
             {"text": "Approve", "value": "1", "type": "primary"},
             {"text": "Reject", "value": "2", "type": "danger"},
-            {"text": "Approve all", "value": "3"},
         ]
+        if not forced:
+            buttons.append({"text": "Approve all", "value": "3"})
+        metadata["buttons"] = buttons
     return metadata
 
 
@@ -661,7 +669,7 @@ class InboundConsumer:
 
                     # Needs user approval
                     prompt_text = _format_approval_prompt(
-                        action_reqs, with_buttons=has_buttons
+                        action_reqs, with_buttons=has_buttons, forced=_has_forced
                     )
                     await self.bus.publish_outbound(
                         OutboundMessage(
@@ -669,7 +677,9 @@ class InboundConsumer:
                             chat_id=msg.chat_id,
                             content=prompt_text,
                             metadata=_approval_prompt_metadata(
-                                msg.metadata, with_buttons=has_buttons
+                                msg.metadata,
+                                with_buttons=has_buttons,
+                                forced=_has_forced,
                             ),
                         )
                     )
