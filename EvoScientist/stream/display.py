@@ -960,7 +960,6 @@ def _resolve_hitl_approval(
     )
 
     decisions: list[dict] = []
-    approve_remaining = False
 
     for i, req in enumerate(action_requests):
         name = (
@@ -995,7 +994,7 @@ def _resolve_hitl_approval(
             continue
 
         # Normal auto-approve paths
-        if auto_approve or approve_remaining:
+        if auto_approve:
             decisions.append({"type": "approve"})
             continue
         if _matches_shell_allow_list(command, shell_allow_list):

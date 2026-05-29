@@ -342,7 +342,7 @@ class TestInterruptEventParsing:
                             }
                         ],
                     },
-                    "ns": ["main"],
+                    "id": "main",
                     "resumable": True,
                 }
             ]

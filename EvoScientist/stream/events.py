@@ -493,20 +493,12 @@ async def stream_agent_events(
                         else:
                             interrupt_value = getattr(interrupt_obj, "value", {})
 
-                        # Extract real interrupt ID (Interrupt.id hex hash)
-                        _raw_id = (
+                        # Extract interrupt ID (Interrupt.id hex hash)
+                        _interrupt_id = str(
                             interrupt_obj.get("id", "")
                             if isinstance(interrupt_obj, dict)
                             else getattr(interrupt_obj, "id", "")
                         )
-                        if not _raw_id:
-                            ns_parts = (
-                                interrupt_obj.get("ns", [""])
-                                if isinstance(interrupt_obj, dict)
-                                else getattr(interrupt_obj, "ns", [""])
-                            )
-                            _raw_id = str(ns_parts[0]) if ns_parts else "default"
-                        _interrupt_id = str(_raw_id)
 
                         # Discriminate ask_user vs HITL interrupts
                         iv_type = (
