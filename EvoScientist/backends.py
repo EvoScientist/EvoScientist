@@ -77,7 +77,7 @@ _FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "contains pipe (output chained to another command)",
     ),
     (
-        re.compile(r"(?<![=\-<>])>{1,2}(?!=)"),
+        re.compile(r"(?<![=\-<>&])>{1,2}(?![=&])"),
         "contains output redirection (can overwrite files)",
     ),
     (re.compile(r"\$\("), "contains $() command substitution"),
