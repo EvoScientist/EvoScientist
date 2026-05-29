@@ -128,7 +128,7 @@ def test_notify_done_routes_to_origin_thread(tmp_path):
     from EvoScientist.middleware.background import _notify_done
 
     pid = bg.launch("true", str(tmp_path))  # no on_exit -> no auto-notify here
-    _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
+    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     _notify_done(bg._PROCESSES[pid], "T-123")
     routed = async_notifier.drain_notifications("T-123")
     assert any(n.task_id == pid and n.origin_cli_thread_id == "T-123" for n in routed)
@@ -144,7 +144,7 @@ def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
     stop_process.invoke({"process_id": pid})
     # Wait until the watcher observed the exit — it would have enqueued here if the
     # process weren't user-stopped. _notify_done is a no-op for stopped processes.
-    _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
+    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     notifs = async_notifier.drain_notifications(None)
     assert not any(n.task_id == pid for n in notifs)
 
@@ -157,7 +157,7 @@ def test_checked_after_exit_dedups_notification(tmp_path):
     )
 
     pid = bg.launch("true", str(tmp_path))
-    _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
+    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     bg.status(pid)  # agent checks AFTER exit
     assert bg.was_observed_done(pid) is True
     n = AsyncTaskNotification(
@@ -178,7 +178,7 @@ def test_not_checked_after_exit_keeps_notification(tmp_path):
     )
 
     pid = bg.launch("true", str(tmp_path))
-    _wait_until(
+    assert _wait_until(
         lambda: bg._PROCESSES[pid].finished_ts is not None
     )  # exit, but do NOT check
     assert bg.was_observed_done(pid) is False
