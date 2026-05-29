@@ -61,95 +61,10 @@ class TestValidateCommand:
     def test_safe_grep(self):
         assert validate_command("grep -r 'pattern' .") is None
 
-    def test_ssh_remote_absolute_paths_are_not_local_paths(self):
-        command = (
-            'ssh host "ls -la /media/username/project; '
-            'cd /home/username/project && pwd"'
-        )
-        assert validate_command(command) is None
-
-    def test_ssh_remote_bash_lc_must_be_single_quoted_argument(self):
-        result = validate_command(
-            'ssh host bash -lc "cd /home/username/project && pwd"'
-        )
+    def test_validate_command_has_no_ssh_remote_path_exemption(self):
+        result = validate_command("ssh host 'ls /home/username/project'")
         assert result is not None
-        assert "single quoted argument" in result
-
-    def test_ssh_remote_bash_lc_is_allowed_when_wrapped_as_remote_argument(self):
-        command = "ssh host 'bash -lc \"cd /home/username/project && pwd\"'"
-        assert validate_command(command) is None
-
-    def test_ssh_remote_system_paths_are_allowed(self):
-        command = 'ssh host "cat /etc/hosts && ls /tmp && ls /media/user/project"'
-        assert validate_command(command) is None
-
-    def test_ssh_local_absolute_path_still_blocked(self):
-        command = 'cat /etc/passwd && ssh host "ls -la /home/username/project"'
-        result = validate_command(command)
-        assert result is not None
-        assert "/etc/passwd" in result
-
-    def test_ssh_remote_commands_are_not_locally_safety_checked(self):
-        assert validate_command('ssh host "sudo systemctl restart service"') is None
-        assert validate_command('ssh host "dd if=/dev/zero of=/tmp/blob bs=1M"') is None
-        assert validate_command('ssh host "/usr/bin/sudo reboot"') is None
-        assert validate_command('ssh host "/bin/dd if=/dev/zero of=/tmp/x"') is None
-        assert validate_command('ssh host "rm -rf /"') is None
-
-    def test_ssh_remote_rm_rf_absolute_subdir_is_not_root_pattern(self):
-        command = 'ssh host "rm -rf /tmp/old-run && ls /tmp"'
-        assert validate_command(command) is None
-
-    def test_ssh_remote_unquoted_absolute_path_is_rejected(self):
-        result = validate_command("ssh host ls /home/username/project")
-        assert result is not None
-        assert "single quoted argument" in result
-
-    def test_subshell_ssh_remote_unquoted_absolute_path_is_rejected(self):
-        result = validate_command("(ssh host ls /home/username/project)")
-        assert result is not None
-        assert "single quoted argument" in result
-
-    def test_backtick_ssh_remote_unquoted_absolute_path_is_rejected(self):
-        result = validate_command("`ssh host ls /home/username/project`")
-        assert result is not None
-        assert "single quoted argument" in result
-
-    def test_assignment_prefixed_ssh_remote_unquoted_absolute_path_is_rejected(self):
-        result = validate_command("ENV_VAR=value ssh host ls /home/username/project")
-        assert result is not None
-        assert "single quoted argument" in result
-
-    def test_ssh_remote_extra_argv_after_quoted_command_is_rejected(self):
-        result = validate_command('ssh host "pwd" extra')
-        assert result is not None
-        assert "single quoted argument" in result
-
-    def test_ssh_local_shell_after_remote_is_still_validated(self):
-        result = validate_command('ssh host "pwd" && cat /etc/passwd')
-        assert result is not None
-        assert "/etc/passwd" in result
-
-    def test_ssh_local_pipeline_after_remote_is_still_validated(self):
-        result = validate_command('ssh host "pwd" | sudo tee out')
-        assert result is not None
-        assert "sudo" in result
-
-    def test_ssh_local_background_after_remote_is_still_validated(self):
-        result = validate_command('ssh host "pwd" & sudo reboot')
-        assert result is not None
-        assert "sudo" in result
-
-    def test_ssh_remote_post_host_options_are_remote_argv_and_rejected(self):
-        result = validate_command("ssh host -i key")
-        assert result is not None
-        assert "single quoted argument" in result
-
-    def test_ssh_options_before_host_are_allowed(self):
-        assert validate_command("ssh -N host") is None
-        assert validate_command("ssh -i key host") is None
-        assert validate_command("ssh -o StrictHostKeyChecking=no host") is None
-        assert validate_command('ssh -t host "pwd"') is None
+        assert "/home/username/project" in result
 
 
 # === convert_virtual_paths_in_command ===
@@ -253,60 +168,10 @@ class TestConvertVirtualPaths:
         )
         assert result == "cat ./debate_sim.py"
 
-    def test_ssh_remote_absolute_paths_are_preserved(self):
-        command = (
-            'ssh host "ls -la /media/username/project; ls -la /home/username/project"'
-        )
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_ssh_remote_absolute_paths_with_options_are_preserved(self):
-        command = (
-            "ssh -p 2222 -i ~/.ssh/id_ed25519 user@host "
-            '"cd /home/username/project; pwd"'
-        )
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_ssh_remote_bash_lc_absolute_paths_are_preserved(self):
-        command = "ssh host 'bash -lc \"cd /home/username/project && pwd\"'"
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_local_paths_still_rewrite_around_ssh_remote_command(self):
-        command = 'cat /data/file.txt && ssh host "ls -la /home/username/project"'
+    def test_convert_virtual_paths_has_no_ssh_remote_path_exemption(self):
+        command = "ssh host 'ls /home/username/project'"
         result = convert_virtual_paths_in_command(command)
-        assert (
-            result == 'cat ./data/file.txt && ssh host "ls -la /home/username/project"'
-        )
-
-    def test_local_redirect_still_rewrites_after_ssh_remote_command(self):
-        command = 'ssh host "ls -la /home/username/project" > /tmp/out'
-        result = convert_virtual_paths_in_command(command)
-        assert result == 'ssh host "ls -la /home/username/project" > ./tmp/out'
-
-    def test_local_ampersand_redirect_rewrites_after_ssh_remote_command(self):
-        command = 'ssh host "ls -la /home/username/project" &> /tmp/out'
-        result = convert_virtual_paths_in_command(command)
-        assert result == 'ssh host "ls -la /home/username/project" &> ./tmp/out'
-
-    def test_subshell_ssh_remote_absolute_paths_are_preserved(self):
-        command = '(ssh host "ls /media/user/project")'
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_backtick_ssh_remote_absolute_paths_are_preserved(self):
-        command = '`ssh host "cat /etc/passwd"`'
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_assignment_prefixed_ssh_remote_absolute_paths_are_preserved(self):
-        command = 'ENV_VAR=value ssh host "ls /media/user/project"'
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_quoted_assignment_prefixed_ssh_remote_absolute_paths_are_preserved(self):
-        command = 'ENV_VAR="with space" ssh host "ls /media/user/project"'
-        assert convert_virtual_paths_in_command(command) == command
-
-    def test_ssh_remote_placeholder_does_not_replace_user_input(self):
-        command = 'echo __EVOSCI_SSH_REMOTE_0__ && ssh host "ls /home"'
-        result = convert_virtual_paths_in_command(command)
-        assert result == command
+        assert result == "ssh host 'ls ./home/username/project'"
 
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
@@ -864,7 +729,7 @@ class TestExecuteCwdSanitization:
     def test_ssh_remote_paths_survive_execute_preprocessing(
         self, tmp_workspace, monkeypatch
     ):
-        """execute() must preserve quoted SSH remote paths end-to-end."""
+        """execute() must preserve single-quoted SSH remote paths end-to-end."""
         captured = {}
 
         def fake_execute(self, command, *, timeout=None):
@@ -875,7 +740,8 @@ class TestExecuteCwdSanitization:
         monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = (
-            'ssh host "ls -la /media/username/project; ls -la /home/username/project"'
+            "ssh -p 2222 -i key host "
+            "'ls -la /media/username/project; ls -la /home/username/project'"
         )
 
         resp = backend.execute(command, timeout=30)
@@ -893,6 +759,125 @@ class TestExecuteCwdSanitization:
 
         assert resp.exit_code == 1
         assert "single quoted argument" in resp.output
+
+    def test_execute_allows_ssh_wrapper_without_remote_command(
+        self, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute("ssh -N host", timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == "ssh -N host"
+
+    def test_execute_rejects_double_quoted_ssh_remote(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute('ssh host "ls /home/username/project"', timeout=30)
+
+        assert resp.exit_code == 1
+        assert "single quoted argument" in resp.output
+
+    def test_execute_rejects_extra_argv_after_single_quoted_ssh_remote(
+        self, tmp_workspace
+    ):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute("ssh host 'pwd' extra", timeout=30)
+
+        assert resp.exit_code == 1
+        assert "single quoted argument" in resp.output
+
+    def test_execute_rejects_double_quoted_ssh_local_substitution(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute('ssh host "echo $(cat /etc/passwd)"', timeout=30)
+
+        assert resp.exit_code == 1
+        assert "single quoted argument" in resp.output
+
+    def test_execute_allows_single_quoted_ssh_remote_substitution(
+        self, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        command = "ssh host 'echo $(cat /etc/passwd)'"
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == command
+
+    def test_execute_rewrites_local_path_around_ssh_remote(
+        self, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute(
+            "cat /data/file.txt && ssh host 'ls /home/username/project'",
+            timeout=30,
+        )
+
+        assert resp.exit_code == 0
+        assert (
+            captured["command"]
+            == "cat ./data/file.txt && ssh host 'ls /home/username/project'"
+        )
+
+    def test_execute_rewrites_local_redirect_after_ssh_remote(
+        self, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute("ssh host 'pwd' > /tmp/out", timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == "ssh host 'pwd' > ./tmp/out"
+
+    def test_execute_ssh_remote_placeholder_does_not_replace_user_input(
+        self, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        command = "echo __EVOSCI_SSH_REMOTE_0__ && ssh host 'ls /home'"
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == command
 
     def test_execute_e2e_parent_path_contains_workspace_name(self, tmp_path):
         """End-to-end regression: when cwd's parent path *and* basename both
@@ -916,6 +901,80 @@ class TestExecuteCwdSanitization:
         assert target.read_text().strip() == "hi"
         nested = ws / "EvoSci" / "EvoScientist" / "workspace" / "probe.txt"
         assert not nested.exists(), f"file leaked into nested path: {nested}"
+
+    def test_execute_allows_full_path_ssh_with_quoted_remote(
+        self, tmp_workspace, monkeypatch
+    ):
+        """Full-path SSH like /usr/bin/ssh should get same remote path protection."""
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            captured["timeout"] = timeout
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        command = "/usr/bin/ssh host 'ls /home/username/project'"
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == command
+
+    def test_execute_rejects_unquoted_full_path_ssh(self, tmp_workspace):
+        """Full-path SSH with unquoted remote command should be rejected."""
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute(
+            "/usr/bin/ssh host ls /home/username/project", timeout=30
+        )
+
+        assert resp.exit_code == 1
+        assert "single quoted argument" in resp.output
+
+    def test_execute_allows_homebrew_ssh_with_quoted_remote(
+        self, tmp_workspace, monkeypatch
+    ):
+        """Homebrew-installed SSH (/opt/homebrew/bin/ssh) should also be recognized."""
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        command = "/opt/homebrew/bin/ssh host 'pwd'"
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == command
+
+    def test_execute_full_path_ssh_remote_path_untouched_in_compound_cmd(
+        self, tmp_workspace, monkeypatch
+    ):
+        """Full-path SSH in compound cmd: local paths rewritten, remote preserved."""
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        command = (
+            "cat /data/file.txt && /usr/bin/ssh host 'ls /home/username/project'"
+        )
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert (
+            captured["command"]
+            == "cat ./data/file.txt && /usr/bin/ssh host 'ls /home/username/project'"
+        )
 
 
 # === execute() output truncation ===

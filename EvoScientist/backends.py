@@ -185,7 +185,7 @@ def _ssh_option_consumes_next(token: str) -> bool:
 
 
 def _is_ssh_executable(token: str) -> bool:
-    return token == "ssh" or token.endswith("/ssh")
+    return os.path.basename(token) == "ssh"
 
 
 def _is_shell_assignment(token: dict[str, object]) -> bool:
@@ -202,16 +202,38 @@ def _ssh_executable_index(words: list[dict[str, object]]) -> int | None:
     return None
 
 
+def _is_single_quoted_word(token: dict[str, object]) -> bool:
+    raw = str(token.get("raw", ""))
+    return raw.startswith("'") and raw.endswith("'")
+
+
+def _ssh_host_index(words: list[dict[str, object]], ssh_idx: int) -> int:
+    """Return the index of the host argument (first non-option after ssh)."""
+    idx = ssh_idx + 1
+    while idx < len(words):
+        value = str(words[idx].get("value", ""))
+        if value == "--":
+            idx += 1
+            break
+        if value.startswith("-") and value != "-":
+            idx += 2 if _ssh_option_consumes_next(value) else 1
+            continue
+        break
+    return idx
+
+
 def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
     """Return remote-command argv spans in SSH invocations.
 
-    Only the supported single quoted token after the destination host is treated
+    Only the supported single-quoted token after the destination host is treated
     as remote argv. Plain ``ssh host`` has no remote argv and returns no spans.
 
     Examples:
-        >>> _ssh_remote_command_spans('ssh host "ls /home/u/project"')
+        >>> _ssh_remote_command_spans("ssh host 'ls /home/u/project'")
         [(9, 29)]
-        >>> _ssh_remote_command_spans('cat /tmp/x && ssh host "pwd"')
+        >>> _ssh_remote_command_spans('ssh host "ls /home/u/project"')
+        []
+        >>> _ssh_remote_command_spans("cat /tmp/x && ssh host 'pwd'")
         [(23, 28)]
     """
     tokens = _shell_token_spans(command)
@@ -226,23 +248,21 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
         if ssh_idx is None:
             return
 
-        idx = ssh_idx + 1
-        while idx < len(words):
-            value = str(words[idx].get("value", ""))
-            if value == "--":
-                idx += 1
-                break
-            if value.startswith("-") and value != "-":
-                idx += 2 if _ssh_option_consumes_next(value) else 1
-                continue
-            break
+        # Mask the SSH executable path itself (e.g., /usr/bin/ssh) so
+        # virtual path conversion doesn't rewrite it.
+        spans.append(
+            (
+                int(words[ssh_idx]["start"]),
+                int(words[ssh_idx]["end"]),
+            )
+        )
 
-        host_idx = idx
+        host_idx = _ssh_host_index(words, ssh_idx)
         remote_idx = host_idx + 1
         if (
             host_idx < len(words)
             and remote_idx < len(words)
-            and bool(words[remote_idx].get("quoted"))
+            and _is_single_quoted_word(words[remote_idx])
         ):
             spans.append(
                 (
@@ -290,17 +310,17 @@ def _restore_spans(command: str, replacements: dict[str, str]) -> str:
 
 
 def _mask_ssh_remote_commands(command: str) -> tuple[str, dict[str, str]]:
-    """Mask SSH remote argv so local path logic can skip it.
+    """Mask supported SSH remote argv so local path logic can skip it.
 
     Examples:
-        >>> _restore_spans(*_mask_ssh_remote_commands('ssh host "pwd"'))
-        'ssh host "pwd"'
+        >>> _restore_spans(*_mask_ssh_remote_commands("ssh host 'pwd'"))
+        "ssh host 'pwd'"
     """
     return _mask_spans(command, _ssh_remote_command_spans(command))
 
 
 def _validate_ssh_remote_command_format(command: str) -> str | None:
-    """Require SSH remote commands to be one quoted token after the host."""
+    """Require SSH remote commands to be one single-quoted token after the host."""
     tokens = _shell_token_spans(command)
     segment: list[dict[str, object]] = []
 
@@ -318,22 +338,11 @@ def _validate_ssh_remote_command_format(command: str) -> str | None:
         if ssh_idx is None:
             return None
 
-        idx = ssh_idx + 1
-        while idx < len(words):
-            value = str(words[idx].get("value", ""))
-            if value == "--":
-                idx += 1
-                break
-            if value.startswith("-") and value != "-":
-                idx += 2 if _ssh_option_consumes_next(value) else 1
-                continue
-            break
-
-        host_idx = idx
+        host_idx = _ssh_host_index(words, ssh_idx)
         remote_idx = host_idx + 1
         if remote_idx >= len(words):
             return None
-        if not bool(words[remote_idx].get("quoted")):
+        if not _is_single_quoted_word(words[remote_idx]):
             return error()
         if remote_idx + 1 < len(words):
             return error()
@@ -490,11 +499,6 @@ def validate_command(
     Returns:
         None if command is safe, error message string if blocked.
     """
-    ssh_error = _validate_ssh_remote_command_format(command)
-    if ssh_error:
-        return ssh_error
-    command, _ = _mask_ssh_remote_commands(command)
-
     # Check for '..' path traversal as a path component
     if _has_traversal_component(command):
         return (
@@ -619,13 +623,12 @@ def convert_virtual_paths_in_command(
         ...     "mkdir -p /Users/u/proj/dir", workspace_name="proj")
         'mkdir -p ./dir'
     """
-    masked_command, replacements = _mask_ssh_remote_commands(command)
 
     def replace_virtual_path(match: re.Match[str]) -> str:
         path = match.group(0)
 
         # Skip content that looks like a URL
-        if "://" in masked_command[max(0, match.start() - 10) : match.end() + 10]:
+        if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
             return path
 
         resolved = _resolve_virtual_mount_path(path)
@@ -659,9 +662,9 @@ def convert_virtual_paths_in_command(
 
     # Match pattern: paths starting with / (but not URLs)
     pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'
-    converted = re.sub(pattern, replace_virtual_path, masked_command)
+    converted = re.sub(pattern, replace_virtual_path, command)
 
-    return _restore_spans(converted, replacements)
+    return converted
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):
@@ -932,6 +935,8 @@ class CustomSandboxBackend(LocalShellBackend):
                 truncated=False,
             )
 
+        command, ssh_replacements = _mask_ssh_remote_commands(command)
+
         # Convert virtual paths to relative paths
         if self.virtual_mode:
             command = convert_virtual_paths_in_command(
@@ -955,6 +960,8 @@ class CustomSandboxBackend(LocalShellBackend):
                 exit_code=1,
                 truncated=False,
             )
+
+        command = _restore_spans(command, ssh_replacements)
 
         # Delegate to parent for subprocess execution
         response = super().execute(command, timeout=timeout)
