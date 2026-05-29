@@ -76,7 +76,7 @@ class TestEvoScientistConfig:
         assert config.openai_api_key == ""
         assert config.tavily_api_key == ""
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-5"
+        assert config.model == "claude-sonnet-4-6"
         assert config.default_mode == "daemon"
         assert config.default_workdir == ""
         assert config.show_thinking is True
@@ -157,7 +157,7 @@ class TestLoadSaveReset:
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-5"
+        assert config.model == "claude-sonnet-4-6"
 
     def test_save_creates_file(self, temp_config_dir, clean_env):
         """Test that save creates the config file."""
@@ -350,8 +350,8 @@ class TestPriorityChain:
         """Test CLI arguments override file config."""
         save_config(EvoScientistConfig(model="gpt-4o"))
 
-        config = get_effective_config(cli_overrides={"model": "claude-opus-4-5"})
-        assert config.model == "claude-opus-4-5"
+        config = get_effective_config(cli_overrides={"model": "claude-opus-4-8"})
+        assert config.model == "claude-opus-4-8"
 
     def test_env_ui_backend_override(self, temp_config_dir, monkeypatch):
         """UI backend can be selected via environment variable."""

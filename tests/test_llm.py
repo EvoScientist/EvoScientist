@@ -137,7 +137,7 @@ class TestListModels:
 class TestGetModelInfo:
     def test_returns_tuple_for_valid_model(self):
         """Test that get_model_info returns tuple for valid model."""
-        result = get_model_info("claude-sonnet-4-5")
+        result = get_model_info("claude-sonnet-4-6")
         assert result is not None
         assert isinstance(result, tuple)
         assert len(result) == 2
@@ -179,10 +179,10 @@ class TestGetChatModel:
         """Test that get_chat_model resolves short names correctly."""
         mock_init.return_value = "mock_model"
 
-        get_chat_model("claude-opus-4-5")
+        get_chat_model("claude-opus-4-8")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "claude-opus-4-5"
+        assert call_kwargs["model"] == "claude-opus-4-8"
         assert call_kwargs["model_provider"] == "anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -213,7 +213,7 @@ class TestGetChatModel:
         """Test that provider can be overridden."""
         mock_init.return_value = "mock_model"
 
-        get_chat_model("claude-sonnet-4-5", provider="custom_provider")
+        get_chat_model("claude-sonnet-4-6", provider="custom_provider")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "custom_provider"
@@ -403,7 +403,7 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key-456")
 
-        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openrouter"
@@ -417,7 +417,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
         get_chat_model(
-            "x-ai/grok-4.1-fast",
+            "x-ai/grok-4.3",
             provider="openrouter",
             reasoning={"effort": "low"},
         )
@@ -432,7 +432,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
         monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
 
-        get_chat_model("x-ai/grok-4.1-fast", provider="openrouter")
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "disabled"}
@@ -1176,7 +1176,7 @@ class TestAutoConfig:
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
-        get_chat_model("claude-sonnet-4-5")
+        get_chat_model("claude-haiku-4-5")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 10000}
@@ -1188,6 +1188,18 @@ class TestAutoConfig:
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
         get_chat_model("claude-sonnet-4-6")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["effort"] == "max"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_anthropic_4_8_adaptive_thinking(self, mock_init, monkeypatch):
+        """Anthropic 4-8 models get adaptive thinking with max effort."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        get_chat_model("claude-opus-4-8")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive"}
@@ -1213,7 +1225,7 @@ class TestAutoConfig:
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
 
-        get_chat_model("claude-sonnet-4-5")
+        get_chat_model("claude-haiku-4-5")
 
         call_kwargs = mock_init.call_args[1]
         assert "thinking" not in call_kwargs

@@ -158,10 +158,10 @@ class TestModelCommandSwitch:
                 return_value=new_agent,
             ),
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-6"]))
+            _run(cmd.execute(ctx, ["claude-opus-4-8"]))
 
         # Config should be updated
-        assert cfg.model == "claude-opus-4-6"
+        assert cfg.model == "claude-opus-4-8"
         assert cfg.provider == "anthropic"
 
         # Agent should be replaced on context
@@ -170,7 +170,7 @@ class TestModelCommandSwitch:
         # Success message shown
         ui.append_system.assert_called_once()
         msg = ui.append_system.call_args[0][0]
-        assert "claude-opus-4-6" in msg
+        assert "claude-opus-4-8" in msg
         assert "anthropic" in msg
 
     def test_switch_with_save_flag(self):
@@ -198,10 +198,10 @@ class TestModelCommandSwitch:
             ),
             patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-6", "--save"]))
+            _run(cmd.execute(ctx, ["claude-opus-4-8", "--save"]))
 
         # Config file should be updated
-        mock_save.assert_any_call("model", "claude-opus-4-6")
+        mock_save.assert_any_call("model", "claude-opus-4-8")
         mock_save.assert_any_call("provider", "anthropic")
 
         # Success message should mention save
@@ -233,7 +233,7 @@ class TestModelCommandSwitch:
             ),
             patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-6"]))
+            _run(cmd.execute(ctx, ["claude-opus-4-8"]))
 
         # Config file should NOT be updated
         mock_save.assert_not_called()
@@ -273,7 +273,7 @@ class TestModelCommandFailure:
                 side_effect=RuntimeError("API key missing"),
             ) as mock_set,
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-6"]))
+            _run(cmd.execute(ctx, ["claude-opus-4-8"]))
 
         mock_set.assert_called_once()
         ui.append_system.assert_called_once()
@@ -558,7 +558,7 @@ class TestModelCommandLoadAgentFailure:
             # Pass ``--save`` to strengthen the assertion: if the ordering
             # ever regresses, ``set_config_value`` would be called with
             # stale data.
-            _run(cmd.execute(ctx, ["claude-opus-4-6", "--save"]))
+            _run(cmd.execute(ctx, ["claude-opus-4-8", "--save"]))
 
         # _load_agent was attempted (transactional first step).
         mock_load.assert_called_once()

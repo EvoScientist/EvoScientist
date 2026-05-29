@@ -102,7 +102,7 @@ def onboard(
     workspace settings, and agent parameters.
 
     Any answer can be pre-set via a flag (``--provider anthropic
-    --model claude-sonnet-4-5 ...``); prompts for unset answers stay
+    --model claude-sonnet-4-6 ...``); prompts for unset answers stay
     interactive unless ``--non-interactive`` is passed, in which case any
     missing required answer aborts the wizard.
     """

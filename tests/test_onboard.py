@@ -373,10 +373,10 @@ class TestStepModel:
         config = EvoScientistConfig()
 
         with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
-            mock_q.select.return_value.ask.return_value = "claude-sonnet-4-5"
+            mock_q.select.return_value.ask.return_value = "claude-sonnet-4-6"
             result = _step_model(config, "anthropic")
 
-        assert result == "claude-sonnet-4-5"
+        assert result == "claude-sonnet-4-6"
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test that _step_model raises KeyboardInterrupt on cancel."""
@@ -1142,7 +1142,7 @@ class TestRunOnboard:
                 "tui",  # UI backend
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode (API key, not OAuth)
-                "claude-sonnet-4-5",  # Model
+                "claude-sonnet-4-6",  # Model
                 "daemon",  # Workspace mode
                 True,  # Show thinking
             ]
@@ -1168,7 +1168,7 @@ class TestRunOnboard:
         # downstream prompts to consume the wrong values.
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.provider == "anthropic"
-        assert final_config.model == "claude-sonnet-4-5"
+        assert final_config.model == "claude-sonnet-4-6"
         assert final_config.anthropic_auth_mode == "api_key"
         assert final_config.ui_backend == "tui"
         assert final_config.default_mode == "daemon"
@@ -1217,7 +1217,7 @@ class TestRunOnboard:
                 "tui",  # UI backend
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode
-                "claude-sonnet-4-5",  # Model
+                "claude-sonnet-4-6",  # Model
                 "daemon",  # Workspace mode
                 True,  # Show thinking
             ]
@@ -1287,7 +1287,7 @@ class TestRunOnboard:
                     "tui",
                     "anthropic",
                     "api_key",
-                    "claude-sonnet-4-5",
+                    "claude-sonnet-4-6",
                     "daemon",
                     True,
                 ]
@@ -1334,7 +1334,7 @@ class TestRunOnboard:
                 "tui",
                 "anthropic",
                 "api_key",
-                "claude-sonnet-4-5",
+                "claude-sonnet-4-6",
                 "daemon",
                 True,
             ]

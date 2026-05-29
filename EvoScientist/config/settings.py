@@ -92,7 +92,7 @@ class EvoScientistConfig:
 
     # LLM Settings
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-5"
+    model: str = "claude-sonnet-4-6"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
 
     # Async Sub-agent Settings

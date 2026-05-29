@@ -120,7 +120,7 @@ class TestUpdateStatusHook:
 
     def test_no_op(self):
         ui, console = _make_ui()
-        ui.update_status_after_model_change("claude-opus-4-6", "anthropic")
+        ui.update_status_after_model_change("claude-opus-4-8", "anthropic")
         console.print.assert_not_called()
 
 

@@ -163,7 +163,7 @@ class TestThreadFunctions(unittest.TestCase):
                             "agent_name": AGENT_NAME,
                             "updated_at": f"2025-01-{15 + i}T10:00:00+00:00",
                             "workspace_dir": f"/tmp/ws_{tid}",
-                            "model": "claude-sonnet-4-5",
+                            "model": "claude-sonnet-4-6",
                         }
                     )
                     await conn.execute(
@@ -272,7 +272,7 @@ class TestThreadFunctions(unittest.TestCase):
         meta = _run(get_thread_metadata("abc12345"))
         assert meta is not None
         assert meta["workspace_dir"] == "/tmp/ws_abc12345"
-        assert meta["model"] == "claude-sonnet-4-5"
+        assert meta["model"] == "claude-sonnet-4-6"
 
     def test_get_thread_metadata_missing(self):
         meta = _run(get_thread_metadata("nonexist"))

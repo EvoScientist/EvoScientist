@@ -66,10 +66,9 @@ _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
-    # Custom Anthropic (third-party Claude-compatible endpoints, 3 defaults)
+    # Custom Anthropic (third-party Claude-compatible endpoints, current-gen defaults)
     # Listed BEFORE native anthropic so MODELS dict defaults to native provider
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "custom-anthropic"),
-    ("claude-sonnet-4-5", "claude-sonnet-4-5", "custom-anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "custom-anthropic"),
     # Custom OpenAI (third-party OpenAI-compatible endpoints, 3 defaults)
     # Listed BEFORE native openai so MODELS dict defaults to native provider
@@ -78,12 +77,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.4", "gpt-5.4", "custom-openai"),
     ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
     ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
-    # Anthropic (ordered by capability)
-    ("claude-opus-4-7", "claude-opus-4-7", "anthropic"),
-    ("claude-opus-4-6", "claude-opus-4-6", "anthropic"),
+    # Anthropic (current generation)
+    ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
-    ("claude-opus-4-5", "claude-opus-4-5", "anthropic"),
-    ("claude-sonnet-4-5", "claude-sonnet-4-5", "anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # OpenAI
     ("gpt-5.5-pro", "gpt-5.5-pro", "openai"),
@@ -99,6 +95,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5-mini", "gpt-5-mini", "openai"),
     ("gpt-5-nano", "gpt-5-nano", "openai"),
     # Google GenAI
+    ("gemini-3.5-flash", "gemini-3.5-flash", "google-genai"),
     ("gemini-3.1-pro", "gemini-3.1-pro-preview", "google-genai"),
     (
         "gemini-3.1-pro-customtools",
@@ -133,13 +130,14 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
-    ("claude-opus-4.7", "anthropic/claude-opus-4.7", "openrouter"),
-    ("claude-opus-4.6", "anthropic/claude-opus-4.6", "openrouter"),
+    ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
+    ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
     ("gpt-5.5-pro", "openai/gpt-5.5-pro", "openrouter"),
     ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
     ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
     ("gpt-5.3-codex", "openai/gpt-5.3-codex", "openrouter"),
+    ("gemini-3.5-flash", "google/gemini-3.5-flash", "openrouter"),
     ("gemini-3.1-pro", "google/gemini-3.1-pro-preview", "openrouter"),
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
@@ -147,7 +145,10 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("minimax-m2.7", "minimax/minimax-m2.7", "openrouter"),
     ("mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "openrouter"),
     ("mimo-v2.5", "xiaomi/mimo-v2.5", "openrouter"),
-    ("grok-4.1-fast", "x-ai/grok-4.1-fast", "openrouter"),
+    ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
+    ("grok-4.3", "x-ai/grok-4.3", "openrouter"),
+    ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
+    ("qwen3.6-flash", "qwen/qwen3.6-flash", "openrouter"),
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
@@ -246,7 +247,7 @@ def _apply_auto_config(
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
             pass
-        elif model_id.endswith(("4-6", "4-7")):
+        elif model_id.endswith(("4-6", "4-7", "4-8")):
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs.setdefault("effort", "max")
         else:
@@ -282,8 +283,8 @@ def get_chat_model(
     """Get a chat model instance.
 
     Args:
-        model: Model name (short name like 'claude-sonnet-4-5' or full ID
-               like 'claude-sonnet-4-5-20250929'). Defaults to DEFAULT_MODEL.
+        model: Model name (short name like 'claude-sonnet-4-6' or full ID
+               like 'claude-sonnet-4-6-20250929'). Defaults to DEFAULT_MODEL.
         provider: Override the provider (e.g., 'anthropic', 'openai').
                   If not specified, inferred from model name or defaults to 'anthropic'.
         **kwargs: Additional arguments passed to init_chat_model (e.g., temperature).
@@ -292,8 +293,8 @@ def get_chat_model(
         A LangChain chat model instance.
 
     Examples:
-        >>> model = get_chat_model()  # Uses default (claude-sonnet-4-5)
-        >>> model = get_chat_model("claude-opus-4-5")  # Use short name
+        >>> model = get_chat_model()  # Uses default (claude-sonnet-4-6)
+        >>> model = get_chat_model("claude-opus-4-8")  # Use short name
         >>> model = get_chat_model("gpt-4o")  # OpenAI model
         >>> model = get_chat_model("claude-3-opus-20240229", provider="anthropic")  # Full ID
     """
