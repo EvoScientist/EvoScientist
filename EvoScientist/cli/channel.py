@@ -530,18 +530,23 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
     bus = getattr(manager, "bus", None)
     if bus is None:
         return False
-    try:
-        future = asyncio.run_coroutine_threadsafe(
-            bus.publish_outbound(
-                OutboundMessage(
-                    channel=origin.channel_type,
-                    chat_id=origin.chat_id,
-                    content=content,
-                    metadata=origin.metadata or {},
-                )
-            ),
-            loop,
+
+    async def _publish_and_record() -> None:
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel=origin.channel_type,
+                chat_id=origin.chat_id,
+                content=content,
+                metadata=origin.metadata or {},
+            )
         )
+        # Mirror the normal channel-reply path, which records a "sent"
+        # message after a successful publish so per-channel stats stay
+        # accurate for forwarded notifications too.
+        manager.record_message(origin.channel_type, "sent")
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_publish_and_record(), loop)
     except Exception as exc:
         _channel_logger.warning(
             "Async notification publish to %s:%s failed to schedule: %s",
@@ -553,6 +558,11 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
 
     def _on_publish_done(fut) -> None:
         """Log any exception raised by the fire-and-forget publish coroutine."""
+        # A cancelled future raises CancelledError from .exception() rather
+        # than returning it (e.g. bus loop torn down mid-publish); treat that
+        # as a benign shutdown, not a failure to log.
+        if fut.cancelled():
+            return
         exc = fut.exception()
         if exc is not None:
             _channel_logger.warning(

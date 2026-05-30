@@ -38,6 +38,7 @@ from .channel import (
     channel_hitl_prompt,
     dispatch_channel_slash_command,
     forget_channel_origin,
+    get_channel_origin,
     publish_to_channel_origin,
     remember_channel_origin,
 )
@@ -1022,6 +1023,10 @@ def _serve_process_message(
             return
 
         if _slash_handled:
+            # A channel-issued /new or /resume rotates the thread inside the
+            # dispatch above; re-bind the now-current thread to this channel
+            # so async-notifier turns on it still forward back here.
+            remember_channel_origin(agent_holder["thread_id"], msg)
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
@@ -1100,7 +1105,14 @@ def _serve_drain_notifications(
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
             return
-        publish_to_channel_origin(tid, response or "")
+        if publish_to_channel_origin(tid, response or ""):
+            # Mirror a normal channel turn's closing "Replied to" line so the
+            # forwarded notification reads as terminated in the serve log.
+            origin = get_channel_origin(tid)
+            if origin is not None:
+                console.print(
+                    f"[dim][{origin.channel_type}] Replied to {origin.chat_id}[/dim]"
+                )
 
     async def _run_notification_message_async(text: str, notifs: list) -> None:
         await _aio.to_thread(_run_notification_message, text, notifs)

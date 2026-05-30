@@ -657,7 +657,11 @@ def run_textual_interactive(
                         await sync_widget.cleanup()
                 self._workspace_dir = workspace_dir
 
-            _ch_mod.forget_channel_origin(self._conversation_tid)
+            if thread_id != self._conversation_tid:
+                # Only drop the origin on a real thread change — resuming the
+                # already-active thread must keep its live origin so a later
+                # async-notifier turn still forwards to the channel.
+                _ch_mod.forget_channel_origin(self._conversation_tid)
             self._conversation_tid = thread_id
             # Background reload: history renders immediately; next turn awaits.
             self._start_background_agent_load(self._workspace_dir)
@@ -906,7 +910,15 @@ def run_textual_interactive(
                     resolve_mentions=False,
                     thread_id_override=target_thread_id,
                 )
-                _ch_mod.publish_to_channel_origin(effective_tid, response or "")
+                if _ch_mod.publish_to_channel_origin(effective_tid, response or ""):
+                    # Mirror a normal channel turn's closing "Replied to" line
+                    # so the forwarded notification reads as terminated.
+                    _origin = _ch_mod.get_channel_origin(effective_tid)
+                    if _origin is not None:
+                        self._append_system(
+                            f"[{_origin.channel_type}: Replied to {_origin.chat_id}]",
+                            style="dim",
+                        )
 
             self._run_task = asyncio.ensure_future(_run_and_publish())
 
@@ -2150,6 +2162,10 @@ def run_textual_interactive(
                     channel_runtime=self._channel_runtime,
                 )
                 if _slash_handled:
+                    # A channel-issued /new or /resume rotates the thread in
+                    # the dispatch above; re-bind the now-current thread to
+                    # this channel so async-notifier turns on it still forward.
+                    _ch_mod.remember_channel_origin(self._conversation_tid, msg)
                     return  # outer finally handles _busy / widget cleanup
 
                 # Non-slash message — streams through the agent, so wait

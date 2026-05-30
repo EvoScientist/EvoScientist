@@ -121,6 +121,23 @@ def test_remember_and_publish_roundtrip(monkeypatch):
         _stop_loop(loop, thread)
 
 
+def test_publish_records_sent_metric(monkeypatch):
+    """A forwarded notification records a "sent" metric, mirroring the normal
+    channel-reply path (``manager.record_message``)."""
+    loop, _publish_outbound, thread = _install_fake_bus(monkeypatch)
+    try:
+        channel_cli.remember_channel_origin(
+            "tid-metric", _make_msg(channel_type="telegram")
+        )
+        assert channel_cli.publish_to_channel_origin("tid-metric", "done") is True
+        # record_message runs right after publish_outbound inside the same
+        # coroutine; sync on it before asserting.
+        _wait_for_publish(channel_cli._manager.record_message)
+        channel_cli._manager.record_message.assert_called_once_with("telegram", "sent")
+    finally:
+        _stop_loop(loop, thread)
+
+
 def test_publish_returns_false_without_origin(monkeypatch):
     loop, publish_outbound, thread = _install_fake_bus(monkeypatch)
     try:
