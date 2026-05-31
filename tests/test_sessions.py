@@ -8,12 +8,15 @@ import unittest
 from datetime import UTC
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, HumanMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from EvoScientist.sessions import (
     AGENT_NAME,
     _format_relative_time,
+    _reduce_messages_delta,
     delete_thread,
     find_similar_threads,
     generate_thread_id,
@@ -1866,6 +1869,130 @@ class TestDbStats(unittest.TestCase):
         assert stats["checkpoint_count"] == 0
         assert stats["write_count"] == 0
         assert stats["size_bytes"] == 0
+
+
+class TestReduceMessagesDeltaNoneState(unittest.TestCase):
+    """Direct unit tests for the inline ``_reduce_messages_delta`` reducer.
+
+    Regression for the None-state crash: ``DeltaChannel.replay_writes``
+    can hand the reducer ``state=None`` for threads whose earliest
+    checkpoint never seeded ``messages: []``. Before the fix, the slow
+    path passed ``None`` straight into ``convert_to_messages`` and raised;
+    now ``state or []`` is substituted.
+    """
+
+    def test_none_state_simple_append(self):
+        result = _reduce_messages_delta(None, [[HumanMessage(content="hi", id="1")]])
+        assert len(result) == 1
+        assert result[0].content == "hi"
+        assert result[0].id == "1"
+
+    def test_none_state_empty_writes(self):
+        # No state and nothing to append → empty list, no crash.
+        assert _reduce_messages_delta(None, []) == []
+
+    def test_empty_state_still_appends(self):
+        # Regression guard: an explicit empty-list state must behave the
+        # same as None — append the single write.
+        result = _reduce_messages_delta([], [[AIMessage(content="yo", id="2")]])
+        assert len(result) == 1
+        assert result[0].content == "yo"
+        assert result[0].id == "2"
+
+
+def _signature(messages):
+    """Comparable shape for reducer-output equality assertions."""
+    return [(type(m).__name__, m.id, m.content) for m in messages]
+
+
+def _import_upstream_reducer():
+    """Import deepagents' private delta reducer, or fail loudly.
+
+    A ``pytest.fail`` (not ``skip``) is deliberate: this test is the
+    tripwire that fires when the upstream private symbol is renamed or
+    relocated. A silent skip would let semantic drift between EvoSci's
+    inline copy (``sessions.py``) and upstream go unnoticed.
+    """
+    try:
+        from deepagents._messages_reducer import (
+            _messages_delta_reducer as upstream,
+        )
+    except ImportError as exc:  # pragma: no cover - tripwire path
+        pytest.fail(
+            "deepagents._messages_reducer._messages_delta_reducer could not "
+            f"be imported ({exc}). The upstream private reducer that EvoSci's "
+            "inline copy in sessions.py (_reduce_messages_delta) mirrors has "
+            "moved or been renamed. Re-locate the upstream symbol and "
+            "re-evaluate the inline copy for semantic drift before adjusting "
+            "this test."
+        )
+    return upstream
+
+
+class TestReduceMessagesDeltaUpstreamParity:
+    """Behavioral parity vs deepagents' private ``_messages_delta_reducer``.
+
+    Drift detector: if upstream changes the reducer's semantics (dedup,
+    tombstone, reset, coercion) the EvoSci inline copy must be updated to
+    match. These cases pass equivalent batched writes to both functions
+    and assert identical output. (EvoSci's signature is ``writes: list[Any]``
+    and upstream's is ``list[list[AnyMessage]]``, but both flatten lists
+    vs single items the same way, so batched-list writes are equivalent.)
+    """
+
+    @pytest.fixture(scope="class")
+    def upstream(self):
+        return _import_upstream_reducer()
+
+    def _assert_parity(self, upstream, state, writes):
+        evo_out = _reduce_messages_delta(state, writes)
+        up_out = upstream(state, writes)
+        assert _signature(evo_out) == _signature(up_out)
+        return evo_out
+
+    def test_parity_none_state_append(self, upstream):
+        out = self._assert_parity(
+            upstream, None, [[HumanMessage(content="hi", id="a1")]]
+        )
+        assert _signature(out) == [("HumanMessage", "a1", "hi")]
+
+    def test_parity_dedup_by_id(self, upstream):
+        state = [HumanMessage(content="orig", id="1")]
+        writes = [[HumanMessage(content="updated", id="1")]]
+        out = self._assert_parity(upstream, state, writes)
+        # In-place update, no duplicate appended.
+        assert _signature(out) == [("HumanMessage", "1", "updated")]
+
+    def test_parity_remove_message_tombstone(self, upstream):
+        state = [
+            HumanMessage(content="keep", id="1"),
+            AIMessage(content="drop", id="2"),
+        ]
+        writes = [[RemoveMessage(id="2")]]
+        out = self._assert_parity(upstream, state, writes)
+        assert _signature(out) == [("HumanMessage", "1", "keep")]
+
+    def test_parity_remove_all_then_append(self, upstream):
+        state = [
+            HumanMessage(content="old1", id="1"),
+            AIMessage(content="old2", id="2"),
+        ]
+        writes = [
+            [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                HumanMessage(content="fresh", id="3"),
+            ]
+        ]
+        out = self._assert_parity(upstream, state, writes)
+        # Sentinel wipes prior state + earlier writes; only "fresh" remains.
+        assert _signature(out) == [("HumanMessage", "3", "fresh")]
+
+    def test_parity_dict_shorthand_coercion(self, upstream):
+        # Raw dict shorthand must coerce to a typed BaseMessage identically
+        # in both reducers.
+        writes = [[{"role": "user", "content": "x", "id": "d1"}]]
+        out = self._assert_parity(upstream, None, writes)
+        assert _signature(out) == [("HumanMessage", "d1", "x")]
 
 
 if __name__ == "__main__":
