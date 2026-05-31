@@ -1048,7 +1048,7 @@ def cmd_interactive(
                     if _origin is not None:
                         tx = Text()
                         tx.append(f"[{_origin.channel_type}: Replied to ", style="dim")
-                        tx.append(_origin.chat_id, style="cyan")
+                        tx.append(_origin.sender or _origin.chat_id, style="cyan")
                         tx.append("]", style="dim")
                         console.print(tx)
                 await _refresh_status_snapshot(reset_streaming_text=True)

@@ -916,7 +916,8 @@ def run_textual_interactive(
                     _origin = _ch_mod.get_channel_origin(effective_tid)
                     if _origin is not None:
                         self._append_system(
-                            f"[{_origin.channel_type}: Replied to {_origin.chat_id}]",
+                            f"[{_origin.channel_type}: Replied to "
+                            f"{_origin.sender or _origin.chat_id}]",
                             style="dim",
                         )
 

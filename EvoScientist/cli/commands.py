@@ -1111,7 +1111,8 @@ def _serve_drain_notifications(
             origin = get_channel_origin(tid)
             if origin is not None:
                 console.print(
-                    f"[dim][{origin.channel_type}] Replied to {origin.chat_id}[/dim]"
+                    f"[dim][{origin.channel_type}] Replied to "
+                    f"{origin.sender or origin.chat_id}[/dim]"
                 )
 
     async def _run_notification_message_async(text: str, notifs: list) -> None:

@@ -465,6 +465,7 @@ class _ChannelOrigin:
 
     channel_type: str
     chat_id: str
+    sender: str
     metadata: dict | None = None
 
 
@@ -486,6 +487,7 @@ def remember_channel_origin(thread_id: str | None, msg: ChannelMessage) -> None:
         _thread_channel_origins[thread_id] = _ChannelOrigin(
             channel_type=msg.channel_type,
             chat_id=msg.chat_id,
+            sender=msg.sender,
             metadata=dict(msg.metadata) if msg.metadata else None,
         )
 

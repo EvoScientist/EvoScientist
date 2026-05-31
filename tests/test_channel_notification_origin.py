@@ -121,6 +121,24 @@ def test_remember_and_publish_roundtrip(monkeypatch):
         _stop_loop(loop, thread)
 
 
+def test_origin_remembers_sender_distinct_from_chat_id():
+    """The origin stores the human-readable sender separately from chat_id, so
+    the notifier closer can show the same handle a normal turn shows.
+
+    Regression: iMessage exposes an internal chat id (e.g. "1") as chat_id
+    while the handle (phone number) lives on sender. The closer must display
+    sender, not chat_id, or the user sees a confusing "Replied to 1".
+    """
+    channel_cli.remember_channel_origin(
+        "tid-sender",
+        _make_msg(chat_id="1"),  # iMessage-style internal chat id
+    )
+    origin = channel_cli.get_channel_origin("tid-sender")
+    assert origin is not None
+    assert origin.chat_id == "1"  # routing id preserved
+    assert origin.sender == "alice"  # human handle preserved for display
+
+
 def test_publish_records_sent_metric(monkeypatch):
     """A forwarded notification records a "sent" metric, mirroring the normal
     channel-reply path (``manager.record_message``)."""
