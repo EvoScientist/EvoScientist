@@ -604,6 +604,7 @@ def cmd_interactive(
                 and kick off background agent reload. The dispatch block
                 refreshes the status bar post-execute (symmetric with
                 /compact)."""
+                _ch_mod.forget_channel_origin(state.get("thread_id"))
                 if not workspace_fixed:
                     state["workspace_dir"] = _create_session_workspace(run_name)
                 state["thread_id"] = generate_thread_id()
@@ -665,6 +666,11 @@ def cmd_interactive(
                             console.print(f"[red]{exc}[/red]")
                             return
                     state["workspace_dir"] = workspace_dir
+                if thread_id != state.get("thread_id"):
+                    # Only drop the origin on a real thread change — resuming
+                    # the already-active thread must keep its live origin so a
+                    # later async-notifier turn still forwards to the channel.
+                    _ch_mod.forget_channel_origin(state.get("thread_id"))
                 state["thread_id"] = thread_id
                 state["resumed"] = True
                 state["status_started_at"] = datetime.now()
@@ -800,6 +806,8 @@ def cmd_interactive(
                 """
                 if not _ch_mod._claim_or_complete_channel_request(msg):
                     return
+
+                _ch_mod.remember_channel_origin(state["thread_id"], msg)
 
                 try:
                     # Clear the waiting ❯ prompt line
@@ -943,6 +951,11 @@ def cmd_interactive(
                         channel_runtime=channel_runtime,
                     )
                     if _slash_handled:
+                        # A channel-issued /new or /resume rotates the thread
+                        # inside the dispatch above; re-bind the now-current
+                        # thread to this channel so async-notifier turns on it
+                        # still forward back here.
+                        _ch_mod.remember_channel_origin(state["thread_id"], msg)
                         _print_separator()
                         sys.stdout.write("\033[34;1m❯\033[0m ")
                         sys.stdout.flush()
@@ -1010,7 +1023,7 @@ def cmd_interactive(
                     console.print(line_text, style=line_style, markup=False)
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
-                run_streaming(
+                response = run_streaming(
                     ui_backend=state["ui_backend"],
                     agent=await _await_agent_ready(),
                     message=text,
@@ -1026,6 +1039,18 @@ def cmd_interactive(
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
                 )
+                _notif_tid = target_thread_id or state["thread_id"]
+                if _ch_mod.publish_to_channel_origin(_notif_tid, response):
+                    # Forwarded to a channel — print the same closing
+                    # "Replied to" line a normal channel turn shows, so the
+                    # forwarded block reads as terminated on screen.
+                    _origin = _ch_mod.get_channel_origin(_notif_tid)
+                    if _origin is not None:
+                        tx = Text()
+                        tx.append(f"[{_origin.channel_type}: Replied to ", style="dim")
+                        tx.append(_origin.sender or _origin.chat_id, style="cyan")
+                        tx.append("]", style="dim")
+                        console.print(tx)
                 await _refresh_status_snapshot(reset_streaming_text=True)
                 console.print()
                 _print_separator()
