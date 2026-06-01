@@ -61,6 +61,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         _DEFAULT_PORT,
         _LOG_FILE,
         _is_port_occupied,
+        _read_workspace_sidecar,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -129,6 +130,26 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     started_proc = None
     if _is_port_occupied(backend_port):
         if is_langgraph_dev_running(port=backend_port):
+            # Reuse an existing EvoSci server only when it serves THIS workspace
+            # — mirror the sidecar guard in ensure_langgraph_dev so WebUI started
+            # from workspace B never silently binds to a server pinned to
+            # workspace A. No sidecar (older subprocess) → reuse, as before.
+            sidecar = _read_workspace_sidecar()
+            if (
+                sidecar is not None
+                and Path(sidecar["workspace"]).resolve() != Path(ws).resolve()
+            ):
+                console.print(
+                    f"[red]Port {backend_port} is already serving a langgraph "
+                    f"dev for a different workspace "
+                    f"({_shorten(sidecar['workspace'])}).[/red]"
+                )
+                console.print(
+                    f"[dim]Stop that EvoSci session, or launch from that "
+                    f"workspace ([bold]--workdir {sidecar['workspace']}[/bold])."
+                    f"[/dim]"
+                )
+                raise typer.Exit(1)
             console.print(
                 f"[green]✓[/green] Reusing langgraph dev already serving "
                 f"port {backend_port}"
@@ -201,6 +222,10 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     popen_kwargs: dict[str, Any] = {"env": webui_env}
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
+    elif os.name == "nt":
+        # New process group so the npx → node → next subtree can be killed as a
+        # unit by taskkill /T in _stop_webui.
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     try:
         webui_proc = subprocess.Popen(
             [npx, "--yes", _WEBUI_PACKAGE, "--port", str(webui_port)],
@@ -250,6 +275,14 @@ def _stop_webui(proc: subprocess.Popen) -> None:
     try:
         if os.name == "posix":
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        elif os.name == "nt":
+            # taskkill /T terminates the whole child tree (node + next server).
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         else:
             proc.terminate()
         proc.wait(timeout=5)

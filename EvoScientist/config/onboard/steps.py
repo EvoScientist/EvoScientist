@@ -174,14 +174,20 @@ def _step_webui_port(config: EvoScientistConfig) -> int:
     from ...langgraph_dev.manager import _is_port_occupied
 
     current_port = getattr(config, "webui_port", 4716)
+    backend_port = getattr(config, "langgraph_dev_port", 6174)
     occupied = _is_port_occupied(current_port)
+    conflicts_backend = current_port == backend_port
 
     # Bake live availability into the label (same single-paren style as the
     # langgraph-dev / ccproxy prompts) so the status shows WITH the question.
-    if occupied:
+    # The WebUI port must also differ from the backend (langgraph dev) port —
+    # run_webui refuses equal ports at startup, so reject them here too instead
+    # of saving a config that fails to launch later.
+    if occupied or conflicts_backend:
+        reason = "occupied" if occupied else f"= backend port {backend_port}"
         prompt_label = (
             f"Enter port for WebUI server "
-            f"(Current: {current_port}, occupied, pick another):"
+            f"(Current: {current_port}, {reason}, pick another):"
         )
     else:
         prompt_label = (
@@ -191,13 +197,15 @@ def _step_webui_port(config: EvoScientistConfig) -> int:
 
     def valid_port(value: str) -> bool:
         if not value:
-            # Keep the default only if it's actually free.
-            return not occupied
+            # Keep the default only if it's free AND not the backend port.
+            return not occupied and not conflicts_backend
         try:
             port = int(value)
         except (ValueError, TypeError):
             return False
         if not (1024 < port < 65536):
+            return False
+        if port == backend_port:
             return False
         return not _is_port_occupied(port)
 
