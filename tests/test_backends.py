@@ -959,6 +959,23 @@ class TestExecuteCwdSanitization:
         assert resp.exit_code == 1
         assert "single quoted argument" in resp.output
 
+    def test_execute_does_not_recognize_tmp_ssh_as_ssh(
+        self, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute("/tmp/ssh host ls /home/username/project", timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == "./tmp/ssh host ls ./home/username/project"
+
     @pytest.mark.parametrize(
         "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
     )

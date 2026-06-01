@@ -176,6 +176,8 @@ _SSH_OPTIONS_WITH_VALUE = {
     "-w",
 }
 
+_SSH_EXECUTABLES = {"ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"}
+
 
 def _ssh_option_consumes_next(token: str) -> bool:
     """Return whether an SSH option token consumes the following argument."""
@@ -185,7 +187,7 @@ def _ssh_option_consumes_next(token: str) -> bool:
 
 
 def _is_ssh_executable(token: str) -> bool:
-    return os.path.basename(token) == "ssh"
+    return token in _SSH_EXECUTABLES
 
 
 def _is_shell_assignment(token: dict[str, object]) -> bool:
@@ -238,6 +240,8 @@ def _ssh_invocations(
         [(0, 1, 2, 1)]
         >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("cat x && ssh -p 22 host 'pwd'")]
         [(0, 3, 4, 0)]
+        >>> _ssh_invocations("/tmp/ssh host 'pwd'")
+        []
     """
     tokens = _shell_token_spans(command)
     invocations: list[tuple[list[dict[str, object]], int, int, int | None, int]] = []
