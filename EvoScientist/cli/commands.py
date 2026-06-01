@@ -1742,6 +1742,17 @@ def _version_callback(value: bool):
         raise typer.Exit()
 
 
+def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> bool:
+    """True for a brand-new interactive session — no one-shot ``-p`` prompt and
+    no ``--resume`` / ``--thread-id`` to continue.
+
+    This is the only case where a WebUI-configured ``EvoSci`` opens the browser
+    app: a one-shot or a resume has a concrete conversation to render in the
+    terminal, so it falls back to the Rich CLI instead.
+    """
+    return not prompt and not thread_id
+
+
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
@@ -1962,15 +1973,21 @@ def _main_callback(
     # langgraph server (full MCP + async) + the published @evoscientist/webui
     # front-end (npx) in THIS terminal, then block. Reuses start_langgraph_dev
     # but leaves `EvoSci deploy` untouched (it stays a clean server for external
-    # UIs / SDK clients). `-p` single-shot keeps the headless CLI path below.
-    if not prompt:
-        from .tui_runtime import normalize_ui_backend
+    # UIs / SDK clients).
+    #
+    # The browser app is only launched for a FRESH interactive session. With
+    # `-p` (one-shot) or `--resume`/`--thread-id` (continue a specific
+    # conversation), there is concrete terminal output to render, so fall back
+    # to the Rich CLI instead of opening the browser UI.
+    from .tui_runtime import normalize_ui_backend
 
-        if normalize_ui_backend(config.ui_backend) == "webui":
+    if normalize_ui_backend(config.ui_backend) == "webui":
+        if _is_fresh_interactive_session(prompt, thread_id):
             from ..deploy.webui import run_webui
 
             run_webui(config, workspace_dir=workspace_dir)
             return
+        config.ui_backend = "cli"
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
