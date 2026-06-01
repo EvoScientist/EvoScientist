@@ -270,7 +270,8 @@ class EvoMemoryMiddleware(AgentMiddleware):
             path = self._file_path(memory_path)
             content = self._read_text(path)
             if content is None:
-                self._write_text(path, template)
+                if not self._write_text(path, template):
+                    raise OSError(f"Failed to bootstrap profile file: {path}")
                 content = template
             records.append((memory_path, content))
         return records

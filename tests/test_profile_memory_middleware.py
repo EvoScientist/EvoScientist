@@ -100,6 +100,24 @@ def test_profile_memory_async_path_bootstraps_and_injects(
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
+def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+
+    middleware = create_memory_middleware(str(memories))
+    monkeypatch.setattr(middleware, "_write_text", lambda _path, _content: False)
+
+    modified = middleware.modify_request(_request())
+    system_text = _system_text(modified)
+
+    assert "Profile files are available at:" in system_text
+    assert "File: /memories/profile/SOUL.md" not in system_text
+    assert "# User profile" not in system_text
+    assert not (memories / "profile" / "USER_PROFILE.md").exists()
+
+
 def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     memories.mkdir()
