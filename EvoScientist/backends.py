@@ -222,6 +222,54 @@ def _ssh_host_index(words: list[dict[str, object]], ssh_idx: int) -> int:
     return idx
 
 
+def _ssh_invocations(
+    command: str,
+) -> list[tuple[list[dict[str, object]], int, int, int | None, int]]:
+    """Return SSH invocations as ``(words, ssh_idx, host_idx, remote_idx, extra)``.
+
+    Examples:
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("ssh host")]
+        [(0, 1, None, 0)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("ssh host 'pwd'")]
+        [(0, 1, 2, 0)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations('ssh host "pwd"')]
+        [(0, 1, 2, 0)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("ssh host 'pwd' extra")]
+        [(0, 1, 2, 1)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("cat x && ssh -p 22 host 'pwd'")]
+        [(0, 3, 4, 0)]
+    """
+    tokens = _shell_token_spans(command)
+    invocations: list[tuple[list[dict[str, object]], int, int, int | None, int]] = []
+    segment: list[dict[str, object]] = []
+
+    def flush_segment() -> None:
+        if not segment:
+            return
+        words = [tok for tok in segment if tok.get("type") == "word"]
+        ssh_idx = _ssh_executable_index(words)
+        if ssh_idx is None:
+            return
+
+        host_idx = _ssh_host_index(words, ssh_idx)
+        remote_idx = host_idx + 1 if host_idx + 1 < len(words) else None
+        remote_extra_argv_count = (
+            max(0, len(words) - remote_idx - 1) if remote_idx is not None else 0
+        )
+        invocations.append(
+            (words, ssh_idx, host_idx, remote_idx, remote_extra_argv_count)
+        )
+
+    for token in tokens:
+        if token.get("type") == "op":
+            flush_segment()
+            segment = []
+        else:
+            segment.append(token)
+    flush_segment()
+    return invocations
+
+
 def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
     """Return remote-command argv spans in SSH invocations.
 
@@ -236,18 +284,8 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
         >>> _ssh_remote_command_spans("cat /tmp/x && ssh host 'pwd'")
         [(23, 28)]
     """
-    tokens = _shell_token_spans(command)
     spans: list[tuple[int, int]] = []
-    segment: list[dict[str, object]] = []
-
-    def flush_segment() -> None:
-        if not segment:
-            return
-        words = [tok for tok in segment if tok.get("type") == "word"]
-        ssh_idx = _ssh_executable_index(words)
-        if ssh_idx is None:
-            return
-
+    for words, ssh_idx, host_idx, remote_idx, _ in _ssh_invocations(command):
         # Mask the SSH executable path itself (e.g., /usr/bin/ssh) so
         # virtual path conversion doesn't rewrite it.
         spans.append(
@@ -257,11 +295,9 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
             )
         )
 
-        host_idx = _ssh_host_index(words, ssh_idx)
-        remote_idx = host_idx + 1
         if (
             host_idx < len(words)
-            and remote_idx < len(words)
+            and remote_idx is not None
             and _is_single_quoted_word(words[remote_idx])
         ):
             spans.append(
@@ -270,14 +306,6 @@ def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
                     int(words[remote_idx]["end"]),
                 )
             )
-
-    for token in tokens:
-        if token.get("type") == "op":
-            flush_segment()
-            segment = []
-        else:
-            segment.append(token)
-    flush_segment()
     return spans
 
 
@@ -321,8 +349,6 @@ def _mask_ssh_remote_commands(command: str) -> tuple[str, dict[str, str]]:
 
 def _validate_ssh_remote_command_format(command: str) -> str | None:
     """Require SSH remote commands to be one single-quoted token after the host."""
-    tokens = _shell_token_spans(command)
-    segment: list[dict[str, object]] = []
 
     def error() -> str:
         return (
@@ -330,40 +356,24 @@ def _validate_ssh_remote_command_format(command: str) -> str | None:
             "for example: ssh host 'cd /home/user/project && python train.py'."
         )
 
-    def flush_segment() -> str | None:
-        if not segment:
-            return None
-        words = [tok for tok in segment if tok.get("type") == "word"]
-        ssh_idx = _ssh_executable_index(words)
-        if ssh_idx is None:
-            return None
-
-        host_idx = _ssh_host_index(words, ssh_idx)
-        remote_idx = host_idx + 1
-        if remote_idx >= len(words):
-            return None
+    for words, _, _, remote_idx, remote_extra_argv_count in _ssh_invocations(command):
+        if remote_idx is None:
+            continue
         if not _is_single_quoted_word(words[remote_idx]):
             return error()
-        if remote_idx + 1 < len(words):
+        if remote_extra_argv_count:
             return error()
-        return None
-
-    for token in tokens:
-        if token.get("type") == "op":
-            if result := flush_segment():
-                return result
-            segment = []
-        else:
-            segment.append(token)
-    return flush_segment()
+    return None
 
 
 def _split_shell_commands(command: str) -> list[str]:
     """Split a compound shell command into individual base commands.
 
-    Handles shell operators tracked by ``_shell_token_spans``. Returns base
-    command names.
+    Handles command-boundary shell operators tracked by ``_shell_token_spans``.
+    Redirection operators are not boundaries; their operands are filenames, not
+    commands.
     """
+    command_boundaries = {"&&", "||", ";", "|", "&", "(", ")", "`"}
     base_commands: list[str] = []
     segment: list[str] = []
 
@@ -373,7 +383,7 @@ def _split_shell_commands(command: str) -> list[str]:
             base_commands.append(words[0])
 
     for token in _shell_token_spans(command):
-        if token.get("type") == "op":
+        if token.get("type") == "op" and token.get("value") in command_boundaries:
             flush_segment()
             segment = []
         else:
@@ -918,13 +928,6 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Then delegates to LocalShellBackend.execute() for actual execution.
         """
-        # Replace literal workspace-root absolute paths with ./
-        # Must happen BEFORE validation so workspace paths (e.g. /tmp/...)
-        # are sanitized before the system-path check fires.
-        ws = str(self.cwd).rstrip("/") + "/"
-        if ws in command:
-            command = command.replace(ws, "./")
-
         # Enforce SSH command shape before virtual path conversion can rewrite
         # unquoted remote absolute paths into local workspace paths.
         ssh_error = _validate_ssh_remote_command_format(command)
@@ -936,6 +939,14 @@ class CustomSandboxBackend(LocalShellBackend):
             )
 
         command, ssh_replacements = _mask_ssh_remote_commands(command)
+
+        # Replace literal workspace-root absolute paths with ./
+        # Must happen after SSH masking so remote paths that happen to contain
+        # the local cwd are preserved, and before validation so local workspace
+        # paths are sanitized before the system-path check fires.
+        ws = str(self.cwd).rstrip("/") + "/"
+        if ws in command:
+            command = command.replace(ws, "./")
 
         # Convert virtual paths to relative paths
         if self.virtual_mode:

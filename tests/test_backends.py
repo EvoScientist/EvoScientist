@@ -4,6 +4,8 @@ import re
 import shlex
 from pathlib import Path
 
+import pytest
+
 from EvoScientist import backends, paths
 from EvoScientist.backends import (
     CustomSandboxBackend,
@@ -750,6 +752,26 @@ class TestExecuteCwdSanitization:
         assert captured["command"] == command
         assert captured["timeout"] == 30
 
+    def test_ssh_remote_path_survives_workspace_root_replacement(
+        self, tmp_path, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        command = f"ssh host 'ls {workspace}/remote-file'"
+
+        resp = backend.execute(command, timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == command
+
     def test_execute_rejects_unquoted_ssh_remote_before_path_conversion(
         self, tmp_workspace
     ):
@@ -902,10 +924,12 @@ class TestExecuteCwdSanitization:
         nested = ws / "EvoSci" / "EvoScientist" / "workspace" / "probe.txt"
         assert not nested.exists(), f"file leaked into nested path: {nested}"
 
-    def test_execute_allows_full_path_ssh_with_quoted_remote(
-        self, tmp_workspace, monkeypatch
+    @pytest.mark.parametrize(
+        "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
+    )
+    def test_execute_recognizes_ssh_executable(
+        self, ssh_path, tmp_workspace, monkeypatch
     ):
-        """Full-path SSH like /usr/bin/ssh should get same remote path protection."""
         captured = {}
 
         def fake_execute(self, command, *, timeout=None):
@@ -915,28 +939,32 @@ class TestExecuteCwdSanitization:
 
         monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        command = "/usr/bin/ssh host 'ls /home/username/project'"
+        command = f"{ssh_path} host 'ls /home/username/project'"
 
         resp = backend.execute(command, timeout=30)
 
         assert resp.exit_code == 0
         assert captured["command"] == command
 
-    def test_execute_rejects_unquoted_full_path_ssh(self, tmp_workspace):
-        """Full-path SSH with unquoted remote command should be rejected."""
+    @pytest.mark.parametrize(
+        "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
+    )
+    def test_execute_rejects_unquoted_ssh_remote_for_executable(
+        self, ssh_path, tmp_workspace
+    ):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
-        resp = backend.execute(
-            "/usr/bin/ssh host ls /home/username/project", timeout=30
-        )
+        resp = backend.execute(f"{ssh_path} host ls /home/username/project", timeout=30)
 
         assert resp.exit_code == 1
         assert "single quoted argument" in resp.output
 
-    def test_execute_allows_homebrew_ssh_with_quoted_remote(
-        self, tmp_workspace, monkeypatch
+    @pytest.mark.parametrize(
+        "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
+    )
+    def test_execute_ssh_remote_path_untouched_in_compound_cmd(
+        self, ssh_path, tmp_workspace, monkeypatch
     ):
-        """Homebrew-installed SSH (/opt/homebrew/bin/ssh) should also be recognized."""
         captured = {}
 
         def fake_execute(self, command, *, timeout=None):
@@ -945,35 +973,14 @@ class TestExecuteCwdSanitization:
 
         monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        command = "/opt/homebrew/bin/ssh host 'pwd'"
-
-        resp = backend.execute(command, timeout=30)
-
-        assert resp.exit_code == 0
-        assert captured["command"] == command
-
-    def test_execute_full_path_ssh_remote_path_untouched_in_compound_cmd(
-        self, tmp_workspace, monkeypatch
-    ):
-        """Full-path SSH in compound cmd: local paths rewritten, remote preserved."""
-        captured = {}
-
-        def fake_execute(self, command, *, timeout=None):
-            captured["command"] = command
-            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
-
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
-        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        command = (
-            "cat /data/file.txt && /usr/bin/ssh host 'ls /home/username/project'"
-        )
+        command = f"cat /data/file.txt && {ssh_path} host 'ls /home/username/project'"
 
         resp = backend.execute(command, timeout=30)
 
         assert resp.exit_code == 0
         assert (
             captured["command"]
-            == "cat ./data/file.txt && /usr/bin/ssh host 'ls /home/username/project'"
+            == f"cat ./data/file.txt && {ssh_path} host 'ls /home/username/project'"
         )
 
 
@@ -1122,6 +1129,12 @@ class TestPipelineCommandValidation:
     def test_quoted_pipe_not_split(self):
         """Pipe inside quotes is not a shell operator."""
         assert validate_command("echo 'hello | world'") is None
+
+    def test_redirect_targets_are_not_treated_as_commands(self):
+        assert validate_command("echo ok > sudo") is None
+        assert validate_command("echo ok 2> dd") is None
+        assert validate_command("python script.py < chmod") is None
+        assert validate_command("ssh host 'pwd' > sudo") is None
 
 
 # === Absolute system path detection ===
