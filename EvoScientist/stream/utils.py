@@ -7,6 +7,7 @@ adapted for deepagents tool names.
 
 import sys
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import PurePath
 
 # === Status marker constants ===
@@ -119,15 +120,21 @@ def _is_memory_path(path: str) -> bool:
     return normalized == "/memories" or normalized.startswith("/memories/")
 
 
+@lru_cache(maxsize=1)
+def _profile_memory_headings() -> tuple[str, ...]:
+    """Return profile headings from the canonical profile templates."""
+    from EvoScientist.middleware.memory import PROFILE_TEMPLATES
+
+    return tuple(
+        template.strip().splitlines()[0].strip()
+        for template in PROFILE_TEMPLATES.values()
+        if template.strip()
+    )
+
+
 def _looks_like_profile_memory(content: str) -> bool:
     """Recognize profile-memory content when streamed without file args."""
-    headings = (
-        "# EvoScientist soul",
-        "# User profile",
-        "# Research taste",
-        "# Project profile",
-    )
-    return any(heading in content for heading in headings)
+    return any(heading in content for heading in _profile_memory_headings())
 
 
 def format_tool_compact(name: str, args: dict | None) -> str:

@@ -167,6 +167,28 @@ class TestFormatToolCompact:
         )
         assert write_result == "Updating memory"
 
+    def test_profile_memory_inference_uses_profile_template_headings(self, monkeypatch):
+        from EvoScientist.middleware import memory
+        from EvoScientist.stream import utils
+
+        monkeypatch.setitem(
+            memory.PROFILE_TEMPLATES,
+            "/profile/CUSTOM.md",
+            "# Custom profile\n\n## Notes\n",
+        )
+        utils._profile_memory_headings.cache_clear()
+
+        try:
+            result = format_tool_compact_with_result(
+                "read_file",
+                {},
+                "# Custom profile\n\n- remembered",
+            )
+        finally:
+            utils._profile_memory_headings.cache_clear()
+
+        assert result == "Reading memory"
+
     def test_project_memory_result_not_special(self):
         result = format_tool_compact_with_result(
             "write_file",
