@@ -10,7 +10,7 @@ runnable graph.
 Reuses the main EvoScientist agent's chat model, backend, and middleware so
 the deployed sub-agent has full capability parity with its in-process
 synchronous counterpart: same workspace files, same ``/skills/`` and
-``/memory/`` routes, same error-handling and context-overflow middleware.
+``/memories/`` routes, same error-handling and context-overflow middleware.
 """
 
 from __future__ import annotations
@@ -96,12 +96,8 @@ def build_async_subagent_graph(name: str) -> Any:
     # which uses ``interrupt()`` for the same purpose (waiting on a user
     # reply) and would deadlock an async sub-agent for the same reason.
     #
-    # Memory middleware is included so async sub-agents can READ
-    # /memory/MEMORY.md, but the extraction trigger (20+ human messages,
-    # see middleware/memory.py) never fires here — sub-agents only receive
-    # the parent's task delegation as a system prompt, not human messages.
-    # Net effect: sub-agents have read-only memory access. Memory writes
-    # happen exclusively from the main agent's user-facing conversation.
+    # Memory middleware is included so async sub-agents get the same profile
+    # context and `/memories/profile/...` file guidance as the main agent.
     return create_deep_agent(
         name=name,
         model=_ensure_chat_model(),

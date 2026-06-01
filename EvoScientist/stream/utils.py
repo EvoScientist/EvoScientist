@@ -119,6 +119,17 @@ def _is_memory_path(path: str) -> bool:
     return normalized == "/memories" or normalized.startswith("/memories/")
 
 
+def _looks_like_profile_memory(content: str) -> bool:
+    """Recognize profile-memory content when streamed without file args."""
+    headings = (
+        "# EvoScientist soul",
+        "# User profile",
+        "# Research taste",
+        "# Project profile",
+    )
+    return any(heading in content for heading in headings)
+
+
 def format_tool_compact(name: str, args: dict | None) -> str:
     """Format as compact tool call string: ToolName(key_arg).
 
@@ -141,19 +152,19 @@ def format_tool_compact(name: str, args: dict | None) -> str:
     # File operations (with special case for memory files)
     if name_lower == "read_file":
         path = _tool_path_arg(args)
-        if _is_memory_path(path) or path.endswith("/MEMORY.md") or path == "/MEMORY.md":
+        if _is_memory_path(path):
             return "Reading memory"
         return f"read_file({_shorten_path(path)})"
 
     if name_lower == "write_file":
         path = _tool_path_arg(args)
-        if _is_memory_path(path) or path.endswith("/MEMORY.md") or path == "/MEMORY.md":
+        if _is_memory_path(path):
             return "Updating memory"
         return f"write_file({_shorten_path(path)})"
 
     if name_lower == "edit_file":
         path = _tool_path_arg(args)
-        if _is_memory_path(path) or path.endswith("/MEMORY.md") or path == "/MEMORY.md":
+        if _is_memory_path(path):
             return "Updating memory"
         return f"edit_file({_shorten_path(path)})"
 
@@ -249,15 +260,11 @@ def format_tool_compact_with_result(
     result_content = result_content or ""
 
     if name_lower in ("write_file", "edit_file"):
-        if (
-            "/memories/" in result_content
-            or "/MEMORY.md" in result_content
-            or "MEMORY.md" in result_content
-        ):
+        if "/memories/" in result_content:
             return "Updating memory"
     elif name_lower == "read_file":
         path = _tool_path_arg(args)
-        if not path and "# EvoScientist Memory" in result_content:
+        if not path and _looks_like_profile_memory(result_content):
             return "Reading memory"
 
     return compact

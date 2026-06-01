@@ -27,7 +27,6 @@ from .diff_format import build_edit_diff
 from .events import stream_agent_events
 from .formatter import ToolResultFormatter
 from .state import (
-    _INTERNAL_TOOLS,
     StreamState,
     SubAgentState,
     _build_todo_stats,
@@ -585,10 +584,6 @@ def create_streaming_display(
             tr = tool_results[i] if has_result else None
             is_task = tc.get("name") == "task"
 
-            # Skip internal middleware tools
-            if tc.get("name") in _INTERNAL_TOOLS:
-                continue
-
             if is_task:
                 # Skip task calls with empty args (still streaming)
                 if tc.get("args"):
@@ -683,19 +678,12 @@ def create_streaming_display(
 
             # Task tool calls are rendered as part of sub-agent sections below
 
-    # Response text handling — exclude internal tools (e.g. ExtractedMemory)
-    # from the "done" calculation so they don't block final Markdown rendering.
-    _n_visible = 0
-    _n_visible_done = 0
-    for i, tc in enumerate(tool_calls):
-        if tc.get("name") in _INTERNAL_TOOLS:
-            continue
-        _n_visible += 1
-        if i < len(tool_results):
-            _n_visible_done += 1
-    has_pending_tools = _n_visible > _n_visible_done
+    # Response text handling: keep the final answer behind pending tool calls.
+    _n_tools = len(tool_calls)
+    _n_done = min(len(tool_results), _n_tools)
+    has_pending_tools = _n_tools > _n_done
     any_active_subagent = any(sa.is_active for sa in subagents)
-    has_used_tools = _n_visible > 0
+    has_used_tools = _n_tools > 0
     all_done = not has_pending_tools and not any_active_subagent and not is_processing
 
     if is_final:
@@ -848,10 +836,6 @@ def display_final_results(
             content = tr.get("content", "") if tr is not None else ""
             tool_name = tc.get("name", "")
             is_task = tool_name.lower() == "task"
-
-            # Skip internal middleware tools
-            if tool_name in _INTERNAL_TOOLS:
-                continue
 
             # Task tools: show delegation line + compact sub-agent summary
             if is_task:

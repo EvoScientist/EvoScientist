@@ -225,9 +225,7 @@ class TestToolCallWidget(unittest.TestCase):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 
         w = ToolCallWidget("edit_file", {}, "mem-1")
-        w._result_content = (
-            "Successfully replaced 1 instance(s) of the string in '/memories/MEMORY.md'"
-        )
+        w._result_content = "Successfully replaced 1 instance(s) of the string in '/memories/profile/USER_PROFILE.md'"
 
         class _Header:
             def __init__(self) -> None:
@@ -508,15 +506,6 @@ class TestIsFinalResponse(unittest.TestCase):
         sa = SubAgentState("research-agent")
         sa.is_active = False
         state.subagents = [sa]
-        assert _is_final_response(state) is True
-
-    def test_internal_tools_ignored(self):
-        from EvoScientist.cli.tui_interactive import _is_final_response
-        from EvoScientist.stream.state import StreamState
-
-        state = StreamState()
-        state.tool_calls = [{"name": "ExtractedMemory", "args": {}}]
-        # No result for internal tool -- should still be considered final
         assert _is_final_response(state) is True
 
     def test_processing_not_final(self):

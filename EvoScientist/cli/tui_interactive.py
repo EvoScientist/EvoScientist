@@ -33,7 +33,7 @@ from ..sessions import (
     thread_exists,
 )
 from ..stream.events import stream_agent_events
-from ..stream.state import _INTERNAL_TOOLS, ResearchPhase, StreamState
+from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .channel import (
@@ -1573,8 +1573,8 @@ def run_textual_interactive(
                                 except Exception:
                                     pass
                                 assistant_w = None
-                            # Skip internal tools and task (handled by SubAgentWidget)
-                            if tool_name not in _INTERNAL_TOOLS and tool_name != "task":
+                            # Task tools are handled by SubAgentWidget.
+                            if tool_name != "task":
                                 has_used_tools = True
                                 if tool_id and tool_id in tool_widgets:
                                     # Re-emitted with updated args — update in place

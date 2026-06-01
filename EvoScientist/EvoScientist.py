@@ -449,7 +449,11 @@ def _get_default_backend():
     )
 
 
-def _get_default_middleware(*, for_async_subagent: bool = False):
+def _get_default_middleware(
+    *,
+    for_async_subagent: bool = False,
+    workspace_dir: str | Path | None = None,
+):
     """Build the default middleware list.
 
     Args:
@@ -492,7 +496,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
-        create_memory_middleware(memory_dir, extraction_model=model),
+        create_memory_middleware(memory_dir, workspace_dir=workspace_dir),
     ]
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
@@ -669,7 +673,7 @@ def create_cli_agent(
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain. Anything CLI-specific
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
-    mw: list[AgentMiddleware] = _get_default_middleware()
+    mw: list[AgentMiddleware] = _get_default_middleware(workspace_dir=workspace_dir)
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
     # would propagate it to every subagent, breaking parallel execute calls

@@ -9,10 +9,6 @@ import ast
 import json
 from enum import StrEnum
 
-# Tool names that are internal middleware artifacts (not user-visible actions).
-# These should be excluded from display rendering and "all_done" calculations.
-_INTERNAL_TOOLS = {"ExtractedMemory"}
-
 
 class ResearchPhase(StrEnum):
     """Research phase constants used by the TUI status bar."""
@@ -139,7 +135,7 @@ class StreamState:
 
     def get_response_markdown(self):
         """Return cached Markdown object, only re-parsing when text changes."""
-        from rich.markdown import Markdown  # type: ignore[import-untyped]
+        from rich.markdown import Markdown
 
         from .display import _fix_markdown_heading_spacing
 
@@ -252,8 +248,7 @@ class StreamState:
 
         elif event_type == "tool_result":
             result_name = event.get("name", "unknown")
-            if result_name not in _INTERNAL_TOOLS:
-                self.is_processing = True
+            self.is_processing = True
             result_content = event.get("content", "")
             self.tool_results.append(
                 {
@@ -352,16 +347,9 @@ class StreamState:
         return event_type
 
     def visible_tool_counts(self) -> tuple[int, int]:
-        """Return (completed, total) counts for visible (non-internal) tools."""
-        n_visible = 0
-        n_done = 0
-        for i, tc in enumerate(self.tool_calls):
-            if tc.get("name") in _INTERNAL_TOOLS:
-                continue
-            n_visible += 1
-            if i < len(self.tool_results):
-                n_done += 1
-        return n_done, n_visible
+        """Return (completed, total) counts for tool calls."""
+        n_total = len(self.tool_calls)
+        return min(len(self.tool_results), n_total), n_total
 
     def has_pending_work(self) -> bool:
         """Return True if tools or sub-agents are still running."""

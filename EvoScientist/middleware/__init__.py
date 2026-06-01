@@ -20,8 +20,6 @@ from .context_editing import (
 from .context_overflow import ContextOverflowMapperMiddleware
 from .memory import (
     EvoMemoryMiddleware,
-    EvoMemoryState,
-    ExtractedMemory,
     create_memory_middleware,
 )
 from .model_fallback import ModelFallbackMiddleware, load_fallback_chain
@@ -37,8 +35,6 @@ __all__ = [
     "ConfigurableModelMiddleware",
     "ContextOverflowMapperMiddleware",
     "EvoMemoryMiddleware",
-    "EvoMemoryState",
-    "ExtractedMemory",
     "ModelFallbackMiddleware",
     "Question",
     "ToolErrorHandlerMiddleware",
