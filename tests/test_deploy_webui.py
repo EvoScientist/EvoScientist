@@ -15,11 +15,15 @@ from EvoScientist.deploy.webui import (
 )
 
 
-def _request(headers=None, **query):
+def _request(headers=None, payload=None, **query):
+    async def _json():
+        return payload or {}
+
     return SimpleNamespace(
         headers={"Host": "localhost", **(headers or {})},
         query=query,
         match_info={},
+        json=_json,
     )
 
 
@@ -144,3 +148,60 @@ def test_webui_workspace_zip_excludes_dotfiles_and_internal_state(tmp_path):
             assert archive.read("notes.txt") == b"hello"
     finally:
         Path(archive_path).unlink()
+
+
+def test_webui_provider_key_response_mentions_restart(monkeypatch, tmp_path):
+    server = _server(tmp_path)
+    monkeypatch.setattr(
+        server,
+        "_load_config",
+        lambda: SimpleNamespace(openai_api_key="", provider="openai", model="gpt-4o"),
+    )
+    monkeypatch.setattr(server, "_models_overview", lambda: {"providers": []})
+
+    from EvoScientist.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "set_config_value", lambda *_args: True)
+
+    response = asyncio.run(
+        server._handle_ui_provider_key(
+            _request(payload={"provider": "openai", "apiKey": "sk-test"})
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert "Restart the LangGraph run" in payload["message"]
+
+
+def test_webui_provider_base_url_response_mentions_restart(monkeypatch, tmp_path):
+    server = _server(tmp_path)
+    monkeypatch.setattr(
+        server,
+        "_load_config",
+        lambda: SimpleNamespace(
+            custom_openai_base_url="",
+            provider="custom-openai",
+            model="gpt-4o",
+        ),
+    )
+    monkeypatch.setattr(server, "_models_overview", lambda: {"providers": []})
+
+    from EvoScientist.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "set_config_value", lambda *_args: True)
+
+    response = asyncio.run(
+        server._handle_ui_provider_base_url(
+            _request(
+                payload={
+                    "provider": "custom-openai",
+                    "baseUrl": "https://api.example.com/v1",
+                }
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert "Restart the LangGraph run" in payload["message"]

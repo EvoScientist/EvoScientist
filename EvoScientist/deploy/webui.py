@@ -715,7 +715,16 @@ class WebUIControlServer:
             return self._json(
                 request, {"error": f"failed to update {config_field}"}, status=500
             )
-        return self._json(request, {"ok": True, "models": self._models_overview()})
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "message": (
+                    "Provider API key updated. Restart the LangGraph run to apply it."
+                ),
+                "models": self._models_overview(),
+            },
+        )
 
     async def _handle_ui_provider_base_url(self, request: Any):
         if not self._check_auth(request):
@@ -736,7 +745,16 @@ class WebUIControlServer:
             return self._json(
                 request, {"error": f"failed to update {config_field}"}, status=500
             )
-        return self._json(request, {"ok": True, "models": self._models_overview()})
+        return self._json(
+            request,
+            {
+                "ok": True,
+                "message": (
+                    "Provider base URL updated. Restart the LangGraph run to apply it."
+                ),
+                "models": self._models_overview(),
+            },
+        )
 
     async def _handle_ui_mcp(self, request: Any):
         if not self._check_auth(request):

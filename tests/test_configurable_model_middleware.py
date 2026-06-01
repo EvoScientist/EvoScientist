@@ -196,7 +196,7 @@ class TestModelOverride:
 
         with (
             _patched_config(
-                {"model": "claude-opus-4-7", "model_provider": "anthropic"}
+                {"model": "claude-opus-4-8", "model_provider": "anthropic"}
             ),
             patch(
                 "EvoScientist.llm.get_chat_model", return_value=new_model
@@ -205,7 +205,7 @@ class TestModelOverride:
             result = _run(mw.awrap_model_call(req, handler))
 
         assert result == "ok"
-        mock_get.assert_called_once_with(model="claude-opus-4-7", provider="anthropic")
+        mock_get.assert_called_once_with(model="claude-opus-4-8", provider="anthropic")
 
     def test_provider_omitted_passed_as_none(self):
         mw = ConfigurableModelMiddleware()

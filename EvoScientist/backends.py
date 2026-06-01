@@ -517,6 +517,40 @@ class MergedSkillsBackend(BackendProtocol):
         return self._primary.upload_files(files)
 
 
+def prepare_sandbox_command(
+    command: str, cwd: str | Path, *, virtual_mode: bool = True
+) -> tuple[str, str | None]:
+    """Normalize workspace paths in ``command`` and validate it for the sandbox.
+
+    Shared by :meth:`CustomSandboxBackend.execute` and the background-process tools so
+    both enforce *identical* workspace-path rewriting (so virtual ``/`` paths resolve to
+    the workspace, not the host root) and the same command validation.
+
+    Returns ``(prepared_command, error)``: ``error`` is a message string when the command
+    is rejected (the caller must NOT run it), otherwise ``None``.
+    """
+    cwd_str = str(cwd).rstrip("/")
+    # Replace literal workspace-root absolute paths with ./ BEFORE validation, so
+    # workspace paths are sanitized before the system-path check fires.
+    ws = cwd_str + "/"
+    if ws in command:
+        command = command.replace(ws, "./")
+    if virtual_mode:
+        command = convert_virtual_paths_in_command(
+            command=command,
+            workspace_name=Path(cwd_str).name,
+        )
+    # Skills/memory dirs must be allowlisted: the workspace-literal replace above runs
+    # before the resolver, so any absolute path it later injects reaches validate unstripped.
+    allow_prefixes = (
+        str(paths.USER_SKILLS_DIR),
+        str(paths.GLOBAL_SKILLS_DIR),
+        str(paths.MEMORIES_DIR),
+        str(_BUILTIN_SKILLS_DIR),
+    )
+    return command, validate_command(command, allow_prefixes=allow_prefixes)
+
+
 class CustomSandboxBackend(LocalShellBackend):
     """
     Custom sandbox backend - inherits LocalShellBackend with added safety.
@@ -620,36 +654,11 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Then delegates to LocalShellBackend.execute() for actual execution.
         """
-        # Replace literal workspace-root absolute paths with ./
-        # Must happen BEFORE validation so workspace paths (e.g. /tmp/...)
-        # are sanitized before the system-path check fires.
-        ws = str(self.cwd).rstrip("/") + "/"
-        if ws in command:
-            command = command.replace(ws, "./")
-
-        # Convert virtual paths to relative paths
-        if self.virtual_mode:
-            command = convert_virtual_paths_in_command(
-                command=command,
-                workspace_name=Path(str(self.cwd)).name,
-            )
-
-        # USER_SKILLS_DIR must be in the allowlist: the workspace-literal
-        # replace above runs BEFORE the resolver, so any absolute path the
-        # resolver later injects reaches validate_command unstripped.
-        allow_prefixes = (
-            str(paths.USER_SKILLS_DIR),
-            str(paths.GLOBAL_SKILLS_DIR),
-            str(paths.MEMORIES_DIR),
-            str(_BUILTIN_SKILLS_DIR),
+        command, error = prepare_sandbox_command(
+            command, self.cwd, virtual_mode=self.virtual_mode
         )
-        error = validate_command(command, allow_prefixes=allow_prefixes)
         if error:
-            return ExecuteResponse(
-                output=error,
-                exit_code=1,
-                truncated=False,
-            )
+            return ExecuteResponse(output=error, exit_code=1, truncated=False)
 
         # Delegate to parent for subprocess execution
         response = super().execute(command, timeout=timeout)
@@ -658,14 +667,17 @@ class CustomSandboxBackend(LocalShellBackend):
         if response.exit_code == 124:
             cmd_words = command.split()
             grep_hint = cmd_words[0] if cmd_words else "process"
-            bg_cmd = f"{command} > /output.log 2>&1 &"
+            bg_cmd = f'{command} > /output.log 2>&1 & echo "PID: $!"'
             response = ExecuteResponse(
                 output=(
                     f"{response.output}\n\n"
-                    f"Recovery: re-run in background to avoid the sandbox timeout:\n"
-                    f"  {bg_cmd}\n"
-                    f"Then check progress: ps aux | grep {grep_hint}\n"
-                    f"Read results: cat /output.log"
+                    f"Recovery — pick one:\n"
+                    f"  1. Needs more time? Re-run with a larger timeout (up to 3600s): "
+                    f"execute(command=..., timeout=600)\n"
+                    f"  2. Runs indefinitely? Run it in the background and keep the PID:\n"
+                    f"       {bg_cmd}\n"
+                    f"     Check: ps -p <PID>  (or: ps aux | grep {grep_hint})  ·  "
+                    f"Read: cat /output.log  ·  Stop: kill <PID>"
                 ),
                 exit_code=response.exit_code,
                 truncated=response.truncated,

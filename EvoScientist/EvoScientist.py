@@ -419,6 +419,7 @@ def _get_default_backend():
 
     from .backends import CustomSandboxBackend, MergedSkillsBackend
 
+    cfg = _ensure_config()
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
@@ -428,7 +429,7 @@ def _get_default_backend():
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
         virtual_mode=True,
-        timeout=300,
+        timeout=cfg.sandbox_execute_timeout,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -499,6 +500,14 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
 
         mw.insert(0, AskUserMiddleware())
 
+    # Background-process tools (run_in_background / check_process / stop_process /
+    # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
+    # must not spawn local OS processes.
+    if not for_async_subagent:
+        from .middleware.background import BackgroundExecutionMiddleware
+
+        mw.append(BackgroundExecutionMiddleware())
+
     mw.append(
         create_code_interpreter_middleware(
             timeout=cfg.code_interpreter_timeout,
@@ -544,7 +553,11 @@ def _get_default_agent():
         # breaks parallel execute calls (multi-pending-interrupt LangGraph
         # error). See PR #202.
         if not cfg.auto_approve:
-            mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
+            mw.append(
+                HumanInTheLoopMiddleware(
+                    interrupt_on={"execute": True, "run_in_background": True}
+                )
+            )
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(be, mw)
@@ -634,7 +647,7 @@ def create_cli_agent(
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
         virtual_mode=True,
-        timeout=300,
+        timeout=cfg.sandbox_execute_timeout,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,
@@ -662,7 +675,11 @@ def create_cli_agent(
     # would propagate it to every subagent, breaking parallel execute calls
     # (multi-pending-interrupt LangGraph error).
     if not cfg.auto_approve:
-        mw.append(HumanInTheLoopMiddleware(interrupt_on={"execute": True}))
+        mw.append(
+            HumanInTheLoopMiddleware(
+                interrupt_on={"execute": True, "run_in_background": True}
+            )
+        )
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(be, mw, on_mcp_progress=on_mcp_progress)

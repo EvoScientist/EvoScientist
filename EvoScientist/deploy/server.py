@@ -106,6 +106,18 @@ def deploy(
             f"[red]Invalid port {effective_port}. Use an integer in [1, 65535].[/red]"
         )
         raise typer.Exit(1)
+    if bool(getattr(config, "webui_enabled", True)):
+        webui_port = int(getattr(config, "webui_port", 8010) or 8010)
+        if webui_port == effective_port:
+            console.print(
+                f"[red]WebUI port {webui_port} conflicts with the LangGraph Dev "
+                "port.[/red]"
+            )
+            console.print(
+                "[dim]Change webui_port or langgraph_dev_port in config, "
+                "or run EvoSci configure webui.[/dim]"
+            )
+            raise typer.Exit(1)
 
     # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
     # holding the port. If an existing EvoSci langgraph dev is already up,

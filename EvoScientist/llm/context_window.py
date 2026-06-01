@@ -17,6 +17,11 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.6 open-source variants — exceptions to the ``qwen3.6`` family.
     "qwen3.6-27b": 262_000,
     "qwen3.6-35b-a3b": 262_000,
+    # Qwen 3.7 Max — closed-source flagship (1M).
+    "qwen3.7-max": 1_000_000,
+    # xAI Grok — per-model windows (build-0.1: 256K, 4.3: 1M).
+    "grok-build-0.1": 256_000,
+    "grok-4.3": 1_000_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
 }
@@ -29,6 +34,8 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("claude-", 1_000_000),
     # OpenAI GPT-5.5 family — base, pro, future variants
     ("gpt-5.5", 1_050_000),
+    # Google Gemini 3.x family — flash, flash-lite, pro (1.05M). Excludes 2.5.
+    ("gemini-3", 1_050_000),
     # Moonshot Kimi K2 family — k2.5, k2.6, k2-thinking, k2-thinking-turbo
     ("kimi-k2", 262_000),
     # Zhipu GLM-5 family — base, 5.1, 5-turbo, 5v-turbo, etc.

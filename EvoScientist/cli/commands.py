@@ -17,7 +17,7 @@ from rich.table import Table
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
 from ..stream.console import console
-from ._app import app, channel_app, config_app, mcp_app, sessions_app
+from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
     _create_session_workspace,
@@ -37,6 +37,10 @@ from .channel import (
     channel_ask_user_prompt,
     channel_hitl_prompt,
     dispatch_channel_slash_command,
+    forget_channel_origin,
+    get_channel_origin,
+    publish_to_channel_origin,
+    remember_channel_origin,
 )
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
@@ -56,15 +60,263 @@ def onboard(
     skip_validation: bool = typer.Option(
         False, "--skip-validation", help="Skip API key validation during setup"
     ),
+    # ---- Pre-fill answers (any subset; remaining prompts stay interactive)
+    provider: str | None = typer.Option(
+        None, "--provider", help="Pre-set LLM provider (e.g. anthropic, openai)"
+    ),
+    model: str | None = typer.Option(None, "--model", help="Pre-set model name"),
+    api_key: str | None = typer.Option(
+        None, "--api-key", help="Pre-set API key for the chosen --provider"
+    ),
+    tavily_key: str | None = typer.Option(
+        None, "--tavily-key", help="Pre-set Tavily API key"
+    ),
+    workspace_mode: str | None = typer.Option(
+        None,
+        "--workspace-mode",
+        help="Pre-set workspace mode (daemon | run)",
+    ),
+    show_thinking: bool | None = typer.Option(
+        None,
+        "--show-thinking/--no-show-thinking",
+        help="Pre-set thinking-panel visibility",
+    ),
+    ui: str | None = typer.Option(None, "--ui", help="Pre-set UI backend (tui | cli)"),
+    port: int | None = typer.Option(
+        None, "--port", help="Pre-set langgraph dev server port"
+    ),
+    # ---- Skip flags
+    skip_skills: bool = typer.Option(
+        False, "--skip-skills", help="Skip skills install"
+    ),
+    skip_mcp: bool = typer.Option(False, "--skip-mcp", help="Skip MCP server setup"),
+    skip_latex: bool = typer.Option(False, "--skip-latex", help="Skip LaTeX setup"),
+    skip_channels: bool = typer.Option(
+        False, "--skip-channels", help="Skip channels setup"
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Run without prompts — every required answer must come from a flag",
+    ),
 ):
-    """Interactive setup wizard for EvoScientist
+    """Interactive setup wizard for EvoScientist.
 
     Guides you through configuring API keys, model selection,
     workspace settings, and agent parameters.
+
+    Any answer can be pre-set via a flag (``--provider anthropic
+    --model claude-sonnet-4-6 ...``); prompts for unset answers stay
+    interactive unless ``--non-interactive`` is passed, in which case any
+    missing required answer aborts the wizard.
+    """
+    from ..config.onboard.constants import (
+        VALID_PROVIDERS,
+        VALID_UI_BACKENDS,
+        VALID_WORKSPACE_MODES,
+    )
+    from ..config.onboard.prompter import NonInteractivePrompter
+
+    # Validate constrained string flags up-front so a typo doesn't silently
+    # poison the saved config. Allowed-value sets live in
+    # ``EvoScientist/config/onboard/constants.py``; a drift test in
+    # ``tests/test_onboard.py`` keeps them aligned with the interactive
+    # ``Choice(value=...)`` lists in ``steps.py``.
+    if ui is not None and ui not in VALID_UI_BACKENDS:
+        raise typer.BadParameter(
+            f"--ui must be one of {sorted(VALID_UI_BACKENDS)}", param_hint="--ui"
+        )
+    if workspace_mode is not None and workspace_mode not in VALID_WORKSPACE_MODES:
+        raise typer.BadParameter(
+            f"--workspace-mode must be one of {sorted(VALID_WORKSPACE_MODES)}",
+            param_hint="--workspace-mode",
+        )
+    if provider is not None and provider not in VALID_PROVIDERS:
+        raise typer.BadParameter(
+            f"--provider must be one of {sorted(VALID_PROVIDERS)}",
+            param_hint="--provider",
+        )
+    # Match the interactive prompt's range (1024 < port < 65536). Without
+    # this check, --port 80 or --port 99999 would land in config and break
+    # the langgraph dev server on startup.
+    if port is not None and not (1024 < port < 65536):
+        raise typer.BadParameter(
+            "--port must be in the user-port range (1025 — 65535)",
+            param_hint="--port",
+        )
+
+    # Collect flag-supplied answers keyed by the prompt_id wizard steps use.
+    answers: dict = {}
+    if ui is not None:
+        answers["ui"] = ui
+    if port is not None:
+        answers["port"] = str(port)
+    if provider is not None:
+        answers["provider"] = provider
+    if model is not None:
+        answers["model"] = model
+    if api_key is not None:
+        answers["api_key"] = api_key
+    if tavily_key is not None:
+        answers["tavily_key"] = tavily_key
+    if workspace_mode is not None:
+        answers["workspace_mode"] = workspace_mode
+    if show_thinking is not None:
+        answers["show_thinking"] = show_thinking
+
+    skip_set = {
+        section
+        for section, flag in (
+            ("skills", skip_skills),
+            ("mcp", skip_mcp),
+            ("latex", skip_latex),
+            ("channels", skip_channels),
+        )
+        if flag
+    }
+
+    prompter = None
+    if answers or skip_set or non_interactive:
+        prompter = NonInteractivePrompter(
+            answers=answers,
+            skip_set=skip_set,
+            strict=non_interactive,
+        )
+
+    _run_onboard_cli(skip_validation=skip_validation, prompter=prompter)
+
+
+# =============================================================================
+# `EvoSci configure <section>` — re-run one onboarding section
+# =============================================================================
+
+
+_CONFIGURE_SECTIONS = {
+    "ui": "UI backend",
+    "port": "LangGraph server port",
+    "provider": "LLM provider + auth + API key",
+    "model": "Model + reasoning effort",
+    "tavily": "Tavily search key",
+    "workspace": "Workspace mode",
+    "thinking": "Thinking panel",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "latex": "LaTeX (TinyTeX)",
+    "webui": "WebUI deploy API",
+    "channels": "Channels",
+}
+
+
+def _run_onboard_cli(**kwargs: Any) -> None:
+    """Invoke the wizard, presenting non-interactive errors as a clean
+    message + exit code 1 instead of a raw Python traceback.
+
+    The wizard raises ``RuntimeError`` for *expected* non-interactive
+    failures: rejected ``--api-key`` / ``--tavily-key`` presets, missing
+    required flags under ``--non-interactive``, or a missing base URL.
+    Those are user-input problems, not bugs — surface them like any other
+    CLI validation error rather than dumping a stack trace.
     """
     from ..config import run_onboard
 
-    run_onboard(skip_validation=skip_validation)
+    try:
+        run_onboard(**kwargs)
+    except RuntimeError as exc:
+        console.print(f"[red]✗ {escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
+
+
+def _configure_section(section: str, skip_validation: bool = False) -> None:
+    """Run a single onboarding section, reusing the wizard's step logic."""
+    _run_onboard_cli(
+        skip_validation=skip_validation,
+        only_sections={section},
+    )
+
+
+@configure_app.command("ui")
+def configure_ui():
+    """Re-run UI backend (TUI / CLI) selection."""
+    _configure_section("ui")
+
+
+@configure_app.command("port")
+def configure_port():
+    """Re-run langgraph dev server port selection."""
+    _configure_section("port")
+
+
+@configure_app.command("provider")
+def configure_provider(
+    skip_validation: bool = typer.Option(False, "--skip-validation"),
+):
+    """Re-run LLM provider, auth mode, and API key prompts.
+
+    Model selection is automatically re-run after provider — the model list
+    depends on the provider, and silently leaving e.g. ``model="claude-...""``
+    when the provider was switched to ``openai`` would break the first
+    request. Press Enter on the model picker to keep the current default.
+    """
+    _run_onboard_cli(
+        skip_validation=skip_validation,
+        only_sections={"provider", "model"},
+    )
+
+
+@configure_app.command("model")
+def configure_model():
+    """Re-run model selection (and reasoning effort for OpenRouter)."""
+    _configure_section("model")
+
+
+@configure_app.command("tavily")
+def configure_tavily(
+    skip_validation: bool = typer.Option(False, "--skip-validation"),
+):
+    """Re-run Tavily search-key prompt."""
+    _configure_section("tavily", skip_validation=skip_validation)
+
+
+@configure_app.command("workspace")
+def configure_workspace():
+    """Re-run workspace mode (daemon/run) selection."""
+    _configure_section("workspace")
+
+
+@configure_app.command("thinking")
+def configure_thinking():
+    """Re-run thinking-panel visibility selection."""
+    _configure_section("thinking")
+
+
+@configure_app.command("skills")
+def configure_skills():
+    """Re-run skills install/sync."""
+    _configure_section("skills")
+
+
+@configure_app.command("mcp")
+def configure_mcp():
+    """Re-run MCP server selection."""
+    _configure_section("mcp")
+
+
+@configure_app.command("latex")
+def configure_latex():
+    """Re-run LaTeX (TinyTeX) setup."""
+    _configure_section("latex")
+
+
+@configure_app.command("webui")
+def configure_webui():
+    """Re-run WebUI deploy API setup."""
+    _configure_section("webui")
+
+
+@configure_app.command("channels")
+def configure_channels():
+    """Re-run channels selection and per-channel configuration."""
+    _configure_section("channels")
 
 
 # =============================================================================
@@ -87,7 +339,7 @@ def channel_setup():
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     from ..config import load_config, save_config
-    from ..config.onboard import _step_channels
+    from ..config.onboard.channels import _step_channels
 
     config = load_config()
     updates = _step_channels(config)
@@ -549,6 +801,7 @@ def _make_serve_start_new_session_cb(
         from ..sessions import generate_thread_id
 
         new_tid = generate_thread_id()
+        forget_channel_origin(agent_holder.get("thread_id"))
         agent_holder["thread_id"] = new_tid
         if channel_runtime is not None:
             channel_runtime.thread_id = new_tid
@@ -596,6 +849,7 @@ def _make_serve_cmd_completed_hook(
         new_tid = getattr(ctx, "thread_id", None)
         thread_changed = bool(new_tid) and new_tid != agent_holder.get("thread_id")
         if thread_changed:
+            forget_channel_origin(agent_holder.get("thread_id"))
             agent_holder["thread_id"] = new_tid
             if channel_runtime is not None:
                 channel_runtime.thread_id = new_tid
@@ -654,6 +908,8 @@ def _serve_process_message(
 
     if not _claim_or_complete_channel_request(msg):
         return
+
+    remember_channel_origin(agent_holder.get("thread_id"), msg)
 
     runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
 
@@ -774,6 +1030,10 @@ def _serve_process_message(
             return
 
         if _slash_handled:
+            # A channel-issued /new or /resume rotates the thread inside the
+            # dispatch above; re-bind the now-current thread to this channel
+            # so async-notifier turns on it still forward back here.
+            remember_channel_origin(agent_holder["thread_id"], msg)
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
@@ -838,18 +1098,29 @@ def _serve_drain_notifications(
         # session-rebind callback), falling back to the startup value.
         runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
         meta = build_metadata(runtime_workspace, model)
+        tid = agent_holder["thread_id"]
         try:
-            run_streaming(
+            response = run_streaming(
                 ui_backend="cli",
                 agent=agent_holder["agent"],
                 message=text,
-                thread_id=agent_holder["thread_id"],
+                thread_id=tid,
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
+            return
+        if publish_to_channel_origin(tid, response or ""):
+            # Mirror a normal channel turn's closing "Replied to" line so the
+            # forwarded notification reads as terminated in the serve log.
+            origin = get_channel_origin(tid)
+            if origin is not None:
+                console.print(
+                    f"[dim][{origin.channel_type}] Replied to "
+                    f"{origin.sender or origin.chat_id}[/dim]"
+                )
 
     async def _run_notification_message_async(text: str, notifs: list) -> None:
         await _aio.to_thread(_run_notification_message, text, notifs)
@@ -1154,7 +1425,7 @@ def config_set(
     if set_config_value(key, value):
         console.print(f"[green]Set {escape(key)}[/green]")
     else:
-        console.print(f"[red]Invalid key: {escape(key)}[/red]")
+        console.print(f"[red]Could not set {escape(key)}: invalid key or value[/red]")
         raise typer.Exit(1)
 
 

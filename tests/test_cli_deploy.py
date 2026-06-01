@@ -29,6 +29,8 @@ def _make_config(
     log_level: str = "warning",
     langgraph_dev_jobs_per_worker: int = 10,
     langgraph_dev_file_persistence: bool = True,
+    webui_enabled: bool = True,
+    webui_port: int = 8010,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -38,6 +40,8 @@ def _make_config(
         log_level=log_level,
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
         langgraph_dev_file_persistence=langgraph_dev_file_persistence,
+        webui_enabled=webui_enabled,
+        webui_port=webui_port,
     )
 
 
@@ -382,6 +386,26 @@ def test_deploy_starts_webui_control_api(monkeypatch, tmp_path):
 
     names = [name for (name, _args, _kw) in captured["atexit_callbacks"]]
     assert "stop" in names
+
+
+def test_deploy_skips_webui_control_api_when_disabled(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path), webui_enabled=False)
+    captured = _run_deploy_once(monkeypatch, config, port=7000)
+
+    assert captured["webui_started"] is False
+
+
+def test_deploy_refuses_webui_langgraph_port_conflict(monkeypatch, tmp_path):
+    config = _make_config(
+        default_workdir=str(tmp_path),
+        langgraph_dev_port=7000,
+        webui_port=7000,
+    )
+
+    with pytest.raises(typer.Exit) as exc:
+        _run_deploy_once(monkeypatch, config)
+
+    assert exc.value.exit_code == 1
 
 
 def test_deploy_registers_cleanup_for_ccproxy_when_oauth(monkeypatch, tmp_path):

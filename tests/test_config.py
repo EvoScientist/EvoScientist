@@ -76,7 +76,7 @@ class TestEvoScientistConfig:
         assert config.openai_api_key == ""
         assert config.tavily_api_key == ""
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-5"
+        assert config.model == "claude-sonnet-4-6"
         assert config.default_mode == "daemon"
         assert config.default_workdir == ""
         assert config.show_thinking is True
@@ -157,7 +157,7 @@ class TestLoadSaveReset:
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-5"
+        assert config.model == "claude-sonnet-4-6"
 
     def test_save_creates_file(self, temp_config_dir, clean_env):
         """Test that save creates the config file."""
@@ -350,8 +350,8 @@ class TestPriorityChain:
         """Test CLI arguments override file config."""
         save_config(EvoScientistConfig(model="gpt-4o"))
 
-        config = get_effective_config(cli_overrides={"model": "claude-opus-4-5"})
-        assert config.model == "claude-opus-4-5"
+        config = get_effective_config(cli_overrides={"model": "claude-opus-4-8"})
+        assert config.model == "claude-opus-4-8"
 
     def test_env_ui_backend_override(self, temp_config_dir, monkeypatch):
         """UI backend can be selected via environment variable."""
@@ -380,6 +380,52 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_CHANNEL_DEBUG_TRACING", "true")
         config = get_effective_config()
         assert config.channel_debug_tracing is True
+
+    def test_sandbox_execute_timeout_default(self, temp_config_dir, clean_env):
+        """Sandbox execute timeout defaults to 300 seconds."""
+        assert EvoScientistConfig().sandbox_execute_timeout == 300
+        assert get_effective_config().sandbox_execute_timeout == 300
+
+    def test_env_sandbox_execute_timeout_override(self, temp_config_dir, monkeypatch):
+        """Sandbox execute timeout can be set via env var and coerces to int."""
+        monkeypatch.setenv("EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT", "600")
+        config = get_effective_config()
+        assert config.sandbox_execute_timeout == 600
+        assert isinstance(config.sandbox_execute_timeout, int)
+
+    def test_sandbox_execute_timeout_invalid_falls_back(self):
+        """Non-positive / non-int values fall back to the default (would
+        otherwise crash CustomSandboxBackend construction at startup)."""
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout=0).sandbox_execute_timeout == 300
+        )
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout=-5).sandbox_execute_timeout
+            == 300
+        )
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout="abc").sandbox_execute_timeout
+            == 300
+        )
+        assert (
+            EvoScientistConfig(sandbox_execute_timeout=True).sandbox_execute_timeout
+            == 300
+        )
+
+    def test_set_sandbox_execute_timeout_rejects_invalid(
+        self, temp_config_dir, clean_env
+    ):
+        """set_config_value must reject (not silently persist) a non-positive timeout."""
+        save_config(EvoScientistConfig(sandbox_execute_timeout=120))
+        assert set_config_value("sandbox_execute_timeout", 0) is False
+        assert set_config_value("sandbox_execute_timeout", -5) is False
+        # bool is an int subclass; reject it before coercion turns True into 1.
+        assert set_config_value("sandbox_execute_timeout", True) is False
+        # The earlier valid value is untouched on disk.
+        assert get_config_value("sandbox_execute_timeout") == 120
+        # A valid value still goes through.
+        assert set_config_value("sandbox_execute_timeout", 600) is True
+        assert get_config_value("sandbox_execute_timeout") == 600
 
     def test_env_api_key_override(self, temp_config_dir, monkeypatch):
         """Test API keys from env override file."""

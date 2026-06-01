@@ -447,6 +447,137 @@ _ASK_USER_TIMEOUT = (
 _STOP_COMMANDS = frozenset(("/stop", "/cancel"))
 
 
+# ---------------------------------------------------------------------------
+# Per-thread channel-origin registry
+# ---------------------------------------------------------------------------
+# When a channel-originated message starts an agent turn, the turn's
+# thread_id is remembered against its (channel_type, chat_id, metadata).
+# Later, when an async sub-agent notification fires a synthetic agent turn
+# for that same thread_id, the notifier path pushes the synthesized final
+# response back to the same chat — otherwise the follow-up would only render
+# locally and the channel user would never see it. v1 forwards only the
+# final response (no mid-turn thinking/todo/media).
+
+
+@dataclass(frozen=True)
+class _ChannelOrigin:
+    """Channel destination remembered for a thread, for notifier push-back."""
+
+    channel_type: str
+    chat_id: str
+    sender: str
+    metadata: dict | None = None
+
+
+_thread_channel_origins: dict[str, _ChannelOrigin] = {}
+_thread_channel_origins_lock = threading.Lock()
+
+
+def remember_channel_origin(thread_id: str | None, msg: ChannelMessage) -> None:
+    """Record that ``thread_id`` is currently bound to ``msg``'s channel chat.
+
+    Called on entry to each channel-triggered agent turn (Rich CLI / TUI /
+    serve). The latest channel turn for a given thread wins — re-registering
+    is intentional, since the user can keep talking on the same thread from
+    the same channel and we always want the most recent metadata.
+    """
+    if not thread_id:
+        return
+    with _thread_channel_origins_lock:
+        _thread_channel_origins[thread_id] = _ChannelOrigin(
+            channel_type=msg.channel_type,
+            chat_id=msg.chat_id,
+            sender=msg.sender,
+            metadata=dict(msg.metadata) if msg.metadata else None,
+        )
+
+
+def get_channel_origin(thread_id: str | None) -> _ChannelOrigin | None:
+    """Return the channel origin remembered for ``thread_id``, or ``None``."""
+    if not thread_id:
+        return None
+    with _thread_channel_origins_lock:
+        return _thread_channel_origins.get(thread_id)
+
+
+def forget_channel_origin(thread_id: str | None) -> None:
+    """Drop the registry entry for ``thread_id`` (e.g. on ``/new`` rotation)."""
+    if not thread_id:
+        return
+    with _thread_channel_origins_lock:
+        _thread_channel_origins.pop(thread_id, None)
+
+
+def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
+    """Schedule pushing ``content`` to the channel remembered for ``thread_id``.
+
+    Fire-and-forget: returns ``True`` iff a publish coroutine was scheduled
+    on the bus loop; returns ``False`` if no origin is registered, the bus
+    isn't running, ``content`` is empty/whitespace, or scheduling itself
+    fails. The publish runs asynchronously — failures inside the coroutine
+    are logged via a done-callback so callers (which are often on event
+    loops that must not block) don't pay any latency.
+    """
+    from ..channels.bus.events import OutboundMessage
+
+    if not content or not content.strip():
+        return False
+    origin = get_channel_origin(thread_id)
+    if origin is None:
+        return False
+    loop = _bus_loop
+    manager = _manager
+    if loop is None or manager is None:
+        return False
+    bus = getattr(manager, "bus", None)
+    if bus is None:
+        return False
+
+    async def _publish_and_record() -> None:
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel=origin.channel_type,
+                chat_id=origin.chat_id,
+                content=content,
+                metadata=origin.metadata or {},
+            )
+        )
+        # Mirror the normal channel-reply path, which records a "sent"
+        # message after a successful publish so per-channel stats stay
+        # accurate for forwarded notifications too.
+        manager.record_message(origin.channel_type, "sent")
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_publish_and_record(), loop)
+    except Exception as exc:
+        _channel_logger.warning(
+            "Async notification publish to %s:%s failed to schedule: %s",
+            origin.channel_type,
+            origin.chat_id,
+            exc,
+        )
+        return False
+
+    def _on_publish_done(fut) -> None:
+        """Log any exception raised by the fire-and-forget publish coroutine."""
+        # A cancelled future raises CancelledError from .exception() rather
+        # than returning it (e.g. bus loop torn down mid-publish); treat that
+        # as a benign shutdown, not a failure to log.
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            _channel_logger.warning(
+                "Async notification publish to %s:%s failed: %s",
+                origin.channel_type,
+                origin.chat_id,
+                exc,
+            )
+
+    future.add_done_callback(_on_publish_done)
+    return True
+
+
 def _is_stop_command(content: str | None) -> bool:
     """Whether incoming content is a stop/cancel slash command."""
     return (content or "").strip().lower() in _STOP_COMMANDS
