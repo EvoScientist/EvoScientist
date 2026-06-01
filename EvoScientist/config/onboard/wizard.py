@@ -572,7 +572,7 @@ def run_onboard(
                         # leaves a stale ``--model`` / ``--api-key`` that would
                         # be re-applied under a different provider, producing
                         # an invalid pair (e.g. ``provider=openai`` +
-                        # ``model=claude-sonnet-4-5``).
+                        # ``model=claude-sonnet-4-6``).
                         for field_name in vars(loop_snapshot):
                             setattr(
                                 config, field_name, getattr(loop_snapshot, field_name)

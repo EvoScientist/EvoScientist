@@ -951,6 +951,8 @@ def _resolve_hitl_approval(
     if not action_requests:
         return [{"type": "approve"}]
 
+    from ..config.settings import HITL_SHELL_TOOLS
+
     cfg = load_config()
     auto_approve = _session_auto_approve or cfg.auto_approve
     shell_allow_list = (
@@ -969,7 +971,7 @@ def _resolve_hitl_approval(
             req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
         )
 
-        if name != "execute":
+        if name not in HITL_SHELL_TOOLS:
             decisions.append({"type": "approve"})
             continue
 

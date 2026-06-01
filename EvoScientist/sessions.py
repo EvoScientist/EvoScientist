@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiosqlite
 from langchain_core.messages import (
@@ -509,7 +509,7 @@ async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
 
 
 def _reduce_messages_delta(
-    state: list[AnyMessage], writes: list[Any]
+    state: list[AnyMessage] | None, writes: list[Any]
 ) -> list[AnyMessage]:
     """Inline copy of deepagents' ``_messages_delta_reducer``.
 
@@ -532,6 +532,10 @@ def _reduce_messages_delta(
     so HTTP-driven graphs (and persisted blobs that round-tripped
     through JSON) reconstruct correctly without a separate coercion
     step.
+
+    ``state`` may be None on ``DeltaChannel.replay_writes`` for threads
+    whose earliest checkpoint did not seed ``messages: []``, and is
+    treated as the empty list.
     """
     flat: list[Any] = []
     for w in writes:
@@ -544,9 +548,9 @@ def _reduce_messages_delta(
     state_msgs: list[AnyMessage] = (
         state
         if state and isinstance(state[0], BaseMessage)
-        else convert_to_messages(state)  # type: ignore[arg-type]
+        else cast("list[AnyMessage]", convert_to_messages(state or []))
     )
-    msgs: list[AnyMessage] = convert_to_messages(flat)  # type: ignore[assignment]
+    msgs: list[AnyMessage] = cast("list[AnyMessage]", convert_to_messages(flat))
 
     # ``REMOVE_ALL_MESSAGES`` resets everything; honor the last sentinel
     # in the batch — discard prior state plus every write before it.

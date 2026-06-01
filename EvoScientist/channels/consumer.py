@@ -118,7 +118,7 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
         return True
 
     try:
-        from ..config.settings import load_config
+        from ..config.settings import HITL_SHELL_TOOLS, load_config
 
         cfg = load_config()
     except Exception:
@@ -153,7 +153,7 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
         name = (
             req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
         )
-        if name != "execute":
+        if name not in HITL_SHELL_TOOLS:
             continue
         args = (
             req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
@@ -647,7 +647,6 @@ class InboundConsumer:
                     action_reqs = _iev.get("action_requests", [])
                     n = len(action_reqs) or 1
 
-                    # Auto-approve: session flag or config, but forced confirmation overrides
                     _has_forced = any(
                         check_forced_confirmation(
                             (r.get("args", {}) if isinstance(r, dict) else {}).get(
@@ -667,7 +666,6 @@ class InboundConsumer:
                         }
                         continue
 
-                    # Needs user approval
                     prompt_text = _format_approval_prompt(
                         action_reqs, with_buttons=has_buttons, forced=_has_forced
                     )
@@ -690,17 +688,28 @@ class InboundConsumer:
                         event=asyncio.Event(),
                     )
                     self._pending_interrupts[session_key] = pending
+                    timed_out = False
                     try:
                         await asyncio.wait_for(
-                            pending.event.wait(),
-                            timeout=_HITL_APPROVAL_TIMEOUT,
+                            pending.event.wait(), timeout=_HITL_APPROVAL_TIMEOUT
                         )
                     except TimeoutError:
-                        pending.decision = "reject"
+                        timed_out = True
                     finally:
                         self._pending_interrupts.pop(session_key, None)
 
-                    decision = pending.decision or "reject"
+                    if timed_out:
+                        decision = "reject"
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content="\u23f0 Approval timed out. Action rejected.",
+                                metadata=msg.metadata,
+                            )
+                        )
+                    else:
+                        decision = pending.decision or "reject"
 
                     if pending.event.is_set():
                         feedback = {
@@ -719,7 +728,6 @@ class InboundConsumer:
                             )
 
                     if decision == "reject":
-                        # Reject this + fill remaining with rejects
                         resume_map[_iid] = {
                             "decisions": [
                                 {"type": "reject", "message": "Rejected"}

@@ -63,7 +63,7 @@ def test_resolve_context_window_falls_back_when_missing():
 
 
 def test_patch_table_resolves_known_model_name():
-    model = SimpleNamespace(model_name="claude-opus-4.7", profile=None)
+    model = SimpleNamespace(model_name="claude-opus-4.8", profile=None)
 
     assert get_context_window(model) == 1_000_000
 
@@ -78,7 +78,7 @@ def test_patch_table_strips_provider_prefix():
 
 def test_real_attribute_beats_patch_table():
     model = SimpleNamespace(
-        model_name="claude-opus-4.7",
+        model_name="claude-opus-4.8",
         context_window=500_000,
         profile=None,
     )
@@ -95,10 +95,10 @@ def test_unknown_model_falls_through_to_fallback():
 
 def test_claude_family_pattern_covers_all_variants():
     # Native Anthropic (dash form)
-    native = SimpleNamespace(model_name="claude-opus-4-7", profile=None)
+    native = SimpleNamespace(model_name="claude-opus-4-8", profile=None)
     # OpenRouter (dot form, with vendor prefix)
     openrouter = SimpleNamespace(model_name="anthropic/claude-sonnet-4.6", profile=None)
-    sonnet = SimpleNamespace(model_name="claude-sonnet-4-5", profile=None)
+    sonnet = SimpleNamespace(model_name="claude-sonnet-4-6", profile=None)
     # Haiku 4.5 is a dict-level exception (200K, not 1M).
     haiku = SimpleNamespace(model_name="claude-haiku-4-5", profile=None)
 
@@ -141,7 +141,7 @@ def test_claude_3x_matches_family_but_upstream_profile_wins_in_practice():
 
 
 def test_apply_injects_into_empty_profile():
-    model = SimpleNamespace(model_name="claude-opus-4-7", profile=None)
+    model = SimpleNamespace(model_name="claude-opus-4-8", profile=None)
 
     apply_known_context_window(model)
 
@@ -164,7 +164,7 @@ def test_apply_preserves_existing_profile_keys():
 
 def test_apply_does_not_overwrite_existing_max_input_tokens():
     model = SimpleNamespace(
-        model_name="claude-opus-4-7",
+        model_name="claude-opus-4-8",
         profile={"max_input_tokens": 500_000},
     )
 
@@ -185,7 +185,7 @@ def test_apply_handles_non_dict_profile_safely():
     # Non-dict profile (e.g. namespace from a future langchain version) must
     # not raise — fall back to a fresh dict so deepagents can still read it.
     model = SimpleNamespace(
-        model_name="claude-opus-4-7",
+        model_name="claude-opus-4-8",
         profile=SimpleNamespace(name="opaque object"),
     )
 

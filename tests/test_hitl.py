@@ -260,6 +260,67 @@ class TestResolveHitlApproval:
         finally:
             disp._session_auto_approve = original
 
+    def test_run_in_background_not_in_allow_list_prompts(self):
+        """run_in_background must NOT auto-approve — it runs shell like execute."""
+        import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
+
+        original = disp._session_auto_approve
+        try:
+            disp._session_auto_approve = False
+            mock_cfg = MagicMock()
+            mock_cfg.auto_approve = False
+            mock_cfg.shell_allow_list = "ls,cat"
+            with patch(
+                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+            ):
+                with patch(
+                    "EvoScientist.stream.display._prompt_hitl_approval"
+                ) as mock_prompt:
+                    mock_prompt.return_value = [{"type": "approve"}]
+                    result = _resolve_hitl_approval(
+                        {
+                            "action_requests": [
+                                {
+                                    "name": "run_in_background",
+                                    "args": {"command": "rm -rf /"},
+                                }
+                            ],
+                        }
+                    )
+            assert result == [{"type": "approve"}]
+            mock_prompt.assert_called_once()  # prompted, not silently approved
+        finally:
+            disp._session_auto_approve = original
+
+    def test_run_in_background_in_allow_list_auto_approves(self):
+        """An allow-listed command still auto-approves for run_in_background."""
+        import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
+
+        original = disp._session_auto_approve
+        try:
+            disp._session_auto_approve = False
+            mock_cfg = MagicMock()
+            mock_cfg.auto_approve = False
+            mock_cfg.shell_allow_list = "python"
+            with patch(
+                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+            ):
+                result = _resolve_hitl_approval(
+                    {
+                        "action_requests": [
+                            {
+                                "name": "run_in_background",
+                                "args": {"command": "python train.py"},
+                            }
+                        ],
+                    }
+                )
+            assert result == [{"type": "approve"}]
+        finally:
+            disp._session_auto_approve = original
+
 
 # =============================================================================
 # Config fields
@@ -484,6 +545,21 @@ class TestConsumerHitlHelpers:
             result = _should_auto_approve(
                 [
                     {"name": "execute", "args": {"command": "rm -rf /"}},
+                ]
+            )
+        assert result is False
+
+    def test_should_auto_approve_run_in_background_no_allowlist(self):
+        """Channel path must NOT auto-approve run_in_background (same as execute)."""
+        from EvoScientist.channels.consumer import _should_auto_approve
+
+        mock_cfg = MagicMock()
+        mock_cfg.auto_approve = False
+        mock_cfg.shell_allow_list = ""
+        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+            result = _should_auto_approve(
+                [
+                    {"name": "run_in_background", "args": {"command": "rm -rf /"}},
                 ]
             )
         assert result is False
