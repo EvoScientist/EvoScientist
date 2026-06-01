@@ -167,6 +167,21 @@ def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
     assert not (memories / "MEMORY.md").exists()
 
 
+def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    legacy_path = memories / "MEMORY.md"
+    legacy_path.write_text("  \n\n", encoding="utf-8")
+
+    middleware = create_memory_middleware(str(memories))
+    middleware.modify_request(_request())
+
+    assert not legacy_path.exists()
+
+
 def test_profile_memory_uses_explicit_workspace_for_project_profile(
     tmp_path, monkeypatch
 ):

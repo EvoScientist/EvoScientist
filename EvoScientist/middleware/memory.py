@@ -263,6 +263,17 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return False
         return True
 
+    def _delete_legacy_memory(self, legacy_path: Path) -> bool:
+        """Remove the old memory file after it has no content left to preserve."""
+        try:
+            legacy_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Failed to delete legacy memory %s: %s", legacy_path, e)
+            return False
+        return True
+
     def _ensure_profile_files(self) -> list[tuple[str, str]]:
         """Create the expected profile files if needed and return their contents."""
         records = []
@@ -284,8 +295,10 @@ class EvoMemoryMiddleware(AgentMiddleware):
         """
         legacy_path = self._memory_dir / _LEGACY_MEMORY_FILENAME
         legacy = self._read_text(legacy_path)
-        if not legacy or not legacy.strip():
+        if legacy is None:
             return True
+        if not legacy.strip():
+            return self._delete_legacy_memory(legacy_path)
 
         user_profile_path = "/profile/USER_PROFILE.md"
         research_taste_path = "/profile/RESEARCH_TASTE.md"
@@ -330,16 +343,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         if not imported_any:
             logger.debug("Legacy MEMORY.md contained no real content to migrate")
 
-        try:
-            legacy_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            logger.warning(
-                "Failed to delete migrated legacy memory %s: %s", legacy_path, e
-            )
-            return False
-        return True
+        return self._delete_legacy_memory(legacy_path)
 
     def _read_profile_records(self) -> list[tuple[str, str]]:
         """Load all profile files after bootstrapping and legacy migration."""
