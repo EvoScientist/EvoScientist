@@ -9,7 +9,11 @@ from ..stream.console import console
 from .tui_backends import RichStreamingBackend, StreamingTUIBackend
 
 DEFAULT_UI_BACKEND = "cli"
-SUPPORTED_UI_BACKENDS = ("cli", "tui")
+# "webui" launches the browser front-end instead of an in-terminal UI; it is
+# intercepted earlier (cli/commands.py:_main_callback) and never reaches the
+# streaming backends, but is listed here so normalize/resolve preserve it
+# rather than falling back to "cli".
+SUPPORTED_UI_BACKENDS = ("cli", "tui", "webui")
 _LEGACY_BACKEND_MAP = {"textual": "tui", "rich": "cli"}
 
 

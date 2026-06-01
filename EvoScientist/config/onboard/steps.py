@@ -43,23 +43,24 @@ from .validators import validate_tavily_key
 
 
 def _step_ui_backend(config: EvoScientistConfig) -> str:
-    """Step 0: Select UI backend (Rich CLI or Textual TUI).
+    """Step 0: Select UI backend (Textual TUI, Rich CLI, or browser WebUI).
 
     Args:
         config: Current configuration.
 
     Returns:
-        Selected backend name ("tui" or "cli").
+        Selected backend name ("tui", "cli", or "webui").
     """
     choices = [
         Choice(title="TUI (full-screen interface, recommended)", value="tui"),
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
+        Choice(title="WebUI (browser interface, beta)", value="webui"),
     ]
 
     # Map legacy values to current ones
     _legacy_map = {"textual": "tui", "rich": "cli"}
     default_backend = _legacy_map.get(config.ui_backend, config.ui_backend)
-    if default_backend not in ("tui", "cli"):
+    if default_backend not in ("tui", "cli", "webui"):
         default_backend = "tui"
 
     backend = questionary.select(
@@ -158,6 +159,72 @@ def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
         console.print(
             f"  [green]✓ EvoScientist will run on http://127.0.0.1:{port}[/green]"
         )
+    return port
+
+
+def _step_webui_port(config: EvoScientistConfig) -> int:
+    """Step 0.6: Choose the local TCP port for the WebUI front-end.
+
+    Only asked when ``ui_backend == "webui"``. This is the Next.js server port
+    the browser opens (``@evoscientist/webui``); the backend keeps its own
+    ``langgraph_dev_port``. Mirrors the langgraph-dev port prompt's UX.
+
+    Returns the chosen port; caller assigns it to ``config.webui_port``.
+    """
+    from ...langgraph_dev.manager import _is_port_occupied
+
+    current_port = getattr(config, "webui_port", 4716)
+    backend_port = getattr(config, "langgraph_dev_port", 6174)
+    occupied = _is_port_occupied(current_port)
+    conflicts_backend = current_port == backend_port
+
+    # Bake live availability into the label (same single-paren style as the
+    # langgraph-dev / ccproxy prompts) so the status shows WITH the question.
+    # The WebUI port must also differ from the backend (langgraph dev) port —
+    # run_webui refuses equal ports at startup, so reject them here too instead
+    # of saving a config that fails to launch later.
+    if occupied or conflicts_backend:
+        reason = "occupied" if occupied else f"= backend port {backend_port}"
+        prompt_label = (
+            f"Enter port for WebUI server "
+            f"(Current: {current_port}, {reason}, pick another):"
+        )
+    else:
+        prompt_label = (
+            f"Enter port for WebUI server "
+            f"(Current: {current_port}, available, Enter to keep):"
+        )
+
+    def valid_port(value: str) -> bool:
+        if not value:
+            # Keep the default only if it's free AND not the backend port.
+            return not occupied and not conflicts_backend
+        try:
+            port = int(value)
+        except (ValueError, TypeError):
+            return False
+        if not (1024 < port < 65536):
+            return False
+        if port == backend_port:
+            return False
+        return not _is_port_occupied(port)
+
+    raw = questionary.text(
+        prompt_label,
+        validate=valid_port,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+    ).ask()
+
+    if raw is None:
+        raise KeyboardInterrupt()
+
+    port = int(raw) if raw else current_port
+    console.print(f"  [green]✓ WebUI will open at http://localhost:{port}[/green]")
+    console.print(
+        "  [yellow]⚠️  Beta: the WebUI won't show your CLI/TUI chat history "
+        "yet.[/yellow]"
+    )
     return port
 
 

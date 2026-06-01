@@ -35,7 +35,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
     }
 )
 
-VALID_UI_BACKENDS: frozenset[str] = frozenset({"tui", "cli"})
+VALID_UI_BACKENDS: frozenset[str] = frozenset({"tui", "cli", "webui"})
 
 VALID_WORKSPACE_MODES: frozenset[str] = frozenset({"daemon", "run"})
 
