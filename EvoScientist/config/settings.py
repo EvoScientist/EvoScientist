@@ -114,6 +114,12 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
+    # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
+    # used only when ui_backend == "webui". 4716 is 6174 reversed — a memorable
+    # pairing with the langgraph dev port that it connects to. The backend keeps
+    # its own port (langgraph_dev_port); this is just the browser server.
+    webui_port: int = 4716
+
     # Whether langgraph dev persists its runtime state to .langgraph_api/ next
     # to the subprocess cwd. True (default) keeps async-task, scheduler, and
     # Store API state across subprocess restarts — useful for future
@@ -149,7 +155,9 @@ class EvoScientistConfig:
 
     # UI Settings
     show_thinking: bool = True
-    ui_backend: Literal["cli", "tui"] = "tui"
+    # "webui" launches the browser front-end (@evoscientist/webui via npx) +
+    # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
+    ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
     reasoning_effort: str = "high"
 
@@ -503,6 +511,7 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "webui_port": "EVOSCIENTIST_WEBUI_PORT",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
     "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",

@@ -81,7 +81,9 @@ def onboard(
         "--show-thinking/--no-show-thinking",
         help="Pre-set thinking-panel visibility",
     ),
-    ui: str | None = typer.Option(None, "--ui", help="Pre-set UI backend (tui | cli)"),
+    ui: str | None = typer.Option(
+        None, "--ui", help="Pre-set UI backend (tui | cli | webui)"
+    ),
     port: int | None = typer.Option(
         None, "--port", help="Pre-set langgraph dev server port"
     ),
@@ -1804,7 +1806,7 @@ def _main_callback(
     ui: str | None = typer.Option(
         None,
         "--ui",
-        help="UI backend: tui (default) or cli.",
+        help="UI backend: tui (default), cli, or webui.",
     ),
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI"""
@@ -1871,8 +1873,8 @@ def _main_callback(
 
     if mode and mode not in ("run", "daemon"):
         raise typer.BadParameter("--mode must be 'run' or 'daemon'")
-    if ui and ui.lower() not in ("cli", "tui"):
-        raise typer.BadParameter("--ui must be 'tui' or 'cli'")
+    if ui and ui.lower() not in ("cli", "tui", "webui"):
+        raise typer.BadParameter("--ui must be 'tui', 'cli', or 'webui'")
 
     # --name only makes sense in run mode
     if name and not (
@@ -1955,6 +1957,20 @@ def _main_callback(
 
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
+
+    # WebUI mode: instead of the in-terminal CLI/TUI, run a deploy-style
+    # langgraph server (full MCP + async) + the published @evoscientist/webui
+    # front-end (npx) in THIS terminal, then block. Reuses start_langgraph_dev
+    # but leaves `EvoSci deploy` untouched (it stays a clean server for external
+    # UIs / SDK clients). `-p` single-shot keeps the headless CLI path below.
+    if not prompt:
+        from .tui_runtime import normalize_ui_backend
+
+        if normalize_ui_backend(config.ui_backend) == "webui":
+            from ..deploy.webui import run_webui
+
+            run_webui(config, workspace_dir=workspace_dir)
+            return
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).

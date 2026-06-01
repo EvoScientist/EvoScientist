@@ -126,9 +126,9 @@ class TestSharedConstantsAlignment:
     def test_ui_constants_match_step_choices(self):
         from EvoScientist.config.onboard.constants import VALID_UI_BACKENDS
 
-        # _step_ui_backend hard-codes "tui" and "cli" — small enough to
-        # check by direct lookup against the canonical set.
-        assert VALID_UI_BACKENDS == frozenset({"tui", "cli"})
+        # _step_ui_backend hard-codes "tui", "cli", and "webui" — small enough
+        # to check by direct lookup against the canonical set.
+        assert VALID_UI_BACKENDS == frozenset({"tui", "cli", "webui"})
 
     def test_workspace_mode_constants_match_step_choices(self):
         from EvoScientist.config.onboard.constants import VALID_WORKSPACE_MODES
