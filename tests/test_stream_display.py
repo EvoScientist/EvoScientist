@@ -1,9 +1,20 @@
 """Tests for Rich streaming display helpers."""
 
+from typing import Any, cast
+
+from rich.console import Console
+
 from EvoScientist.stream.display import (
     _fix_markdown_heading_spacing,
+    create_streaming_display,
     resolve_final_status_footer,
 )
+
+
+def _render_text(renderable) -> str:
+    console = Console(record=True, width=100, color_system=None)
+    console.print(renderable)
+    return console.export_text()
 
 
 def test_resolve_final_status_footer_hides_footer_for_interactive_cli():
@@ -14,6 +25,52 @@ def test_resolve_final_status_footer_hides_footer_for_interactive_cli():
 def test_resolve_final_status_footer_keeps_footer_for_noninteractive():
     """Non-interactive output keeps the footer so callers see the trailing status."""
     assert resolve_final_status_footer(False, lambda: "footer") == "footer"
+
+
+def test_streaming_display_keeps_response_visible_with_pending_late_memory_tool():
+    """Late profile-memory tools should not make already-streamed text disappear."""
+    renderable = create_streaming_display(
+        response_text="Here is the answer.",
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "read_file",
+                "args": {"path": "/memories/profile/USER_PROFILE.md"},
+            }
+        ],
+        tool_results=[],
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "Here is the answer." in rendered
+    assert "Reading memory" in rendered
+
+
+def test_streaming_display_keeps_response_visible_while_late_tool_result_processes():
+    """A completed late memory tool should not hide streamed response text."""
+    renderable = create_streaming_display(
+        response_text="Here is the answer.",
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "read_file",
+                "args": {"path": "/memories/profile/USER_PROFILE.md"},
+            }
+        ],
+        tool_results=[
+            {
+                "name": "read_file",
+                "content": "# User profile\n\n- Likes concise updates.",
+            }
+        ],
+        is_processing=True,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "Here is the answer." in rendered
+    assert "Reading memory" in rendered
 
 
 class TestFixMarkdownHeadingSpacing:
@@ -105,7 +162,7 @@ class TestAssistantMessageBufferContract:
 
         msg = AssistantMessage(initial_content=initial)
         fake_md = MagicMock()
-        msg.query_one = MagicMock(return_value=fake_md)
+        cast(Any, msg).query_one = MagicMock(return_value=fake_md)
         return msg, fake_md
 
     def test_flush_markdown_does_not_mutate_buffer(self):

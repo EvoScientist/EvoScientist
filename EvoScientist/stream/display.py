@@ -681,10 +681,14 @@ def create_streaming_display(
     # Response text handling: keep the final answer behind pending tool calls.
     _n_tools = len(tool_calls)
     _n_done = min(len(tool_results), _n_tools)
-    has_pending_tools = _n_tools > _n_done
+    response_text_started = bool(response_text)
+    has_pending_tools = _n_tools > _n_done and not response_text_started
     any_active_subagent = any(sa.is_active for sa in subagents)
     has_used_tools = _n_tools > 0
-    all_done = not has_pending_tools and not any_active_subagent and not is_processing
+    is_processing_blocking = is_processing and not response_text_started
+    all_done = (
+        not has_pending_tools and not any_active_subagent and not is_processing_blocking
+    )
 
     if is_final:
         # Final frame: render todo panel + response (tools/subagents handled above).

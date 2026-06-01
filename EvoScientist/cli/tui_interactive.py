@@ -1566,8 +1566,11 @@ def run_textual_interactive(
                             narration_w = None
                             await _remove_w(processing_w)
                             processing_w = None
-                            # Remove early AssistantMessage (text arrived before tools)
-                            if assistant_w is not None:
+                            # Remove early AssistantMessage before task tools, or
+                            # before any tool if no answer text has streamed yet.
+                            if assistant_w is not None and (
+                                tool_name == "task" or not state.response_text
+                            ):
                                 try:
                                     await assistant_w.remove()
                                 except Exception:
