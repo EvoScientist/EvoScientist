@@ -14,6 +14,8 @@ from EvoScientist.deploy.webui import (
     WebUIControlServer,
 )
 
+_AUTH_HEADERS = {"X-API-Key": "secret"}
+
 
 def _request(headers=None, payload=None, **query):
     async def _json():
@@ -94,18 +96,22 @@ def test_webui_cors_does_not_reflect_unknown_private_origin(tmp_path):
 
 
 def test_webui_file_tree_rejects_invalid_path(tmp_path):
-    server = _server(tmp_path)
+    server = _server(tmp_path, api_key="secret")
 
-    response = asyncio.run(server._handle_ui_files_tree(_request(path="../secret")))
+    response = asyncio.run(
+        server._handle_ui_files_tree(_request(headers=_AUTH_HEADERS, path="../secret"))
+    )
 
     assert response.status == 400
     assert json.loads(response.text) == {"error": "invalid path"}
 
 
 def test_webui_file_read_rejects_invalid_path(tmp_path):
-    server = _server(tmp_path)
+    server = _server(tmp_path, api_key="secret")
 
-    response = asyncio.run(server._handle_ui_files_read(_request(path="../secret")))
+    response = asyncio.run(
+        server._handle_ui_files_read(_request(headers=_AUTH_HEADERS, path="../secret"))
+    )
 
     assert response.status == 400
     assert json.loads(response.text) == {"error": "invalid path"}
@@ -113,9 +119,11 @@ def test_webui_file_read_rejects_invalid_path(tmp_path):
 
 def test_webui_file_read_is_bounded_and_marks_truncated(tmp_path):
     (tmp_path / "large.txt").write_text("a" * (256 * 1024 + 5))
-    server = _server(tmp_path)
+    server = _server(tmp_path, api_key="secret")
 
-    response = asyncio.run(server._handle_ui_files_read(_request(path="large.txt")))
+    response = asyncio.run(
+        server._handle_ui_files_read(_request(headers=_AUTH_HEADERS, path="large.txt"))
+    )
     payload = json.loads(response.text)
 
     assert payload["truncated"] is True
@@ -126,12 +134,33 @@ def test_webui_file_tree_hides_dotfiles_and_internal_state(tmp_path):
     (tmp_path / "notes.txt").write_text("hello")
     (tmp_path / ".env").write_text("SECRET=1")
     (tmp_path / ".langgraph_api").mkdir()
-    server = _server(tmp_path)
+    server = _server(tmp_path, api_key="secret")
 
-    response = asyncio.run(server._handle_ui_files_tree(_request()))
+    response = asyncio.run(
+        server._handle_ui_files_tree(_request(headers=_AUTH_HEADERS))
+    )
     payload = json.loads(response.text)
 
     assert [entry["name"] for entry in payload["entries"]] == ["notes.txt"]
+    assert payload["truncated"] is False
+
+
+def test_webui_file_tree_reports_truncated_results(monkeypatch, tmp_path):
+    from EvoScientist.deploy import webui as webui_mod
+
+    for index in range(3):
+        (tmp_path / f"{index}.txt").write_text(str(index))
+    server = _server(tmp_path, api_key="secret")
+    monkeypatch.setattr(webui_mod, "_MAX_WORKSPACE_TREE_ENTRIES", 2)
+
+    response = asyncio.run(
+        server._handle_ui_files_tree(_request(headers=_AUTH_HEADERS))
+    )
+    payload = json.loads(response.text)
+
+    assert [entry["name"] for entry in payload["entries"]] == ["0.txt", "1.txt"]
+    assert payload["truncated"] is True
+    assert payload["limit"] == 2
 
 
 def test_webui_workspace_zip_excludes_dotfiles_and_internal_state(tmp_path):
@@ -151,7 +180,7 @@ def test_webui_workspace_zip_excludes_dotfiles_and_internal_state(tmp_path):
 
 
 def test_webui_provider_key_response_mentions_restart(monkeypatch, tmp_path):
-    server = _server(tmp_path)
+    server = _server(tmp_path, api_key="secret")
     monkeypatch.setattr(
         server,
         "_load_config",
@@ -165,7 +194,10 @@ def test_webui_provider_key_response_mentions_restart(monkeypatch, tmp_path):
 
     response = asyncio.run(
         server._handle_ui_provider_key(
-            _request(payload={"provider": "openai", "apiKey": "sk-test"})
+            _request(
+                headers=_AUTH_HEADERS,
+                payload={"provider": "openai", "apiKey": "sk-test"},
+            )
         )
     )
     payload = json.loads(response.text)
@@ -175,7 +207,7 @@ def test_webui_provider_key_response_mentions_restart(monkeypatch, tmp_path):
 
 
 def test_webui_provider_base_url_response_mentions_restart(monkeypatch, tmp_path):
-    server = _server(tmp_path)
+    server = _server(tmp_path, api_key="secret")
     monkeypatch.setattr(
         server,
         "_load_config",
@@ -194,10 +226,11 @@ def test_webui_provider_base_url_response_mentions_restart(monkeypatch, tmp_path
     response = asyncio.run(
         server._handle_ui_provider_base_url(
             _request(
+                headers=_AUTH_HEADERS,
                 payload={
                     "provider": "custom-openai",
                     "baseUrl": "https://api.example.com/v1",
-                }
+                },
             )
         )
     )
@@ -205,3 +238,29 @@ def test_webui_provider_base_url_response_mentions_restart(monkeypatch, tmp_path
 
     assert payload["ok"] is True
     assert "Restart the LangGraph run" in payload["message"]
+
+
+def test_webui_sensitive_endpoint_requires_configured_api_key(tmp_path):
+    server = _server(tmp_path)
+
+    response = asyncio.run(
+        server._handle_ui_provider_key(
+            _request(payload={"provider": "openai", "apiKey": "sk-test"})
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 403
+    assert payload == {"error": "webui_api_key is required for this endpoint"}
+
+
+def test_webui_sensitive_endpoint_rejects_missing_api_key(tmp_path):
+    server = _server(tmp_path, api_key="secret")
+
+    response = asyncio.run(
+        server._handle_ui_provider_key(
+            _request(payload={"provider": "openai", "apiKey": "sk-test"})
+        )
+    )
+
+    assert response.status == 401

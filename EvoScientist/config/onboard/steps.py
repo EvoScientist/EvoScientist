@@ -262,7 +262,7 @@ def _step_webui(config: EvoScientistConfig) -> dict[str, object]:
 
     while True:
         api_key = questionary.password(
-            "WebUI API key (required for non-local bind):",
+            "WebUI API key (required for sensitive controls and non-local bind):",
             default=str(getattr(config, "webui_api_key", "")),
             style=WIZARD_STYLE,
             qmark=f"  {QMARK}",

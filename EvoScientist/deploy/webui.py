@@ -384,11 +384,22 @@ class WebUIControlServer:
         expected = (self.config.api_key or "").strip()
         return not expected or self._supplied_api_key(request) == expected
 
+    def _is_sensitive_authenticated(self, request: Any) -> bool:
+        expected = (self.config.api_key or "").strip()
+        return bool(expected) and self._supplied_api_key(request) == expected
+
     def _check_auth(self, request: Any) -> bool:
         return (
             self._request_host_allowed(request)
             and self._request_origin_allowed(request)
             and self._is_authenticated(request)
+        )
+
+    def _check_sensitive_auth(self, request: Any) -> bool:
+        return (
+            self._request_host_allowed(request)
+            and self._request_origin_allowed(request)
+            and self._is_sensitive_authenticated(request)
         )
 
     def _cors_headers(self, request: Any) -> dict[str, str]:
@@ -427,6 +438,19 @@ class WebUIControlServer:
     def _unauthorized(self, request: Any):
         return self._json(request, {"error": "unauthorized"}, status=401)
 
+    def _sensitive_unauthorized(self, request: Any):
+        if not self._request_host_allowed(request) or not self._request_origin_allowed(
+            request
+        ):
+            return self._json(request, {"error": "forbidden"}, status=403)
+        if not (self.config.api_key or "").strip():
+            return self._json(
+                request,
+                {"error": "webui_api_key is required for this endpoint"},
+                status=403,
+            )
+        return self._unauthorized(request)
+
     async def _request_payload(self, request: Any) -> dict[str, Any]:
         try:
             payload = await request.json()
@@ -448,6 +472,8 @@ class WebUIControlServer:
                 "service": "evoscientist-webui",
                 "authRequired": auth_required,
                 "authenticated": authenticated,
+                "sensitiveAuthRequired": True,
+                "sensitiveAuthenticated": self._is_sensitive_authenticated(request),
                 "assistantId": self.assistant_id,
             },
         )
@@ -553,8 +579,8 @@ class WebUIControlServer:
         )
 
     async def _handle_ui_skills_install(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         source = str(payload.get("source") or payload.get("name") or "").strip()
         if not source:
@@ -568,8 +594,8 @@ class WebUIControlServer:
         )
 
     async def _handle_ui_skills_uninstall(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         name = str(payload.get("name") or "").strip()
         if not name:
@@ -673,8 +699,8 @@ class WebUIControlServer:
         return result
 
     async def _handle_ui_models_switch(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         model = str(payload.get("model") or payload.get("name") or "").strip()
         provider = str(payload.get("provider") or "").strip()
@@ -697,8 +723,8 @@ class WebUIControlServer:
         )
 
     async def _handle_ui_provider_key(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         provider = str(payload.get("provider") or "").strip()
         api_key = str(payload.get("apiKey") or payload.get("api_key") or "").strip()
@@ -727,8 +753,8 @@ class WebUIControlServer:
         )
 
     async def _handle_ui_provider_base_url(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         provider = str(payload.get("provider") or "").strip()
         base_url = str(payload.get("baseUrl") or payload.get("base_url") or "").strip()
@@ -808,8 +834,8 @@ class WebUIControlServer:
         }
 
     async def _handle_ui_mcp_install(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         names = payload.get("names") or payload.get("name")
         if isinstance(names, str):
@@ -842,8 +868,8 @@ class WebUIControlServer:
         )
 
     async def _handle_ui_mcp_remove(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         payload = await self._request_payload(request)
         name = str(payload.get("name") or "").strip()
         if not name:
@@ -865,8 +891,8 @@ class WebUIControlServer:
         return candidate, normalized
 
     async def _handle_ui_files_tree(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         path = request.query.get("path", "")
         try:
             root_path, normalized = self._resolve_workspace_path(path)
@@ -875,6 +901,7 @@ class WebUIControlServer:
         if not root_path.exists() or not root_path.is_dir():
             return self._json(request, {"error": "directory not found"}, status=404)
         entries = []
+        truncated = False
         for entry in sorted(
             root_path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
         ):
@@ -887,6 +914,9 @@ class WebUIControlServer:
                 continue
             if _is_hidden_or_internal(relative):
                 continue
+            if len(entries) >= _MAX_WORKSPACE_TREE_ENTRIES:
+                truncated = True
+                break
             entries.append(
                 {
                     "name": entry.name,
@@ -898,8 +928,6 @@ class WebUIControlServer:
                     ).isoformat(),
                 }
             )
-            if len(entries) >= _MAX_WORKSPACE_TREE_ENTRIES:
-                break
         return self._json(
             request,
             {
@@ -907,6 +935,8 @@ class WebUIControlServer:
                 "workspaceDir": str(self.workspace_dir),
                 "path": normalized,
                 "entries": entries,
+                "truncated": truncated,
+                "limit": _MAX_WORKSPACE_TREE_ENTRIES,
             },
         )
 
@@ -916,8 +946,8 @@ class WebUIControlServer:
             return handle.read(_MAX_FILE_PREVIEW_BYTES + 1)
 
     async def _handle_ui_files_read(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         relative_path = request.query.get("path", "")
         try:
             file_path, normalized = self._resolve_workspace_path(relative_path)
@@ -992,8 +1022,8 @@ class WebUIControlServer:
         return archive_path
 
     async def _handle_ui_files_download_all(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
         from aiohttp import web
 
         root = self.workspace_dir
@@ -1022,8 +1052,8 @@ class WebUIControlServer:
                 pass
 
     async def _handle_ui_session_shutdown(self, request: Any):
-        if not self._check_auth(request):
-            return self._unauthorized(request)
+        if not self._check_sensitive_auth(request):
+            return self._sensitive_unauthorized(request)
 
         def _shutdown() -> None:
             os.kill(os.getpid(), signal.SIGTERM)
