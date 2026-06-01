@@ -176,8 +176,6 @@ _SSH_OPTIONS_WITH_VALUE = {
     "-w",
 }
 
-_SSH_EXECUTABLES = {"ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"}
-
 
 def _ssh_option_consumes_next(token: str) -> bool:
     """Return whether an SSH option token consumes the following argument."""
@@ -187,7 +185,7 @@ def _ssh_option_consumes_next(token: str) -> bool:
 
 
 def _is_ssh_executable(token: str) -> bool:
-    return token in _SSH_EXECUTABLES
+    return token == "ssh"
 
 
 def _is_shell_assignment(token: dict[str, object]) -> bool:

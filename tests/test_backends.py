@@ -924,11 +924,8 @@ class TestExecuteCwdSanitization:
         nested = ws / "EvoSci" / "EvoScientist" / "workspace" / "probe.txt"
         assert not nested.exists(), f"file leaked into nested path: {nested}"
 
-    @pytest.mark.parametrize(
-        "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
-    )
-    def test_execute_recognizes_ssh_executable(
-        self, ssh_path, tmp_workspace, monkeypatch
+    def test_execute_recognizes_literal_ssh_executable(
+        self, tmp_workspace, monkeypatch
     ):
         captured = {}
 
@@ -939,27 +936,47 @@ class TestExecuteCwdSanitization:
 
         monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        command = f"{ssh_path} host 'ls /home/username/project'"
+        command = "ssh host 'ls /home/username/project'"
 
         resp = backend.execute(command, timeout=30)
 
         assert resp.exit_code == 0
         assert captured["command"] == command
 
-    @pytest.mark.parametrize(
-        "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
-    )
-    def test_execute_rejects_unquoted_ssh_remote_for_executable(
-        self, ssh_path, tmp_workspace
-    ):
+    def test_execute_rejects_unquoted_ssh_remote_for_literal_ssh(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
-        resp = backend.execute(f"{ssh_path} host ls /home/username/project", timeout=30)
+        resp = backend.execute("ssh host ls /home/username/project", timeout=30)
 
         assert resp.exit_code == 1
         assert "single quoted argument" in resp.output
 
-    def test_execute_does_not_recognize_tmp_ssh_as_ssh(
+    @pytest.mark.parametrize(
+        ("ssh_path", "expected_path"),
+        [
+            ("/tmp/ssh", "./tmp/ssh"),
+            ("/usr/bin/ssh", "./usr/bin/ssh"),
+            ("/opt/homebrew/bin/ssh", "./opt/homebrew/bin/ssh"),
+        ],
+    )
+    def test_execute_does_not_recognize_path_named_ssh_as_ssh(
+        self, ssh_path, expected_path, tmp_workspace, monkeypatch
+    ):
+        captured = {}
+
+        def fake_execute(self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        resp = backend.execute(f"{ssh_path} host ls /home/username/project", timeout=30)
+
+        assert resp.exit_code == 0
+        assert captured["command"] == f"{expected_path} host ls ./home/username/project"
+
+    def test_execute_ssh_remote_path_untouched_in_compound_cmd(
         self, tmp_workspace, monkeypatch
     ):
         captured = {}
@@ -970,34 +987,14 @@ class TestExecuteCwdSanitization:
 
         monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-
-        resp = backend.execute("/tmp/ssh host ls /home/username/project", timeout=30)
-
-        assert resp.exit_code == 0
-        assert captured["command"] == "./tmp/ssh host ls ./home/username/project"
-
-    @pytest.mark.parametrize(
-        "ssh_path", ["ssh", "/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
-    )
-    def test_execute_ssh_remote_path_untouched_in_compound_cmd(
-        self, ssh_path, tmp_workspace, monkeypatch
-    ):
-        captured = {}
-
-        def fake_execute(self, command, *, timeout=None):
-            captured["command"] = command
-            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
-
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
-        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        command = f"cat /data/file.txt && {ssh_path} host 'ls /home/username/project'"
+        command = "cat /data/file.txt && ssh host 'ls /home/username/project'"
 
         resp = backend.execute(command, timeout=30)
 
         assert resp.exit_code == 0
         assert (
             captured["command"]
-            == f"cat ./data/file.txt && {ssh_path} host 'ls /home/username/project'"
+            == "cat ./data/file.txt && ssh host 'ls /home/username/project'"
         )
 
 
