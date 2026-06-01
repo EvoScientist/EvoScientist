@@ -225,11 +225,17 @@ WRITING_GUIDELINES = """# Writing Guidelines
 # Shell execution guidelines (rules for the `execute` tool)
 # =============================================================================
 
+# NOTE: the "300s" default below is intentionally hardcoded static text, not
+# templated from config. get_system_prompt() must stay byte-stable for prompt
+# caching, so the configured value is NOT injected here. The actually-enforced
+# timeout is cfg.sandbox_execute_timeout (CustomSandboxBackend); this number is
+# just the documented default, and the per-command `timeout` override is the
+# mechanism that matters to the agent.
 SHELL_GUIDELINES = """# Shell Execution Guidelines
 
 When using the `execute` tool for shell commands:
 
-**Sandbox limits**: Commands time out after 300 seconds (exit code 124) and output is truncated at 100 KB. Plan accordingly.
+**Sandbox limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below).
 
 **Short commands** (< 30 seconds): Run directly
 ```bash
@@ -237,23 +243,15 @@ python script.py
 pip install pandas
 ```
 
-**Long-running commands** (> 30 seconds): Run in background, then check results
+**Long-running commands** (> 30 seconds): prefer the `run_in_background` tool — it launches the command detached, streams output to a log, and returns a process id immediately. Then use `check_process(<id>)` for status + recent output, `stop_process(<id>)` to kill it, and `list_processes()` to see all background processes.
+
+If you must background manually instead, you MUST redirect output to a file (otherwise the call blocks) and capture the PID:
 ```bash
-# Step 1: Start in background, redirect output to log
 python long_task.py > /output.log 2>&1 &
-
-# Step 2: Check if still running
-ps aux | grep long_task
-
-# Step 3: Read results when done
-cat /output.log
+echo "PID: $!"          # check: ps -p <PID>   ·   stop: kill <PID>   ·   read: cat /output.log
 ```
 
 **Before heavy compute**: Estimate runtime. If likely > 5 minutes, use background execution from the start. If GPU memory is uncertain, start with a small test run (1 epoch, small batch) before the full run.
-
-**After a timeout (exit code 124)**: Do NOT re-run the same command. Instead:
-1. Re-launch in background with output logging
-2. Or reduce the workload (fewer epochs, smaller model, subset of data)
 
 This prevents blocking the conversation during long operations.
 """

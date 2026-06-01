@@ -118,7 +118,7 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
         return True
 
     try:
-        from ..config.settings import load_config
+        from ..config.settings import HITL_SHELL_TOOLS, load_config
 
         cfg = load_config()
     except Exception:
@@ -137,7 +137,7 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
         name = (
             req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
         )
-        if name != "execute":
+        if name not in HITL_SHELL_TOOLS:
             continue
         args = (
             req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
@@ -657,18 +657,34 @@ class InboundConsumer:
                 )
                 self._pending_interrupts[session_key] = pending
 
+                timed_out = False
                 try:
                     await asyncio.wait_for(
                         pending.event.wait(),
                         timeout=_HITL_APPROVAL_TIMEOUT,
                     )
                 except TimeoutError:
-                    # Auto-approve on timeout
-                    pending.decision = "approve"
+                    timed_out = True
                 finally:
+                    # Unregister BEFORE any further await so a late reply can't flip
+                    # the decision back to approve during the notification round-trip.
                     self._pending_interrupts.pop(session_key, None)
 
-                decision = pending.decision or "approve"
+                if timed_out:
+                    # Reject on timeout (fail-closed; matches cli/channel.py). Decision
+                    # is a local constant, not pending.decision, so it can't be
+                    # overwritten by a late reply after we unregistered above.
+                    decision = "reject"
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content="⏰ Approval timed out. Action rejected.",
+                            metadata=msg.metadata,
+                        )
+                    )
+                else:
+                    decision = pending.decision or "reject"
 
                 # Visible confirmation so the click/reply registers (QQ has no
                 # message recall API for C2C).  Only fires when the user

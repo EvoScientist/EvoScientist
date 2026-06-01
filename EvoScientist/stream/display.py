@@ -962,7 +962,7 @@ def _resolve_hitl_approval(
         return [{"type": "approve"} for _ in action_requests]
 
     # Config-level auto-approve
-    from ..config.settings import load_config
+    from ..config.settings import HITL_SHELL_TOOLS, load_config
 
     cfg = load_config()
     if cfg.auto_approve:
@@ -984,8 +984,8 @@ def _resolve_hitl_approval(
             req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
         )
 
-        if name != "execute":
-            continue  # Non-execute tools auto-approve
+        if name not in HITL_SHELL_TOOLS:
+            continue  # Only shell-running tools need manual approval
 
         command = args.get("command", "") if isinstance(args, dict) else ""
         if not _matches_shell_allow_list(command, shell_allow_list):

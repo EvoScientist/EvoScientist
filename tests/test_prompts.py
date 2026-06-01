@@ -153,8 +153,8 @@ class TestShellGuidelines:
         assert len(SHELL_GUIDELINES) > 0
 
     def test_mentions_timeout_limit(self):
-        assert "300" in SHELL_GUIDELINES
-        assert "124" in SHELL_GUIDELINES
+        assert "300" in SHELL_GUIDELINES  # default timeout
+        assert "3600" in SHELL_GUIDELINES  # per-command override ceiling
 
     def test_mentions_background_execution(self):
         assert "background" in SHELL_GUIDELINES.lower()
