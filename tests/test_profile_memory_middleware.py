@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 from langchain_core.messages import SystemMessage
 
+import EvoScientist.middleware.memory as memory_module
 from EvoScientist import paths
-from EvoScientist.middleware.memory import create_memory_middleware
 
 
 def _request():
@@ -49,7 +49,7 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     modified = middleware.modify_request(_request())
     system_text = _system_text(modified)
 
@@ -71,7 +71,9 @@ def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = create_memory_middleware(str(memories), max_inline_profile_chars=10)
+    middleware = memory_module.create_memory_middleware(
+        str(memories), max_inline_profile_chars=10
+    )
     modified = middleware.modify_request(_request())
     system_text = _system_text(modified)
 
@@ -91,7 +93,7 @@ def test_profile_memory_async_path_bootstraps_and_injects(
     async def _handler(request):
         return request
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     modified = run_async(middleware.awrap_model_call(_request(), _handler))
     system_text = _system_text(modified)
 
@@ -106,7 +108,7 @@ def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     monkeypatch.setattr(middleware, "_write_text", lambda _path, _content: False)
 
     modified = middleware.modify_request(_request())
@@ -146,7 +148,7 @@ def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
     middleware.modify_request(_request())
 
@@ -176,7 +178,7 @@ def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
     legacy_path = memories / "MEMORY.md"
     legacy_path.write_text("  \n\n", encoding="utf-8")
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
 
     assert not legacy_path.exists()
@@ -192,7 +194,7 @@ def test_profile_memory_uses_explicit_workspace_for_project_profile(
     active_workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", global_workspace)
 
-    middleware = create_memory_middleware(
+    middleware = memory_module.create_memory_middleware(
         str(memories), workspace_dir=str(active_workspace)
     )
     modified = middleware.modify_request(_request())
@@ -212,6 +214,37 @@ def test_profile_memory_uses_explicit_workspace_for_project_profile(
     assert not (
         memories / "profile" / "projects" / wrong_project_id / "PROJECT_PROFILE.md"
     ).exists()
+
+
+def test_profile_memory_resolves_project_id_once_per_middleware(
+    tmp_path, monkeypatch, run_async
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    calls = []
+
+    def _resolve_project_id(workspace_dir):
+        calls.append(workspace_dir)
+        return "P-cached-project"
+
+    monkeypatch.setattr(memory_module, "_resolve_project_id", _resolve_project_id)
+
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=str(workspace), max_inline_profile_chars=10
+    )
+    sync_modified = middleware.modify_request(_request())
+    async_modified = run_async(middleware.amodify_request(_request()))
+
+    assert calls == [workspace]
+    assert (
+        "/memories/profile/projects/P-cached-project/PROJECT_PROFILE.md"
+        in _system_text(sync_modified)
+    )
+    assert (
+        "/memories/profile/projects/P-cached-project/PROJECT_PROFILE.md"
+        in _system_text(async_modified)
+    )
 
 
 def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
@@ -237,7 +270,7 @@ def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
 
     user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
@@ -276,7 +309,7 @@ def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    middleware = create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
 
     migrated_profile_text = "\n".join(_profile_texts(memories))

@@ -43,7 +43,7 @@ Use these files for:
 - `/memories/profile/SOUL.md`: how this copy should usually behave; voice and boundaries.
 - `/memories/profile/USER_PROFILE.md`: facts and preferences about the user.
 - `/memories/profile/RESEARCH_TASTE.md`: research interests, standards, methods that fit, and things to avoid.
-- `{project_profile_path}`: conventions, commands, tests, and traps for this workspace.
+- `/memories/profile/projects/{project_id}/PROJECT_PROFILE.md`: conventions, commands, and pitfalls for this workspace.
 
 Read the relevant file before editing it. Add small bullets under existing
 headings, skip duplicates, and leave out temporary task state.
@@ -146,9 +146,8 @@ def _resolve_project_id(workspace: str | Path | None = None) -> str:
     return f"P-{_short_hash(f'path:{root}')}"
 
 
-def _profile_specs(workspace: str | Path | None = None) -> list[tuple[str, str]]:
+def _profile_specs(project_id: str) -> list[tuple[str, str]]:
     """Return the profile files owned by this middleware and their templates."""
-    project_id = _resolve_project_id(workspace)
     return [
         (path.format(project_id=project_id), template)
         for path, template in PROFILE_TEMPLATES.items()
@@ -158,12 +157,6 @@ def _profile_specs(workspace: str | Path | None = None) -> list[tuple[str, str]]
 def _agent_path(memory_path: str) -> str:
     """Translate a memory-relative path to the virtual path agents see."""
     return f"/memories{memory_path}"
-
-
-def _project_profile_agent_path(workspace: str | Path | None = None) -> str:
-    """Return the virtual path for this workspace's project profile."""
-    project_id = _resolve_project_id(workspace)
-    return f"/memories/profile/projects/{project_id}/PROJECT_PROFILE.md"
 
 
 def _legacy_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
@@ -214,13 +207,6 @@ def _append_imported_section(content: str, body: str) -> str:
     return content.rstrip() + f"\n\n## {_LEGACY_IMPORT_HEADING}\n\n{body.strip()}\n"
 
 
-def _profile_pointer_context(workspace: str | Path | None = None) -> str:
-    """Return path-only context for profiles that are too large to inline."""
-    lines = ["Profile files are available at:"]
-    lines.extend(f"- {_agent_path(path)}" for path, _ in _profile_specs(workspace))
-    return "\n".join(lines)
-
-
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
@@ -236,7 +222,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
         max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
-        self._workspace_dir = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
+        workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
+        self._project_id = _resolve_project_id(workspace)
+        self._profile_specs = _profile_specs(self._project_id)
+        pointer_lines = ["Profile files are available at:"]
+        pointer_lines.extend(
+            f"- {_agent_path(path)}" for path, _ in self._profile_specs
+        )
+        self._profile_pointer_context = "\n".join(pointer_lines)
         self._max_inline_profile_chars = max_inline_profile_chars
 
     def _file_path(self, memory_path: str) -> Path:
@@ -277,7 +270,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
     def _ensure_profile_files(self) -> list[tuple[str, str]]:
         """Create the expected profile files if needed and return their contents."""
         records = []
-        for memory_path, template in _profile_specs(self._workspace_dir):
+        for memory_path, template in self._profile_specs:
             path = self._file_path(memory_path)
             content = self._read_text(path)
             if content is None:
@@ -364,7 +357,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         ).strip()
         if len(full) <= self._max_inline_profile_chars:
             return full
-        return _profile_pointer_context(self._workspace_dir)
+        return self._profile_pointer_context
 
     def _read_profile_memory(self) -> str:
         """Return profile context, falling back to file pointers on setup errors."""
@@ -373,7 +366,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return self._profile_context_from_records(records)
         except Exception as e:
             logger.debug("Failed to read profile memory: %s", e)
-            return _profile_pointer_context(self._workspace_dir)
+            return self._profile_pointer_context
 
     def _inject_profile_context(
         self, request: ModelRequest, profile_content: str
@@ -383,7 +376,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
         injection = PROFILE_INJECTION_TEMPLATE.format(
             profile_content=profile_content,
-            project_profile_path=_project_profile_agent_path(self._workspace_dir),
+            project_id=self._project_id,
         )
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
@@ -392,14 +385,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
         """Apply profile memory injection for synchronous model calls."""
         profile_content = self._read_profile_memory()
         if not profile_content:
-            profile_content = _profile_pointer_context(self._workspace_dir)
+            profile_content = self._profile_pointer_context
         return self._inject_profile_context(request, profile_content)
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
         """Async profile injection; file reads run off the event loop."""
         profile_content = await asyncio.to_thread(self._read_profile_memory)
         if not profile_content:
-            profile_content = _profile_pointer_context(self._workspace_dir)
+            profile_content = self._profile_pointer_context
         return self._inject_profile_context(request, profile_content)
 
     def wrap_model_call(
