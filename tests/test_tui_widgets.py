@@ -170,6 +170,20 @@ class TestStoppedResponseText(unittest.TestCase):
         assert current == "partial\n[Stopped.]"
         assert final_text == "partial\n[Stopped.]"
 
+    def test_strips_trailing_placeholder_ellipsis(self):
+        from EvoScientist.cli.tui_interactive import (
+            _strip_trailing_placeholder_ellipsis,
+        )
+
+        assert (
+            _strip_trailing_placeholder_ellipsis("final answer\n...") == "final answer"
+        )
+        assert _strip_trailing_placeholder_ellipsis("...") == ""
+        assert (
+            _strip_trailing_placeholder_ellipsis("final answer\n...\n...")
+            == "final answer"
+        )
+
 
 @unittest.skipUnless(_has_textual, "textual not installed")
 class TestAssistantMessage(unittest.TestCase):

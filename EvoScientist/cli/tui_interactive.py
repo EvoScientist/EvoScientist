@@ -226,6 +226,14 @@ def _response_after_narration(response_text: str, narrated_response_end: int) ->
     return response_text[max(0, narrated_response_end) :]
 
 
+def _strip_trailing_placeholder_ellipsis(text: str) -> str:
+    """Remove the standalone streaming placeholder suffix from final TUI text."""
+    clean = text.strip()
+    while clean.endswith("\n...") or clean.rstrip() == "...":
+        clean = clean.rstrip().removesuffix("...").rstrip()
+    return clean
+
+
 def _stopped_response_after_narration(
     previous_text: str,
     narrated_response_end: int,
@@ -1617,7 +1625,7 @@ def run_textual_interactive(
                             else:
                                 # Stream final response incrementally (both
                                 # text-only replies and post-tool responses).
-                                response_display.narration = None
+                                await _preserve_active_narration()
                                 if response_display.assistant is None:
                                     response_display.assistant_start = max(
                                         response_display.narrated_end,
@@ -1645,7 +1653,7 @@ def run_textual_interactive(
                             if thinking_w is not None and thinking_w._is_active:
                                 thinking_w.finalize()
                             # Clear transient indicators
-                            response_display.narration = None
+                            await _preserve_active_narration()
                             await _remove_w(processing_w)
                             processing_w = None
                             existing_tool = bool(tool_id and tool_id in tool_widgets)
@@ -1918,7 +1926,7 @@ def run_textual_interactive(
 
                         elif event_type == "done":
                             # Clean up transient indicators
-                            response_display.narration = None
+                            await _preserve_active_narration()
                             await _remove_w(processing_w)
                             processing_w = None
                             _expand_completed_tools()
@@ -1927,20 +1935,14 @@ def run_textual_interactive(
                                 state.response_text,
                                 response_display.narrated_end,
                             )
-                            if (
-                                response_display.assistant is None
-                                and final_response_text.strip()
-                            ):
-                                # Strip trailing standalone "..."
+                            clean = _strip_trailing_placeholder_ellipsis(
+                                final_response_text
+                            )
+                            if clean:
                                 response_display.assistant_start = len(
                                     state.response_text
                                 ) - len(final_response_text)
-                                clean = final_response_text.strip()
-                                while (
-                                    clean.endswith("\n...") or clean.rstrip() == "..."
-                                ):
-                                    clean = clean.rstrip().removesuffix("...").rstrip()
-                                if clean:
+                                if response_display.assistant is None:
                                     response_display.assistant = AssistantMessage(clean)
                                     await container.mount(response_display.assistant)
                                     self._schedule_scroll_to_bottom(
@@ -1948,6 +1950,15 @@ def run_textual_interactive(
                                         delays=(0.15, 0.4, 0.8, 1.5),
                                         immediate=False,
                                     )
+                                elif response_display.assistant._content != clean:
+                                    response_display.assistant._content = clean
+                                    await response_display.assistant.stop_stream()
+                            elif response_display.assistant is not None:
+                                try:
+                                    await response_display.assistant.remove()
+                                except Exception:
+                                    pass
+                                response_display.assistant = None
                             # Mount token usage stats with elapsed time
                             if state.total_input_tokens or state.total_output_tokens:
                                 elapsed = None
