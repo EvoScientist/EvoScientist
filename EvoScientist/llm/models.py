@@ -108,6 +108,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
     # MiniMax (direct API — Anthropic-compatible; default: api.minimaxi.com, global: api.minimax.io)
+    ("minimax-m3", "MiniMax-M3", "minimax"),
     ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
     ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
     ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
@@ -142,7 +143,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
-    ("minimax-m2.7", "minimax/minimax-m2.7", "openrouter"),
+    ("minimax-m3", "minimax/minimax-m3", "openrouter"),
     ("mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "openrouter"),
     ("mimo-v2.5", "xiaomi/mimo-v2.5", "openrouter"),
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),

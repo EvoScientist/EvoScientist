@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.1.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.1.2" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -90,7 +90,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 <table>
   <tr>
-    <th width="75%"><p align="center">🖥️ CLI / TUI</p></th>
+    <th width="75%"><p align="center">🖥️ CLI / TUI / WebUI</p></th>
     <th width="25%"><p align="center">📱 Mobile</p></th>
   </tr>
   <tr>
@@ -112,6 +112,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **🧠 Persistent Memory** — Context, preferences, and findings survive across sessions.
 - **🌐 Multi-Provider** — Anthropic, OpenAI, Google, MiniMax, NVIDIA — one config to switch.
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
+- **🖥️ Browser WebUI (beta)** — Workspace-panel web app, one terminal via `--ui webui`.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
 - **🔄 Code Generation Modes** — More Effort (iterative refinement), continuously improving code quality.
 - **⚡ Adaptive Tools** — Per-turn tool selection keeps only relevant tools visible, reducing noise.
@@ -130,6 +131,24 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **[11 Mar 2026]** ⛳ Technical Report is live! [**Check it out**](https://arxiv.org/abs/2603.08127) 👈
 - **[06 Mar 2026]** 🥇 Ranked #1 on [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) at submission time! [**Leaderboard**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
 - **[24 Nov 2025]** 🏆 6/6 accepted at [ICAIS 2025](https://icais.ai/) AI Scientist Track — Best Paper & AI Reviewer's Appraisal Award! [**Details**](https://airaxiv.com/papers/?q=zacharyzhang2022%40gmail.com) 👈
+
+<details>
+<summary>📦 Release Highlights — version changelog</summary>
+
+- **[02 Jun 2026]** **[v0.1.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.2)** — Browser WebUI mode (beta), `EvoSci deploy` standalone LangGraph server, default model → claude-sonnet-4-6, MiniMax M3, plus sandbox-timeout and async-notifier channel-routing fixes.
+- **[19 May 2026]** **[v0.1.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.1)** — deepagents 0.6.2 DeltaChannel upgrade, tier-aware skill mounts, status & elapsed-time bar, QQ inline buttons.
+- **[08 May 2026]** **[v0.1.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.0)** — Async sub-agents (langgraph dev), official Docker image, personal WeChat, sessions-DB compaction.
+- **[26 Apr 2026]** **[v0.0.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.9)** — Faster startup, in-session model switching, unified slash commands, DeepSeek V4 thinking fix.
+- **[21 Apr 2026]** **[v0.0.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.8)** — Unified data directory, status bar, enhanced ask-user & auto-mode.
+- **[10 Apr 2026]** **[v0.0.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.7)** — Global skills directory, Moonshot/Kimi providers, ccproxy fixes, channel improvements.
+- **[03 Apr 2026]** **[v0.0.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.6)** — Dynamic context management, OpenRouter reasoning, More Effort mode, GLM-5.1.
+- **[27 Mar 2026]** **[v0.0.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.5)** — Context-retry middleware, OpenAI relay config, Feishu event-loop fix, `/compact`.
+- **[24 Mar 2026]** **[v0.0.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.4)** — `@file` mentions, resume history, Feishu WebSocket, LaTeX setup.
+- **[20 Mar 2026]** **[v0.0.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.3)** — Voice input (STT), MiniMax/DeepSeek providers, MCP & skill browsers.
+- **[17 Mar 2026]** **[v0.0.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.2)** — OAuth sign-in, human-in-the-loop & `ask_user`, headless serve mode.
+- **[13 Mar 2026]** **[v0.0.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.1)** — First public release of the self-evolving AI Scientist.
+
+</details>
 
 ## 📖 Table of Contents
 
@@ -371,7 +390,7 @@ EvoSci  # or EvoScientist — interactive mode (TUI by default)
 ![cli help](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli_help.png)
 
 > [!TIP]
-> Need to copy long outputs? Use `--ui cli` for classic mode where native terminal copy works freely. On macOS, [iTerm2](https://iterm2.com/) users can also hold `⌥ Option` while dragging to select, then `⌘+C`.
+> Prefer a browser? Run `EvoSci --ui webui` for the web workspace UI (beta). Need to copy long outputs? Use `--ui cli` for classic mode where native terminal copy works freely. On macOS, [iTerm2](https://iterm2.com/) users can also hold `⌥ Option` while dragging to select, then `⌘+C`.
 
 <details>
 <summary>Common examples</summary>
@@ -382,9 +401,25 @@ EvoSci -p "your question"        # single-shot mode
 EvoSci --workdir /path/to/project # open in a specific directory
 EvoSci -m run                     # isolated per-session workspace
 EvoSci --ui cli                   # classic CLI (lightweight)
+EvoSci --ui webui                 # browser workspace UI (beta, needs Node/npx)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 ```
+
+</details>
+
+<details>
+<summary>Browser WebUI (beta)</summary>
+
+Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal — no second process to manage:
+
+```bash
+EvoSci config set ui_backend webui   # persist; or one-off with `EvoSci --ui webui`
+EvoSci                               # opens http://localhost:4716
+EvoSci config set webui_port 4800    # change the front-end port (must differ from the langgraph dev port)
+```
+
+Requires **Node.js 24 LTS** (for `npx`); the first launch downloads `@evoscientist/webui` and needs network. Beta: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
 
 </details>
 
@@ -543,7 +578,7 @@ Coming soon:
 - [x] 🦾 Agent-initiated human clarification
 - [x] 📑 Technical report on the way
 - [x] 🔐 OAuth sign-in (CLI coding agent subscribers)
-- [ ] 📺 Web app with workspace UI
+- [x] 📺 Web app with workspace UI (beta)
 - [ ] 📹 Demo and tutorial in the works
 - [ ] 📊 Benchmark suite to be released
 - [ ] ⏰ Scheduled tasks for the core system planned

@@ -243,7 +243,8 @@ def _step_provider(config: EvoScientistConfig) -> str:
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
         Choice(
-            title="MiniMax (M2 — M2.7 models, 204K context, thinking)", value="minimax"
+            title="MiniMax (M2 — M3 models, up to 1M context, thinking)",
+            value="minimax",
         ),
         Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
         Choice(

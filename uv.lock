@@ -878,7 +878,7 @@ wheels = [
 
 [[package]]
 name = "evoscientist"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents", extra = ["quickjs"] },
@@ -1025,7 +1025,7 @@ requires-dist = [
     { name = "slack-sdk", marker = "extra == 'all-channels'", specifier = ">=3.27" },
     { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.27" },
     { name = "tavily-python", specifier = ">=0.7" },
-    { name = "textual", specifier = ">=8.0" },
+    { name = "textual", specifier = ">=8.0,<8.2.7" },
     { name = "typer", specifier = ">=0.24" },
 ]
 provides-extras = ["dev", "telegram", "discord", "slack", "wechat", "feishu", "qq", "stt", "oauth", "all-channels"]

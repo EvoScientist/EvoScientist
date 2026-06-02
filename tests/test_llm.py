@@ -636,10 +636,11 @@ class TestMiniMaxProvider:
         assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
 
     def test_minimax_models_registered(self):
-        """MiniMax should have 4 direct model entries in _MODEL_ENTRIES."""
+        """MiniMax should have 5 direct model entries in _MODEL_ENTRIES."""
         minimax_models = get_models_for_provider("minimax")
-        assert len(minimax_models) == 4
+        assert len(minimax_models) == 5
         model_names = {name for name, _ in minimax_models}
+        assert "minimax-m3" in model_names
         assert "minimax-m2.7" in model_names
         assert "minimax-m2.7-highspeed" in model_names
         assert "minimax-m2.5" in model_names
