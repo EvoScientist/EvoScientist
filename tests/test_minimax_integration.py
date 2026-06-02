@@ -20,17 +20,17 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestMiniMaxIntegration:
-    def test_minimax_m25_chat_completion(self):
-        """Test that MiniMax M2.5 can produce a chat completion."""
-        model = get_chat_model("minimax-m2.5", provider="minimax", temperature=0)
+    def test_minimax_m3_chat_completion(self):
+        """Test that MiniMax M3 can produce a chat completion."""
+        model = get_chat_model("minimax-m3", provider="minimax", temperature=0)
         response = model.invoke("Reply with exactly: hello")
         assert response.content
         assert len(response.content) > 0
 
-    def test_minimax_m25_highspeed_chat_completion(self):
-        """Test that MiniMax M2.5-highspeed can produce a chat completion."""
+    def test_minimax_m27_highspeed_chat_completion(self):
+        """Test that MiniMax M2.7-highspeed can produce a chat completion."""
         model = get_chat_model(
-            "minimax-m2.5-highspeed", provider="minimax", temperature=0
+            "minimax-m2.7-highspeed", provider="minimax", temperature=0
         )
         response = model.invoke("Reply with exactly: world")
         assert response.content
@@ -38,7 +38,7 @@ class TestMiniMaxIntegration:
 
     def test_minimax_with_full_model_id(self):
         """Test using the full model ID directly."""
-        model = get_chat_model("MiniMax-M2.5", provider="minimax", temperature=0)
+        model = get_chat_model("MiniMax-M3", provider="minimax", temperature=0)
         response = model.invoke("What is 2+2? Answer with just the number.")
         assert response.content
         assert "4" in response.content

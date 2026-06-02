@@ -111,8 +111,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("minimax-m3", "MiniMax-M3", "minimax"),
     ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
     ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
-    ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
-    ("minimax-m2.5-highspeed", "MiniMax-M2.5-highspeed", "minimax"),
     # NVIDIA
     ("nemotron-super", "nvidia/nemotron-3-super-120b-a12b", "nvidia"),
     ("nemotron-nano", "nvidia/nemotron-3-nano-30b-a3b", "nvidia"),
