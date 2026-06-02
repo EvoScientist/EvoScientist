@@ -579,6 +579,37 @@ class TestLatestTextReset:
         # response_text still has everything
         assert state.response_text == "first segmentsecond segment"
 
+    def test_tool_call_marks_existing_text_as_narration(self):
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "first segment"})
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+
+        assert state.narrated_response_end == len("first segment")
+        assert state.narration_segments == [(0, "first segment")]
+
+        state.handle_event({"type": "text", "content": "second segment"})
+        assert state.narrated_response_end == len("first segment")
+        assert state.narration_segments == [(0, "first segment")]
+
+    def test_later_tool_call_extends_narrated_boundary(self):
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "first segment"})
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "text", "content": "second segment"})
+        state.handle_event(
+            {"type": "tool_call", "id": "tc2", "name": "execute", "args": {}}
+        )
+
+        assert state.narrated_response_end == len("first segmentsecond segment")
+        assert state.narration_segments == [
+            (0, "first segment"),
+            (1, "second segment"),
+        ]
+
 
 # =============================================================================
 # Name merging edge cases

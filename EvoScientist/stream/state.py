@@ -118,6 +118,8 @@ class StreamState:
         self.todo_items: list[dict] = []
         # Latest text segment (reset on each tool_call)
         self.latest_text = ""
+        self.narrated_response_end = 0
+        self.narration_segments = []
         # Token usage tracking
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -217,7 +219,6 @@ class StreamState:
             self.is_thinking = False
             self.is_responding = False
             self.is_processing = False
-            self.latest_text = ""  # Reset -- next text segment is a new message
 
             tool_id = event.get("id", "")
             tool_name = event.get("name", "unknown")
@@ -236,9 +237,21 @@ class StreamState:
                         updated = True
                         break
                 if not updated:
+                    if self.latest_text.strip():
+                        self.narration_segments.append(
+                            (len(self.tool_calls), self.latest_text)
+                        )
+                        self.narrated_response_end = len(self.response_text)
                     self.tool_calls.append(tc_data)
             else:
+                if self.latest_text.strip():
+                    self.narration_segments.append(
+                        (len(self.tool_calls), self.latest_text)
+                    )
+                    self.narrated_response_end = len(self.response_text)
                 self.tool_calls.append(tc_data)
+
+            self.latest_text = ""  # Reset -- next text segment is a new message
 
             # Capture todo items from write_todos args (most reliable source)
             if tool_name == "write_todos":
@@ -384,6 +397,8 @@ class StreamState:
             "is_summarizing": self.is_summarizing,
             "response_text": self.response_text,
             "latest_text": self.latest_text,
+            "narrated_response_end": self.narrated_response_end,
+            "narration_segments": self.narration_segments,
             "tool_calls": self.tool_calls,
             "tool_results": self.tool_results,
             "is_thinking": self.is_thinking,
