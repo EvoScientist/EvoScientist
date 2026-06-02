@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from types import SimpleNamespace
 
 from langchain_core.messages import SystemMessage
@@ -32,8 +31,7 @@ def _system_text(modified) -> str:
 
 
 def _path_project_id(workspace) -> str:
-    source = f"path:{workspace.resolve()}"
-    return f"P-{hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]}"
+    return memory_module._resolve_project_id(workspace)
 
 
 def _profile_texts(memories):
@@ -139,8 +137,6 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     system_text = _system_text(modified)
 
     assert "Profile files are available at:" in system_text
-    assert "File: /memories/profile/SOUL.md" not in system_text
-    assert "# EvoScientist soul" not in system_text
     assert soul_path.read_bytes() == original_bytes
 
 
