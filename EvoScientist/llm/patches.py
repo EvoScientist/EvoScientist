@@ -214,10 +214,11 @@ _MEDIA_CONTENT_TYPES = _IMAGE_CONTENT_TYPES | _FILE_CONTENT_TYPES
 def _flatten_message_content(content: Any) -> str | list[Any] | Any:
     """Convert list-of-blocks content to a string, preserving media blocks.
 
-    Text blocks are joined by double newlines; thinking/reasoning blocks are
-    dropped.  When a media block (image or file) is present, returns a list: a
-    single consolidated text block (if any text) followed by the media blocks.
-    Otherwise returns a plain string.  Non-list input is returned unchanged.
+    Thinking/reasoning blocks are dropped.  When a media block (image or file)
+    is present, returns a list in the ORIGINAL order — consecutive text is
+    joined into a single text block, media blocks kept as-is — so captions stay
+    next to the attachment they describe.  Otherwise returns a plain string.
+    Non-list input is returned unchanged.
 
     Args:
         content: Message content — a string, a list of content blocks, or
@@ -232,13 +233,23 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
     if not isinstance(content, list):
         return content
     parts: list[str] = []
-    media_blocks: list[Any] = []
+    ordered_blocks: list[Any] = []
+    saw_media = False
+
+    def _flush_text() -> None:
+        if parts:
+            ordered_blocks.append({"type": "text", "text": "\n\n".join(parts)})
+            parts.clear()
+
     for block in content:
         if isinstance(block, dict):
             btype = block.get("type")
             if btype in _MEDIA_CONTENT_TYPES:
-                # Keep media as-is; never mutate (upstream copy.copy is shallow).
-                media_blocks.append(block)
+                # Keep media as-is (never mutate; upstream copy.copy is shallow)
+                # and preserve its position relative to surrounding text.
+                _flush_text()
+                ordered_blocks.append(block)
+                saw_media = True
                 continue
             if btype in _SKIP_CONTENT_TYPES:
                 continue
@@ -247,14 +258,10 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
                 parts.append(text)
         elif isinstance(block, str):
             parts.append(block)
-    text = "\n\n".join(parts) if parts else ""
-    if media_blocks:
-        blocks: list[Any] = []
-        if text:
-            blocks.append({"type": "text", "text": text})
-        blocks.extend(media_blocks)
-        return blocks
-    return text
+    if saw_media:
+        _flush_text()
+        return ordered_blocks
+    return "\n\n".join(parts) if parts else ""
 
 
 def _sanitize_messages(messages: list[Any], hoist_tool_media: bool = True) -> list[Any]:
@@ -296,8 +303,10 @@ def _sanitize_messages(messages: list[Any], hoist_tool_media: bool = True) -> li
                 b for b in flat if not (isinstance(b, dict) and b.get("type") == "text")
             ]
             tool_msg = copy.copy(msg)
+            # Join ALL text runs (interleaved content can yield more than one)
+            # so no text is lost; tool content must be a string on OpenAI-compat.
             tool_msg.content = (
-                text_blocks[0]["text"]
+                "\n\n".join(b["text"] for b in text_blocks)
                 if text_blocks
                 else "[media content provided in the following message]"
             )

@@ -793,6 +793,22 @@ class TestFlattenMessageContent:
             img,
         ]
 
+    def test_preserves_text_media_ordering(self):
+        # Text after an image must stay AFTER it (not consolidated to the front).
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        content = [
+            {"type": "text", "text": "before"},
+            img,
+            {"type": "text", "text": "after"},
+        ]
+        assert _flatten_message_content(content) == [
+            {"type": "text", "text": "before"},
+            img,
+            {"type": "text", "text": "after"},
+        ]
+
     def test_thinking_dropped_image_kept(self):
         from EvoScientist.llm.patches import _flatten_message_content
 
@@ -1143,6 +1159,34 @@ class TestPatchOpenAICompatContent:
         called = orig.call_args[0][0]
         # Tool keeps the text as its string content; image hoisted to a human msg.
         assert called[0].content == "chart description"
+        assert any(b.get("type") == "image" for b in called[1].content)
+
+    def test_tool_message_interleaved_text_not_lost(self):
+        # Interleaved [text, image, text] in a tool result: BOTH text runs must
+        # survive the hoisting split (not just the first).
+        from langchain_core.messages import ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        tm = ToolMessage(
+            content=[
+                {"type": "text", "text": "before"},
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"},
+                {"type": "text", "text": "after"},
+            ],
+            tool_call_id="tc1",
+            name="read_file",
+        )
+        model._generate([tm])
+
+        called = orig.call_args[0][0]
+        # both text runs preserved in the tool placeholder; image hoisted
+        assert "before" in called[0].content
+        assert "after" in called[0].content
         assert any(b.get("type") == "image" for b in called[1].content)
 
 
