@@ -729,6 +729,91 @@ class TestFlattenMessageContent:
         content = [{"type": "thinking", "text": "thought"}]
         assert _flatten_message_content(content) == ""
 
+    def test_preserves_image_block(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        assert _flatten_message_content([img]) == [img]
+
+    def test_preserves_image_url_block(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        img = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+        assert _flatten_message_content([img]) == [img]
+
+    def test_preserves_file_block(self):
+        # PDF/document files are preserved (capable models read them).
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        f = {"type": "file", "base64": "FFF", "mime_type": "application/pdf"}
+        assert _flatten_message_content([f]) == [f]
+
+    def test_unsupported_media_dropped(self):
+        # video/audio are NOT in the allowlist -> dropped, not crashing
+        # (langchain-openai raises ValueError on `video`).
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        for block in (
+            {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
+            {"type": "audio", "base64": "ZZZ", "mime_type": "audio/wav"},
+        ):
+            assert _flatten_message_content([block]) == ""
+
+    def test_non_image_media_dropped_keeps_text(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        content = [
+            {"type": "text", "text": "hi"},
+            {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
+        ]
+        # Video dropped, text kept -> plain string (no media list).
+        assert _flatten_message_content(content) == "hi"
+
+    def test_consolidates_text_and_image(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        content = [{"type": "text", "text": "a photo"}, img]
+        assert _flatten_message_content(content) == [
+            {"type": "text", "text": "a photo"},
+            img,
+        ]
+
+    def test_multiple_text_blocks_with_image(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        content = [
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b"},
+            img,
+        ]
+        assert _flatten_message_content(content) == [
+            {"type": "text", "text": "a\n\nb"},
+            img,
+        ]
+
+    def test_thinking_dropped_image_kept(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        content = [{"type": "thinking", "text": "hmm"}, img]
+        assert _flatten_message_content(content) == [img]
+
+    def test_pure_text_still_returns_string(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        content = [{"type": "text", "text": "x"}, {"type": "text", "text": "y"}]
+        result = _flatten_message_content(content)
+        assert result == "x\n\ny"
+        assert isinstance(result, str)
+
+    def test_unknown_nontext_block_still_dropped(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        content = [{"type": "tool_use", "id": "1", "name": "foo"}]
+        assert _flatten_message_content(content) == ""
+
 
 # =============================================================================
 # Test _patch_openai_compat_content (all 4 paths)
@@ -819,6 +904,666 @@ class TestPatchOpenAICompatContent:
 
         assert chunks == ["c1", "c2"]
         assert received_msgs[0].content == "hello"
+
+    def test_generate_preserves_media(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
+        model._generate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
+
+    @pytest.mark.anyio
+    async def test_agenerate_preserves_media(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._agenerate
+        _patch_openai_compat_content(model)
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
+        await model._agenerate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
+
+    def test_stream_preserves_media(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._stream
+        _patch_openai_compat_content(model)
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
+        list(model._stream([msg]))
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
+
+    @pytest.mark.anyio
+    async def test_astream_preserves_media(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        received_msgs = []
+
+        async def _fake_astream(messages, *args, **kwargs):
+            received_msgs.extend(messages)
+            for chunk in ["c1", "c2"]:
+                yield chunk
+
+        model._astream = _fake_astream
+        _patch_openai_compat_content(model)
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
+        chunks = []
+        async for c in model._astream([msg]):
+            chunks.append(c)
+
+        assert chunks == ["c1", "c2"]
+        assert received_msgs[0].content == [{"type": "text", "text": "see"}, img]
+
+    def test_toolmessage_image_hoisted_to_human(self):
+        from langchain_core.messages import ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)  # hoist_tool_media=True (OpenAI-compat)
+
+        # deepagents read_file emits this exact shape for an image file.
+        tm = ToolMessage(
+            content_blocks=[
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+            ],
+            tool_call_id="tc1",
+            name="read_file",
+        )
+        model._generate([tm])
+
+        called_msgs = orig.call_args[0][0]
+        # Tool content becomes a string placeholder (OpenAI-compat requirement) ...
+        assert isinstance(called_msgs[0].content, str)
+        # ... and the image is hoisted into a following HumanMessage.
+        assert len(called_msgs) == 2
+        hoisted = called_msgs[1]
+        assert hoisted.type == "human"
+        assert any(
+            isinstance(b, dict) and b.get("type") == "image" for b in hoisted.content
+        )
+
+    def test_toolmessage_image_kept_inline_when_no_hoist(self):
+        from langchain_core.messages import ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model, hoist_tool_media=False)  # Anthropic-routed
+
+        tm = ToolMessage(
+            content_blocks=[
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+            ],
+            tool_call_id="tc1",
+            name="read_file",
+        )
+        model._generate([tm])
+
+        called_msgs = orig.call_args[0][0]
+        # No hoisting: image stays inline in the tool message content.
+        assert len(called_msgs) == 1
+        content = called_msgs[0].content
+        assert isinstance(content, list)
+        assert any(isinstance(b, dict) and b.get("type") == "image" for b in content)
+
+    def test_parallel_tool_images_hoisted_after_tools(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "c1", "name": "read_file", "args": {}},
+                {"id": "c2", "name": "read_file", "args": {}},
+            ],
+        )
+        t1 = ToolMessage(
+            content_blocks=[
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+            ],
+            tool_call_id="c1",
+            name="read_file",
+        )
+        t2 = ToolMessage(
+            content_blocks=[
+                {"type": "image", "base64": "BBB", "mime_type": "image/png"}
+            ],
+            tool_call_id="c2",
+            name="read_file",
+        )
+        model._generate([ai, t1, t2])
+
+        called_msgs = orig.call_args[0][0]
+        # Tool results stay consecutive; one hoisted HumanMessage follows them.
+        assert [m.type for m in called_msgs] == ["ai", "tool", "tool", "human"]
+        assert isinstance(called_msgs[1].content, str)
+        assert isinstance(called_msgs[2].content, str)
+        imgs = [b for b in called_msgs[3].content if b.get("type") == "image"]
+        assert len(imgs) == 2
+
+    def test_assistant_text_still_flattened_to_string(self):
+        from langchain_core.messages import AIMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        msg = AIMessage(
+            content=[
+                {"type": "text", "text": "hi"},
+                {"type": "thinking", "text": "t"},
+            ]
+        )
+        model._generate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        assert called_msgs[0].content == "hi"
+
+    def test_tool_media_flushed_before_next_human(self):
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        tm = ToolMessage(
+            content_blocks=[
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+            ],
+            tool_call_id="tc1",
+            name="read_file",
+        )
+        nxt = HumanMessage(content="thanks")
+        model._generate([tm, nxt])
+
+        called = orig.call_args[0][0]
+        # tool(placeholder), hoisted image (human), then the original human msg
+        assert [m.type for m in called] == ["tool", "human", "human"]
+        assert isinstance(called[0].content, str)
+        assert any(b.get("type") == "image" for b in called[1].content)
+        assert called[2].content == "thanks"
+
+    def test_tool_message_text_and_image_split(self):
+        from langchain_core.messages import ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(model)
+
+        tm = ToolMessage(
+            content=[
+                {"type": "text", "text": "chart description"},
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"},
+            ],
+            tool_call_id="tc1",
+            name="read_file",
+        )
+        model._generate([tm])
+
+        called = orig.call_args[0][0]
+        # Tool keeps the text as its string content; image hoisted to a human msg.
+        assert called[0].content == "chart description"
+        assert any(b.get("type") == "image" for b in called[1].content)
+
+
+# =============================================================================
+# Test no-vision fallback (models that reject image input)
+# =============================================================================
+
+
+class TestNoVisionFallback:
+    """Verify image-rejecting models fall back to a text placeholder."""
+
+    def _img_tool(self):
+        from langchain_core.messages import ToolMessage
+
+        return ToolMessage(
+            content_blocks=[
+                {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+            ],
+            tool_call_id="t1",
+            name="read_file",
+        )
+
+    def _make_model(self):
+        from unittest.mock import MagicMock
+
+        model = MagicMock()
+        model._agenerate = None
+        model._stream = None
+        model._astream = None
+        return model
+
+    def test_media_error_types(self):
+        from EvoScientist.llm.patches import (
+            _FILE_CONTENT_TYPES,
+            _IMAGE_CONTENT_TYPES,
+            _is_http_400,
+            _media_error_types,
+        )
+
+        # marker identifies the specific modality
+        assert (
+            _media_error_types(Exception("No endpoints found that support image input"))
+            >= _IMAGE_CONTENT_TYPES
+        )
+        assert (
+            _media_error_types(Exception("file input is not supported"))
+            == _FILE_CONTENT_TYPES
+        )
+        # DeepSeek-style maps to all media (generic "expected text")
+        assert (
+            _media_error_types(
+                Exception("unknown variant `image_url`, expected `text`")
+            )
+            >= _IMAGE_CONTENT_TYPES
+        )
+        # non-media errors implicate nothing
+        assert _media_error_types(Exception("rate limit exceeded")) == set()
+        assert (
+            _media_error_types(Exception("No endpoints found for some/model")) == set()
+        )
+        # bare "expected text" (non-media schema error) must NOT match
+        assert (
+            _media_error_types(
+                Exception("tool schema validation failed: expected text")
+            )
+            == set()
+        )
+
+        class _E(Exception):
+            status_code = 400
+
+        assert _is_http_400(_E("bad request"))
+        assert not _is_http_400(Exception("rate limit exceeded"))
+
+    def test_media_types_in(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _media_types_in
+
+        img = {"type": "image", "base64": "A", "mime_type": "image/png"}
+        f = {"type": "file", "base64": "F", "mime_type": "application/pdf"}
+        assert _media_types_in([HumanMessage(content=[img, f])]) == {"image", "file"}
+        assert _media_types_in([HumanMessage(content="hi")]) == set()
+
+    def test_strip_media_types_replaces_only_given(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _strip_media_types
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        f = {"type": "file", "base64": "FFF", "mime_type": "application/pdf"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, img, f])
+        # Strip only files -> image survives, file becomes a placeholder block.
+        out = _strip_media_types([msg], {"file"})
+        types = [b.get("type") for b in out[0].content if isinstance(b, dict)]
+        assert "image" in types  # image preserved
+        assert "file" not in types  # file stripped
+        assert any(
+            b.get("type") == "text" and "omitted" in b.get("text", "").lower()
+            for b in out[0].content
+        )
+
+    def test_profile_no_vision_strips_upfront(self):
+        # Proactive: profile says image_inputs is False -> strip from the start,
+        # no failing first request.
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        model.profile = {"image_inputs": False}
+        calls = []
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            return "ok"
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        assert model._generate([self._img_tool()]) == "ok"
+        assert len(calls) == 1  # no failed attempt
+        assert all(isinstance(m.content, str) for m in calls[0])
+        assert any("omitted" in m.content.lower() for m in calls[0])
+
+    def test_profile_with_vision_does_not_strip(self):
+        # Profile says image_inputs is True -> normal preserve path (no upfront strip).
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        model.profile = {"image_inputs": True}
+        calls = []
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            return "ok"
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        assert model._generate([self._img_tool()]) == "ok"
+        # Image preserved (hoisted), not replaced by a placeholder.
+        assert any(
+            isinstance(m.content, list)
+            and any(b.get("type") == "image" for b in m.content)
+            for m in calls[0]
+        )
+
+    def test_generate_falls_back_and_caches(self):
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        calls = []
+        state = {"raised": False}
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            if not state["raised"]:  # fail exactly once, ever
+                state["raised"] = True
+                raise Exception("unknown variant `image_url`, expected `text`")
+            return "ok"
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        tm = self._img_tool()
+        # 1st turn: preserve attempt fails once -> strip -> ok
+        assert model._generate([tm]) == "ok"
+        assert len(calls) == 2
+        retry = calls[1]
+        assert all(isinstance(m.content, str) for m in retry)
+        assert any("omitted" in m.content.lower() for m in retry)
+
+        # 2nd turn: cached no-vision -> straight to stripped, single call (no failure)
+        calls.clear()
+        assert model._generate([tm]) == "ok"
+        assert len(calls) == 1
+        assert all(isinstance(m.content, str) for m in calls[0])
+
+    def test_non_image_error_not_retried(self):
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        calls = []
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            raise Exception("rate limit exceeded")
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        with pytest.raises(Exception, match="rate limit"):
+            model._generate([self._img_tool()])
+        assert len(calls) == 1
+
+    def test_stream_falls_back(self):
+        from unittest.mock import MagicMock
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        model._generate = MagicMock(return_value="g")
+        calls = []
+
+        def _stream(msgs, *a, **k):
+            calls.append(msgs)
+            if len(calls) == 1:
+                raise Exception("No endpoints found that support image input")
+            yield from ["x", "y"]
+
+        model._stream = _stream
+        _patch_openai_compat_content(model)
+
+        out = list(model._stream([self._img_tool()]))
+        assert out == ["x", "y"]
+        assert len(calls) == 2
+
+    @pytest.mark.anyio
+    async def test_astream_falls_back(self):
+        from unittest.mock import MagicMock
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        model._generate = MagicMock(return_value="g")
+        calls = []
+
+        async def _astream(msgs, *a, **k):
+            calls.append(msgs)
+            if len(calls) == 1:
+                raise Exception("No endpoints found that support image input")
+            for c in ["x", "y"]:
+                yield c
+
+        model._astream = _astream
+        _patch_openai_compat_content(model)
+
+        out = [c async for c in model._astream([self._img_tool()])]
+        assert out == ["x", "y"]
+        assert len(calls) == 2
+
+    def test_unrelated_400_retry_fails_not_cached(self):
+        # A non-media 400 (e.g. tool schema) whose stripped retry ALSO fails must
+        # surface the original error and must NOT permanently flip to no-media.
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        class _E(Exception):
+            status_code = 400
+
+        model = self._make_model()
+        calls = []
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            raise _E("invalid tool schema")  # 400, not media; fails every time
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        tm = self._img_tool()
+        with pytest.raises(_E):
+            model._generate([tm])
+        assert len(calls) == 2  # preserve attempt + stripped retry (both fail)
+
+        # Not cached: the next call attempts preserve again (not straight-to-stripped)
+        calls.clear()
+        with pytest.raises(_E):
+            model._generate([tm])
+        assert len(calls) == 2
+
+    def test_pdf_rejection_does_not_disable_images(self):
+        # Per-modality: a PDF/file rejection caches only file types; a later
+        # image must still be preserved (not stripped).
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        calls = []
+        state = {"raised": False}
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            has_file = any(
+                isinstance(m.content, list)
+                and any(
+                    isinstance(b, dict) and b.get("type") == "file" for b in m.content
+                )
+                for m in msgs
+            )
+            if has_file and not state["raised"]:
+                state["raised"] = True
+                raise Exception("file input is not supported")
+            return "ok"
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        pdf_tm = ToolMessage(
+            content_blocks=[
+                {"type": "file", "base64": "F", "mime_type": "application/pdf"}
+            ],
+            tool_call_id="t1",
+            name="read_file",
+        )
+        assert model._generate([pdf_tm]) == "ok"  # file rejected -> stripped -> ok
+
+        # Now an image: must still be preserved (images not blocked by a PDF reject)
+        calls.clear()
+        img_msg = HumanMessage(
+            content=[{"type": "image", "base64": "A", "mime_type": "image/png"}]
+        )
+        assert model._generate([img_msg]) == "ok"
+        assert len(calls) == 1  # single attempt, no failure
+        assert any(
+            isinstance(m.content, list)
+            and any(isinstance(b, dict) and b.get("type") == "image" for b in m.content)
+            for m in calls[0]
+        )
+
+    def test_bare_400_recovers_but_not_cached(self):
+        # A bare 400 with NO media marker recovers this request (stripped retry)
+        # but must NOT cache (no permanent degradation) — High #1.
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        class _E(Exception):
+            status_code = 400
+
+        model = self._make_model()
+        calls = []
+        state = {"raised": False}
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            if not state["raised"]:
+                state["raised"] = True
+                raise _E("transient bad request")  # 400, no media marker
+            return "ok"
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        tm = self._img_tool()
+        assert model._generate([tm]) == "ok"  # bare 400 -> stripped retry -> ok
+        assert len(calls) == 2
+
+        # NOT cached: the next call still attempts preserve (image kept, not stripped)
+        calls.clear()
+        assert model._generate([tm]) == "ok"
+        assert len(calls) == 1
+        assert any(
+            isinstance(m.content, list)
+            and any(isinstance(b, dict) and b.get("type") == "image" for b in m.content)
+            for m in calls[0]
+        )
+
+    def test_mixed_modality_caches_only_culprit(self):
+        # image+file message; provider rejects only the file -> cache file only,
+        # images stay preserved on later turns — High #2.
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        calls = []
+        state = {"raised": False}
+
+        def _gen(msgs, *a, **k):
+            calls.append(msgs)
+            if not state["raised"]:
+                state["raised"] = True
+                raise Exception("file input is not supported")
+            return "ok"
+
+        model._generate = _gen
+        _patch_openai_compat_content(model)
+
+        mixed = HumanMessage(
+            content=[
+                {"type": "image", "base64": "A", "mime_type": "image/png"},
+                {"type": "file", "base64": "F", "mime_type": "application/pdf"},
+            ]
+        )
+        assert model._generate([mixed]) == "ok"  # file rejected -> retry -> cache file
+
+        # later image-only request: image must still be preserved
+        calls.clear()
+        img = HumanMessage(
+            content=[{"type": "image", "base64": "A", "mime_type": "image/png"}]
+        )
+        assert model._generate([img]) == "ok"
+        assert len(calls) == 1
+        assert any(
+            isinstance(m.content, list)
+            and any(isinstance(b, dict) and b.get("type") == "image" for b in m.content)
+            for m in calls[0]
+        )
+
+    def test_stream_empty_retry_raises_original(self):
+        # If the stripped streaming retry yields ZERO chunks, surface the
+        # original error instead of silently returning an empty stream.
+        from unittest.mock import MagicMock
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        model._generate = MagicMock(return_value="g")
+        calls = []
+
+        def _stream(msgs, *a, **k):
+            calls.append(msgs)
+            if len(calls) == 1:
+                raise Exception("No endpoints found that support image input")
+            return  # retry yields nothing
+            yield  # pragma: no cover  (makes this a generator)
+
+        model._stream = _stream
+        _patch_openai_compat_content(model)
+
+        with pytest.raises(Exception, match="support image"):
+            list(model._stream([self._img_tool()]))
+        assert len(calls) == 2
 
 
 # =============================================================================

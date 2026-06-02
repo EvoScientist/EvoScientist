@@ -464,7 +464,10 @@ def get_chat_model(
     if (
         _is_third_party or _is_openai_proxy
     ) and _original_provider not in _no_patch_providers:
-        _patch_openai_compat_content(chat_model)
+        # Anthropic-routed providers accept media in tool results natively;
+        # only OpenAI-compatible providers need tool-media hoisting.
+        _hoist = _original_provider not in _ANTHROPIC_ROUTED_PROVIDERS
+        _patch_openai_compat_content(chat_model, hoist_tool_media=_hoist)
 
     # DeepSeek thinking mode requires reasoning_content passback in multi-turn
     # + tool_use scenarios.
