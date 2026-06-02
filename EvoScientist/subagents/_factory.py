@@ -40,7 +40,6 @@ def build_async_subagent_graph(name: str) -> Any:
     from EvoScientist.config import apply_config_to_env, get_effective_config
     from EvoScientist.EvoScientist import (
         SUBAGENTS_CONFIG,
-        _build_prompt_refs,
         _ensure_chat_model,
         _get_default_backend,
         _get_default_middleware,
@@ -63,7 +62,6 @@ def build_async_subagent_graph(name: str) -> Any:
     specs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
-        prompt_refs=_build_prompt_refs(),
     )
     spec = next((s for s in specs if s.get("name") == name), None)
     if spec is None:

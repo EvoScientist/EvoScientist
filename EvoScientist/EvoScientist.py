@@ -27,7 +27,7 @@ from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddlewar
 from . import paths as _paths_mod
 from .config import apply_config_to_env, get_effective_config
 from .paths import set_active_workspace, set_workspace_root
-from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
+from .prompts import get_system_prompt
 
 # Suppress noisy warnings from deepagents skill loader (non-string frontmatter fields, etc.)
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
@@ -213,11 +213,6 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
         )
 
 
-def _build_prompt_refs() -> dict:
-    """Build prompt references for configured subagents."""
-    return {"RESEARCHER_INSTRUCTIONS": RESEARCHER_INSTRUCTIONS}
-
-
 def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
     """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
 
@@ -330,7 +325,6 @@ def _build_base_kwargs(base_backend, base_middleware):
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
-        prompt_refs=_build_prompt_refs(),
     )
     _inject_subagent_middleware(subs)
     subs = _maybe_swap_async_subagents(subs, base_middleware)
@@ -379,7 +373,6 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
-        prompt_refs=_build_prompt_refs(),
     )
 
     _inject_subagent_middleware(subs)

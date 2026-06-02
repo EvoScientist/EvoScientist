@@ -5,7 +5,6 @@ from EvoScientist.prompts import (
     EVOSCIENTIST_IDENTITY,
     EXPERIMENT_WORKFLOW,
     REPORT_TEMPLATE,
-    RESEARCHER_INSTRUCTIONS,
     SHELL_GUIDELINES,
     WRITING_GUIDELINES,
     get_system_prompt,
@@ -73,10 +72,6 @@ class TestGetSystemPrompt:
 
         result = get_system_prompt()
         assert not re.search(r"Current date: \d{4}-\d{2}-\d{2}", result)
-
-    def test_researcher_prompt_does_not_own_date_placeholder(self):
-        assert "{date}" not in RESEARCHER_INSTRUCTIONS
-        assert "Today's date" not in RESEARCHER_INSTRUCTIONS
 
     def test_mentions_skill_manager_for_discovery(self):
         """Agent must know it can browse/install skills from the EvoSkills catalog."""
