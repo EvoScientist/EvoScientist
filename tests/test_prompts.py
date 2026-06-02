@@ -5,6 +5,7 @@ from EvoScientist.prompts import (
     EVOSCIENTIST_IDENTITY,
     EXPERIMENT_WORKFLOW,
     REPORT_TEMPLATE,
+    RESEARCHER_INSTRUCTIONS,
     SHELL_GUIDELINES,
     WRITING_GUIDELINES,
     get_system_prompt,
@@ -63,16 +64,19 @@ class TestGetSystemPrompt:
         assert 0 <= idx_identity < idx_workflow < idx_delegation
 
     def test_does_not_contain_static_date(self):
-        """Date is injected per-turn by EvoMemoryMiddleware, not baked into static prompt.
+        """Date is injected per-turn by runtime context, not baked into static prompt.
 
         Static prompt must stay byte-stable across midnight so the cache prefix
-        survives. See EvoMemoryMiddleware.modify_request for runtime injection.
+        survives. See RuntimeContextMiddleware for runtime injection.
         """
         import re
 
         result = get_system_prompt()
-        # No literal "Today's date is YYYY-MM-DD." in the static prompt.
-        assert not re.search(r"Today's date is \d{4}-\d{2}-\d{2}", result)
+        assert not re.search(r"Current date: \d{4}-\d{2}-\d{2}", result)
+
+    def test_researcher_prompt_does_not_own_date_placeholder(self):
+        assert "{date}" not in RESEARCHER_INSTRUCTIONS
+        assert "Today's date" not in RESEARCHER_INSTRUCTIONS
 
     def test_mentions_skill_manager_for_discovery(self):
         """Agent must know it can browse/install skills from the EvoSkills catalog."""

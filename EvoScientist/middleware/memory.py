@@ -154,9 +154,7 @@ Rules:
 # System-prompt snippet injected every turn
 # ---------------------------------------------------------------------------
 
-MEMORY_INJECTION_TEMPLATE = """Today's date is {date}.
-
-<evo_memory>
+MEMORY_INJECTION_TEMPLATE = """<evo_memory>
 {memory_content}
 </evo_memory>
 
@@ -692,10 +690,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
         from deepagents.middleware._utils import append_to_system_message
 
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        injection = MEMORY_INJECTION_TEMPLATE.format(
-            memory_content=memory_content, date=date_str
-        )
+        injection = MEMORY_INJECTION_TEMPLATE.format(memory_content=memory_content)
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 

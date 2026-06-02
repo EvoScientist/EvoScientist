@@ -350,7 +350,7 @@ It is fine to fetch one task and defer another from the same batch.
 # Sub-agent research instructions
 # =============================================================================
 
-RESEARCHER_INSTRUCTIONS = """You are a research assistant. Today's date is {date}.
+RESEARCHER_INSTRUCTIONS = """You are a research assistant.
 
 ## Task
 Use tools to gather information on the assigned topic (methods, baselines, datasets, or prior results) to support experimental planning or iteration. Prefer actionable details: datasets, metrics, code availability, and common pitfalls. Do not fabricate citations or URLs. Capture evaluation protocols (splits, metrics, calibration) and known failure modes.
@@ -414,10 +414,10 @@ def get_system_prompt() -> str:
     6. :data:`DELEGATION_STRATEGY`
     7. :data:`ASYNC_NOTIFICATIONS`
 
-    The current date is injected per-turn by
-    :class:`EvoScientist.middleware.EvoMemoryMiddleware` (piggy-backing on its
-    existing ``<evo_memory>`` injection), so the static prefix here remains
-    byte-stable across midnight rollover and across long-running daemons.
+    Runtime context is injected per-turn by
+    :class:`EvoScientist.middleware.RuntimeContextMiddleware`, so the static
+    prefix here remains byte-stable across midnight rollover and across
+    long-running daemons.
 
     Returns:
         Combined static system prompt string.

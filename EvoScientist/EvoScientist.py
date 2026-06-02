@@ -20,7 +20,6 @@ Usage:
 import json
 import logging
 import os
-from datetime import datetime
 from pathlib import Path
 
 from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
@@ -198,6 +197,7 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
         ContextOverflowMapperMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
+        create_runtime_context_middleware,
     )
 
     for sa in subs:
@@ -206,6 +206,7 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
                 # No ``model=`` — subagents share the main agent's model,
                 # so defer to the factory's ``_ensure_chat_model()`` fallback.
                 create_context_editing_middleware(),
+                create_runtime_context_middleware(),
                 ToolErrorHandlerMiddleware(),
                 ContextOverflowMapperMiddleware(),
             ]
@@ -213,12 +214,8 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
 
 
 def _build_prompt_refs() -> dict:
-    """Build prompt references with the current date (not frozen at import)."""
-    return {
-        "RESEARCHER_INSTRUCTIONS": RESEARCHER_INSTRUCTIONS.format(
-            date=datetime.now().strftime("%Y-%m-%d"),
-        ),
-    }
+    """Build prompt references for configured subagents."""
+    return {"RESEARCHER_INSTRUCTIONS": RESEARCHER_INSTRUCTIONS}
 
 
 def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
@@ -472,6 +469,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_middleware,
+        create_runtime_context_middleware,
         create_tool_selector_middleware,
         load_fallback_chain,
     )
@@ -492,6 +490,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
+        create_runtime_context_middleware(),
         create_memory_middleware(memory_dir, extraction_model=model),
     ]
 
