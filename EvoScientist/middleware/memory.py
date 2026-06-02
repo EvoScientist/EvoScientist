@@ -237,14 +237,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return self._memory_dir / memory_path.lstrip("/")
 
     def _read_text(self, path: Path) -> str | None:
-        """Read UTF-8 text, treating missing or unreadable files as absent."""
+        """Read UTF-8 text, returning None only when the file is absent."""
         try:
             return path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
         except (OSError, UnicodeDecodeError) as e:
             logger.warning("Failed to read profile memory %s: %s", path, e)
-            return None
+            raise
 
     def _write_text(self, path: Path, content: str) -> bool:
         """Write UTF-8 text, creating parent directories as needed."""
