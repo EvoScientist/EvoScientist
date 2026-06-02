@@ -137,7 +137,8 @@ def load_subagents(
         research-agent:
           description: "..."
           tools: [tavily_search, think_tool]
-          system_prompt_ref: RESEARCHER_INSTRUCTIONS
+          system_prompt: |
+            ...
     """
     prompt_refs = prompt_refs or {}
 
