@@ -95,13 +95,17 @@ class TestFormatToolCompact:
         result = format_tool_compact("edit_file", {"path": "f.py"})
         assert result == "edit_file(f.py)"
 
-    # Global memory file special display (/memories/ = global)
+    # Global profile memory display (/memories/ = global)
     def test_read_file_global_memory(self):
-        result = format_tool_compact("read_file", {"path": "/memories/MEMORY.md"})
+        result = format_tool_compact(
+            "read_file", {"path": "/memories/profile/USER_PROFILE.md"}
+        )
         assert result == "Reading memory"
 
     def test_read_file_global_memory_file_path_alias(self):
-        result = format_tool_compact("read_file", {"file_path": "/memories/MEMORY.md"})
+        result = format_tool_compact(
+            "read_file", {"file_path": "/memories/profile/USER_PROFILE.md"}
+        )
         assert result == "Reading memory"
 
     def test_read_file_any_global_memory_file(self):
@@ -109,14 +113,15 @@ class TestFormatToolCompact:
         assert result == "Reading memory"
 
     def test_write_file_global_memory(self):
-        result = format_tool_compact("write_file", {"path": "/MEMORY.md"})
+        result = format_tool_compact(
+            "write_file", {"path": "/memories/profile/USER_PROFILE.md"}
+        )
         assert result == "Updating memory"
-        # Also covers paths with /memories/ prefix
-        result2 = format_tool_compact("write_file", {"path": "/memories/MEMORY.md"})
-        assert result2 == "Updating memory"
 
     def test_edit_file_global_memory(self):
-        result = format_tool_compact("edit_file", {"path": "/memories/MEMORY.md"})
+        result = format_tool_compact(
+            "edit_file", {"path": "/memories/profile/USER_PROFILE.md"}
+        )
         assert result == "Updating memory"
 
     def test_write_edit_any_global_memory_file(self):
@@ -144,14 +149,14 @@ class TestFormatToolCompact:
         read_result = format_tool_compact_with_result(
             "read_file",
             {},
-            "# EvoScientist Memory\n\nFounder: Zachary",
+            "# User profile\n\nFounder: Zachary",
         )
         assert read_result == "Reading memory"
 
         edit_result = format_tool_compact_with_result(
             "edit_file",
             {},
-            "Successfully replaced 1 instance(s) of the string in '/memories/MEMORY.md'",
+            "Successfully replaced 1 instance(s) of the string in '/memories/profile/USER_PROFILE.md'",
         )
         assert edit_result == "Updating memory"
 
@@ -161,6 +166,28 @@ class TestFormatToolCompact:
             "Wrote updated content to '/memories/history.md'",
         )
         assert write_result == "Updating memory"
+
+    def test_profile_memory_inference_uses_profile_template_headings(self, monkeypatch):
+        from EvoScientist.middleware import memory
+        from EvoScientist.stream import utils
+
+        monkeypatch.setitem(
+            memory.PROFILE_TEMPLATES,
+            "/profile/CUSTOM.md",
+            "# Custom profile\n\n## Notes\n",
+        )
+        utils._profile_memory_headings.cache_clear()
+
+        try:
+            result = format_tool_compact_with_result(
+                "read_file",
+                {},
+                "# Custom profile\n\n- remembered",
+            )
+        finally:
+            utils._profile_memory_headings.cache_clear()
+
+        assert result == "Reading memory"
 
     def test_project_memory_result_not_special(self):
         result = format_tool_compact_with_result(

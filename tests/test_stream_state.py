@@ -579,6 +579,37 @@ class TestLatestTextReset:
         # response_text still has everything
         assert state.response_text == "first segmentsecond segment"
 
+    def test_tool_call_marks_existing_text_as_narration(self):
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "first segment"})
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+
+        assert state.narrated_response_end == len("first segment")
+        assert state.narration_segments == [(0, "first segment")]
+
+        state.handle_event({"type": "text", "content": "second segment"})
+        assert state.narrated_response_end == len("first segment")
+        assert state.narration_segments == [(0, "first segment")]
+
+    def test_later_tool_call_extends_narrated_boundary(self):
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "first segment"})
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
+        )
+        state.handle_event({"type": "text", "content": "second segment"})
+        state.handle_event(
+            {"type": "tool_call", "id": "tc2", "name": "execute", "args": {}}
+        )
+
+        assert state.narrated_response_end == len("first segmentsecond segment")
+        assert state.narration_segments == [
+            (0, "first segment"),
+            (1, "second segment"),
+        ]
+
 
 # =============================================================================
 # Name merging edge cases
@@ -859,17 +890,6 @@ class TestHasPendingWork:
         state.handle_event({"type": "text", "content": "done"})
         assert state.has_pending_work() is False
 
-    def test_internal_tool_ignored(self):
-        state = StreamState()
-        state.handle_event(
-            {"type": "tool_call", "id": "tc1", "name": "ExtractedMemory", "args": {}}
-        )
-        state.handle_event(
-            {"type": "tool_result", "name": "ExtractedMemory", "content": "ok"}
-        )
-        state.is_processing = False
-        assert state.has_pending_work() is False
-
 
 class TestVisibleToolCounts:
     """Tests for StreamState.visible_tool_counts()."""
@@ -893,29 +913,16 @@ class TestVisibleToolCounts:
         state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
         assert state.visible_tool_counts() == (1, 1)
 
-    def test_internal_tool_excluded(self):
-        state = StreamState()
-        state.handle_event(
-            {"type": "tool_call", "id": "tc1", "name": "ExtractedMemory", "args": {}}
-        )
-        assert state.visible_tool_counts() == (0, 0)
-
     def test_mixed(self):
         state = StreamState()
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
         state.handle_event(
-            {"type": "tool_call", "id": "tc2", "name": "ExtractedMemory", "args": {}}
-        )
-        state.handle_event(
             {"type": "tool_call", "id": "tc3", "name": "search", "args": {}}
         )
         state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
-        state.handle_event(
-            {"type": "tool_result", "name": "ExtractedMemory", "content": "ok"}
-        )
-        # execute done, ExtractedMemory done but invisible, search pending
+        # execute done, search pending
         assert state.visible_tool_counts() == (1, 2)
 
 

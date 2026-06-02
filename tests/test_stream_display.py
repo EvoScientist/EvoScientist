@@ -1,9 +1,22 @@
 """Tests for Rich streaming display helpers."""
 
+from typing import Any, cast
+
+from rich.console import Console
+from rich.markdown import Markdown
+
 from EvoScientist.stream.display import (
     _fix_markdown_heading_spacing,
+    create_streaming_display,
     resolve_final_status_footer,
 )
+from EvoScientist.stream.state import SubAgentState
+
+
+def _render_text(renderable) -> str:
+    console = Console(record=True, width=100, color_system=None)
+    console.print(renderable)
+    return console.export_text()
 
 
 def test_resolve_final_status_footer_hides_footer_for_interactive_cli():
@@ -14,6 +27,416 @@ def test_resolve_final_status_footer_hides_footer_for_interactive_cli():
 def test_resolve_final_status_footer_keeps_footer_for_noninteractive():
     """Non-interactive output keeps the footer so callers see the trailing status."""
     assert resolve_final_status_footer(False, lambda: "footer") == "footer"
+
+
+def test_streaming_display_keeps_narration_visible_with_pending_memory_tool():
+    """Profile-memory reads still block, while lead-in text remains visible."""
+    narration = "Here is the answer."
+    renderable = create_streaming_display(
+        response_text=narration,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "read_file",
+                "args": {"path": "/memories/profile/USER_PROFILE.md"},
+            }
+        ],
+        tool_results=[],
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "Here is the answer." in rendered
+    assert "Reading memory" in rendered
+    assert "Running" in rendered
+    assert rendered.index("Here is the answer.") < rendered.index("Reading memory")
+
+
+def test_streaming_display_keeps_narration_visible_while_processing_tool_result():
+    """Completed tools still block while their result is being processed."""
+    narration = "Here is the answer."
+    renderable = create_streaming_display(
+        response_text=narration,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "read_file",
+                "args": {"path": "/memories/profile/USER_PROFILE.md"},
+            }
+        ],
+        tool_results=[
+            {
+                "name": "read_file",
+                "content": "# User profile\n\n- Likes concise updates.",
+            }
+        ],
+        is_processing=True,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "Here is the answer." in rendered
+    assert "Reading memory" in rendered
+    assert "Analyzing results" in rendered
+    assert rendered.index("Here is the answer.") < rendered.index("Reading memory")
+
+
+def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():
+    """Ordinary tools use the same pending-tool behavior as memory reads."""
+    narration = "I will inspect the files first."
+    renderable = create_streaming_display(
+        response_text=narration,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "execute",
+                "args": {"command": "rg -n TODO ."},
+            }
+        ],
+        tool_results=[],
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "execute(rg -n TODO .)" in rendered
+    assert "Running" in rendered
+    assert "I will inspect the files first." in rendered
+    assert rendered.index("I will inspect the files first.") < rendered.index(
+        "execute(rg -n TODO .)"
+    )
+
+
+def test_streaming_display_keeps_narration_separate_when_answer_streams():
+    """Post-tool answers should not re-render pre-tool narration as Markdown."""
+    narration = "I will inspect the files first.\n"
+    answer = "The delayed check completed."
+    renderable = create_streaming_display(
+        response_text=f"{narration}{answer}",
+        latest_text=answer,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "execute",
+                "args": {"command": "python check.py"},
+            }
+        ],
+        tool_results=[
+            {
+                "name": "execute",
+                "content": "check complete",
+            }
+        ],
+        response_markdown=Markdown("SHOULD NOT RENDER"),
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "I will inspect the files first." in rendered
+    assert "The delayed check completed." in rendered
+    assert "SHOULD NOT RENDER" not in rendered
+    assert rendered.index("I will inspect the files first.") < rendered.index(
+        "execute(python check.py)"
+    )
+    assert rendered.index("execute(python check.py)") < rendered.index(
+        "The delayed check completed."
+    )
+
+
+def test_streaming_display_keeps_narration_separate_in_final_frame():
+    """The final Rich frame should preserve narration without one concat block."""
+    narration = "I will inspect the files first.\n"
+    answer = "The delayed check completed."
+    renderable = create_streaming_display(
+        response_text=f"{narration}{answer}",
+        latest_text=answer,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "execute",
+                "args": {"command": "python check.py"},
+            }
+        ],
+        tool_results=[
+            {
+                "name": "execute",
+                "content": "check complete",
+            }
+        ],
+        is_final=True,
+        response_markdown=Markdown("SHOULD NOT RENDER"),
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "I will inspect the files first." in rendered
+    assert "The delayed check completed." in rendered
+    assert "SHOULD NOT RENDER" not in rendered
+    assert rendered.index("I will inspect the files first.") < rendered.index(
+        "execute(python check.py)"
+    )
+    assert rendered.index("execute(python check.py)") < rendered.index(
+        "The delayed check completed."
+    )
+
+
+def test_streaming_display_preserves_narration_for_pending_final_tool():
+    """Stopped/error final frames keep narration attached to pending tools."""
+    narration = "I will inspect the files first.\n"
+    answer = "[Stopped.]"
+    renderable = create_streaming_display(
+        response_text=f"{narration}{answer}",
+        latest_text=answer,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "execute",
+                "args": {"command": "sleep 30"},
+            }
+        ],
+        tool_results=[],
+        is_final=True,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "I will inspect the files first." in rendered
+    assert "execute(sleep 30)" in rendered
+    assert "[Stopped.]" in rendered
+    assert rendered.index("I will inspect the files first.") < rendered.index(
+        "execute(sleep 30)"
+    )
+    assert rendered.index("execute(sleep 30)") < rendered.index("[Stopped.]")
+
+
+def test_streaming_display_interleaves_multiple_narration_segments():
+    """Multiple narrated segments should stay attached to their following tools."""
+    first = "I will inspect the files first.\n"
+    second = "I found one file, now I will run it.\n"
+    answer = "The delayed check completed."
+    renderable = create_streaming_display(
+        response_text=f"{first}{second}{answer}",
+        latest_text=answer,
+        narrated_response_end=len(first) + len(second),
+        narration_segments=[
+            (0, first),
+            (1, second),
+        ],
+        tool_calls=[
+            {
+                "id": "tc1",
+                "name": "execute",
+                "args": {"command": "rg -n delayed ."},
+            },
+            {
+                "id": "tc2",
+                "name": "execute",
+                "args": {"command": "python check.py"},
+            },
+        ],
+        tool_results=[
+            {
+                "name": "execute",
+                "content": "check.py",
+            },
+            {
+                "name": "execute",
+                "content": "check complete",
+            },
+        ],
+        is_final=True,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert rendered.index("I will inspect the files first.") < rendered.index(
+        "execute(rg -n delayed .)"
+    )
+    assert rendered.index("execute(rg -n delayed .)") < rendered.index(
+        "I found one file, now I will run it."
+    )
+    assert rendered.index("I found one file, now I will run it.") < rendered.index(
+        "execute(python check.py)"
+    )
+    assert rendered.index("execute(python check.py)") < rendered.index(
+        "The delayed check completed."
+    )
+
+
+def test_streaming_display_preserves_narration_for_collapsed_completed_tool():
+    """Live collapsed completed summaries keep narration from hidden tools."""
+    narration = "I will check the early result.\n"
+    tool_calls = [
+        {
+            "id": f"tc{i}",
+            "name": "execute",
+            "args": {"command": f"python step_{i}.py"},
+        }
+        for i in range(5)
+    ]
+    tool_results = [
+        {
+            "name": "execute",
+            "content": f"step {i} complete",
+        }
+        for i in range(5)
+    ]
+
+    renderable = create_streaming_display(
+        response_text=narration,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=tool_calls,
+        tool_results=tool_results,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "I will check the early result." in rendered
+    assert "1 completed" in rendered
+    assert "execute(python step_0.py)" not in rendered
+    assert rendered.index("I will check the early result.") < rendered.index(
+        "1 completed"
+    )
+
+
+def test_streaming_display_preserves_narration_for_collapsed_running_tool():
+    """Live collapsed running summaries keep narration from hidden tools."""
+    narration = "I will start the long-running check.\n"
+    tool_calls = [
+        {
+            "id": f"tc{i}",
+            "name": "execute",
+            "args": {"command": f"sleep {i + 1}"},
+        }
+        for i in range(4)
+    ]
+
+    renderable = create_streaming_display(
+        response_text=narration,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=tool_calls,
+        tool_results=[],
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "I will start the long-running check." in rendered
+    assert "1 more running" in rendered
+    assert "execute(sleep 1)" not in rendered
+    assert rendered.index("I will start the long-running check.") < rendered.index(
+        "1 more running"
+    )
+
+
+def test_streaming_display_preserves_task_narration_while_subagent_runs():
+    """Narration before a task call should stay attached to the task section."""
+    narration = "I'll ask a specialist to inspect this.\n"
+    subagent = SubAgentState("code-agent", "inspect this")
+    subagent.is_active = True
+    subagent.add_tool_call("execute", {"command": "rg -n TODO ."}, "sa1")
+
+    renderable = create_streaming_display(
+        response_text=narration,
+        narrated_response_end=len(narration),
+        narration_segments=[(0, narration)],
+        tool_calls=[
+            {
+                "id": "task1",
+                "name": "task",
+                "args": {
+                    "subagent_type": "code-agent",
+                    "description": "inspect this",
+                },
+            }
+        ],
+        tool_results=[],
+        subagents=[subagent],
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "I'll ask a specialist to inspect this." in rendered
+    assert "Cooking with code-agent" in rendered
+    assert "execute(rg -n TODO .)" in rendered
+    assert rendered.index("I'll ask a specialist to inspect this.") < rendered.index(
+        "Cooking with code-agent"
+    )
+
+
+def test_streaming_display_orders_final_task_narration_by_tool_index():
+    """Task narration should not move after regular-tool narration in final frames."""
+    first = "I'll ask a specialist to inspect this.\n"
+    second = "Now I will run the result locally.\n"
+    answer = "The local run passed."
+    subagent = SubAgentState("code-agent", "inspect this")
+    subagent.is_active = False
+    subagent.add_tool_call("execute", {"command": "rg -n TODO ."}, "sa1")
+    subagent.add_tool_result("execute", "todo.py", True, "sa1")
+
+    renderable = create_streaming_display(
+        response_text=f"{first}{second}{answer}",
+        latest_text=answer,
+        narrated_response_end=len(first) + len(second),
+        narration_segments=[
+            (0, first),
+            (1, second),
+        ],
+        tool_calls=[
+            {
+                "id": "task1",
+                "name": "task",
+                "args": {
+                    "subagent_type": "code-agent",
+                    "description": "inspect this",
+                },
+            },
+            {
+                "id": "tc2",
+                "name": "execute",
+                "args": {"command": "python todo.py"},
+            },
+        ],
+        tool_results=[
+            {
+                "name": "task",
+                "content": "todo.py",
+            },
+            {
+                "name": "execute",
+                "content": "passed",
+            },
+        ],
+        subagents=[subagent],
+        is_final=True,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert rendered.index("I'll ask a specialist to inspect this.") < rendered.index(
+        "Cooking with code-agent"
+    )
+    assert rendered.index("Cooking with code-agent") < rendered.index(
+        "Now I will run the result locally."
+    )
+    assert rendered.index("Now I will run the result locally.") < rendered.index(
+        "execute(python todo.py)"
+    )
+    assert rendered.index("execute(python todo.py)") < rendered.index(
+        "The local run passed."
+    )
 
 
 class TestFixMarkdownHeadingSpacing:
@@ -105,7 +528,7 @@ class TestAssistantMessageBufferContract:
 
         msg = AssistantMessage(initial_content=initial)
         fake_md = MagicMock()
-        msg.query_one = MagicMock(return_value=fake_md)
+        cast(Any, msg).query_one = MagicMock(return_value=fake_md)
         return msg, fake_md
 
     def test_flush_markdown_does_not_mutate_buffer(self):
