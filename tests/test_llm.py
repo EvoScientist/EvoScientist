@@ -1289,6 +1289,46 @@ class TestNoVisionFallback:
             for b in out[0].content
         )
 
+    def test_strip_media_types_preserves_position(self):
+        # Stripped block is replaced IN PLACE; surrounding text/kept media keep
+        # their order (placeholder where the image was, file stays last).
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _strip_media_types
+
+        img = {"type": "image", "base64": "A", "mime_type": "image/png"}
+        f = {"type": "file", "base64": "F", "mime_type": "application/pdf"}
+        msg = HumanMessage(
+            content=[
+                {"type": "text", "text": "t1"},
+                img,
+                {"type": "text", "text": "t2"},
+                f,
+            ]
+        )
+        out = _strip_media_types([msg], {"image"})  # block only image
+        content = out[0].content
+        assert all(b.get("type") != "image" for b in content)  # image gone
+        # order preserved: t1, placeholder (where image was), t2, file
+        assert content[0]["text"] == "t1"
+        assert content[1]["type"] == "text"
+        assert "omitted" in content[1]["text"].lower()
+        assert content[2]["text"] == "t2"
+        assert content[3]["type"] == "file"  # file kept at its original position
+
+    def test_strip_media_types_dedups_consecutive(self):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _strip_media_types
+
+        a = {"type": "image", "base64": "A", "mime_type": "image/png"}
+        b = {"type": "image", "base64": "B", "mime_type": "image/png"}
+        msg = HumanMessage(content=[a, b])
+        out = _strip_media_types([msg], {"image"})
+        # two adjacent stripped blocks collapse into ONE placeholder
+        assert len(out[0].content) == 1
+        assert "omitted" in out[0].content[0]["text"].lower()
+
     def test_profile_no_vision_strips_upfront(self):
         # Proactive: profile says image_inputs is False -> strip from the start,
         # no failing first request.

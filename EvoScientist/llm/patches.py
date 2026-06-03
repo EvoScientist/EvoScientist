@@ -375,8 +375,9 @@ def _is_http_400(exc: Exception) -> bool:
 def _strip_media_types(messages: list[Any], types: set[str]) -> list[Any]:
     """Replace blocks of the given types with a placeholder text block.
 
-    Other blocks (text and non-stripped media) are kept, so a model that
-    rejects only one modality still receives the others.
+    Each stripped block is replaced IN PLACE (consecutive ones collapse into one
+    placeholder), so surrounding text/media keep their original positions and a
+    model that rejects only one modality still receives the others in order.
     """
     import copy
 
@@ -388,10 +389,18 @@ def _strip_media_types(messages: list[Any], types: set[str]) -> list[Any]:
         ):
             out.append(msg)
             continue
-        kept = [
-            b for b in content if not (isinstance(b, dict) and b.get("type") in types)
-        ]
-        kept.append({"type": "text", "text": _UNSUPPORTED_MEDIA_PLACEHOLDER})
+        kept: list[Any] = []
+        last_was_placeholder = False
+        for b in content:
+            if isinstance(b, dict) and b.get("type") in types:
+                if not last_was_placeholder:
+                    kept.append(
+                        {"type": "text", "text": _UNSUPPORTED_MEDIA_PLACEHOLDER}
+                    )
+                    last_was_placeholder = True
+                continue
+            kept.append(b)
+            last_was_placeholder = False
         msg = copy.copy(msg)
         msg.content = kept
         out.append(msg)
