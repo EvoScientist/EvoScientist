@@ -435,10 +435,11 @@ class CompactSummaryRenderable:
 
 
 def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
-    """Conditionally start the langgraph dev subprocess for async sub-agents.
+    """Start the langgraph dev subprocess for background agent work.
 
-    Shared by both the interactive entry and the serve entry — keeps the
-    user-visible status message and the conditional in one place.
+    Shared by both the interactive entry and the serve entry so the
+    user-visible status message and workspace-mismatch handling stay in one
+    place.
 
     Raises ``typer.Exit(1)`` (after surfacing a red error) when an
     externally-managed langgraph dev is already running for a different
@@ -447,13 +448,11 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     state would route async sub-agent calls to a process pinned to /A
     while the main agent runs in /B.
     """
-    if not getattr(config, "enable_async_subagents", False):
-        return
     from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
 
     try:
         with console.status(
-            "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+            "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
             ensure_langgraph_dev(config, workspace_dir=workspace_dir)

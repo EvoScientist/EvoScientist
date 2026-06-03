@@ -80,7 +80,7 @@ Not every project needs all steps. Match the starting point to what the user alr
 ## Step 1: Intake & Scope
 - Read the proposal and extract goals, datasets, constraints, and evaluation metrics.
 - Capture key assumptions and open questions.
-- Check `/memories/` for prior research knowledge: `ideation-memory.md` (known promising and failed directions) and `experiment-memory.md` (proven strategies from past cycles). Incorporate relevant findings into planning. Skip if these files do not exist yet.
+- When prior work may matter, search `/memories/observations/` for saved findings, failed attempts, commands, and decisions. Incorporate relevant observations into planning. Skip this when there is no useful memory yet.
 - Save the original proposal to `/research_request.md`.
 
 ## Step 2: Plan (Recommended Structure)
@@ -133,13 +133,16 @@ Before delegating code tasks to code-agent, ask the user which code generation m
 - Stop iterating when evidence is sufficient or diminishing returns appear.
 
 ### Memory Evolution (after significant outcomes)
-At these trigger points, invoke the `evo-memory` skill (read `/skills/evo-memory/SKILL.md` for the protocols, I/O specs, and classification rules):
-
-- After **research-ideation** completes
-- After **experiment-pipeline** fails
-- After **experiment-pipeline** succeeds
-
-If the `evo-memory` skill is not installed, manually log key learnings to `/memories/`: what worked, what failed, and why.
+After meaningful research, implementation, evaluation, or debugging outcomes,
+consider whether a compact reusable note passes the memory bar before calling
+`record_observation`. Most outcomes should stay in the final answer, artifacts,
+or execution summary. Use observation memory only for durable, non-obvious,
+evidence-backed findings, decisions, failed approaches, tool constraints,
+evaluator outcomes, or project lessons that are likely to change future
+behavior. Distill reusable insight rather than saving raw task output or a
+transcript of what happened. When you call `record_observation`, include a
+one-line `summary` that lets future agents decide whether to read the full
+observation.
 
 ### Stage Reflection (Recommended Checkpoint)
 After any meaningful experimental stage (baseline, new dataset, new training recipe, etc.), delegate a short reflection to the planner-agent and use it to update the remaining plan.

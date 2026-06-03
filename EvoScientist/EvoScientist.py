@@ -38,6 +38,7 @@ logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 
 SUBAGENTS_CONFIG = Path(__file__).parent / "subagents"
 SKILLS_DIR = str(Path(__file__).parent / "skills")
+DEFAULT_SKILL_SOURCES = ("/skills/",)
 
 # =============================================================================
 # Lazy state — initialized on first use, not at import time
@@ -186,21 +187,37 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
 # =============================================================================
 
 
-def _inject_subagent_middleware(subs: list[dict]) -> None:
+def _inject_subagent_middleware(
+    subs: list[dict],
+    *,
+    workspace_dir: str | Path | None = None,
+) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
     Without this, subagent tool errors are caught by LangGraph's default
     ToolNode handler which produces terse messages without tracebacks or
     retry guidance — reducing the subagent's ability to self-recover.
     """
+    from .memory import MemorySourceType
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        MemoryLifecycleRole,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
+        create_memory_lifecycle_middleware,
+        create_memory_middleware,
         create_runtime_context_middleware,
     )
 
+    memory_dir = str(_paths_mod.MEMORIES_DIR)
     for sa in subs:
+        name = str(sa.get("name") or "sub-agent")
+        memory_middleware = create_memory_middleware(
+            memory_dir,
+            workspace_dir=workspace_dir,
+            source_type=MemorySourceType.SUBAGENT,
+            source_agent=name,
+        )
         sa.setdefault("middleware", []).extend(
             [
                 # No ``model=`` — subagents share the main agent's model,
@@ -209,8 +226,33 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
                 create_runtime_context_middleware(),
                 ToolErrorHandlerMiddleware(),
                 ContextOverflowMapperMiddleware(),
+                memory_middleware,
+                create_memory_lifecycle_middleware(
+                    memory_dir,
+                    workspace_dir=workspace_dir,
+                    project_id=memory_middleware.project_id,
+                    role=MemoryLifecycleRole.SUBAGENT,
+                    source_agent=name,
+                ),
             ]
         )
+
+
+def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
+    """Materialize DeepAgents' default subagent so our middleware wraps it."""
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    name = GENERAL_PURPOSE_SUBAGENT["name"]
+    if any(sa.get("name") == name for sa in subs):
+        return
+
+    subs.insert(
+        0,
+        {
+            **GENERAL_PURPOSE_SUBAGENT,
+            "skills": list(DEFAULT_SKILL_SOURCES),
+        },
+    )
 
 
 def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
@@ -312,7 +354,7 @@ def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> l
     return out
 
 
-def _build_base_kwargs(base_backend, base_middleware):
+def _build_base_kwargs(base_backend, base_middleware, *, workspace_dir=None):
     """Build agent kwargs *without* MCP (fast, no subprocess spawning)."""
     from .tools import skill_manager, tavily_search, think_tool
     from .utils import load_subagents
@@ -326,7 +368,8 @@ def _build_base_kwargs(base_backend, base_middleware):
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
     )
-    _inject_subagent_middleware(subs)
+    _ensure_general_purpose_subagent(subs)
+    _inject_subagent_middleware(subs, workspace_dir=workspace_dir)
     subs = _maybe_swap_async_subagents(subs, base_middleware)
     return {
         "name": "EvoScientist",
@@ -336,11 +379,17 @@ def _build_base_kwargs(base_backend, base_middleware):
         "subagents": subs,
         "middleware": base_middleware,
         "system_prompt": get_system_prompt(),
-        "skills": ["/skills/"],
+        "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
 
-def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=None):
+def load_mcp_and_build_kwargs(
+    base_backend,
+    base_middleware,
+    *,
+    on_mcp_progress=None,
+    workspace_dir=None,
+):
     """Load MCP tools (cached by config) and build agent kwargs.
 
     Re-connects to MCP servers only when the effective MCP config changes.
@@ -355,7 +404,11 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
 
     mcp_by_agent = _load_mcp_tools_cached(on_progress=on_mcp_progress)
     if not mcp_by_agent:
-        return _build_base_kwargs(base_backend, base_middleware)
+        return _build_base_kwargs(
+            base_backend,
+            base_middleware,
+            workspace_dir=workspace_dir,
+        )
 
     tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
@@ -375,7 +428,8 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
         tool_registry=registry,
     )
 
-    _inject_subagent_middleware(subs)
+    _ensure_general_purpose_subagent(subs)
+    _inject_subagent_middleware(subs, workspace_dir=workspace_dir)
 
     # Inject MCP tools into subagents by name
     for sa in subs:
@@ -394,7 +448,7 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
         "subagents": subs,
         "middleware": base_middleware,
         "system_prompt": get_system_prompt(),
-        "skills": ["/skills/"],
+        "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
 
@@ -443,6 +497,7 @@ def _get_default_middleware(
     *,
     for_async_subagent: bool = False,
     workspace_dir: str | Path | None = None,
+    memory_source_agent: str = "EvoScientist",
 ):
     """Build the default middleware list.
 
@@ -457,14 +512,19 @@ def _get_default_middleware(
             ``subagents/_factory.py`` deliberately skips ``interrupt_on=`` on
             the deepagents level. Defaults to False (full middleware list)
             for the CLI's in-process agent.
+        memory_source_agent: Attribution name for profile/observation writes.
+            Async sub-agent factories pass their deployed agent name here.
     """
+    from .memory import MemorySourceType
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
+        MemoryLifecycleRole,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
+        create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_runtime_context_middleware,
         create_tool_selector_middleware,
@@ -480,6 +540,14 @@ def _get_default_middleware(
     # ``ModelFallbackMiddleware``: a configurable.model override sets the
     # PRIMARY model only, leaving the fallback chain free to try its own
     # alternatives instead of re-overriding every retry to the same model.
+    memory_middleware = create_memory_middleware(
+        memory_dir,
+        workspace_dir=workspace_dir,
+        source_type=(
+            MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
+        ),
+        source_agent=memory_source_agent,
+    )
     mw = [
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
@@ -488,7 +556,18 @@ def _get_default_middleware(
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
         create_runtime_context_middleware(),
-        create_memory_middleware(memory_dir, workspace_dir=workspace_dir),
+        memory_middleware,
+        create_memory_lifecycle_middleware(
+            memory_dir,
+            workspace_dir=workspace_dir,
+            project_id=memory_middleware.project_id,
+            role=(
+                MemoryLifecycleRole.SUBAGENT
+                if for_async_subagent
+                else MemoryLifecycleRole.TURN
+            ),
+            source_agent=memory_source_agent,
+        ),
     ]
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
@@ -556,9 +635,17 @@ def _get_default_agent():
             )
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
-            kwargs = _build_base_kwargs(be, mw)
+            kwargs = _build_base_kwargs(
+                be,
+                mw,
+                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+            )
         else:
-            kwargs = load_mcp_and_build_kwargs(be, mw)
+            kwargs = load_mcp_and_build_kwargs(
+                be,
+                mw,
+                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+            )
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
@@ -678,7 +765,12 @@ def create_cli_agent(
         )
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
-    kwargs = load_mcp_and_build_kwargs(be, mw, on_mcp_progress=on_mcp_progress)
+    kwargs = load_mcp_and_build_kwargs(
+        be,
+        mw,
+        on_mcp_progress=on_mcp_progress,
+        workspace_dir=workspace_dir,
+    )
 
     return create_deep_agent(
         **kwargs,

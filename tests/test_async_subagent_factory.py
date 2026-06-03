@@ -12,6 +12,27 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
+def _single_middleware(subagent: dict, class_name: str):
+    matches = [m for m in subagent["middleware"] if type(m).__name__ == class_name]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _assert_subagent_memory_middleware(subagent: dict, *, source_agent: str) -> None:
+    from EvoScientist.middleware.memory_lifecycle import MemoryLifecycleRole
+
+    memory_middleware = _single_middleware(subagent, "EvoMemoryMiddleware")
+    lifecycle_middleware = _single_middleware(
+        subagent,
+        "EvoMemoryLifecycleMiddleware",
+    )
+
+    assert [tool.name for tool in memory_middleware.tools] == ["record_observation"]
+    assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
+    assert lifecycle_middleware._source_agent == source_agent
+    assert lifecycle_middleware._project_id == memory_middleware.project_id
+
+
 @patch("deepagents.create_deep_agent")
 @patch("EvoScientist.EvoScientist._load_mcp_tools_cached", return_value={})
 @patch("EvoScientist.EvoScientist._get_default_middleware", return_value=[])
@@ -59,8 +80,32 @@ def test_factory_requests_async_safe_middleware(
 
     build_async_subagent_graph("writing-agent")
 
-    # The contract: factory MUST pass ``for_async_subagent=True``.
-    mock_get_mw.assert_called_once_with(for_async_subagent=True)
+    # The contract: factory MUST pass async-safe mode and the source agent name.
+    mock_get_mw.assert_called_once_with(
+        for_async_subagent=True,
+        memory_source_agent="writing-agent",
+    )
+    subagents = mock_create.call_args.kwargs["subagents"]
+    assert subagents[0]["name"] == "general-purpose"
+    _assert_subagent_memory_middleware(
+        subagents[0],
+        source_agent="general-purpose",
+    )
+
+
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+def test_inject_subagent_adds_memory_middleware(mock_model, tmp_path):
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subs = [{"name": "test-agent"}]
+
+    _inject_subagent_middleware(subs, workspace_dir=workspace)
+
+    _assert_subagent_memory_middleware(subs[0], source_agent="test-agent")
 
 
 # ---------------------------------------------------------------------------

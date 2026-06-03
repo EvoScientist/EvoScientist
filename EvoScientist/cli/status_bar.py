@@ -13,6 +13,7 @@ from ..llm.context_window import (
     DEFAULT_CONTEXT_WINDOW_FALLBACK,
     resolve_context_window,
 )
+from ..memory.worker_activity import MemoryWorkerStatusSnapshot, memory_worker_status
 from ..sessions import get_thread_messages
 
 _FALLBACK_CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW_FALLBACK
@@ -91,15 +92,15 @@ def format_token_count_compact(value: int) -> str:
     """Format large token counts into a compact human-readable form."""
     abs_value = abs(int(value))
     if abs_value >= 1_000_000:
-        num = value / 1_000_000
+        num = float(value) / 1_000_000
         suffix = "M"
     elif abs_value >= 1_000:
-        num = value / 1_000
+        num = float(value) / 1_000
         suffix = "K"
     else:
         return str(value)
 
-    if num.is_integer():
+    if num == int(num):
         return f"{int(num)}{suffix}"
     return f"{num:.1f}{suffix}"
 
@@ -160,20 +161,71 @@ def trim_status_text(text: str, max_width: int) -> str:
     if max_width <= ellipsis_width:
         return ellipsis[:max_width]
 
-    try:
-        from prompt_toolkit.utils import get_cwidth
-    except Exception:
-        get_cwidth = None
-
     out: list[str] = []
     width = 0
     for ch in text:
-        ch_width = get_cwidth(ch) if get_cwidth else len(ch)
+        ch_width = _display_width(ch)
         if width + ch_width + ellipsis_width > max_width:
             break
         out.append(ch)
         width += ch_width
     return "".join(out).rstrip() + ellipsis
+
+
+def get_memory_worker_status() -> MemoryWorkerStatusSnapshot | None:
+    """Read completed EvoMemory save counts without making rendering fail."""
+    try:
+        return memory_worker_status()
+    except Exception:
+        return None
+
+
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    word = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {word}"
+
+
+def _memory_worker_label(status: MemoryWorkerStatusSnapshot) -> str:
+    parts: list[str] = []
+    if status.is_running:
+        parts.append("🧠")
+
+    saved: list[str] = []
+    if status.profile_updates:
+        saved.append(_plural(status.profile_updates, "profile edit"))
+    if status.observations_recorded:
+        saved.append(_plural(status.observations_recorded, "observation"))
+    if saved:
+        parts.append(f"Saved {', '.join(saved)}")
+
+    return " ".join(parts)
+
+
+def _append_memory_worker_indicator(
+    frags: list[tuple[str, str]],
+    *,
+    status: MemoryWorkerStatusSnapshot | None,
+    width: int,
+) -> None:
+    if status is None:
+        return
+
+    label = _memory_worker_label(status)
+    if not label:
+        return
+
+    tail: list[tuple[str, str]] = []
+    if frags and frags[-1] == ("class:status-bar", " "):
+        tail.append(frags.pop())
+
+    separator = " │ " if width >= 76 else " · "
+    frags.extend(
+        [
+            ("class:status-bar-dim", separator),
+            ("class:status-bar-warn", label),
+        ]
+    )
+    frags.extend(tail)
 
 
 def build_status_fragments(
@@ -182,7 +234,8 @@ def build_status_fragments(
     width: int,
 ) -> list[tuple[str, str]]:
     """Build prompt_toolkit formatted-text fragments for the status bar."""
-    duration_label = format_duration_compact(started_at)
+    now = datetime.now()
+    duration_label = format_duration_compact(started_at, now=now)
     percent = snapshot.context_percent
     percent_label = f"{percent}%"
     if width < 52:
@@ -219,6 +272,12 @@ def build_status_fragments(
             ("class:status-bar-dim", duration_label),
             ("class:status-bar", " "),
         ]
+
+    _append_memory_worker_indicator(
+        frags,
+        status=get_memory_worker_status(),
+        width=width,
+    )
 
     total_width = sum(_display_width(text) for _, text in frags)
     if total_width > width:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import ClassVar
 
 from langchain_core.messages import HumanMessage
@@ -48,6 +49,90 @@ def test_build_status_fragments_wide_layout():
     assert "[█" in rendered
     assert "10%" in rendered
     assert "3m" in rendered
+
+
+def test_build_status_fragments_shows_memory_worker_indicator(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_memory_worker_status",
+        lambda: SimpleNamespace(
+            is_running=False,
+            profile_updates=4,
+            observations_recorded=5,
+        ),
+    )
+    snapshot = SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
+
+    fragments = build_status_fragments(
+        snapshot,
+        datetime.now() - timedelta(minutes=3),
+        100,
+    )
+
+    assert any(
+        style == "class:status-bar-warn" and text.strip() for style, text in fragments
+    )
+
+
+def test_build_status_fragments_shows_memory_worker_indicator_when_running(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_memory_worker_status",
+        lambda: SimpleNamespace(
+            is_running=True,
+            profile_updates=0,
+            observations_recorded=0,
+        ),
+    )
+    snapshot = SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
+
+    fragments = build_status_fragments(
+        snapshot,
+        datetime.now() - timedelta(minutes=3),
+        100,
+    )
+
+    assert any(
+        style == "class:status-bar-warn" and text.strip() for style, text in fragments
+    )
+
+
+def test_build_status_fragments_hides_memory_indicator_when_idle(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_memory_worker_status",
+        lambda: SimpleNamespace(
+            is_running=False,
+            profile_updates=0,
+            observations_recorded=0,
+        ),
+    )
+    snapshot = SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
+
+    fragments = build_status_fragments(
+        snapshot,
+        datetime.now() - timedelta(minutes=3),
+        100,
+    )
+
+    assert not any(style == "class:status-bar-warn" for style, _text in fragments)
 
 
 def test_build_status_fragments_medium_layout():

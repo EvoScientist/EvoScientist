@@ -37,6 +37,7 @@ bridge/package-lock.json
 workspace/
 skills/
 memory/
+!EvoScientist/memory/
 media/
 conversation_history/
 .deno_cache/

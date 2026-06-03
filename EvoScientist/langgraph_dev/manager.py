@@ -1,10 +1,10 @@
-"""langgraph dev lifecycle management for async sub-agent support.
+"""langgraph dev lifecycle management for background agent support.
 
 Provides functions to start/stop/health-check a ``langgraph dev`` subprocess
-that hosts the EvoScientist main agent and async sub-agents (e.g.
-``writing-agent``). The CLI calls ``ensure_langgraph_dev(config, ...)`` at
-startup so users can run ``EvoSci -p "..."`` without manually managing the
-langgraph dev server.
+that hosts the EvoScientist main agent, async sub-agents (e.g.
+``writing-agent``), and EvoMemory background workers. The CLI calls
+``ensure_langgraph_dev(config, ...)`` at startup so users can run
+``EvoSci -p "..."`` without manually managing the langgraph dev server.
 
 Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
 """
@@ -720,13 +720,12 @@ def ensure_langgraph_dev(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None = None,
 ) -> subprocess.Popen | None:
-    """Conditionally start langgraph dev based on ``config.enable_async_subagents``.
+    """Start or reuse langgraph dev for async/background agent work.
 
     Behavior:
-    - flag false: no-op, returns None
-    - flag true + already running on the configured port: reuse, returns None
+    - already running on the configured port: reuse, returns None
       (we don't own it; warns if the workspace can't be verified)
-    - flag true + not running: start subprocess, register atexit cleanup, return Popen
+    - not running: start subprocess, register atexit cleanup, return Popen
 
     Args:
         config: Active EvoScientistConfig.
@@ -736,11 +735,10 @@ def ensure_langgraph_dev(
             own ``Path.cwd()`` (the CLI's launch directory).
 
     Errors during startup are logged but don't abort the CLI — the user can
-    still chat with sync sub-agents; only async sub-agent calls will fail.
+    still chat with sync sub-agents; only async sub-agent calls and EvoMemory
+    background workers will fail.
     """
     global _ASYNC_SUBAGENTS_AVAILABLE
-    if not getattr(config, "enable_async_subagents", False):
-        return None
 
     # Two layers of locking:
     #   1. ``FileLock`` — cross-process coordination. Without it, two CLI
@@ -868,11 +866,13 @@ def _ensure_langgraph_dev_locked(
     except (FileNotFoundError, RuntimeError) as exc:
         # Startup failed — keep async subagents disabled so the main agent
         # falls back to in-process sync delegation rather than routing tool
-        # calls at a dead URL.
+        # calls at a dead URL. EvoMemory workers will also skip until the
+        # server is reachable.
         _ASYNC_SUBAGENTS_AVAILABLE = False
         logger.warning(
-            "Failed to start langgraph dev — async sub-agents disabled, "
-            "falling back to in-process sync delegation. %s",
+            "Failed to start langgraph dev — async sub-agents will fall back "
+            "to in-process delegation, and EvoMemory background workers will "
+            "not run. %s",
             exc,
         )
         return None

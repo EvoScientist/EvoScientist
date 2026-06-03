@@ -84,7 +84,7 @@ class TestGetSystemPrompt:
 
         Anything sent to `/memory/...` falls through to CustomSandboxBackend
         (workspace files), bypassing the persistent FilesystemBackend that
-        owns ideation-memory.md / experiment-memory.md.
+        owns persistent memory files.
         """
         result = get_system_prompt()
         # `/memory/` as a filesystem path (after a backtick or whitespace, before

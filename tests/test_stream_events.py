@@ -235,6 +235,19 @@ class TestMultiModeChunkUnpacking:
         assert len(text_events) == 1
         assert text_events[0]["content"] == "should appear"
 
+    def test_user_message_clears_memory_worker_saved_counts(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "EvoScientist.stream.events.clear_memory_worker_saved_counts",
+            lambda: calls.append(True),
+        )
+        mock_agent = AsyncMock()
+        mock_agent.astream = MagicMock(return_value=_async_iter([]))
+
+        _collect_events(mock_agent, message="new user turn")
+
+        assert calls == [True]
+
     def test_summarization_filtered(self):
         """Chunks with lc_source=summarization metadata are filtered out."""
         chunk_real = _make_ai_chunk("real content")
