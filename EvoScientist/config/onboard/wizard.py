@@ -33,6 +33,7 @@ from .steps import (
     _step_thinking,
     _step_tinytex,
     _step_ui_backend,
+    _step_webui_port,
     _step_workspace,
 )
 from .style import (
@@ -421,6 +422,11 @@ def run_onboard(
                     )
                 else:
                     config.ui_backend = _step_ui_backend(config)
+                # WebUI mode needs a front-end port; ask right after the mode
+                # choice (only when chosen interactively — non-interactive /
+                # preset runs keep the config default).
+                if config.ui_backend == "webui" and not strict and preset_ui is None:
+                    config.webui_port = _step_webui_port(config)
                 _autosave(config)
 
             if "port" in sections_to_run:

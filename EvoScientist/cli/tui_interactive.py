@@ -12,6 +12,7 @@ import queue
 import random
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -33,7 +34,7 @@ from ..sessions import (
     thread_exists,
 )
 from ..stream.events import stream_agent_events
-from ..stream.state import _INTERNAL_TOOLS, ResearchPhase, StreamState
+from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
 from .channel import (
@@ -220,6 +221,32 @@ def _should_finalize_active_summarization(event_type: str) -> bool:
     return bool(event_type) and event_type not in _SUMMARY_CONTINUATION_EVENTS
 
 
+def _response_after_narration(response_text: str, narrated_response_end: int) -> str:
+    """Return the response suffix that has not already been shown inline."""
+    return response_text[max(0, narrated_response_end) :]
+
+
+def _strip_trailing_placeholder_ellipsis(text: str) -> str:
+    """Remove the standalone streaming placeholder suffix from final TUI text."""
+    clean = text.strip()
+    while clean.endswith("\n...") or clean.rstrip() == "...":
+        clean = clean.rstrip().removesuffix("...").rstrip()
+    return clean
+
+
+def _stopped_response_after_narration(
+    previous_text: str,
+    narrated_response_end: int,
+) -> tuple[str, str, str]:
+    """Return display-current, display-stopped, and full stopped response text."""
+    from ..stream.display import build_stopped_response_text
+
+    display_previous = _response_after_narration(previous_text, narrated_response_end)
+    display_current, display_stopped = build_stopped_response_text(display_previous)
+    _, full_stopped = build_stopped_response_text(previous_text)
+    return display_current, display_stopped, full_stopped
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -240,6 +267,7 @@ def run_textual_interactive(
         from textual.binding import Binding
         from textual.containers import Container, Horizontal, VerticalScroll
         from textual.events import MouseUp
+        from textual.widget import Widget
         from textual.widgets import Static
 
         from .clipboard import copy_selection_to_clipboard, get_clipboard_text
@@ -1220,7 +1248,6 @@ def run_textual_interactive(
                     of mounting the AskUserWidget.
             """
             from ..stream.display import (
-                build_stopped_response_text,
                 is_stream_cancel_requested,
             )
 
@@ -1242,20 +1269,26 @@ def run_textual_interactive(
             loading_removed = False
             thinking_w: ThinkingWidget | None = None
             summarization_w: SummarizationWidget | None = None
-            assistant_w: AssistantMessage | None = None
             todo_w: TodoWidget | None = None
             tool_widgets: dict[str, ToolCallWidget] = {}
             subagent_widgets: dict[str, SubAgentWidget] = {}
 
+            @dataclass
+            class _ResponseDisplayState:
+                assistant: AssistantMessage | None = None
+                narration: AssistantMessage | None = None
+                assistant_start: int = 0
+                narrated_end: int = 0
+
+            response_display = _ResponseDisplayState()
+
             # Transient indicator widgets (auto-removed on state transitions)
-            narration_w: Static | None = None  # dim italic intermediate text
             processing_w: Static | None = None  # "Analyzing results..."
 
             # Tool collapsing (matches CLI MAX_VISIBLE_TOOLS)
             _MAX_VISIBLE_TOOLS = 4
             completed_tool_order: list[str] = []  # tool_ids in completion order
             collapse_summary_w: Static | None = None
-            has_used_tools = False
 
             _thinking_sent = False
             _todo_sent = False
@@ -1285,7 +1318,7 @@ def run_textual_interactive(
             metadata = build_metadata(self._workspace_dir, self._current_model)
             response = ""
 
-            async def _remove_w(w: Static | None) -> None:
+            async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
                 if w is not None:
                     try:
@@ -1293,26 +1326,78 @@ def run_textual_interactive(
                     except Exception:
                         pass
 
+            async def _mount_or_update_narration(text: str) -> None:
+                """Show the current between-tool text segment inline."""
+                content = text.strip()
+                if not content:
+                    return
+                if response_display.narration is None:
+                    response_display.narration = AssistantMessage(content)
+                    await container.mount(response_display.narration)
+                else:
+                    response_display.narration._content = content
+                    await response_display.narration.stop_stream()
+                response_display.narrated_end = len(state.response_text)
+
+            async def _convert_assistant_to_narration() -> None:
+                """Turn a provisional answer into inline narration before a tool."""
+                if response_display.assistant is None:
+                    return
+                content = response_display.assistant._content
+                if content.strip():
+                    narration = AssistantMessage(content.strip())
+                    try:
+                        await container.mount(
+                            narration, before=response_display.assistant
+                        )
+                    except Exception:
+                        await container.mount(narration)
+                    response_display.narrated_end = max(
+                        response_display.narrated_end,
+                        response_display.assistant_start + len(content),
+                    )
+                try:
+                    await response_display.assistant.remove()
+                except Exception:
+                    pass
+                response_display.assistant = None
+                response_display.assistant_start = len(state.response_text)
+                response_display.narration = None
+
+            async def _preserve_active_narration() -> None:
+                """Finalize inline narration without removing it from the transcript."""
+                if response_display.narration is not None:
+                    await response_display.narration.stop_stream()
+                    response_display.narration = None
+
             async def _mark_cancelled_response() -> str:
-                nonlocal assistant_w
                 previous_text = state.response_text or ""
-                current, final_text = build_stopped_response_text(previous_text)
+                current, final_segment, final_text = _stopped_response_after_narration(
+                    previous_text,
+                    response_display.narrated_end,
+                )
 
                 state.response_text = final_text
-                self._set_status_streaming_text(final_text)
+                self._set_status_streaming_text(final_segment)
 
-                if assistant_w is None:
-                    if final_text:
-                        assistant_w = AssistantMessage(final_text)
-                        await container.mount(assistant_w)
+                await _preserve_active_narration()
+                _expand_completed_tools()
+
+                if response_display.assistant is None:
+                    if final_segment:
+                        response_display.assistant_start = len(final_text) - len(
+                            final_segment
+                        )
+                        response_display.assistant = AssistantMessage(final_segment)
+                        await container.mount(response_display.assistant)
                 else:
-                    if previous_text != current:
-                        assistant_w._content = final_text
-                        await assistant_w.stop_stream()
+                    if response_display.assistant._content != current:
+                        response_display.assistant._content = final_segment
+                        await response_display.assistant.stop_stream()
                     else:
-                        suffix = final_text[len(current) :]
+                        suffix = final_segment[len(current) :]
                         if suffix:
-                            await assistant_w.append_content(suffix)
+                            await response_display.assistant.append_content(suffix)
 
                 _schedule_scroll()
                 return final_text
@@ -1369,6 +1454,13 @@ def run_textual_interactive(
                 else:
                     collapse_summary_w.update(summary)
                     collapse_summary_w.display = True
+
+            def _expand_completed_tools() -> None:
+                """Show every completed tool once the turn reaches a final state."""
+                if collapse_summary_w is not None:
+                    collapse_summary_w.display = False
+                for tw in tool_widgets.values():
+                    tw.display = True
 
             def _find_or_rename_sa_widget(
                 resolved_name: str,
@@ -1520,39 +1612,38 @@ def run_textual_interactive(
                                 _schedule_scroll()
 
                         elif event_type == "text":
+                            chunk = event.get("content", "")
                             if thinking_w is not None and thinking_w._is_active:
                                 thinking_w.finalize()
                             # Clear processing indicator
                             await _remove_w(processing_w)
                             processing_w = None
 
-                            if has_used_tools and not _is_final_response(state):
-                                # Tools still running — show intermediate narration
-                                await _remove_w(narration_w)
-                                narration_w = None
-                                last_line = (
-                                    state.latest_text.strip().split("\n")[-1].strip()
-                                )
-                                if last_line:
-                                    if len(last_line) > 60:
-                                        last_line = last_line[:57] + "\u2026"
-                                    narration_w = Static(
-                                        Text(f"    {last_line}", style="dim italic"),
-                                    )
-                                    await container.mount(narration_w)
+                            if not _is_final_response(state):
+                                await _mount_or_update_narration(state.latest_text)
+                                self._set_status_streaming_text(state.latest_text)
                             else:
                                 # Stream final response incrementally (both
                                 # text-only replies and post-tool responses).
-                                await _remove_w(narration_w)
-                                narration_w = None
-                                if assistant_w is None:
-                                    assistant_w = AssistantMessage(state.response_text)
-                                    await container.mount(assistant_w)
-                                else:
-                                    await assistant_w.append_content(
-                                        event.get("content", ""),
+                                await _preserve_active_narration()
+                                if response_display.assistant is None:
+                                    response_display.assistant_start = max(
+                                        response_display.narrated_end,
+                                        len(state.response_text) - len(chunk),
                                     )
-                                self._set_status_streaming_text(state.response_text)
+                                    response_display.assistant = AssistantMessage(
+                                        state.response_text[
+                                            response_display.assistant_start :
+                                        ]
+                                    )
+                                    await container.mount(response_display.assistant)
+                                else:
+                                    await response_display.assistant.append_content(
+                                        chunk
+                                    )
+                                self._set_status_streaming_text(
+                                    response_display.assistant._content
+                                )
 
                         elif event_type == "tool_call":
                             tool_name = event.get("name", "unknown")
@@ -1562,21 +1653,17 @@ def run_textual_interactive(
                             if thinking_w is not None and thinking_w._is_active:
                                 thinking_w.finalize()
                             # Clear transient indicators
-                            await _remove_w(narration_w)
-                            narration_w = None
+                            await _preserve_active_narration()
                             await _remove_w(processing_w)
                             processing_w = None
-                            # Remove early AssistantMessage (text arrived before tools)
-                            if assistant_w is not None:
-                                try:
-                                    await assistant_w.remove()
-                                except Exception:
-                                    pass
-                                assistant_w = None
-                            # Skip internal tools and task (handled by SubAgentWidget)
-                            if tool_name not in _INTERNAL_TOOLS and tool_name != "task":
-                                has_used_tools = True
-                                if tool_id and tool_id in tool_widgets:
+                            existing_tool = bool(tool_id and tool_id in tool_widgets)
+                            if response_display.assistant is not None and (
+                                tool_name == "task" or not existing_tool
+                            ):
+                                await _convert_assistant_to_narration()
+                            # Task tools are handled by SubAgentWidget.
+                            if tool_name != "task":
+                                if existing_tool:
                                     # Re-emitted with updated args — update in place
                                     existing = tool_widgets[tool_id]
                                     existing._tool_name = tool_name
@@ -1839,27 +1926,39 @@ def run_textual_interactive(
 
                         elif event_type == "done":
                             # Clean up transient indicators
-                            await _remove_w(narration_w)
-                            narration_w = None
+                            await _preserve_active_narration()
                             await _remove_w(processing_w)
                             processing_w = None
+                            _expand_completed_tools()
                             # Mount final response
-                            if assistant_w is None and state.response_text:
-                                # Strip trailing standalone "..."
-                                clean = state.response_text.strip()
-                                while (
-                                    clean.endswith("\n...") or clean.rstrip() == "..."
-                                ):
-                                    clean = clean.rstrip().removesuffix("...").rstrip()
-                                assistant_w = AssistantMessage(
-                                    clean or state.response_text
-                                )
-                                await container.mount(assistant_w)
-                                self._schedule_scroll_to_bottom(
-                                    container,
-                                    delays=(0.15, 0.4, 0.8, 1.5),
-                                    immediate=False,
-                                )
+                            final_response_text = _response_after_narration(
+                                state.response_text,
+                                response_display.narrated_end,
+                            )
+                            clean = _strip_trailing_placeholder_ellipsis(
+                                final_response_text
+                            )
+                            if clean:
+                                response_display.assistant_start = len(
+                                    state.response_text
+                                ) - len(final_response_text)
+                                if response_display.assistant is None:
+                                    response_display.assistant = AssistantMessage(clean)
+                                    await container.mount(response_display.assistant)
+                                    self._schedule_scroll_to_bottom(
+                                        container,
+                                        delays=(0.15, 0.4, 0.8, 1.5),
+                                        immediate=False,
+                                    )
+                                elif response_display.assistant._content != clean:
+                                    response_display.assistant._content = clean
+                                    await response_display.assistant.stop_stream()
+                            elif response_display.assistant is not None:
+                                try:
+                                    await response_display.assistant.remove()
+                                except Exception:
+                                    pass
+                                response_display.assistant = None
                             # Mount token usage stats with elapsed time
                             if state.total_input_tokens or state.total_output_tokens:
                                 elapsed = None
@@ -1885,7 +1984,9 @@ def run_textual_interactive(
                     response = (state.response_text or "").strip()
 
                 except asyncio.CancelledError:
-                    # Ctrl+C cancellation — re-raise so _run_turn can handle it
+                    # Ctrl+C cancellation: preserve streamed text before the outer
+                    # turn handler appends its interruption notice.
+                    await _mark_cancelled_response()
                     raise
                 except Exception as exc:
                     error_msg = str(exc)
@@ -1911,12 +2012,14 @@ def run_textual_interactive(
                             await loading.cleanup()
                         except Exception:
                             pass
-                    # Clean up transient indicators
-                    for w in (narration_w, processing_w):
-                        await _remove_w(w)
+                    # Clean up transient indicators. Inline narration is transcript
+                    # content, so finalize it without removing the widget.
+                    await _preserve_active_narration()
+                    await _remove_w(processing_w)
                     # Mark any still-running tool widgets as interrupted
                     # (skip if HITL approved — tools will continue next round)
                     if not _hitl_resuming:
+                        _expand_completed_tools()
                         for tw in tool_widgets.values():
                             if tw._status == "running":
                                 try:
@@ -1937,8 +2040,8 @@ def run_textual_interactive(
                         except Exception:
                             pass
                     # Finalize assistant message stream
-                    if assistant_w is not None:
-                        await assistant_w.stop_stream()
+                    if response_display.assistant is not None:
+                        await response_display.assistant.stop_stream()
                     # Flush remaining thinking callback
                     if (
                         on_thinking_cb
