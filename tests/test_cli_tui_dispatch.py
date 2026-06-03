@@ -1,5 +1,6 @@
 """Tests for CLI interactive UI backend dispatch."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -100,9 +101,36 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
     assert calls == [(config, "/tmp/workspace")]
 
 
+def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
+    monkeypatch,
+):
+    import EvoScientist.cli.commands as cmds
+
+    calls = []
+
+    def fake_ensure(config, *, workspace_dir):
+        calls.append((config, workspace_dir))
+
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
+        fake_ensure,
+    )
+
+    config = SimpleNamespace(enable_async_subagents=False)
+    asyncio.run(
+        cmds._sync_background_agent_server_workspace(
+            config,
+            workspace_dir="/tmp/resumed-workspace",
+        )
+    )
+
+    assert calls == [(config, "/tmp/resumed-workspace")]
+
+
 def test_cmd_interactive_dispatches_to_textual(monkeypatch):
     captured: dict[str, object] = {}
     captured_kwargs: list[dict[str, object]] = []
+    effective_config = SimpleNamespace(langgraph_dev_port=9999)
 
     def _fake_resolve_ui_backend(value, *, warn_fallback=False):
         captured["resolved_input"] = value
@@ -132,6 +160,7 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch):
         run_name="demo-run",
         thread_id="thread-1",
         ui_backend="tui",
+        config=effective_config,
     )
 
     assert captured["resolved_input"] == "tui"
@@ -146,6 +175,7 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch):
     assert kwargs["provider"] == "demo-provider"
     assert kwargs["run_name"] == "demo-run"
     assert kwargs["thread_id"] == "thread-1"
+    assert kwargs["config"] is effective_config
     assert kwargs["channel_send_thinking"] is True
     assert callable(kwargs["load_agent"])
     assert callable(kwargs["create_session_workspace"])

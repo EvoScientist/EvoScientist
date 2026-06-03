@@ -14,6 +14,7 @@ import typer  # type: ignore[import-untyped]
 from rich.markup import escape
 from rich.table import Table
 
+from ..commands.base import Command, CommandContext
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_workspace_root
 from ..stream.console import console
@@ -461,6 +462,33 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
         raise typer.Exit(1) from exc
 
 
+async def _sync_background_agent_server_workspace(
+    config: Any,
+    *,
+    workspace_dir: str,
+    status_message: str = (
+        "[dim]Syncing background agent server to resumed workspace...[/dim]"
+    ),
+) -> None:
+    """Sync langgraph dev to a resumed workspace for background agent work.
+
+    ``ensure_langgraph_dev`` is intentionally always called: EvoMemory
+    background workers require the server even when async subagents are disabled.
+    WorkspaceMismatchError is left for callers to handle according to their UI
+    flow.
+    """
+    import asyncio
+
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+
+    with console.status(status_message, spinner="dots"):
+        await asyncio.to_thread(
+            ensure_langgraph_dev,
+            config,
+            workspace_dir=workspace_dir,
+        )
+
+
 def _resolve_context_window(
     model: Any, fallback: int = _COMPACT_CONTEXT_WINDOW_FALLBACK
 ) -> int:
@@ -826,7 +854,7 @@ def _make_serve_cmd_completed_hook(
     without spinning up the whole serve loop.
     """
 
-    async def _hook(ctx: Any, original_agent: Any, cmd: Any) -> None:
+    async def _hook(ctx: CommandContext, original_agent: Any, cmd: Command) -> None:
         if ctx.agent is not None and ctx.agent is not original_agent:
             agent_holder["agent"] = ctx.agent
             if channel_runtime is not None:
@@ -840,7 +868,7 @@ def _make_serve_cmd_completed_hook(
         # ``ctx.thread_id`` unchanged — ``thread_changed`` gates both
         # the adoption and the user-facing warning so neither fires in
         # that case.
-        new_tid = getattr(ctx, "thread_id", None)
+        new_tid = ctx.thread_id
         thread_changed = bool(new_tid) and new_tid != agent_holder.get("thread_id")
         if thread_changed:
             forget_channel_origin(agent_holder.get("thread_id"))
@@ -848,7 +876,7 @@ def _make_serve_cmd_completed_hook(
             if channel_runtime is not None:
                 channel_runtime.thread_id = new_tid
 
-        new_workspace = getattr(ctx, "workspace_dir", None)
+        new_workspace = ctx.workspace_dir
         if new_workspace and new_workspace != agent_holder.get("workspace_dir"):
             agent_holder["workspace_dir"] = new_workspace
 
@@ -856,7 +884,7 @@ def _make_serve_cmd_completed_hook(
         # for ``/resume`` so the missing history isn't silent.  Flush
         # is required because ``cmd_manager.execute`` already flushed
         # the command's own output before calling this hook.
-        if getattr(cmd, "name", None) == "/resume" and thread_changed:
+        if cmd.name == "/resume" and thread_changed:
             try:
                 ctx.ui.append_system(
                     "Note: serve mode uses in-memory state — "

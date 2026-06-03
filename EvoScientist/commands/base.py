@@ -78,6 +78,7 @@ class CommandContext:
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
+    command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.
     input_tokens_hint: int | None = None

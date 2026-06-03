@@ -4,6 +4,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from EvoScientist.commands.channel_ui import ChannelCommandUI
 from tests.conftest import run_async as _run
 
@@ -75,6 +77,24 @@ def test_handle_session_resume_sends_history_back_to_channel_without_local_dupli
     assert "Conversation history:" in text
     assert "User: How does this work?" in text
     assert "EvoScientist: Here is the saved answer." in text
+
+
+def test_handle_session_resume_propagates_callback_abort_without_history():
+    callback = AsyncMock(side_effect=RuntimeError("workspace conflict"))
+    bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
+    ui, captured = _make_ui(callback=callback, bus_ref=bus_ref)
+
+    with patch(
+        "EvoScientist.sessions.get_thread_messages",
+        new=AsyncMock(),
+    ) as get_messages:
+        with pytest.raises(RuntimeError, match="workspace conflict"):
+            _run(_run_resume(ui, "thread-42", "/workspace"))
+
+    callback.assert_awaited_once_with("thread-42", "/workspace")
+    get_messages.assert_not_awaited()
+    bus_ref.publish_outbound.assert_not_awaited()
+    assert captured == []
 
 
 def test_handle_session_resume_reports_history_load_error():

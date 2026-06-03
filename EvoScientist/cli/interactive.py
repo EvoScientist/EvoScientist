@@ -31,7 +31,7 @@ from rich.text import Text
 
 import EvoScientist.cli.channel as _ch_mod
 
-from ..commands.base import CommandContext
+from ..commands.base import Command, CommandContext
 from ..commands.manager import manager as cmd_manager
 from ..sessions import (
     generate_thread_id,
@@ -269,6 +269,7 @@ def cmd_interactive(
             thread_id=thread_id,
             load_agent=load_agent,
             create_session_workspace=_create_session_workspace,
+            config=config,
         )
         return
 
@@ -630,10 +631,9 @@ def cmd_interactive(
                 renders conversation history."""
                 if workspace_dir:
                     # Sync the langgraph dev subprocess to the resumed
-                    # workspace so deployed sub-agents (writing-agent etc.)
+                    # workspace so background workers and deployed sub-agents
                     # don't operate on the previous workspace's files. The
-                    # manager auto-detects the change and restarts; no-ops
-                    # if async subagents are disabled or workspace unchanged.
+                    # manager auto-detects the change and restarts when needed.
                     # Restart can take 10-15s — show a spinner so the user
                     # doesn't think the CLI is frozen, and run the sync call
                     # in a worker thread so the asyncio event loop keeps
@@ -642,29 +642,21 @@ def cmd_interactive(
                     # State mutation happens AFTER this sync succeeds so a
                     # WorkspaceMismatchError leaves the session's existing
                     # workspace_dir / thread_id untouched.
-                    if getattr(config, "enable_async_subagents", False):
-                        from ..langgraph_dev.manager import (
-                            WorkspaceMismatchError,
-                            ensure_langgraph_dev,
-                        )
+                    from ..langgraph_dev.manager import WorkspaceMismatchError
+                    from .commands import _sync_background_agent_server_workspace
 
-                        try:
-                            with console.status(
-                                "[dim]Syncing async sub-agent server to resumed "
-                                "workspace...[/dim]",
-                                spinner="dots",
-                            ):
-                                await asyncio.to_thread(
-                                    ensure_langgraph_dev,
-                                    config,
-                                    workspace_dir=workspace_dir,
-                                )
-                        except WorkspaceMismatchError as exc:
-                            # Another EvoSci process owns the langgraph dev
-                            # server for a different workspace. Abort the
-                            # resume without mutating session state.
-                            console.print(f"[red]{exc}[/red]")
-                            return
+                    try:
+                        await _sync_background_agent_server_workspace(
+                            config,
+                            workspace_dir=workspace_dir,
+                        )
+                    except WorkspaceMismatchError as exc:
+                        # Another EvoSci process owns the langgraph dev
+                        # server for a different workspace. Abort the
+                        # resume without mutating session state. Raise so
+                        # command UIs, including channel UI, report failure
+                        # instead of continuing with success/history output.
+                        raise RuntimeError(str(exc)) from exc
                     state["workspace_dir"] = workspace_dir
                 if thread_id != state.get("thread_id"):
                     # Only drop the origin on a real thread change — resuming
@@ -724,29 +716,20 @@ def cmd_interactive(
                         # Show a spinner during the 10-15s restart, and run
                         # the sync call in a worker thread so the asyncio
                         # event loop stays responsive.
-                        if getattr(config, "enable_async_subagents", False):
-                            from ..langgraph_dev.manager import (
-                                WorkspaceMismatchError,
-                                ensure_langgraph_dev,
-                            )
+                        from ..langgraph_dev.manager import WorkspaceMismatchError
+                        from .commands import _sync_background_agent_server_workspace
 
-                            try:
-                                with console.status(
-                                    "[dim]Syncing async sub-agent server to "
-                                    "resumed workspace...[/dim]",
-                                    spinner="dots",
-                                ):
-                                    await asyncio.to_thread(
-                                        ensure_langgraph_dev,
-                                        config,
-                                        workspace_dir=ws,
-                                    )
-                            except WorkspaceMismatchError as exc:
-                                # Startup --resume into a workspace owned by
-                                # a different EvoSci process: refuse to start
-                                # the CLI so the user can resolve the conflict.
-                                console.print(f"[red]{exc}[/red]")
-                                raise typer.Exit(1) from exc
+                        try:
+                            await _sync_background_agent_server_workspace(
+                                config,
+                                workspace_dir=ws,
+                            )
+                        except WorkspaceMismatchError as exc:
+                            # Startup --resume into a workspace owned by
+                            # a different EvoSci process: refuse to start
+                            # the CLI so the user can resolve the conflict.
+                            console.print(f"[red]{exc}[/red]")
+                            raise typer.Exit(1) from exc
                 else:
                     # Resolution failed (ambiguous/not-found); the user's raw
                     # input is still seeded in state["thread_id"] from init.
@@ -890,7 +873,7 @@ def cmd_interactive(
                     # etc. sent via iMessage actually execute instead of being
                     # fed to the LLM as a plain prompt.
                     async def _on_channel_cmd_completed(
-                        ctx: Any, original_agent: Any, cmd: Any
+                        ctx: CommandContext, original_agent: Any, cmd: Command
                     ) -> None:
                         """Mirror the REPL adoption block at
                         ``interactive.py:1005-1030`` so ``/model`` and similar
@@ -931,7 +914,7 @@ def cmd_interactive(
                         # status snapshot re-rendered even when the agent
                         # didn't swap.  ``/resume`` refreshes inline in its
                         # own async callback.
-                        if agent_swapped or getattr(cmd, "name", None) in (
+                        if agent_swapped or cmd.name in (
                             "/compact",
                             "/new",
                         ):
