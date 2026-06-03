@@ -759,9 +759,8 @@ def channel_hitl_prompt(
         _parse_approval_reply,
     )
 
-    # Check session auto-approve (set by a previous "3" reply)
-    # Forced-confirmation patterns still require manual approval
     session_key = f"{msg.channel_type}:{msg.chat_id}"
+    has_forced = False
     if session_key in _hitl_auto_approve:
         from ..backends import check_forced_confirmation
         from ..config.settings import HITL_SHELL_TOOLS

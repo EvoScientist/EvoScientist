@@ -1396,6 +1396,7 @@ def run_textual_interactive(
                     response = await _mark_cancelled_response()
                     break
                 state.pending_interrupt = None
+                state.pending_interrupts.clear()
                 state.pending_ask_user = None
                 _hitl_resuming = False
                 # Reset per-round widgets so resumed streams get fresh ones

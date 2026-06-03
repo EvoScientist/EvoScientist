@@ -1553,11 +1553,6 @@ def _run_streaming(
             if resume_map:
                 from langgraph.types import Command  # type: ignore[import-untyped]
 
-                _all_approved = all(
-                    d.get("type") == "approve"
-                    for v in resume_map.values()
-                    for d in v.get("decisions", [])
-                )
                 state.pending_interrupt = None
                 state.pending_interrupts.clear()
                 state.thinking_text = ""
@@ -1579,11 +1574,11 @@ def _run_streaming(
                     ask_user_prompt_fn=ask_user_prompt_fn,
                     cancel_scope=cancel_scope,
                     _state=state,
-                    _hitl_depth=_hitl_depth if _all_approved else _hitl_depth + 1,
+                    _hitl_depth=_hitl_depth + 1,
                     _media_sent=_media_sent,
                     _sent_thinking_text=_sent_thinking_text,
                 )
-        elif state.pending_interrupt is not None:
+        elif state.pending_interrupt is not None or state.pending_interrupts:
             _logger.warning(
                 "HITL loop reached max iterations (%d), stopping",
                 _MAX_HITL_ITERATIONS,

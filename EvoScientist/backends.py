@@ -62,23 +62,16 @@ BLOCKED_COMMANDS = [
 
 # Forced-confirmation patterns: NOT hard-blocked, but override all auto-approve
 # and require explicit user confirmation. Each entry: (regex, reason string).
-_FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+# Patterns checked against the FULL command string (dangerous even inside quotes)
+_FORCED_FULL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
-        re.compile(r"(?:^|\s)~(?:[A-Za-z0-9._-]+(?:/|\s|$)|/|\s|$)"),
+        re.compile(r"(?:^|\s)~(?:[A-Za-z._-][A-Za-z0-9._-]*(?:/|\s|$)|/|\s|$)"),
         "references home directory '~' (may leak sensitive files)",
     ),
     (re.compile(r"\$[A-Za-z_{]"), "expands environment variables (may leak secrets)"),
     (
         re.compile(r"\b(?:printenv|env)\b"),
         "reads environment variables (may leak secrets)",
-    ),
-    (
-        re.compile(r"(?<!\|)\|(?!\|)"),
-        "contains pipe (output chained to another command)",
-    ),
-    (
-        re.compile(r"(?<![=\-<>&])>{1,2}(?![=&])"),
-        "contains output redirection (can overwrite files)",
     ),
     (re.compile(r"\$\("), "contains $() command substitution"),
     (re.compile(r"`"), "contains backtick command substitution"),
@@ -91,6 +84,25 @@ _FORCED_CONFIRMATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\buv\s+(?:add|remove|pip)\b"), "modifies project dependencies"),
 ]
 
+# Patterns checked ONLY outside quoted strings (| and > are common inside regexes/code)
+_FORCED_UNQUOTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"(?<!\|)\|(?!\|)"),
+        "contains pipe (output chained to another command)",
+    ),
+    (
+        re.compile(r"(?<![=\-<>&])>{1,2}(?![=&])"),
+        "contains output redirection (can overwrite files)",
+    ),
+]
+
+_QUOTED_RE = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*')""")
+
+
+def _strip_quoted(command: str) -> str:
+    """Replace quoted string contents with placeholders to avoid false positives."""
+    return _QUOTED_RE.sub('""', command)
+
 
 def check_forced_confirmation(command: str) -> str | None:
     """Check if a command contains patterns that require forced confirmation.
@@ -101,8 +113,12 @@ def check_forced_confirmation(command: str) -> str | None:
     """
     if _has_traversal_component(command):
         return "contains '..' path traversal (accesses files outside workspace)"
-    for pattern, reason in _FORCED_CONFIRMATION_PATTERNS:
+    for pattern, reason in _FORCED_FULL_PATTERNS:
         if pattern.search(command):
+            return reason
+    unquoted = _strip_quoted(command)
+    for pattern, reason in _FORCED_UNQUOTED_PATTERNS:
+        if pattern.search(unquoted):
             return reason
     return None
 

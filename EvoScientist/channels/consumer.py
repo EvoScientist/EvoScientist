@@ -739,6 +739,11 @@ class InboundConsumer:
                                 for _ in range(n)
                             ]
                         }
+                        remaining_count = sum(
+                            1
+                            for _rid in pending_hitl_interrupts
+                            if _rid not in resume_map
+                        )
                         for _rid, _rev in pending_hitl_interrupts.items():
                             if _rid not in resume_map:
                                 _rn = len(_rev.get("action_requests", [])) or 1
@@ -748,6 +753,15 @@ class InboundConsumer:
                                         for _ in range(_rn)
                                     ]
                                 }
+                        if remaining_count > 0:
+                            await self.bus.publish_outbound(
+                                OutboundMessage(
+                                    channel=msg.channel,
+                                    chat_id=msg.chat_id,
+                                    content=f"\u274c {remaining_count} remaining action(s) also rejected.",
+                                    metadata=msg.metadata,
+                                )
+                            )
                         break
 
                     if decision == "auto" and not _has_forced:
