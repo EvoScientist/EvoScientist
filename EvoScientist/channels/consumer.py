@@ -125,13 +125,14 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
         return False  # fail-closed
 
     from ..backends import check_forced_confirmation
+    from ..config.settings import HITL_SHELL_TOOLS
 
     # Check forced confirmation before auto-approve
     for req in action_requests:
         name = (
             req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
         )
-        if name != "execute":
+        if name not in HITL_SHELL_TOOLS:
             continue
         args = (
             req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
@@ -622,7 +623,10 @@ class InboundConsumer:
                     return  # done
 
                 # ask_user: send questions to channel user, collect answers
-                if interrupt_data.get("type") == "ask_user":
+                if (
+                    interrupt_data is not None
+                    and interrupt_data.get("type") == "ask_user"
+                ):
                     result = await self._resolve_ask_user(
                         msg,
                         interrupt_data,
@@ -637,6 +641,7 @@ class InboundConsumer:
                 from langgraph.types import Command  # type: ignore[import-untyped]
 
                 from ..backends import check_forced_confirmation
+                from ..config.settings import HITL_SHELL_TOOLS
 
                 has_buttons = (
                     channel is not None and channel.capabilities.inline_buttons
@@ -655,7 +660,7 @@ class InboundConsumer:
                         )
                         for r in action_reqs
                         if (r.get("name", "") if isinstance(r, dict) else "")
-                        == "execute"
+                        in HITL_SHELL_TOOLS
                     )
                     if not _has_forced and (
                         session_key in self._auto_approve_sessions
@@ -745,7 +750,7 @@ class InboundConsumer:
                                 }
                         break
 
-                    if decision == "auto":
+                    if decision == "auto" and not _has_forced:
                         self._auto_approve_sessions.add(session_key)
                     resume_map[_iid] = {
                         "decisions": [{"type": "approve"} for _ in range(n)]

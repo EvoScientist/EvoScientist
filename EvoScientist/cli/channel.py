@@ -764,13 +764,14 @@ def channel_hitl_prompt(
     session_key = f"{msg.channel_type}:{msg.chat_id}"
     if session_key in _hitl_auto_approve:
         from ..backends import check_forced_confirmation
+        from ..config.settings import HITL_SHELL_TOOLS
 
         has_forced = any(
             check_forced_confirmation(
                 (r.get("args", {}) if isinstance(r, dict) else {}).get("command", "")
             )
             for r in action_requests
-            if (r.get("name", "") if isinstance(r, dict) else "") == "execute"
+            if (r.get("name", "") if isinstance(r, dict) else "") in HITL_SHELL_TOOLS
         )
         if not has_forced:
             return [{"type": "approve"} for _ in action_requests]
@@ -786,8 +787,20 @@ def channel_hitl_prompt(
         _manager.get_channel(msg.channel_type) if _manager is not None else None
     )
     has_buttons = channel_obj is not None and channel_obj.capabilities.inline_buttons
+
+    # Check forced confirmation for the prompt display
+    if not has_forced:
+        from ..backends import check_forced_confirmation as _cfc
+        from ..config.settings import HITL_SHELL_TOOLS as _tools
+
+        has_forced = any(
+            _cfc((r.get("args", {}) if isinstance(r, dict) else {}).get("command", ""))
+            for r in action_requests
+            if (r.get("name", "") if isinstance(r, dict) else "") in _tools
+        )
+
     approval_metadata = _approval_prompt_metadata(
-        msg.metadata, with_buttons=has_buttons
+        msg.metadata, with_buttons=has_buttons, forced=has_forced
     )
 
     def _send(content: str, *, metadata: dict | None = None) -> bool:
@@ -810,7 +823,9 @@ def channel_hitl_prompt(
             return False
 
     # 1. Send approval prompt
-    prompt_text = _format_approval_prompt(action_requests, with_buttons=has_buttons)
+    prompt_text = _format_approval_prompt(
+        action_requests, with_buttons=has_buttons, forced=has_forced
+    )
     if not _send(prompt_text, metadata=approval_metadata):
         return None
 
@@ -824,18 +839,15 @@ def channel_hitl_prompt(
         return None
 
     if _is_stop_command(reply_text):
-        # `/stop` already got its own immediate ack from the bus fast-path.
-        # Treat it as a pure cancel signal here so we don't send a second,
-        # contradictory "Unrecognized reply" message.
         return None
 
     # 3. Parse decision
     decision = _parse_approval_reply(reply_text)
-    if decision == "auto":
+    if decision == "auto" and not has_forced:
         _hitl_auto_approve.add(session_key)
         _send("\u2705 已批准（后续自动通过）")
         return [{"type": "approve"} for _ in action_requests]
-    if decision == "approve":
+    if decision == "approve" or (decision == "auto" and has_forced):
         _send("\u2705 已批准")
         return [{"type": "approve"} for _ in action_requests]
 
