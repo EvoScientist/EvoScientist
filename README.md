@@ -123,6 +123,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 > Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other CLI coding agents.
 
 ## 🔥 News
+- **[03 Jun 2026]** 🥈 Ranked #2 on [ResearchClawBench](https://github.com/InternScience/ResearchClawBench) (Agent mode, as of 2026.6.3)! [**Leaderboard**](https://internscience.github.io/ResearchClawBench-Home/) 👈
 - **[18 Apr 2026]** 🥇 Ranked #1 on [DeepResearch Bench](https://deepresearch-bench.github.io/) at submission time! [**Leaderboard**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
 - **[13 Apr 2026]** 🥇 Reclaimed #1 on [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) at submission time! [**Leaderboard**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
 - **[26 Mar 2026]** 🥇 Ranked #1 on [AstaBench Data Analysis](https://allenai-asta-bench-leaderboard.hf.space/home) at submission time! [**Leaderboard**](https://allenai-asta-bench-leaderboard.hf.space/data-analysis) 👈
