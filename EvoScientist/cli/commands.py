@@ -81,7 +81,9 @@ def onboard(
         "--show-thinking/--no-show-thinking",
         help="Pre-set thinking-panel visibility",
     ),
-    ui: str | None = typer.Option(None, "--ui", help="Pre-set UI backend (tui | cli)"),
+    ui: str | None = typer.Option(
+        None, "--ui", help="Pre-set UI backend (tui | cli | webui)"
+    ),
     port: int | None = typer.Option(
         None, "--port", help="Pre-set langgraph dev server port"
     ),
@@ -1740,6 +1742,17 @@ def _version_callback(value: bool):
         raise typer.Exit()
 
 
+def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> bool:
+    """True for a brand-new interactive session — no one-shot ``-p`` prompt and
+    no ``--resume`` / ``--thread-id`` to continue.
+
+    This is the only case where a WebUI-configured ``EvoSci`` opens the browser
+    app: a one-shot or a resume has a concrete conversation to render in the
+    terminal, so it falls back to the Rich CLI instead.
+    """
+    return not prompt and not thread_id
+
+
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
@@ -1804,7 +1817,7 @@ def _main_callback(
     ui: str | None = typer.Option(
         None,
         "--ui",
-        help="UI backend: tui (default) or cli.",
+        help="UI backend: tui (default), cli, or webui.",
     ),
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI"""
@@ -1871,8 +1884,8 @@ def _main_callback(
 
     if mode and mode not in ("run", "daemon"):
         raise typer.BadParameter("--mode must be 'run' or 'daemon'")
-    if ui and ui.lower() not in ("cli", "tui"):
-        raise typer.BadParameter("--ui must be 'tui' or 'cli'")
+    if ui and ui.lower() not in ("cli", "tui", "webui"):
+        raise typer.BadParameter("--ui must be 'tui', 'cli', or 'webui'")
 
     # --name only makes sense in run mode
     if name and not (
@@ -1955,6 +1968,26 @@ def _main_callback(
 
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
+
+    # WebUI mode: instead of the in-terminal CLI/TUI, run a deploy-style
+    # langgraph server (full MCP + async) + the published @evoscientist/webui
+    # front-end (npx) in THIS terminal, then block. Reuses start_langgraph_dev
+    # but leaves `EvoSci deploy` untouched (it stays a clean server for external
+    # UIs / SDK clients).
+    #
+    # The browser app is only launched for a FRESH interactive session. With
+    # `-p` (one-shot) or `--resume`/`--thread-id` (continue a specific
+    # conversation), there is concrete terminal output to render, so fall back
+    # to the Rich CLI instead of opening the browser UI.
+    from .tui_runtime import normalize_ui_backend
+
+    if normalize_ui_backend(config.ui_backend) == "webui":
+        if _is_fresh_interactive_session(prompt, thread_id):
+            from ..deploy.webui import run_webui
+
+            run_webui(config, workspace_dir=workspace_dir)
+            return
+        config.ui_backend = "cli"
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).

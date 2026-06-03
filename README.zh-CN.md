@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.1.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.1.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -97,7 +97,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 
 <table>
   <tr>
-    <th width="75%"><p align="center">🖥️ CLI / TUI</p></th>
+    <th width="75%"><p align="center">🖥️ CLI / TUI / WebUI</p></th>
     <th width="25%"><p align="center">📱 移动端</p></th>
   </tr>
   <tr>
@@ -120,6 +120,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 - **🧠 持久化记忆** — 上下文、偏好和研究发现跨会话保持。
 - **🌐 多模型供应商** — Anthropic、OpenAI、Google、MiniMax、NVIDIA——一处配置，随时切换。
 - **📱 多渠道接入** — CLI 为中心；Telegram、Slack、飞书、微信等——共享同一智能体会话。
+- **🖥️ 浏览器 WebUI（beta）** — 单终端 `--ui webui` 启动带工作区面板的 Web 应用。
 - **🔬 科学工作流** — 需求采集 → 规划 → 执行 → 评估 → 撰写 → 验证。
 - **🔄 代码生成模式** — More Effort（迭代精修），持续迭代提升代码生成质量。
 - **⚡ 自适应工具** — 每轮对话智能筛选相关工具，减少干扰提升效率。
@@ -139,6 +140,25 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 - **[2026 年 3 月 11 日]** ⛳ 技术报告已上线！[**查看详情**](https://arxiv.org/abs/2603.08127) 👈
 - **[2026 年 3 月 6 日]** 🥇 提交时在 [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 排名第一！[**排行榜**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
 - **[2025 年 11 月 24 日]** 🏆 [ICAIS 2025](https://icais.ai/) AI Scientist Track 6/6 全部中稿 — Best Paper & AI Reviewer's Appraisal Award！[**详情**](https://airaxiv.com/papers/?q=zacharyzhang2022%40gmail.com) 👈
+
+<details>
+<summary>📦 版本更新摘要（changelog）</summary>
+
+- **[2026 年 6 月 3 日]** **[v0.1.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.3)** — 多模态处理（图片 + PDF/文档 flatten/hoisting、纯文本模型回退）、runtime-context 中间件、memory 中间件迁移至 profile 文件 + stream 时间线叙述、textual 中文输入修复。
+- **[2026 年 6 月 2 日]** **[v0.1.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.2)** — 浏览器 WebUI 模式（beta）、`EvoSci deploy` 独立 LangGraph 服务器、默认模型 → claude-sonnet-4-6、MiniMax M3，以及 sandbox 超时与 async-notifier 渠道路由修复。
+- **[2026 年 5 月 19 日]** **[v0.1.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.1)** — deepagents 0.6.2 DeltaChannel 升级、tier-aware skill mounts、状态/耗时栏、QQ 内联按钮。
+- **[2026 年 5 月 8 日]** **[v0.1.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.0)** — 异步子智能体（langgraph dev）、官方 Docker 镜像、个人微信、sessions DB 压缩。
+- **[2026 年 4 月 26 日]** **[v0.0.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.9)** — 启动加速、会话内换模型、统一斜杠命令、DeepSeek V4 thinking 修复。
+- **[2026 年 4 月 21 日]** **[v0.0.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.8)** — 统一数据目录、状态栏、增强 ask-user & auto-mode。
+- **[2026 年 4 月 10 日]** **[v0.0.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.7)** — 全局 skills 目录、Moonshot/Kimi 供应商、ccproxy 修复、渠道改进。
+- **[2026 年 4 月 3 日]** **[v0.0.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.6)** — 动态上下文管理、OpenRouter reasoning、More Effort 模式、GLM-5.1。
+- **[2026 年 3 月 27 日]** **[v0.0.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.5)** — 上下文重试中间件、OpenAI relay 配置、飞书事件循环修复、`/compact`。
+- **[2026 年 3 月 24 日]** **[v0.0.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.4)** — `@file` 引用、resume 历史、飞书 WebSocket、LaTeX 安装。
+- **[2026 年 3 月 20 日]** **[v0.0.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.3)** — 语音输入（STT）、MiniMax/DeepSeek 供应商、MCP & skill 浏览器。
+- **[2026 年 3 月 17 日]** **[v0.0.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.2)** — OAuth 登录、human-in-the-loop & `ask_user`、headless serve。
+- **[2026 年 3 月 13 日]** **[v0.0.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.1)** — 首个公开版本——自进化 AI Scientist。
+
+</details>
 
 ## 📖 目录
 
@@ -380,7 +400,7 @@ EvoSci  # 或 EvoScientist — 交互模式（默认 TUI）
 ![cli help](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli_help.png)
 
 > [!TIP]
-> 需要复制长输出？使用 `--ui cli` 切换到经典模式，即可使用终端原生复制。macOS [iTerm2](https://iterm2.com/) 用户也可以按住 `⌥ Option` 拖选文字，再 `⌘+C` 复制。
+> 想用浏览器？运行 `EvoSci --ui webui` 打开 Web 工作区界面（beta）。需要复制长输出？使用 `--ui cli` 切换到经典模式，即可使用终端原生复制。macOS [iTerm2](https://iterm2.com/) 用户也可以按住 `⌥ Option` 拖选文字，再 `⌘+C` 复制。
 
 <details>
 <summary>常用示例</summary>
@@ -391,9 +411,25 @@ EvoSci -p "你的问题"              # 单次查询模式
 EvoSci --workdir /path/to/project # 在指定目录下启动
 EvoSci -m run                     # 隔离的会话级工作区
 EvoSci --ui cli                   # 经典 CLI（轻量）
+EvoSci --ui webui                 # 浏览器工作区界面（beta，需 Node/npx）
 EvoSci serve                      # 无头模式——仅渠道，无交互提示符
 EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
 ```
+
+</details>
+
+<details>
+<summary>浏览器 WebUI（beta）</summary>
+
+将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端，无需管理第二个进程：
+
+```bash
+EvoSci config set ui_backend webui   # 持久化；或用 `EvoSci --ui webui` 临时启用
+EvoSci                               # 打开 http://localhost:4716
+EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev 端口不同）
+```
+
+需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。Beta：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
 
 </details>
 
@@ -552,7 +588,7 @@ channel_enabled: "telegram,slack,feishu,qq"
 - [x] 🦾 智能体主动向人类澄清确认
 - [x] 📑 技术报告已发布
 - [x] 🔐 OAuth 登录（CLI 编程智能体订阅用户）
-- [ ] 📺 带工作区的 Web 应用界面
+- [x] 📺 带工作区的 Web 应用界面（beta）
 - [ ] 📹 Demo 与教程正在制作中
 - [ ] 📊 基准测试套件即将推出
 - [ ] ⏰ 核心系统定时任务规划中

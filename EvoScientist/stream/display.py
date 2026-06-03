@@ -27,7 +27,6 @@ from .diff_format import build_edit_diff
 from .events import stream_agent_events
 from .formatter import ToolResultFormatter
 from .state import (
-    _INTERNAL_TOOLS,
     StreamState,
     SubAgentState,
     _build_todo_stats,
@@ -63,6 +62,38 @@ def _fix_markdown_heading_spacing(text: str) -> str:
     a fenced code block still gets a space (context-free regex).
     """
     return _HEADING_FIX_RE.sub(r"\1 ", text)
+
+
+def _split_response_for_display(
+    response_text: str,
+    narrated_response_end: int,
+) -> tuple[str, str]:
+    """Split cumulative response text into narrated prefix and answer suffix."""
+    boundary = max(0, min(len(response_text), narrated_response_end))
+    return response_text[:boundary], response_text[boundary:]
+
+
+def _clean_response_text(text: str) -> str:
+    """Trim a streamed response copy for display."""
+    clean = text.strip()
+    while clean.endswith("\n...") or clean.rstrip() == "...":
+        clean = clean.rstrip().removesuffix("...").rstrip()
+    return clean
+
+
+def _response_markdown_for_display(
+    text: str,
+    *,
+    response_markdown: Any = None,
+    full_response_text: str = "",
+) -> Any | None:
+    """Build Markdown for the answer text, reusing the full-response cache if valid."""
+    clean = _clean_response_text(text)
+    if not clean:
+        return None
+    if response_markdown is not None and text == full_response_text:
+        return response_markdown
+    return Markdown(_fix_markdown_heading_spacing(clean))
 
 
 formatter = ToolResultFormatter()
@@ -472,6 +503,8 @@ def create_streaming_display(
     final_show_thinking: bool = False,
     final_thinking_max_length: int = DisplayLimits.THINKING_FINAL,
     response_markdown: Any = None,
+    narrated_response_end: int = 0,
+    narration_segments: list[tuple[int, str]] | None = None,
     total_input_tokens: int = 0,
     total_output_tokens: int = 0,
     summarization_text: str = "",
@@ -568,11 +601,72 @@ def create_streaming_display(
             )
         )
 
+    # Response text handling: keep the final answer behind pending tool calls.
+    _n_tools = len(tool_calls)
+    _n_done = min(len(tool_results), _n_tools)
+    has_pending_tools = _n_tools > _n_done
+    any_active_subagent = any(sa.is_active for sa in subagents)
+    is_processing_blocking = is_processing
+    all_done = (
+        not has_pending_tools and not any_active_subagent and not is_processing_blocking
+    )
+    _, answer_text = _split_response_for_display(
+        response_text,
+        narrated_response_end,
+    )
+    narration_by_tool: dict[int, list[str]] = {}
+    for tool_index, text in narration_segments or []:
+        if text.strip():
+            narration_by_tool.setdefault(tool_index, []).append(text)
+
+    def _append_narration_before_tool(tool_index: int) -> None:
+        for text in narration_by_tool.get(tool_index, []):
+            narration_markdown = _response_markdown_for_display(text)
+            if narration_markdown is not None:
+                elements.append(Text(""))  # blank separator
+                elements.append(narration_markdown)
+
+    def _find_task_subagent(tc: dict, shown_sa_names: set[str]) -> SubAgentState | None:
+        sa_name = tc.get("args", {}).get("subagent_type", "")
+        task_desc = tc.get("args", {}).get("description", "")
+        for sa in subagents:
+            if sa.name in shown_sa_names:
+                continue
+            if sa.name == sa_name or (
+                task_desc and task_desc in (sa.description or "")
+            ):
+                return sa
+
+        candidates = [
+            sa
+            for sa in subagents
+            if sa.name not in shown_sa_names and (sa.tool_calls or sa.is_active)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def _append_task_entry(
+        tool_index: int,
+        tc: dict,
+        tr: dict | None,
+        *,
+        shown_sa_names: set[str],
+        compact: bool,
+    ) -> None:
+        _append_narration_before_tool(tool_index)
+        elements.append(_render_tool_call_line(tc, tr))
+        matched_sa = _find_task_subagent(tc, shown_sa_names)
+        if matched_sa is not None:
+            shown_sa_names.add(matched_sa.name)
+            elements.extend(_render_subagent_section(matched_sa, compact=compact))
+
     # Tool calls and results paired display
     # Collapse older completed tools to prevent overflow in Live mode
     # Task tool calls are ALWAYS visible (they represent sub-agent delegations)
     MAX_VISIBLE_TOOLS = 4
     MAX_VISIBLE_RUNNING = 3
+    shown_sa_names: set[str] = set()
 
     if tool_calls:
         # Split into categories
@@ -585,24 +679,30 @@ def create_streaming_display(
             tr = tool_results[i] if has_result else None
             is_task = tc.get("name") == "task"
 
-            # Skip internal middleware tools
-            if tc.get("name") in _INTERNAL_TOOLS:
-                continue
-
             if is_task:
-                # Skip task calls with empty args (still streaming)
-                if tc.get("args"):
-                    task_tools.append((tc, tr))
+                task_tools.append((i, tc, tr))
             elif has_result:
-                completed_regular.append((tc, tr))
+                completed_regular.append((i, tc, tr))
             else:
-                running_regular.append((tc, None))
+                running_regular.append((i, tc, None))
 
         if is_final:
             # Final frame: show ALL tools expanded, no spinners, no collapsing
-            shown_sa_names: set[str] = set()
+            for tool_index, tc, tr in sorted(
+                completed_regular + running_regular + task_tools,
+                key=lambda item: item[0],
+            ):
+                if tc.get("name") == "task":
+                    _append_task_entry(
+                        tool_index,
+                        tc,
+                        tr,
+                        shown_sa_names=shown_sa_names,
+                        compact=True,
+                    )
+                    continue
 
-            for tc, tr in completed_regular:
+                _append_narration_before_tool(tool_index)
                 elements.append(_render_tool_call_line(tc, tr))
                 content = tr.get("content", "") if tr else ""
                 if tr and (not is_success(content) or tc.get("name") == "edit_file"):
@@ -613,22 +713,6 @@ def create_streaming_display(
                         tool_args=tc.get("args"),
                     )
                     elements.extend(result_elements)
-
-            # Task tools with compact sub-agent summaries
-            for tc, tr in task_tools:
-                elements.append(_render_tool_call_line(tc, tr))
-                sa_name = tc.get("args", {}).get("subagent_type", "")
-                task_desc = tc.get("args", {}).get("description", "")
-                matched_sa = None
-                for sa in subagents:
-                    if sa.name == sa_name or (
-                        task_desc and task_desc in (sa.description or "")
-                    ):
-                        matched_sa = sa
-                        break
-                if matched_sa:
-                    shown_sa_names.add(matched_sa.name)
-                    elements.extend(_render_subagent_section(matched_sa, compact=True))
 
             # Render any sub-agents not already shown via task tool calls
             for sa in subagents:
@@ -647,7 +731,9 @@ def create_streaming_display(
             visible = completed_regular[-slots:] if slots else []
 
             if hidden:
-                ok = sum(1 for _, tr in hidden if is_success(tr.get("content", "")))
+                for tool_index, _, _ in hidden:
+                    _append_narration_before_tool(tool_index)
+                ok = sum(1 for _, _, tr in hidden if is_success(tr.get("content", "")))
                 fail = len(hidden) - ok
                 summary = Text()
                 summary.append(f"\u2713 {ok} completed", style="dim green")
@@ -655,10 +741,42 @@ def create_streaming_display(
                     summary.append(f" | {fail} failed", style="dim red")
                 elements.append(summary)
 
-            for tc, tr in visible:
+            # --- Running regular tools (limit visible) ---
+            hidden_running = len(running_regular) - MAX_VISIBLE_RUNNING
+            if hidden_running > 0:
+                hidden_running_tools = running_regular[:-MAX_VISIBLE_RUNNING]
+                for tool_index, _, _ in hidden_running_tools:
+                    _append_narration_before_tool(tool_index)
+                summary = Text()
+                summary.append(
+                    f"\u25cf {hidden_running} more running...", style="dim yellow"
+                )
+                elements.append(summary)
+                running_regular = running_regular[-MAX_VISIBLE_RUNNING:]
+
+            for tool_index, tc, tr in sorted(
+                visible + running_regular + task_tools,
+                key=lambda item: item[0],
+            ):
+                if tc.get("name") == "task":
+                    matched_sa = _find_task_subagent(tc, shown_sa_names)
+                    _append_task_entry(
+                        tool_index,
+                        tc,
+                        tr,
+                        shown_sa_names=shown_sa_names,
+                        compact=not matched_sa.is_active if matched_sa else True,
+                    )
+                    continue
+
+                _append_narration_before_tool(tool_index)
                 elements.append(_render_tool_call_line(tc, tr))
-                content = tr.get("content", "") if tr else ""
-                if tr and (not is_success(content) or tc.get("name") == "edit_file"):
+                if tr is None:
+                    elements.append(Spinner("dots", text=" Running...", style="yellow"))
+                    continue
+
+                content = tr.get("content", "")
+                if not is_success(content) or tc.get("name") == "edit_file":
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
@@ -667,36 +785,7 @@ def create_streaming_display(
                     )
                     elements.extend(result_elements)
 
-            # --- Running regular tools (limit visible) ---
-            hidden_running = len(running_regular) - MAX_VISIBLE_RUNNING
-            if hidden_running > 0:
-                summary = Text()
-                summary.append(
-                    f"\u25cf {hidden_running} more running...", style="dim yellow"
-                )
-                elements.append(summary)
-                running_regular = running_regular[-MAX_VISIBLE_RUNNING:]
-
-            for tc, tr in running_regular:
-                elements.append(_render_tool_call_line(tc, tr))
-                elements.append(Spinner("dots", text=" Running...", style="yellow"))
-
-            # Task tool calls are rendered as part of sub-agent sections below
-
-    # Response text handling — exclude internal tools (e.g. ExtractedMemory)
-    # from the "done" calculation so they don't block final Markdown rendering.
-    _n_visible = 0
-    _n_visible_done = 0
-    for i, tc in enumerate(tool_calls):
-        if tc.get("name") in _INTERNAL_TOOLS:
-            continue
-        _n_visible += 1
-        if i < len(tool_results):
-            _n_visible_done += 1
-    has_pending_tools = _n_visible > _n_visible_done
-    any_active_subagent = any(sa.is_active for sa in subagents)
-    has_used_tools = _n_visible > 0
-    all_done = not has_pending_tools and not any_active_subagent and not is_processing
+            # Remaining sub-agent sections are rendered below.
 
     if is_final:
         # Final frame: render todo panel + response (tools/subagents handled above).
@@ -707,17 +796,14 @@ def create_streaming_display(
             elements.append(Text(""))  # blank separator
             elements.append(_render_todo_panel(todo_items))
 
-        # Include response in final frame so it stays visible after Live exits
-        if response_text:
-            clean_response = response_text.strip()
-            while clean_response.endswith("\n...") or clean_response.rstrip() == "...":
-                clean_response = clean_response.rstrip().removesuffix("...").rstrip()
-            if clean_response:
-                elements.append(Text(""))  # blank separator
-                elements.append(
-                    response_markdown
-                    or Markdown(_fix_markdown_heading_spacing(clean_response))
-                )
+        answer_markdown = _response_markdown_for_display(
+            answer_text,
+            response_markdown=response_markdown,
+            full_response_text=response_text,
+        )
+        if answer_markdown is not None:
+            elements.append(Text(""))  # blank separator
+            elements.append(answer_markdown)
 
         # Token usage stats (right-aligned)
         if total_input_tokens or total_output_tokens:
@@ -731,16 +817,6 @@ def create_streaming_display(
             stats.append("]", style="dim italic")
             elements.append(stats)
     else:
-        # Intermediate narration (tools still running) -- dim italic above Task List
-        if latest_text and has_used_tools and not all_done:
-            preview = latest_text.strip()
-            if preview:
-                last_line = preview.split("\n")[-1].strip()
-                if last_line:
-                    if len(last_line) > 60:
-                        last_line = last_line[:57] + "\u2026"
-                    elements.append(Text(f"    {last_line}", style="dim italic"))
-
         # Task List panel (persistent, updates on write_todos / read_todos)
         todo_items = todo_items or []
         if todo_items:
@@ -750,16 +826,11 @@ def create_streaming_display(
         # Sub-agent activity sections
         # Active: full bordered view; Completed: compact 1-line summary
         for sa in subagents:
-            if sa.tool_calls or sa.is_active:
+            if sa.name not in shown_sa_names and (sa.tool_calls or sa.is_active):
                 elements.extend(_render_subagent_section(sa, compact=not sa.is_active))
 
         # Processing state after tool execution
-        if (
-            is_processing
-            and not is_thinking
-            and not is_responding
-            and not response_text
-        ):
+        if is_processing and not is_thinking and not is_responding:
             # Check if any sub-agent is active
             any_active = any(sa.is_active for sa in subagents)
             if not any_active:
@@ -769,11 +840,14 @@ def create_streaming_display(
 
         # Stream response in real-time as tokens arrive (all tools done)
         if response_text and all_done:
-            elements.append(Text(""))  # blank separator
-            elements.append(
-                response_markdown
-                or Markdown(_fix_markdown_heading_spacing(response_text))
+            answer_markdown = _response_markdown_for_display(
+                answer_text,
+                response_markdown=response_markdown,
+                full_response_text=response_text,
             )
+            if answer_markdown is not None:
+                elements.append(Text(""))  # blank separator
+                elements.append(answer_markdown)
 
     if not elements:
         elements.append(Spinner("dots", text=" Processing...", style="cyan"))
@@ -848,10 +922,6 @@ def display_final_results(
             content = tr.get("content", "") if tr is not None else ""
             tool_name = tc.get("name", "")
             is_task = tool_name.lower() == "task"
-
-            # Skip internal middleware tools
-            if tool_name in _INTERNAL_TOOLS:
-                continue
 
             # Task tools: show delegation line + compact sub-agent summary
             if is_task:

@@ -20,7 +20,6 @@ Usage:
 import json
 import logging
 import os
-from datetime import datetime
 from pathlib import Path
 
 from langchain.agents.middleware import AgentMiddleware
@@ -28,7 +27,7 @@ from langchain.agents.middleware import AgentMiddleware
 from . import paths as _paths_mod
 from .config import apply_config_to_env, get_effective_config
 from .paths import set_active_workspace, set_workspace_root
-from .prompts import RESEARCHER_INSTRUCTIONS, get_system_prompt
+from .prompts import get_system_prompt
 
 # Suppress noisy warnings from deepagents skill loader (non-string frontmatter fields, etc.)
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
@@ -198,6 +197,7 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
         ContextOverflowMapperMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
+        create_runtime_context_middleware,
     )
 
     for sa in subs:
@@ -206,19 +206,11 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
                 # No ``model=`` — subagents share the main agent's model,
                 # so defer to the factory's ``_ensure_chat_model()`` fallback.
                 create_context_editing_middleware(),
+                create_runtime_context_middleware(),
                 ToolErrorHandlerMiddleware(),
                 ContextOverflowMapperMiddleware(),
             ]
         )
-
-
-def _build_prompt_refs() -> dict:
-    """Build prompt references with the current date (not frozen at import)."""
-    return {
-        "RESEARCHER_INSTRUCTIONS": RESEARCHER_INSTRUCTIONS.format(
-            date=datetime.now().strftime("%Y-%m-%d"),
-        ),
-    }
 
 
 def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
@@ -333,7 +325,6 @@ def _build_base_kwargs(base_backend, base_middleware):
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
-        prompt_refs=_build_prompt_refs(),
     )
     _inject_subagent_middleware(subs)
     subs = _maybe_swap_async_subagents(subs, base_middleware)
@@ -382,7 +373,6 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
-        prompt_refs=_build_prompt_refs(),
     )
 
     _inject_subagent_middleware(subs)
@@ -449,7 +439,11 @@ def _get_default_backend():
     )
 
 
-def _get_default_middleware(*, for_async_subagent: bool = False):
+def _get_default_middleware(
+    *,
+    for_async_subagent: bool = False,
+    workspace_dir: str | Path | None = None,
+):
     """Build the default middleware list.
 
     Args:
@@ -472,6 +466,7 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_middleware,
+        create_runtime_context_middleware,
         create_tool_selector_middleware,
         load_fallback_chain,
     )
@@ -492,7 +487,8 @@ def _get_default_middleware(*, for_async_subagent: bool = False):
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
-        create_memory_middleware(memory_dir, extraction_model=model),
+        create_runtime_context_middleware(),
+        create_memory_middleware(memory_dir, workspace_dir=workspace_dir),
     ]
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
@@ -661,7 +657,7 @@ def create_cli_agent(
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain. Anything CLI-specific
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
-    mw: list[AgentMiddleware] = _get_default_middleware()
+    mw: list[AgentMiddleware] = _get_default_middleware(workspace_dir=workspace_dir)
 
     hitl_interrupt_on = {"execute": True, "run_in_background": True}
 

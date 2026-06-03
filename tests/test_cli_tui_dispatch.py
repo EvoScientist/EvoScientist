@@ -1,6 +1,80 @@
 """Tests for CLI interactive UI backend dispatch."""
 
+import pytest
+
+from EvoScientist.cli.commands import _is_fresh_interactive_session
 from EvoScientist.cli.interactive import cmd_interactive
+
+
+@pytest.mark.parametrize(
+    ("prompt", "thread_id", "expected"),
+    [
+        (None, None, True),  # bare `EvoSci` → fresh → WebUI launches
+        ("what is 1+1", None, False),  # `-p` one-shot → terminal (Rich CLI)
+        (None, "47bcffcd", False),  # `--resume <id>` → terminal (Rich CLI)
+        ("hi", "47bcffcd", False),  # both → terminal
+        ("", None, True),  # empty `-p` is falsy → treated as fresh
+    ],
+)
+def test_is_fresh_interactive_session(prompt, thread_id, expected):
+    """WebUI only launches for a fresh interactive session; `-p` / `--resume`
+    fall back to the terminal."""
+    assert _is_fresh_interactive_session(prompt, thread_id) is expected
+
+
+def _invoke_main(monkeypatch, argv):
+    """Invoke the EvoSci main callback with ui_backend=webui and all heavy setup
+    mocked. Returns (calls, result): calls["dispatch"] is "webui" if run_webui
+    ran, or ("cli", <ui_backend>) if cmd_interactive ran."""
+    from typer.testing import CliRunner
+
+    import EvoScientist.cli.commands as cmds
+    import EvoScientist.cli.interactive as interactive_mod
+    import EvoScientist.config as cfg_mod
+    import EvoScientist.deploy.webui as webui_mod
+    from EvoScientist.cli._app import app
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    calls: dict[str, object] = {}
+
+    def _fake_config(overrides):
+        cfg = EvoScientistConfig()
+        # Mirror the real --ui override; default to webui for this test.
+        cfg.ui_backend = overrides.get("ui_backend") or "webui"
+        return cfg
+
+    monkeypatch.setattr(cfg_mod, "get_effective_config", _fake_config)
+    monkeypatch.setattr(cfg_mod, "apply_config_to_env", lambda cfg: None)
+    monkeypatch.setattr(cmds, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(cmds, "_ensure_async_subagent_server", lambda *a, **k: None)
+    monkeypatch.setattr(
+        webui_mod,
+        "run_webui",
+        lambda *a, **k: calls.__setitem__("dispatch", "webui"),
+    )
+    monkeypatch.setattr(
+        interactive_mod,
+        "cmd_interactive",
+        lambda **kw: calls.__setitem__("dispatch", ("cli", kw.get("ui_backend"))),
+    )
+
+    result = CliRunner().invoke(app, argv, catch_exceptions=False)
+    return calls, result
+
+
+def test_main_callback_launches_webui_for_fresh_session(monkeypatch):
+    """Bare `EvoSci` with ui_backend=webui opens the browser app."""
+    calls, result = _invoke_main(monkeypatch, [])
+    assert result.exit_code == 0
+    assert calls.get("dispatch") == "webui"
+
+
+def test_main_callback_resume_falls_back_to_cli(monkeypatch):
+    """`EvoSci --resume <id>` with ui_backend=webui does NOT open the browser;
+    it resumes the conversation in the Rich CLI (ui_backend forced to 'cli')."""
+    calls, result = _invoke_main(monkeypatch, ["--resume", "abc123"])
+    assert result.exit_code == 0
+    assert calls.get("dispatch") == ("cli", "cli")
 
 
 def test_cmd_interactive_dispatches_to_textual(monkeypatch):

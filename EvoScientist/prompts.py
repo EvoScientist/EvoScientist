@@ -13,8 +13,7 @@ The main agent's system prompt is assembled by :func:`get_system_prompt` from:
 - :data:`ASYNC_NOTIFICATIONS` — how to triage `[Async tasks update]` signals
   from async sub-agents
 
-:data:`RESEARCHER_INSTRUCTIONS` is the research-agent sub-agent prompt,
-loaded via ``_build_prompt_refs`` in ``EvoScientist.py``.
+Built-in sub-agent prompts live in ``EvoScientist/subagents/*.yaml``.
 
 Style notes
 -----------
@@ -347,56 +346,6 @@ It is fine to fetch one task and defer another from the same batch.
 """
 
 # =============================================================================
-# Sub-agent research instructions
-# =============================================================================
-
-RESEARCHER_INSTRUCTIONS = """You are a research assistant. Today's date is {date}.
-
-## Task
-Use tools to gather information on the assigned topic (methods, baselines, datasets, or prior results) to support experimental planning or iteration. Prefer actionable details: datasets, metrics, code availability, and common pitfalls. Do not fabricate citations or URLs. Capture evaluation protocols (splits, metrics, calibration) and known failure modes.
-
-## Available Tools
-- `think_tool` — Reflect on findings and plan next steps
-- `read_file` — Read skill instructions when a skill matches the task (paths shown in your available skills listing)
-- Optionally, some web search tools to find information online.
-
-**CRITICAL:** Use `think_tool` after each search
-
-## Research Strategy
-1. Read the question carefully
-2. Start with broad searches
-3. After each search, reflect: Do I have enough? What's missing?
-4. Narrow searches to fill gaps
-5. Stop when you can answer confidently
-
-## Hard Limits
-- Simple queries: 2-3 searches maximum
-- Complex queries: up to 5 searches maximum
-- Stop after 5 searches regardless
-
-## Stop When
-- You can answer comprehensively
-- You have 3+ relevant sources
-- Last 2 searches returned similar information
-
-## Response Format
-Structure findings with clear headings and cite sources inline:
-
-```
-## Key Findings
-
-Finding one with context [1]. Another insight [2].
-
-## Recommended Next Experiments
-- One actionable experiment suggestion with motivation and expected outcome.
-
-### Sources
-[1] Title: URL
-[2] Title: URL
-```
-"""
-
-# =============================================================================
 # Combined exports
 # =============================================================================
 
@@ -414,10 +363,10 @@ def get_system_prompt() -> str:
     6. :data:`DELEGATION_STRATEGY`
     7. :data:`ASYNC_NOTIFICATIONS`
 
-    The current date is injected per-turn by
-    :class:`EvoScientist.middleware.EvoMemoryMiddleware` (piggy-backing on its
-    existing ``<evo_memory>`` injection), so the static prefix here remains
-    byte-stable across midnight rollover and across long-running daemons.
+    Runtime context is injected per-turn by
+    :class:`EvoScientist.middleware.RuntimeContextMiddleware`, so the static
+    prefix here remains byte-stable across midnight rollover and across
+    long-running daemons.
 
     Returns:
         Combined static system prompt string.

@@ -17,7 +17,6 @@ from unittest.mock import MagicMock, patch
 @patch("EvoScientist.EvoScientist._get_default_middleware", return_value=[])
 @patch("EvoScientist.EvoScientist._get_default_backend")
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
-@patch("EvoScientist.EvoScientist._build_prompt_refs", return_value={})
 @patch("EvoScientist.utils.load_subagents")
 @patch("EvoScientist.config.apply_config_to_env")
 @patch("EvoScientist.config.get_effective_config")
@@ -25,7 +24,6 @@ def test_factory_requests_async_safe_middleware(
     mock_get_cfg,
     mock_apply_env,
     mock_load_subs,
-    mock_prompt_refs,
     mock_chat,
     mock_backend,
     mock_get_mw,
