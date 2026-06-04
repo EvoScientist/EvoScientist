@@ -386,8 +386,8 @@ async def stream_agent_events(
         return "sub-agent"
 
     # Build input for agent.astream()
+    clear_memory_worker_saved_counts()
     if isinstance(message, str):
-        clear_memory_worker_saved_counts()
         # Build user message content: text + inline images + file path references
         user_content: str | list[dict[str, Any]] = message
         if media:
