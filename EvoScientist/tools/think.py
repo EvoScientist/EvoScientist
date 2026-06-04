@@ -32,7 +32,7 @@ def think_tool(reflection: str) -> str:
        `/memories/observations/` records saved findings, failed attempts,
        commands, decisions, and other reusable notes. Search it with `grep` or
        `glob` before repeating substantial work. After completing or failing a
-       task, call `record_observation` only if the outcome is durable,
+       task, call `record_observation` (when available) if the outcome is durable,
        non-obvious, evidence-backed, not already in memory, and likely to
        change future behavior. Skip this when there is no useful memory yet.
     5. Strategy — Should I continue the current approach, adjust it, or try
