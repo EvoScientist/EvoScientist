@@ -4,9 +4,11 @@ import asyncio
 import json
 import re
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 import yaml
 from langchain.agents.middleware.types import AgentState
 from langchain.tools import ToolRuntime
@@ -505,6 +507,145 @@ def test_turn_memory_worker_has_profile_only_memory_middleware(tmp_path):
     assert [tool.name for tool in subagent_middleware[0].tools] == [
         "record_observation"
     ]
+
+
+def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+    )
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
+
+    class _Runs:
+        def get(self, **_kwargs):
+            raise RuntimeError("poll failed")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+        )
+        status = worker_activity.memory_worker_status()
+        assert status.is_running is False
+        assert status.profile_updates == 0
+        assert status.observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
+    tmp_path, monkeypatch, run_async
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+    )
+    observation_path = memory_dir / "observations" / "global" / "O-1.md"
+    observation_path.parent.mkdir(parents=True)
+    observation_path.write_text("# Observation\n", encoding="utf-8")
+
+    class _Runs:
+        async def get(self, **_kwargs):
+            raise RuntimeError("poll failed")
+
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
+
+    try:
+        run_async(
+            memory_lifecycle._watch_memory_worker_run_async(
+                SimpleNamespace(runs=_Runs()),
+                thread_id="worker-thread",
+                run_id="run-1",
+            )
+        )
+        status = worker_activity.memory_worker_status()
+        assert status.is_running is False
+        assert status.profile_updates == 0
+        assert status.observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_memory_worker_watcher_untracks_when_client_creation_fails(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+    )
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("client failed")),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="client failed"):
+            memory_lifecycle._watch_memory_worker_run_sync(
+                url="http://x",
+                thread_id="worker-thread",
+                run_id="run-1",
+            )
+        status = worker_activity.memory_worker_status()
+        assert status.is_running is False
+        assert status.profile_updates == 0
+        assert status.observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch):
+    worker_activity.reset_memory_worker_status_for_tests()
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
+    )
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+        )
+        assert worker_activity.memory_worker_status().is_running is False
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
 
 
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):

@@ -121,6 +121,12 @@ def mark_memory_worker_started(
         )
 
 
+def forget_memory_worker(thread_id: str, run_id: str) -> None:
+    """Stop tracking a worker without counting memory-output deltas."""
+    with _active_lock:
+        _active_runs.pop((thread_id, run_id), None)
+
+
 def mark_memory_worker_finished(thread_id: str, run_id: str) -> None:
     global _observations_recorded, _profile_updates
 

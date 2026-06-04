@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from .. import paths as _paths
 from ..memory import MemorySourceType
 from ..memory.worker_activity import (
+    forget_memory_worker,
     mark_memory_worker_finished,
     mark_memory_worker_started,
     snapshot_memory_outputs,
@@ -47,6 +48,7 @@ TURN_MEMORY_WORKER_GRAPH_ID = "evomemory-turn-worker"
 _MEMORY_WORKER_TERMINAL_STATUSES = frozenset(
     {"success", "error", "timeout", "interrupted"}
 )
+_MEMORY_WORKER_EXCLUDED_TOOLS = frozenset({"execute", "task", "write_todos"})
 _MEMORY_WORKER_POLL_INTERVAL_SECONDS = 1.0
 _MEMORY_WORKER_MAX_POLL_FAILURES = 3
 _memory_worker_tracker_tasks: set[asyncio.Task[None]] = set()
@@ -512,7 +514,7 @@ def _memory_worker_middleware(
             enable_observation_tool=role == MemoryLifecycleRole.SUBAGENT,
         ),
         _ToolExclusionMiddleware(
-            excluded=frozenset({"execute", "task", "write_todos"})
+            excluded=_MEMORY_WORKER_EXCLUDED_TOOLS,
         ),
     ]
 
@@ -789,6 +791,7 @@ def _watch_memory_worker_run_sync(
     from langgraph_sdk import get_sync_client
 
     failures = 0
+    worker_confirmed_finished = False
     try:
         client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
         while True:
@@ -810,10 +813,14 @@ def _watch_memory_worker_run_sync(
                 continue
 
             if _status_from_run_response(run) in _MEMORY_WORKER_TERMINAL_STATUSES:
+                worker_confirmed_finished = True
                 return
             time.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
-        mark_memory_worker_finished(thread_id, run_id)
+        if worker_confirmed_finished:
+            mark_memory_worker_finished(thread_id, run_id)
+        else:
+            forget_memory_worker(thread_id, run_id)
 
 
 def _spawn_memory_worker_status_task(
@@ -837,6 +844,7 @@ async def _watch_memory_worker_run_async(
     run_id: str,
 ) -> None:
     failures = 0
+    worker_confirmed_finished = False
     try:
         while True:
             try:
@@ -859,10 +867,14 @@ async def _watch_memory_worker_run_async(
                 continue
 
             if _status_from_run_response(run) in _MEMORY_WORKER_TERMINAL_STATUSES:
+                worker_confirmed_finished = True
                 return
             await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
-        mark_memory_worker_finished(thread_id, run_id)
+        if worker_confirmed_finished:
+            mark_memory_worker_finished(thread_id, run_id)
+        else:
+            forget_memory_worker(thread_id, run_id)
 
 
 def _launch_memory_worker(
