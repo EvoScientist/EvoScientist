@@ -75,6 +75,50 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
+def test_memory_middleware_can_disable_all_memory_injection(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+
+    middleware = memory_module.create_memory_middleware(
+        str(memories),
+        enable_profile_memory=False,
+        enable_observation_memory=False,
+    )
+    request = _request()
+    modified = middleware.modify_request(request)
+
+    assert modified is request
+    assert middleware.tools == []
+    assert not (memories / "profile").exists()
+    assert not (memories / "observations").exists()
+
+
+def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+
+    middleware = memory_module.create_memory_middleware(
+        str(memories),
+        enable_profile_memory=False,
+        enable_observation_memory=True,
+        enable_observation_tool=False,
+    )
+    modified = middleware.modify_request(_request())
+    content = str(modified.system_message.content)
+
+    assert middleware.tools == []
+    assert not (memories / "profile").exists()
+    assert (memories / "observations" / "global").is_dir()
+    assert list((memories / "observations" / "projects").glob("P-*"))
+    assert "<observation_memory>" in content
+    assert "Memory preflight:" in content
+    assert "record_observation" not in content
+
+
 def test_observation_index_loads_summary_frontmatter_once(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"

@@ -26,9 +26,23 @@ import psutil
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
-from EvoScientist.config import EvoScientistConfig
+from EvoScientist.config import (
+    EvoScientistConfig,
+    MemoryControls,
+    MemoryObservationTarget,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
+    """Return whether this config needs the background langgraph dev server."""
+    if config.enable_async_subagents:
+        return True
+    memory_controls = MemoryControls.from_config(config)
+    return memory_controls.worker_needed(
+        MemoryObservationTarget.TURN_WORKER
+    ) or memory_controls.worker_needed(MemoryObservationTarget.SUBAGENT_WORKER)
 
 
 # Reentrant lock guarding ``_PROCESS`` / ``_PROCESS_WORKSPACE`` /
@@ -739,6 +753,10 @@ def ensure_langgraph_dev(
     background workers will fail.
     """
     global _ASYNC_SUBAGENTS_AVAILABLE
+
+    if not needs_langgraph_dev(config):
+        _ASYNC_SUBAGENTS_AVAILABLE = False
+        return None
 
     # Two layers of locking:
     #   1. ``FileLock`` — cross-process coordination. Without it, two CLI

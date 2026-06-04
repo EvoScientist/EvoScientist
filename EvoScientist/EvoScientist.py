@@ -25,7 +25,13 @@ from pathlib import Path
 from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
 
 from . import paths as _paths_mod
-from .config import apply_config_to_env, get_effective_config
+from .config import (
+    MemoryControls,
+    MemoryObservationTarget,
+    apply_config_to_env,
+    get_effective_config,
+)
+from .memory import MemorySourceType
 from .paths import set_active_workspace, set_workspace_root
 from .prompts import get_system_prompt
 
@@ -187,6 +193,16 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
 # =============================================================================
 
 
+def _configured_system_prompt(cfg) -> str:
+    memory_controls = MemoryControls.from_config(cfg)
+    return get_system_prompt(
+        enable_observation_memory=memory_controls.observations_enabled,
+        enable_observation_writes=memory_controls.observation_tool_enabled(
+            MemoryObservationTarget.AGENT
+        ),
+    )
+
+
 def _inject_subagent_middleware(
     subs: list[dict],
     *,
@@ -198,7 +214,6 @@ def _inject_subagent_middleware(
     ToolNode handler which produces terse messages without tracebacks or
     retry guidance — reducing the subagent's ability to self-recover.
     """
-    from .memory import MemorySourceType
     from .middleware import (
         ContextOverflowMapperMiddleware,
         MemoryLifecycleRole,
@@ -209,33 +224,44 @@ def _inject_subagent_middleware(
         create_runtime_context_middleware,
     )
 
+    cfg = _ensure_config()
+    memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     for sa in subs:
         name = str(sa.get("name") or "sub-agent")
+        source_type = MemorySourceType.SUBAGENT
         memory_middleware = create_memory_middleware(
             memory_dir,
             workspace_dir=workspace_dir,
-            source_type=MemorySourceType.SUBAGENT,
+            source_type=source_type,
             source_agent=name,
+            enable_profile_memory=memory_controls.profile_enabled,
+            enable_observation_memory=memory_controls.observations_enabled,
+            enable_observation_tool=memory_controls.observation_tool_enabled(
+                MemoryObservationTarget.AGENT
+            ),
         )
-        sa.setdefault("middleware", []).extend(
-            [
-                # No ``model=`` — subagents share the main agent's model,
-                # so defer to the factory's ``_ensure_chat_model()`` fallback.
-                create_context_editing_middleware(),
-                create_runtime_context_middleware(),
-                ToolErrorHandlerMiddleware(),
-                ContextOverflowMapperMiddleware(),
-                memory_middleware,
+        middleware = [
+            # No ``model=`` — subagents share the main agent's model,
+            # so defer to the factory's ``_ensure_chat_model()`` fallback.
+            create_context_editing_middleware(),
+            create_runtime_context_middleware(),
+            ToolErrorHandlerMiddleware(),
+            ContextOverflowMapperMiddleware(),
+        ]
+        if memory_controls.memory_enabled:
+            middleware.append(memory_middleware)
+        if memory_controls.worker_needed(MemoryObservationTarget.SUBAGENT_WORKER):
+            middleware.append(
                 create_memory_lifecycle_middleware(
                     memory_dir,
                     workspace_dir=workspace_dir,
                     project_id=memory_middleware.project_id,
                     role=MemoryLifecycleRole.SUBAGENT,
                     source_agent=name,
-                ),
-            ]
-        )
+                )
+            )
+        sa.setdefault("middleware", []).extend(middleware)
 
 
 def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
@@ -378,7 +404,7 @@ def _build_base_kwargs(base_backend, base_middleware, *, workspace_dir=None):
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": get_system_prompt(),
+        "system_prompt": _configured_system_prompt(_ensure_config()),
         "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
@@ -447,7 +473,7 @@ def load_mcp_and_build_kwargs(
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": get_system_prompt(),
+        "system_prompt": _configured_system_prompt(_ensure_config()),
         "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
@@ -515,7 +541,6 @@ def _get_default_middleware(
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
     """
-    from .memory import MemorySourceType
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
@@ -536,6 +561,15 @@ def _get_default_middleware(
         load_fallback_chain(cfg.model_fallbacks)
     model = _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    source_type = (
+        MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
+    )
+    memory_controls = MemoryControls.from_config(cfg)
+    worker_target = (
+        MemoryObservationTarget.SUBAGENT_WORKER
+        if for_async_subagent
+        else MemoryObservationTarget.TURN_WORKER
+    )
     # ``ConfigurableModelMiddleware`` is placed first so it wraps
     # ``ModelFallbackMiddleware``: a configurable.model override sets the
     # PRIMARY model only, leaving the fallback chain free to try its own
@@ -543,10 +577,13 @@ def _get_default_middleware(
     memory_middleware = create_memory_middleware(
         memory_dir,
         workspace_dir=workspace_dir,
-        source_type=(
-            MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
-        ),
+        source_type=source_type,
         source_agent=memory_source_agent,
+        enable_profile_memory=memory_controls.profile_enabled,
+        enable_observation_memory=memory_controls.observations_enabled,
+        enable_observation_tool=memory_controls.observation_tool_enabled(
+            MemoryObservationTarget.AGENT
+        ),
     )
     mw = [
         ConfigurableModelMiddleware(),
@@ -556,19 +593,23 @@ def _get_default_middleware(
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
         create_runtime_context_middleware(),
-        memory_middleware,
-        create_memory_lifecycle_middleware(
-            memory_dir,
-            workspace_dir=workspace_dir,
-            project_id=memory_middleware.project_id,
-            role=(
-                MemoryLifecycleRole.SUBAGENT
-                if for_async_subagent
-                else MemoryLifecycleRole.TURN
-            ),
-            source_agent=memory_source_agent,
-        ),
     ]
+    if memory_controls.memory_enabled:
+        mw.append(memory_middleware)
+    if memory_controls.worker_needed(worker_target):
+        mw.append(
+            create_memory_lifecycle_middleware(
+                memory_dir,
+                workspace_dir=workspace_dir,
+                project_id=memory_middleware.project_id,
+                role=(
+                    MemoryLifecycleRole.SUBAGENT
+                    if for_async_subagent
+                    else MemoryLifecycleRole.TURN
+                ),
+                source_agent=memory_source_agent,
+            )
+        )
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
         from .middleware.ask_user import AskUserMiddleware
@@ -660,7 +701,7 @@ def __getattr__(name: str):
     if name == "chat_model":
         return _ensure_chat_model()
     if name == "SYSTEM_PROMPT":
-        return get_system_prompt()
+        return _configured_system_prompt(_ensure_config())
     if name == "backend":
         return _get_default_backend()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

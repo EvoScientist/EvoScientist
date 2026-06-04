@@ -72,7 +72,7 @@ Profile update scope:
 {observation_instructions}
 </memory_instructions>"""
 
-OBSERVATION_MEMORY_INSTRUCTIONS = """
+OBSERVATION_MEMORY_READ_INSTRUCTIONS = """
 Observation memory lives under `/memories/observations/`:
 - `/memories/observations/global/`: cross-project observations.
 - `/memories/observations/projects/{project_id}/`: observations for this workspace.
@@ -91,7 +91,9 @@ Memory preflight:
   notes, and `scope: global` for cross-project notes.
 - Mention the result briefly in your plan or handoff: which observation mattered,
   or that no relevant observation was found. Do not let this become a long detour.
+"""
 
+OBSERVATION_MEMORY_WRITE_INSTRUCTIONS = """
 Call `record_observation` only for durable, non-obvious, evidence-backed
 information that is not already in memory and is likely to change future behavior:
 recurring constraints, important decisions, failed approaches future agents might
@@ -292,11 +294,15 @@ class EvoMemoryMiddleware(AgentMiddleware):
         max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
         source_type: MemorySourceType = MemorySourceType.TURN,
         source_agent: str = "EvoScientist",
+        enable_profile_memory: bool = True,
+        enable_observation_memory: bool = True,
         enable_observation_tool: bool = True,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
         self._project_id = _resolve_project_id(workspace)
+        self._enable_profile_memory = enable_profile_memory
+        self._enable_observation_memory = enable_observation_memory
         self._profile_specs = _profile_specs(self._project_id)
         pointer_lines = ["Profile files are available at:"]
         pointer_lines.extend(
@@ -304,7 +310,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
         )
         self._profile_pointer_context = "\n".join(pointer_lines)
         self._max_inline_profile_chars = max_inline_profile_chars
-        self._enable_observation_tool = enable_observation_tool
+        self._enable_observation_tool = (
+            enable_observation_memory and enable_observation_tool
+        )
         self.tools = (
             [
                 create_record_observation_tool(
@@ -314,21 +322,23 @@ class EvoMemoryMiddleware(AgentMiddleware):
                     source_agent=source_agent,
                 )
             ]
-            if enable_observation_tool
+            if self._enable_observation_tool
             else []
         )
         self._profile_context = (
-            self._read_profile_memory() or self._profile_pointer_context
-        )
-        self._observation_index_records = (
-            self._read_observation_index_records() if enable_observation_tool else []
-        )
-        self._observation_index_context = (
-            self._observation_index_context_from_records(
-                self._observation_index_records
-            )
-            if enable_observation_tool
+            (self._read_profile_memory() or self._profile_pointer_context)
+            if enable_profile_memory
             else ""
+        )
+        self._observation_index_records = []
+        self._observation_index_context = ""
+        if not enable_observation_memory:
+            return
+
+        self._ensure_observation_dirs()
+        self._observation_index_records = self._read_observation_index_records()
+        self._observation_index_context = self._observation_index_context_from_records(
+            self._observation_index_records
         )
 
     @property
@@ -453,10 +463,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
         return self._delete_legacy_memory(legacy_path)
 
-    def _read_profile_records(self) -> list[tuple[str, str]]:
-        """Load all profile files after bootstrapping and legacy migration."""
-        if self._enable_observation_tool:
-            self._ensure_observation_dirs()
+    def _read_bootstrapped_profile_records(self) -> list[tuple[str, str]]:
         records = self._ensure_profile_files()
         if self._migrate_legacy_memory():
             records = [
@@ -464,6 +471,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 for memory_path, _ in records
             ]
         return records
+
+    def _read_profile_records(self) -> list[tuple[str, str]]:
+        """Load all profile files after bootstrapping and legacy migration."""
+        if not self._enable_observation_memory:
+            return self._read_bootstrapped_profile_records()
+
+        self._ensure_observation_dirs()
+        return self._read_bootstrapped_profile_records()
 
     def _profile_context_from_records(self, records: list[tuple[str, str]]) -> str:
         """Inline profile contents unless they exceed the prompt budget."""
@@ -645,21 +660,51 @@ class EvoMemoryMiddleware(AgentMiddleware):
             ]
         )
 
+    def _observation_memory_instructions(self) -> str:
+        if not self._enable_observation_memory:
+            return ""
+
+        instructions = OBSERVATION_MEMORY_READ_INSTRUCTIONS.format(
+            project_id=self._project_id
+        )
+        if not self._enable_observation_tool:
+            return instructions
+        return instructions + OBSERVATION_MEMORY_WRITE_INSTRUCTIONS
+
     def _inject_profile_context(
         self, request: ModelRequest, profile_content: str
     ) -> ModelRequest:
         """Append profile context and editing guidance to the system prompt."""
         from deepagents.middleware._utils import append_to_system_message
 
+        if not self._enable_profile_memory and not self._enable_observation_memory:
+            return request
+
+        observation_instructions = self._observation_memory_instructions()
+
+        if not self._enable_profile_memory:
+            injection = "\n\n".join(
+                part
+                for part in (
+                    self._observation_index_context,
+                    (
+                        "<memory_instructions>\n"
+                        f"{observation_instructions.strip()}\n"
+                        "</memory_instructions>"
+                    )
+                    if observation_instructions.strip()
+                    else "",
+                )
+                if part
+            )
+            new_system = append_to_system_message(request.system_message, injection)
+            return request.override(system_message=new_system)
+
         injection = PROFILE_INJECTION_TEMPLATE.format(
             profile_content=profile_content,
             observation_memory=self._observation_index_context,
             project_id=self._project_id,
-            observation_instructions=(
-                OBSERVATION_MEMORY_INSTRUCTIONS.format(project_id=self._project_id)
-                if self._enable_observation_tool
-                else ""
-            ),
+            observation_instructions=observation_instructions,
         )
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
@@ -695,6 +740,8 @@ def create_memory_middleware(
     max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
     source_type: MemorySourceType = MemorySourceType.TURN,
     source_agent: str = "EvoScientist",
+    enable_profile_memory: bool = True,
+    enable_observation_memory: bool = True,
     enable_observation_tool: bool = True,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
@@ -708,5 +755,7 @@ def create_memory_middleware(
         max_inline_profile_chars=max_inline_profile_chars,
         source_type=source_type,
         source_agent=source_agent,
+        enable_profile_memory=enable_profile_memory,
+        enable_observation_memory=enable_observation_memory,
         enable_observation_tool=enable_observation_tool,
     )

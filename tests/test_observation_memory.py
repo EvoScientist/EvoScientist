@@ -17,6 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
+from EvoScientist.config import MemoryObservationWriter
 from EvoScientist.memory import worker_activity
 from EvoScientist.memory.observations import (
     MemoryScope,
@@ -491,22 +492,84 @@ def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
-def test_turn_memory_worker_has_profile_only_memory_middleware(tmp_path):
+def test_all_mode_skips_turn_worker_observation_tool(tmp_path):
     turn_middleware = memory_lifecycle._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        observation_writer=MemoryObservationWriter.ALL,
     )
     subagent_middleware = memory_lifecycle._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        observation_writer=MemoryObservationWriter.ALL,
     )
 
     assert turn_middleware[0].tools == []
     assert [tool.name for tool in subagent_middleware[0].tools] == [
         "record_observation"
     ]
+
+
+def test_memory_worker_observation_writer_modes(tmp_path):
+    agent_only = memory_lifecycle._memory_worker_middleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        observation_writer=MemoryObservationWriter.AGENT,
+    )
+    worker_subagent = memory_lifecycle._memory_worker_middleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        observation_writer=MemoryObservationWriter.WORKER,
+    )
+    worker_turn = memory_lifecycle._memory_worker_middleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        observation_writer=MemoryObservationWriter.WORKER,
+    )
+
+    assert agent_only[0].tools == []
+    assert [tool.name for tool in worker_subagent[0].tools] == ["record_observation"]
+    assert worker_turn[0].tools == []
+
+
+def test_memory_worker_prompts_match_observation_tool_availability():
+    turn_profile_only = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.TURN,
+        enable_profile_memory=True,
+        enable_observation_tool=False,
+    )
+    turn_with_observation_flag = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.TURN,
+        enable_profile_memory=True,
+        enable_observation_tool=True,
+    )
+    subagent_profile_only = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        enable_profile_memory=True,
+        enable_observation_tool=False,
+    )
+    subagent_with_observations = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        enable_profile_memory=True,
+        enable_observation_tool=True,
+    )
+    subagent_observations_only = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        enable_profile_memory=False,
+        enable_observation_tool=True,
+    )
+
+    assert "record_observation" not in turn_profile_only
+    assert "record_observation" not in turn_with_observation_flag
+    assert "record_observation" not in subagent_profile_only
+    assert "record_observation" in subagent_with_observations
+    assert "record_observation" in subagent_observations_only
+    assert "/memories/profile/" not in subagent_observations_only
 
 
 def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(

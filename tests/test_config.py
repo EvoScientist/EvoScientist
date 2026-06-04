@@ -8,6 +8,9 @@ import yaml
 
 from EvoScientist.config import (
     EvoScientistConfig,
+    MemoryControls,
+    MemoryObservationTarget,
+    MemoryObservationWriter,
     apply_config_to_env,
     get_config_dir,
     get_config_path,
@@ -43,6 +46,10 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
         "EVOSCIENTIST_UI_BACKEND",
+        "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
+        "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
+        "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
+        "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
     ]:
         monkeypatch.delenv(key, raising=False)
     return config_dir
@@ -58,6 +65,10 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
         "EVOSCIENTIST_UI_BACKEND",
+        "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
+        "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
+        "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
+        "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -83,6 +94,10 @@ class TestEvoScientistConfig:
         assert config.ui_backend == "tui"
         assert config.log_level == "warning"
         assert config.reasoning_effort == "high"
+        assert config.memory_profile_enabled is True
+        assert config.memory_observations_enabled is True
+        assert config.memory_observation_writer == MemoryObservationWriter.ALL
+        assert config.memory_workers_enabled is True
         assert config.ollama_base_url == ""
         assert config.channel_debug_tracing is False
         assert config.imessage_enabled is False
@@ -291,6 +306,56 @@ class TestGetSetValues:
         set_config_value("channel_debug_tracing", "false")
         assert get_config_value("channel_debug_tracing") is False
 
+    def test_set_memory_observation_writer_validates_value(
+        self, temp_config_dir, clean_env
+    ):
+        """Observation writer mode accepts only the supported product controls."""
+        save_config(
+            EvoScientistConfig(memory_observation_writer=MemoryObservationWriter.ALL)
+        )
+
+        assert set_config_value("memory_observation_writer", "worker") is True
+        assert get_config_value("memory_observation_writer") == "worker"
+        assert set_config_value("memory_observation_writer", "AGENT") is True
+        assert get_config_value("memory_observation_writer") == "agent"
+        assert set_config_value("memory_observation_writer", "subagent") is False
+        assert get_config_value("memory_observation_writer") == "agent"
+
+    def test_memory_controls_observation_writer_targets(self):
+        """MemoryControls centralizes observation writer target semantics."""
+        worker_controls = MemoryControls.from_config(
+            EvoScientistConfig(
+                memory_profile_enabled=False,
+                memory_observations_enabled=True,
+                memory_observation_writer=MemoryObservationWriter.WORKER,
+                memory_workers_enabled=True,
+            )
+        )
+        all_controls = MemoryControls.from_config(
+            EvoScientistConfig(
+                memory_profile_enabled=False,
+                memory_observations_enabled=True,
+                memory_observation_writer=MemoryObservationWriter.ALL,
+                memory_workers_enabled=True,
+            )
+        )
+
+        assert not worker_controls.observation_tool_enabled(
+            MemoryObservationTarget.TURN_WORKER
+        )
+        assert not worker_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
+        assert worker_controls.observation_tool_enabled(
+            MemoryObservationTarget.SUBAGENT_WORKER
+        )
+        assert not worker_controls.observation_tool_enabled(
+            MemoryObservationTarget.AGENT
+        )
+        assert not all_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
+        assert all_controls.observation_tool_enabled(MemoryObservationTarget.AGENT)
+        assert all_controls.observation_tool_enabled(
+            MemoryObservationTarget.SUBAGENT_WORKER
+        )
+
     def test_list_config(self, temp_config_dir, clean_env):
         """Test listing all config values."""
         config = EvoScientistConfig(provider="openai", model="gpt-4o")
@@ -380,6 +445,27 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_CHANNEL_DEBUG_TRACING", "true")
         config = get_effective_config()
         assert config.channel_debug_tracing is True
+
+    def test_env_memory_controls_override(self, temp_config_dir, monkeypatch):
+        """Memory controls can be selected via environment variables."""
+        save_config(
+            EvoScientistConfig(
+                memory_profile_enabled=True,
+                memory_observations_enabled=True,
+                memory_observation_writer=MemoryObservationWriter.ALL,
+                memory_workers_enabled=True,
+            )
+        )
+        monkeypatch.setenv("EVOSCIENTIST_MEMORY_PROFILE_ENABLED", "false")
+        monkeypatch.setenv("EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED", "false")
+        monkeypatch.setenv("EVOSCIENTIST_MEMORY_OBSERVATION_WRITER", "worker")
+        monkeypatch.setenv("EVOSCIENTIST_MEMORY_WORKERS_ENABLED", "false")
+
+        config = get_effective_config()
+        assert config.memory_profile_enabled is False
+        assert config.memory_observations_enabled is False
+        assert config.memory_observation_writer == MemoryObservationWriter.WORKER
+        assert config.memory_workers_enabled is False
 
     def test_sandbox_execute_timeout_default(self, temp_config_dir, clean_env):
         """Sandbox execute timeout defaults to 300 seconds."""
