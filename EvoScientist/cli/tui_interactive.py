@@ -657,10 +657,10 @@ def run_textual_interactive(
                 # timer widget (like /compact) so the user sees progress
                 # instead of a frozen static line.
                 #
-                # ``self._workspace_dir`` is mutated AFTER the sync succeeds
-                # so a WorkspaceMismatchError leaves the session pointing at
-                # the existing workspace instead of half-resuming into the
-                # conflicting one.
+                # ``self._workspace_dir`` is mutated AFTER mismatch checks so
+                # WorkspaceMismatchError leaves the session pointing at the
+                # existing workspace. Other sync failures resume locally in
+                # the TUI while background workers may be unavailable.
                 from ..langgraph_dev.manager import (
                     WorkspaceMismatchError,
                     ensure_langgraph_dev,
@@ -684,6 +684,19 @@ def run_textual_interactive(
                     # UI, report failure instead of continuing with
                     # success/history output.
                     raise RuntimeError(str(exc)) from exc
+                except Exception:
+                    _channel_logger.warning(
+                        "Failed to sync background agent server for resumed "
+                        "workspace %s; continuing resume in degraded mode",
+                        workspace_dir,
+                        exc_info=True,
+                    )
+                    self.append_system(
+                        "Background agent server sync failed; resumed local "
+                        "session, but async subagents and EvoMemory workers "
+                        "may be unavailable.",
+                        style="yellow",
+                    )
                 finally:
                     await sync_widget.cleanup()
                 self._workspace_dir = workspace_dir
