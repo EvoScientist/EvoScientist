@@ -10,6 +10,7 @@ observation writes go through the structured ``record_observation`` tool.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import subprocess
@@ -720,9 +721,10 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for asynchronous model calls."""
-        return self._inject_profile_context(
-            request, self._profile_context_for_request()
-        )
+        profile_context = ""
+        if self._enable_profile_memory:
+            profile_context = await asyncio.to_thread(self._read_profile_memory)
+        return self._inject_profile_context(request, profile_context)
 
     def wrap_model_call(
         self,

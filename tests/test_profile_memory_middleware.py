@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
+from blockbuster import BlockBuster
 from langchain_core.messages import SystemMessage
 
 import EvoScientist.middleware.memory as memory_module
@@ -297,6 +299,51 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     middleware.modify_request(_request())
 
     assert soul_path.read_bytes() == original_bytes
+
+
+def test_profile_memory_async_path_inlines_content_under_blockbuster(
+    tmp_path, monkeypatch, run_async
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+
+    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware.modify_request(_request())
+    user_profile = memories / "profile" / "USER_PROFILE.md"
+    user_profile.write_text(
+        user_profile.read_text(encoding="utf-8")
+        + "\n\n- Async profile content should be inlined.",
+        encoding="utf-8",
+    )
+
+    call_threads = []
+    original_read = middleware._read_profile_memory
+
+    def tracked_read_profile_memory():
+        call_threads.append(threading.get_ident())
+        return original_read()
+
+    monkeypatch.setattr(middleware, "_read_profile_memory", tracked_read_profile_memory)
+
+    async def run():
+        event_loop_thread = threading.get_ident()
+        blocker = BlockBuster(scanned_modules=memory_module)
+        blocker.activate()
+        try:
+            modified = await middleware.amodify_request(_request())
+        finally:
+            blocker.deactivate()
+        return event_loop_thread, modified
+
+    event_loop_thread, modified = run_async(run())
+
+    assert call_threads
+    assert all(thread_id != event_loop_thread for thread_id in call_threads)
+    assert "Async profile content should be inlined." in str(
+        modified.system_message.content
+    )
 
 
 def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
