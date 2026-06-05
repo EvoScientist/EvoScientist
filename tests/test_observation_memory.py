@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from blockbuster import BlockBuster
 from langchain.agents.middleware.types import AgentState
 from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -644,6 +645,47 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         status = worker_activity.memory_worker_status()
         assert status.is_running is False
         assert status.profile_updates == 0
+        assert status.observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
+    tmp_path, run_async
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
+    )
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
+
+    class _Runs:
+        async def get(self, **_kwargs):
+            return {"status": "success"}
+
+    async def run():
+        blocker = BlockBuster(scanned_modules=[memory_lifecycle, worker_activity])
+        blocker.activate()
+        try:
+            await memory_lifecycle._watch_memory_worker_run_async(
+                SimpleNamespace(runs=_Runs()),
+                thread_id="worker-thread",
+                run_id="run-1",
+            )
+        finally:
+            blocker.deactivate()
+
+    try:
+        run_async(run())
+        status = worker_activity.memory_worker_status()
+        assert status.is_running is False
+        assert status.profile_updates == 1
         assert status.observations_recorded == 0
     finally:
         worker_activity.reset_memory_worker_status_for_tests()

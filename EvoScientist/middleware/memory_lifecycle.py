@@ -1062,7 +1062,7 @@ async def _watch_memory_worker_run_async(
             await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
-            mark_memory_worker_finished(thread_id, run_id)
+            await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
