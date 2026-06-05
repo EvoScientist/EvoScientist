@@ -1136,14 +1136,14 @@ async def _alaunch_memory_worker(
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
     url = _memory_worker_url()
-    if not is_langgraph_dev_running(base_url=url):
+    if not await asyncio.to_thread(is_langgraph_dev_running, base_url=url):
         logger.info("Skipping EvoMemory worker launch; LangGraph dev is unavailable")
         return
 
     client = get_client(url=url, headers={"x-auth-scheme": "langsmith"})
     thread = await client.threads.create(graph_id=role.graph_id)
     worker_thread_id = str(thread["thread_id"])
-    before_outputs = snapshot_memory_outputs(memory_dir)
+    before_outputs = await asyncio.to_thread(snapshot_memory_outputs, memory_dir)
     payload = _memory_worker_run_kwargs(
         role=role,
         project_id=project_id,

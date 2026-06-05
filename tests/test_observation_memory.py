@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -789,6 +790,76 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
     assert status.profile_updates == 1
     assert status.observations_recorded == 1
     worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_async_memory_worker_launch_offloads_blocking_work(
+    tmp_path, monkeypatch, run_async
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
+
+    call_threads: list[tuple[str, int]] = []
+
+    def fake_is_running(**_kwargs):
+        call_threads.append(("health", threading.get_ident()))
+        return True
+
+    def fake_snapshot(_memory_dir):
+        call_threads.append(("snapshot", threading.get_ident()))
+        return worker_activity.MemoryOutputSnapshot(
+            profile_files={},
+            observation_files=frozenset(),
+        )
+
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+        fake_is_running,
+    )
+    monkeypatch.setattr(memory_lifecycle, "snapshot_memory_outputs", fake_snapshot)
+
+    class _Threads:
+        async def create(self, **_kwargs):
+            return {"thread_id": "worker-thread"}
+
+    class _Runs:
+        async def create(self, **_kwargs):
+            return {"run_id": "run-1", "status": "pending"}
+
+    fake_client = SimpleNamespace(threads=_Threads(), runs=_Runs())
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: fake_client)
+
+    spawned = []
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_spawn_memory_worker_status_task",
+        lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+
+    async def run():
+        event_loop_thread = threading.get_ident()
+        await memory_lifecycle._alaunch_memory_worker(
+            role=memory_lifecycle.MemoryLifecycleRole.TURN,
+            memory_dir=tmp_path / "memories",
+            project_id="P-project",
+            source_agent="EvoScientist",
+            session_id="thread-1",
+            trajectory=[{"role": "human", "content": "hi"}],
+        )
+        return event_loop_thread
+
+    try:
+        event_loop_thread = run_async(run())
+        assert [name for name, _thread_id in call_threads] == ["health", "snapshot"]
+        assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
+        assert worker_activity.memory_worker_status().is_running is True
+        assert spawned == [
+            (
+                (fake_client,),
+                {"thread_id": "worker-thread", "run_id": "run-1"},
+            )
+        ]
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
 
 
 def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_path):
