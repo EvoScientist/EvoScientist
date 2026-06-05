@@ -279,25 +279,6 @@ def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     assert not (memories / "profile" / "USER_PROFILE.md").exists()
 
 
-def test_profile_memory_uses_cached_context_after_construction(
-    tmp_path, monkeypatch, run_async
-):
-    memories = tmp_path / "memories"
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-
-    middleware = memory_module.create_memory_middleware(str(memories))
-    monkeypatch.setattr(
-        middleware,
-        "_read_profile_memory",
-        lambda: (_ for _ in ()).throw(AssertionError("profile was reread")),
-    )
-
-    middleware.modify_request(_request())
-    run_async(middleware.amodify_request(_request()))
-
-
 def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     tmp_path, monkeypatch
 ):

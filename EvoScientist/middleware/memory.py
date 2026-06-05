@@ -325,11 +325,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
             if self._enable_observation_tool
             else []
         )
-        self._profile_context = (
-            (self._read_profile_memory() or self._profile_pointer_context)
-            if enable_profile_memory
-            else ""
-        )
         self._observation_index_records = []
         self._observation_index_context = ""
         if not enable_observation_memory:
@@ -492,10 +487,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return self._profile_pointer_context
 
     def _read_profile_memory(self) -> str:
-        """Return profile context, falling back to file pointers on setup errors."""
+        """Return profile context, falling back to file pointers."""
         try:
             records = self._read_profile_records()
-            return self._profile_context_from_records(records)
+            return (
+                self._profile_context_from_records(records)
+                or self._profile_pointer_context
+            )
         except Exception as e:
             logger.debug("Failed to read profile memory: %s", e)
             return self._profile_pointer_context
@@ -709,13 +707,22 @@ class EvoMemoryMiddleware(AgentMiddleware):
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
+    def _profile_context_for_request(self) -> str:
+        if not self._enable_profile_memory:
+            return ""
+        return self._read_profile_memory()
+
     def modify_request(self, request: ModelRequest) -> ModelRequest:
-        """Apply cached memory injection for synchronous model calls."""
-        return self._inject_profile_context(request, self._profile_context)
+        """Apply memory injection for synchronous model calls."""
+        return self._inject_profile_context(
+            request, self._profile_context_for_request()
+        )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
-        """Apply cached memory injection for asynchronous model calls."""
-        return self._inject_profile_context(request, self._profile_context)
+        """Apply memory injection for asynchronous model calls."""
+        return self._inject_profile_context(
+            request, self._profile_context_for_request()
+        )
 
     def wrap_model_call(
         self,
