@@ -2007,8 +2007,10 @@ def run_textual_interactive(
                         and len(state.thinking_text) >= _MIN_THINKING_LEN
                     ):
                         on_thinking_cb(state.thinking_text.rstrip())
-                    # Re-anchor so final content is visible.
-                    self._anchor_chat(container)
+                    # Re-anchor so final content is visible, but only
+                    # if the user hasn't scrolled away.
+                    if not container._anchor_released:
+                        self._anchor_chat(container)
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
