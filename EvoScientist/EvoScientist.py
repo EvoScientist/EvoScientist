@@ -592,6 +592,12 @@ def _get_default_middleware(
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(model=model),
+        # Interpreter prompt must land before runtime/memory context, so this
+        # middleware sits ahead of runtime_context in the stack.
+        create_code_interpreter_middleware(
+            timeout=cfg.code_interpreter_timeout,
+            max_result_chars=cfg.code_interpreter_max_result_chars,
+        ),
         create_runtime_context_middleware(),
     ]
     if memory_controls.memory_enabled:
@@ -624,12 +630,6 @@ def _get_default_middleware(
 
         mw.append(BackgroundExecutionMiddleware())
 
-    mw.append(
-        create_code_interpreter_middleware(
-            timeout=cfg.code_interpreter_timeout,
-            max_result_chars=cfg.code_interpreter_max_result_chars,
-        )
-    )
     return mw
 
 
