@@ -43,7 +43,7 @@ from .validators import validate_tavily_key
 
 
 def _step_ui_backend(config: EvoScientistConfig) -> str:
-    """Step 0: Select UI backend (Textual TUI, Rich CLI, or browser WebUI).
+    """Step 0: Select UI backend (desktop WebUI, Textual TUI, or Rich CLI).
 
     Args:
         config: Current configuration.
@@ -52,9 +52,9 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         Selected backend name ("tui", "cli", or "webui").
     """
     choices = [
+        Choice(title="WebUI (desktop interface, beta)", value="webui"),
         Choice(title="TUI (full-screen interface, recommended)", value="tui"),
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
-        Choice(title="WebUI (browser interface, beta)", value="webui"),
     ]
 
     # Map legacy values to current ones
