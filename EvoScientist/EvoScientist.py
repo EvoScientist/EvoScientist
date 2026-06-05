@@ -59,6 +59,13 @@ _chat_model = None
 # /model switch to lag one step (see issue #179).
 _chat_model_key: tuple[str | None, str | None] | None = None
 
+# Auxiliary model for background/helper LLM calls (memory workers + main-agent
+# tool selector). Cached separately from the main model; falls back to the main
+# instance when the auxiliary_* config fields are empty (see
+# _ensure_auxiliary_chat_model).
+_auxiliary_chat_model = None
+_auxiliary_chat_model_key: tuple[str | None, str | None] | None = None
+
 # Cache MCP tools by the effective config signature to avoid reconnecting
 # to MCP servers on every `/new` when config is unchanged.
 _MCP_TOOLS_CACHE_KEY: str | None = None
@@ -124,6 +131,32 @@ def _ensure_chat_model():
     return _chat_model
 
 
+def _ensure_auxiliary_chat_model():
+    """Return the auxiliary chat model for background/helper LLM calls.
+
+    Resolves ``(cfg.auxiliary_model or cfg.model, cfg.auxiliary_provider or
+    cfg.provider)``. When the auxiliary fields are empty — or resolve to the same
+    ``(model, provider)`` pair as the main model — returns the main
+    ``_ensure_chat_model()`` instance directly, so no second client is built.
+    Otherwise it is cached separately under its own key. Onboard sets the
+    provider alongside the model, so the ``or cfg.provider`` fallback only
+    matters for a model set without an explicit auxiliary provider.
+    """
+    global _auxiliary_chat_model, _auxiliary_chat_model_key
+    from .llm import get_chat_model
+
+    cfg = _ensure_config()
+    aux_model = cfg.auxiliary_model or cfg.model
+    aux_provider = cfg.auxiliary_provider or cfg.provider
+    if (aux_model, aux_provider) == (cfg.model, cfg.provider):
+        return _ensure_chat_model()
+    key = (aux_model, aux_provider)
+    if _auxiliary_chat_model is None or _auxiliary_chat_model_key != key:
+        _auxiliary_chat_model = get_chat_model(model=aux_model, provider=aux_provider)
+        _auxiliary_chat_model_key = key
+    return _auxiliary_chat_model
+
+
 def set_chat_model(model: str, provider: str | None = None):
     """Replace the cached chat model with a new one.
 
@@ -135,6 +168,12 @@ def set_chat_model(model: str, provider: str | None = None):
     Returns the current chat model instance.
     """
     from .llm import get_chat_model
+
+    # Invalidate the auxiliary cache too: when auxiliary_* is empty it mirrors
+    # the main model, so a /model switch must let it re-resolve to the new main.
+    global _auxiliary_chat_model, _auxiliary_chat_model_key
+    _auxiliary_chat_model = None
+    _auxiliary_chat_model_key = None
 
     key = (model, provider)
     if _chat_model is None or _chat_model_key != key:
@@ -585,13 +624,20 @@ def _get_default_middleware(
             MemoryObservationTarget.AGENT
         ),
     )
+    # Main-agent tool selection may use the auxiliary model; async sub-agents
+    # keep the main model (they do real work, not a one-off helper call).
+    # context_editing stays on the main model — its model only sizes the
+    # context-window trigger for the main agent's own history.
+    tool_selector_model = (
+        model if for_async_subagent else _ensure_auxiliary_chat_model()
+    )
     mw = [
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(model=model),
+        *create_tool_selector_middleware(model=tool_selector_model),
         # Interpreter prompt must land before runtime/memory context, so this
         # middleware sits ahead of runtime_context in the stack.
         create_code_interpreter_middleware(

@@ -46,15 +46,16 @@ def _patch_all_questionary(mock_q):
 
 
 class TestConstants:
-    def test_steps_has_twelve_items(self):
-        """Test that STEPS contains exactly 12 steps."""
-        assert len(STEPS) == 12
+    def test_steps_has_thirteen_items(self):
+        """Test that STEPS contains exactly 13 steps."""
+        assert len(STEPS) == 13
         assert STEPS == [
             "UI",
             "LangGraph Port",
             "Provider",
             "API Key",
             "Model",
+            "Auxiliary Model",
             "Tavily Key",
             "Workspace",
             "Thinking",
@@ -353,6 +354,20 @@ class TestStepProvider:
         assert result == "anthropic"
         mock_q.select.assert_called_once()
 
+    def test_default_value_and_label_override(self):
+        """default_value preselects a provider (re-run co-pilot default) and
+        label customizes the prompt text."""
+        from EvoScientist.config.onboard.steps import _step_provider
+
+        config = EvoScientistConfig(provider="anthropic")
+        with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
+            mock_q.select.return_value.ask.return_value = "openai"
+            _step_provider(config, label="co-pilot", default_value="openrouter")
+
+        call = mock_q.select.call_args
+        assert call.kwargs["default"] == "openrouter"  # override, not config.provider
+        assert "co-pilot" in call.args[0]
+
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test that _step_provider raises KeyboardInterrupt on cancel."""
         from EvoScientist.config.onboard.steps import _step_provider
@@ -377,6 +392,38 @@ class TestStepModel:
             result = _step_model(config, "anthropic")
 
         assert result == "claude-sonnet-4-6"
+
+    def test_main_model_not_in_provider_list_defaults_to_first(self):
+        """Reset/main flow: a config.model that isn't in the chosen provider's
+        list (e.g. provider switched to google-genai) defaults to that
+        provider's first model, NOT the custom 'Type a model name...' entry."""
+        from EvoScientist.config.onboard.steps import _step_model
+        from EvoScientist.llm.models import get_models_for_provider
+
+        config = EvoScientistConfig(model="claude-sonnet-4-6")
+        entries = get_models_for_provider("google-genai")
+        with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
+            mock_q.select.return_value.ask.return_value = entries[0][0]
+            _step_model(config, "google-genai")
+
+        default = mock_q.select.call_args.kwargs["default"]
+        assert default == entries[0][0]
+        assert default != "__custom__"
+
+    def test_custom_default_value_preselects_and_prefills(self):
+        """Co-pilot re-run: a saved custom (non-registry) model preselects and
+        prefills the 'Type a model name...' entry."""
+        from EvoScientist.config.onboard.steps import _step_model
+
+        config = EvoScientistConfig()
+        with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
+            mock_q.select.return_value.ask.return_value = "__custom__"
+            mock_q.text.return_value.ask.return_value = "my-private/model"
+            result = _step_model(config, "openrouter", default_value="my-private/model")
+
+        assert mock_q.select.call_args.kwargs["default"] == "__custom__"
+        assert mock_q.text.call_args.kwargs["default"] == "my-private/model"
+        assert result == "my-private/model"
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test that _step_model raises KeyboardInterrupt on cancel."""
@@ -1143,6 +1190,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode (API key, not OAuth)
                 "claude-sonnet-4-6",  # Model
+                "skip",  # Auxiliary: Skip (single driver)
                 "daemon",  # Workspace mode
                 True,  # Show thinking
             ]
@@ -1172,6 +1220,101 @@ class TestRunOnboard:
         assert final_config.anthropic_auth_mode == "api_key"
         assert final_config.ui_backend == "tui"
         assert final_config.default_mode == "daemon"
+
+    def test_auxiliary_model_enabled_collects_provider_and_key(self):
+        """Enabling the auxiliary step stores its provider, model, and the
+        chosen provider's API key (a different company than the main agent)."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.channels.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+            patch("EvoScientist.config.onboard.wizard._step_tinytex"),
+        ):
+            mock_load.return_value = EvoScientistConfig()
+
+            mock_q.select.return_value.ask.side_effect = [
+                "tui",  # UI backend
+                "anthropic",  # Provider
+                "api_key",  # Anthropic auth mode
+                "claude-sonnet-4-6",  # Model
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Auxiliary provider (a different company)
+                "gpt-5.5",  # Auxiliary model
+                "daemon",  # Workspace mode
+                True,  # Show thinking
+            ]
+            mock_q.password.return_value.ask.side_effect = [
+                "",  # Main provider API key (keep current)
+                "sk-aux-openai",  # Auxiliary provider API key
+                "",  # Tavily key (keep current)
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [
+                True,  # Save config
+            ]
+            mock_q.text.return_value.ask.side_effect = [
+                "",  # Workspace directory
+            ]
+            mock_q.checkbox.return_value.ask.return_value = []  # Skills: skip
+
+            result = run_onboard(skip_validation=True)
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        # The auxiliary provider's key is stored in its per-provider field.
+        assert final_config.openai_api_key == "sk-aux-openai"
+        # Main agent is untouched.
+        assert final_config.provider == "anthropic"
+        assert final_config.model == "claude-sonnet-4-6"
+
+    def test_auxiliary_custom_provider_collects_base_url(self):
+        """Regression for the custom-provider fix: a custom auxiliary provider
+        collects its base URL (provider -> base URL -> key -> model order)."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.channels.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig()
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "custom-openai",  # Auxiliary provider
+                "gpt-5.5",  # Auxiliary model (from the custom-openai registry)
+            ]
+            mock_q.text.return_value.ask.side_effect = [
+                "https://my-endpoint/v1",  # Auxiliary base URL (custom provider)
+            ]
+            mock_q.password.return_value.ask.side_effect = [
+                "sk-aux-custom",  # Auxiliary provider API key
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "custom-openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        # Base URL must be collected for the custom auxiliary provider.
+        assert final_config.custom_openai_base_url == "https://my-endpoint/v1"
+        assert final_config.custom_openai_api_key == "sk-aux-custom"
 
     def test_returns_false_on_cancel(self):
         """Test that run_onboard returns False when cancelled."""
@@ -1218,6 +1361,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode
                 "claude-sonnet-4-6",  # Model
+                "skip",  # Auxiliary: Skip (single driver)
                 "daemon",  # Workspace mode
                 True,  # Show thinking
             ]
@@ -1288,11 +1432,14 @@ class TestRunOnboard:
                     "anthropic",
                     "api_key",
                     "claude-sonnet-4-6",
+                    "skip",  # Auxiliary: Skip (single driver)
                     "daemon",
                     True,
                 ]
                 mock_q.password.return_value.ask.side_effect = ["", ""]
-                mock_q.confirm.return_value.ask.side_effect = [False]  # Save? = No
+                mock_q.confirm.return_value.ask.side_effect = [
+                    False,  # Save? = No
+                ]
                 mock_q.text.return_value.ask.side_effect = [""]
                 mock_q.checkbox.return_value.ask.return_value = []
 
@@ -1335,11 +1482,14 @@ class TestRunOnboard:
                 "anthropic",
                 "api_key",
                 "claude-sonnet-4-6",
+                "skip",  # Auxiliary: Skip (single driver)
                 "daemon",
                 True,
             ]
             mock_q.password.return_value.ask.side_effect = ["", ""]
-            mock_q.confirm.return_value.ask.side_effect = [False]  # Save? = No
+            mock_q.confirm.return_value.ask.side_effect = [
+                False,  # Save? = No
+            ]
             mock_q.text.return_value.ask.side_effect = [""]
             mock_q.checkbox.return_value.ask.return_value = []
 

@@ -95,6 +95,8 @@ class EvoScientistConfig:
         tavily_api_key: Tavily API key for web search.
         provider: Default LLM provider ('anthropic', 'openai', 'google-genai', or 'nvidia').
         model: Default model name (short name or full ID).
+        auxiliary_provider: Provider for auxiliary_model (empty = use main provider).
+        auxiliary_model: Model for memory workers + tool selector (empty = use main model).
         default_mode: Default workspace mode ('daemon' or 'run').
         default_workdir: Default workspace directory (empty = use current working directory).
         show_thinking: Whether to show thinking panels in CLI.
@@ -129,6 +131,10 @@ class EvoScientistConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+    # Optional auxiliary model for background/helper LLM calls (memory workers +
+    # tool selector). Empty = fall back to the main model/provider.
+    auxiliary_provider: str = ""  # empty = use main provider
+    auxiliary_model: str = ""  # empty = use main model
 
     # Async Sub-agent Settings
     # When True (default), the EvoSci CLI auto-starts a langgraph dev subprocess
@@ -622,6 +628,8 @@ _ENV_MAPPINGS = {
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
+    "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
+    "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",

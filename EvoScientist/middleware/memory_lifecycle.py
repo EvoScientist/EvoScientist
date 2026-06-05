@@ -706,11 +706,13 @@ def _build_memory_worker_agent(
     """Create a background memory worker agent for one lifecycle hook."""
     from deepagents import create_deep_agent
 
-    from ..EvoScientist import _ensure_chat_model
+    from ..EvoScientist import _ensure_auxiliary_chat_model
 
     agent = create_deep_agent(
         name=role.worker_agent_name,
-        model=_ensure_chat_model(),
+        # Memory workers are background helper agents — use the auxiliary model
+        # (falls back to the main model when auxiliary_* is unset).
+        model=_ensure_auxiliary_chat_model(),
         system_prompt=system_prompt,
         tools=[],
         backend=_build_memory_worker_backend(

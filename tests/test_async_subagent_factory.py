@@ -125,6 +125,8 @@ def test_inject_subagent_omits_memory_middleware_when_memory_disabled(
     cfg.memory_observations_enabled = False
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
@@ -153,6 +155,8 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.WORKER
     cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
@@ -191,6 +195,8 @@ def test_all_observation_writer_skips_turn_worker_without_profile_memory(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
     mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
@@ -259,6 +265,8 @@ def test_async_subagent_mode_filters_ask_user(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
     mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 

@@ -411,6 +411,8 @@ def test_auto_approve_still_includes_ask_user_middleware(
     cfg.enable_ask_user = True
     cfg.auto_approve = True
     cfg.auto_mode = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
@@ -430,6 +432,8 @@ def test_auto_mode_disables_ask_user_middleware(
     cfg.enable_ask_user = True
     cfg.auto_approve = True
     cfg.auto_mode = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
@@ -458,6 +462,8 @@ def test_for_async_subagent_omits_ask_user_middleware(
     cfg.enable_ask_user = True
     cfg.auto_approve = False
     cfg.auto_mode = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
