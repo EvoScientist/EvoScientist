@@ -62,6 +62,7 @@ def _load_agent(
     workspace_dir: str | None = None,
     checkpointer=None,
     config=None,
+    chat_model=None,
     *,
     on_mcp_progress=None,
 ):
@@ -73,6 +74,9 @@ def _load_agent(
             Falls back to ``InMemorySaver`` when ``None``.
         config: Optional pre-loaded ``EvoScientistConfig``.  Forwarded to
             ``create_cli_agent`` to avoid double config loading.
+        chat_model: Optional pre-built chat model.  Forwarded to
+            ``create_cli_agent``; combined with an explicit ``config`` it
+            selects the pure (no module-global write) build path.
         on_mcp_progress: Optional per-server MCP progress callback.
             Signature ``(event, server_name, detail) -> None``.
     """
@@ -82,5 +86,6 @@ def _load_agent(
         workspace_dir=workspace_dir,
         checkpointer=checkpointer,
         config=config,
+        chat_model=chat_model,
         on_mcp_progress=on_mcp_progress,
     )
