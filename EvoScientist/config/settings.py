@@ -331,21 +331,23 @@ class EvoScientistConfig:
 # =============================================================================
 
 
-_active_config: EvoScientistConfig | None = None
+_runtime_auto_approve: bool = False
 
 
-def set_active_config(config: EvoScientistConfig) -> None:
-    """Set the runtime-effective config (includes CLI overrides)."""
-    global _active_config
-    _active_config = config
+def set_runtime_auto_approve(value: bool) -> None:
+    """Set by CLI when --auto-approve is passed, so downstream HITL
+    checks see the override without re-reading from disk."""
+    global _runtime_auto_approve
+    _runtime_auto_approve = value
+
+
+def get_runtime_auto_approve() -> bool:
+    """True if --auto-approve was passed on the CLI."""
+    return _runtime_auto_approve
 
 
 def load_config() -> EvoScientistConfig:
-    """Load configuration. Returns the active runtime config if set
-    (includes CLI overrides), otherwise reads from file.
-    """
-    if _active_config is not None:
-        return _active_config
+    """Load configuration from file."""
     config_path = get_config_path()
 
     if not config_path.exists():

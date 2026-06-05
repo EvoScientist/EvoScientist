@@ -77,9 +77,9 @@ def _ensure_config(config=None):
     if _config is None:
         _config = get_effective_config()
         apply_config_to_env(_config)
-    from .config.settings import set_active_config
+    from .config.settings import set_runtime_auto_approve
 
-    set_active_config(_config)
+    set_runtime_auto_approve(getattr(_config, "auto_approve", False))
     return _config
 
 

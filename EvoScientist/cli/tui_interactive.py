@@ -2007,10 +2007,13 @@ def run_textual_interactive(
                         _areqs = _iev.get("action_requests", [])
                         _n = len(_areqs) or 1
 
-                        from EvoScientist.config.settings import load_config as _lc
+                        from EvoScientist.config.settings import (
+                            get_runtime_auto_approve,
+                        )
 
-                        _cfg_auto = _lc().auto_approve
-                        if (self._hitl_auto_approve or _cfg_auto) and not _has_forced(_areqs):
+                        if (
+                            self._hitl_auto_approve or get_runtime_auto_approve()
+                        ) and not _has_forced(_areqs):
                             resume_map[_iid] = {
                                 "decisions": [{"type": "approve"} for _ in range(_n)]
                             }

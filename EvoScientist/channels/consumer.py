@@ -141,7 +141,9 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
         if check_forced_confirmation(command):
             return False
 
-    if cfg.auto_approve:
+    from ..config.settings import get_runtime_auto_approve
+
+    if cfg.auto_approve or get_runtime_auto_approve():
         return True
 
     shell_allow_list = (

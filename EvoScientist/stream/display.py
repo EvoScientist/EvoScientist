@@ -1021,10 +1021,12 @@ def _resolve_hitl_approval(
     if not action_requests:
         return [{"type": "approve"}]
 
-    from ..config.settings import HITL_SHELL_TOOLS
+    from ..config.settings import HITL_SHELL_TOOLS, get_runtime_auto_approve
 
     cfg = load_config()
-    auto_approve = _session_auto_approve or cfg.auto_approve
+    auto_approve = (
+        _session_auto_approve or cfg.auto_approve or get_runtime_auto_approve()
+    )
     shell_allow_list = (
         [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
         if cfg.shell_allow_list
