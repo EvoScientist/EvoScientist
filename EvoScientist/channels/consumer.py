@@ -718,9 +718,9 @@ class InboundConsumer:
 
                     if pending.event.is_set():
                         feedback = {
-                            "approve": "\u2705 已批准",
-                            "auto": "\u2705 已批准（后续自动通过）",
-                            "reject": "\u274c 已拒绝",
+                            "approve": "\u2705 Approved",
+                            "auto": "\u2705 Approved (auto-approve enabled)",
+                            "reject": "\u274c Rejected",
                         }.get(decision)
                         if feedback:
                             await self.bus.publish_outbound(
