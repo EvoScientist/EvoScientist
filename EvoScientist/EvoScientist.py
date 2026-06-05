@@ -77,6 +77,9 @@ def _ensure_config(config=None):
     if _config is None:
         _config = get_effective_config()
         apply_config_to_env(_config)
+    from .config.settings import set_active_config
+
+    set_active_config(_config)
     return _config
 
 

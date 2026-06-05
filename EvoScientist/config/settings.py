@@ -331,13 +331,21 @@ class EvoScientistConfig:
 # =============================================================================
 
 
-def load_config() -> EvoScientistConfig:
-    """Load configuration from file.
+_active_config: EvoScientistConfig | None = None
 
-    Returns:
-        EvoScientistConfig instance with values from file, or defaults if
-        file doesn't exist.
+
+def set_active_config(config: EvoScientistConfig) -> None:
+    """Set the runtime-effective config (includes CLI overrides)."""
+    global _active_config
+    _active_config = config
+
+
+def load_config() -> EvoScientistConfig:
+    """Load configuration. Returns the active runtime config if set
+    (includes CLI overrides), otherwise reads from file.
     """
+    if _active_config is not None:
+        return _active_config
     config_path = get_config_path()
 
     if not config_path.exists():
