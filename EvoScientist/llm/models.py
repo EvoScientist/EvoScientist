@@ -20,6 +20,7 @@ from .patches import (
     _patch_ccproxy_system_to_developer,
     _patch_deepseek_reasoning_passback,
     _patch_openai_compat_content,
+    _patch_openrouter_strip_responses_reasoning,
 )
 
 _MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
@@ -414,9 +415,15 @@ def get_chat_model(
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key
-        # Enable reasoning; disable summary to avoid multi-turn schema errors.
+        # Reasoning via `effort` + `summary: "auto"` so a readable reasoning
+        # summary is returned for display. OpenAI-Responses also emits encrypted
+        # reasoning items (`rs_*` id) that can't be replayed on multi-turn
+        # passback (OpenRouter's `/responses` beta is stateless, store=false —
+        # "Item with id 'rs_...' not found"); the patch strips them on passback,
+        # so enabling `summary` is safe. See langchain-ai/langchain#37777.
         effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or "high"
-        kwargs.setdefault("reasoning", {"effort": effort, "summary": "disabled"})
+        kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
+        _patch_openrouter_strip_responses_reasoning()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:
