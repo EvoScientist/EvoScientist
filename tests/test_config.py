@@ -50,6 +50,8 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
         "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
+        "EVOSCIENTIST_AUXILIARY_MODEL",
+        "EVOSCIENTIST_AUXILIARY_PROVIDER",
     ]:
         monkeypatch.delenv(key, raising=False)
     return config_dir
@@ -69,6 +71,8 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
         "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
+        "EVOSCIENTIST_AUXILIARY_MODEL",
+        "EVOSCIENTIST_AUXILIARY_PROVIDER",
     ]:
         monkeypatch.delenv(key, raising=False)
 

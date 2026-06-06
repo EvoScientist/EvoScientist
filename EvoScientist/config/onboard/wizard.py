@@ -704,6 +704,8 @@ def run_onboard(
                             current_value=config.custom_anthropic_base_url
                             or os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", ""),
                         )
+                    elif aux_provider == "minimax":
+                        config.minimax_base_url = _step_minimax_region(config)
                     if aux_provider != "ollama":
                         aux_key_attr = _PROVIDER_KEY_ATTR.get(
                             aux_provider, "openai_api_key"
