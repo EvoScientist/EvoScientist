@@ -266,3 +266,138 @@ class TestIsAsyncSubagentsAvailable:
         assert manager.is_async_subagents_available() is True
         manager._ASYNC_SUBAGENTS_AVAILABLE = False
         assert manager.is_async_subagents_available() is False
+
+
+# =============================================================================
+# _rotate_log_if_needed — log rotation for langgraph_dev.log
+# =============================================================================
+
+
+class TestRotateLogIfNeeded:
+    """``_rotate_log_if_needed`` implements the single-backup rollover
+    policy from #209. When ``_LOG_FILE`` exceeds the module's
+    ``_LOG_ROTATION_BYTES`` threshold, rename to ``<log>.1`` (overwriting
+    any existing backup) so the next open() starts fresh. Threshold
+    is patched to a small value per-test to keep the fixtures tiny.
+    """
+
+    def test_no_existing_file_is_noop(self, tmp_path):
+        log = tmp_path / "langgraph_dev.log"
+        manager._rotate_log_if_needed(log)
+        assert not log.exists()
+        assert not (tmp_path / "langgraph_dev.log.1").exists()
+
+    def test_file_smaller_than_threshold_is_not_rotated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 100)
+        manager._rotate_log_if_needed(log)
+        assert log.exists()
+        assert log.stat().st_size == 100
+        assert not (tmp_path / "langgraph_dev.log.1").exists()
+
+    def test_file_exactly_at_threshold_is_not_rotated(self, tmp_path, monkeypatch):
+        """Off-by-one: rotation triggers only on strict greater-than.
+        A log sitting at the threshold size is left alone — the next
+        session that pushes it over triggers the rollover.
+        """
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 1024)
+        manager._rotate_log_if_needed(log)
+        assert log.exists()
+        assert log.stat().st_size == 1024
+        assert not (tmp_path / "langgraph_dev.log.1").exists()
+
+    def test_file_over_threshold_is_rotated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 1025)
+        manager._rotate_log_if_needed(log)
+        # After rotation: the original path was moved to ``<log>.1``.
+        # The next ``open(log, "ab")`` will re-create the active file
+        # at offset 0 (append mode creates if missing). Verify both
+        # halves of the contract: the backup holds the previous content,
+        # and the active log is writable from scratch.
+        assert not log.exists()
+        backup = tmp_path / "langgraph_dev.log.1"
+        assert backup.exists()
+        assert backup.stat().st_size == 1025
+        with open(log, "ab") as fh:
+            fh.write(b"new")
+        assert log.stat().st_size == 3  # just "new", not appended to backup
+
+    def test_rotation_overwrites_existing_backup(self, tmp_path, monkeypatch):
+        """A pre-existing ``<log>.1`` from an earlier rotation must be
+        clobbered by the new rollover — single-backup policy means we
+        never keep more than one historical copy.
+        """
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        backup = tmp_path / "langgraph_dev.log.1"
+        log.write_bytes(b"x" * 2000)
+        backup.write_bytes(b"OLD_BACKUP_PAYLOAD_THAT_SHOULD_BE_GONE_NOW")
+        original_backup_size = backup.stat().st_size
+        manager._rotate_log_if_needed(log)
+        assert backup.exists()
+        assert backup.stat().st_size != original_backup_size
+        assert backup.stat().st_size == 2000  # now holds the just-rotated log
+
+    def test_failed_rotation_does_not_raise(self, tmp_path, monkeypatch):
+        """If ``os.replace`` fails (e.g. permission denied on Windows
+        when another process holds the backup open), the helper logs a
+        warning and returns — the caller can still open the un-rotated
+        log and proceed. Failing rotation is non-fatal: the next
+        ``start_langgraph_dev`` invocation will try again.
+        """
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 0)  # always rotate
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 10)
+        with patch(
+            "EvoScientist.langgraph_dev.manager.os.replace",
+            side_effect=PermissionError("denied"),
+        ):
+            # Must not raise.
+            manager._rotate_log_if_needed(log)
+        # Original log is left intact (we failed to rotate, didn't corrupt).
+        assert log.exists()
+        assert log.stat().st_size == 10
+
+
+class TestStartLanggraphDevRotatesLog:
+    """``start_langgraph_dev`` must call ``_rotate_log_if_needed`` before
+    opening the log handle, so each session starts with either an
+    existing-but-fresh log or a brand-new file. Verifying the call site
+    directly (vs. mocking the entire subprocess spawn) keeps the test
+    cheap while still guarding the integration point.
+    """
+
+    def test_rotate_called_before_open(self, tmp_path, monkeypatch):
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 2048)  # contents don't matter for the check
+        # Redirect the module-level paths to the temp dir so we don't
+        # touch the real ~/.config/evoscientist/ on a dev machine.
+        monkeypatch.setattr(manager, "_LOG_FILE", log)
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        # Make ``_packaged_langgraph_config`` point at a real file so
+        # ``start_langgraph_dev`` doesn't bail at the existence check
+        # before reaching the rotation call.
+        fake_config = tmp_path / "langgraph.json"
+        fake_config.write_text("{}")
+        # Don't actually start a subprocess — just verify the rotation
+        # call happens. We mock the spawn to raise immediately so the
+        # rest of start_langgraph_dev aborts before doing anything else.
+        with patch.object(
+            manager, "_langgraph_exe", return_value="/fake/langgraph"
+        ), patch.object(
+            manager, "_packaged_langgraph_config", return_value=fake_config
+        ), patch(
+            "EvoScientist.langgraph_dev.manager.subprocess.Popen",
+            side_effect=FileNotFoundError("subprocess not available"),
+        ):
+            try:
+                manager.start_langgraph_dev(workspace_dir=tmp_path)
+            except FileNotFoundError:
+                pass  # expected — we just need rotation to have happened
+        # After start attempt, the oversize log must have been rotated.
+        assert (tmp_path / "langgraph_dev.log.1").exists()

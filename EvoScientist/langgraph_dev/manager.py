@@ -68,6 +68,42 @@ _PID_DIR = Path.home() / ".config" / "evoscientist"
 _PID_FILE = _PID_DIR / "langgraph_dev.pid"
 _LOG_FILE = _PID_DIR / "langgraph_dev.log"
 
+# Default rollover threshold for ``_LOG_FILE`` — once the log exceeds this
+# size, the next ``start_langgraph_dev`` invocation rotates it to
+# ``langgraph_dev.log.1`` (overwriting any existing backup) and starts fresh.
+# Single-backup policy keeps the disk footprint bounded at roughly 2x the
+# threshold even under heavy use (chatty MCP servers, repeated failure
+# paths with stack traces). See #209.
+_LOG_ROTATION_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _rotate_log_if_needed(log_path: Path) -> None:
+    """Rotate ``log_path`` to ``<log_path>.1`` when it exceeds the
+    module's ``_LOG_ROTATION_BYTES`` threshold.
+
+    Single-backup policy: at most one rotated copy is kept on disk. The
+    active log is fresh (zero bytes) after rotation, so the next
+    ``open(log_path, "ab")`` writes at offset 0.
+
+    Best-effort: failures are logged and swallowed. A failed rotation
+    must NOT block ``start_langgraph_dev`` — the worst case is the log
+    keeps growing for one more session and the next ``start`` try
+    rotates it.
+    """
+    try:
+        if not log_path.exists():
+            return
+        if log_path.stat().st_size <= _LOG_ROTATION_BYTES:
+            return
+        backup = log_path.with_name(log_path.name + ".1")
+        os.replace(log_path, backup)
+    except OSError as exc:
+        logger.warning(
+            "Failed to rotate log %s: %s. Continuing with the existing log.",
+            log_path,
+            exc,
+        )
+
 # Workspace fingerprint sidecar — JSON recording the workspace + pid of the
 # running langgraph dev. Cross-process callers (e.g. TUI starting up while
 # ``EvoSci deploy`` is already running) read this on the reuse path to refuse
@@ -531,6 +567,10 @@ def start_langgraph_dev(
         )
 
     _PID_DIR.mkdir(parents=True, exist_ok=True)
+    # Rotate the log if it has grown past the threshold so this session's
+    # output starts on a fresh file. Failure is non-fatal (see
+    # ``_rotate_log_if_needed``). See #209.
+    _rotate_log_if_needed(_LOG_FILE)
     # Open the log file once and hand it to subprocess.Popen as stdout/stderr.
     # Popen duplicates the fd into the child via fork+exec, so closing our
     # parent-side handle in the finally below releases this process's fd
