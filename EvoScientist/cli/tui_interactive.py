@@ -444,6 +444,8 @@ def run_textual_interactive(
             self._status_phase: ResearchPhase = ResearchPhase.IDLE
             self._turn_started_at: datetime | None = None
             self._compacting_widget: CompactingWidget | None = None
+            self._chat_following: bool = True
+            self._new_content_below: bool = False
 
         # ── Background agent / MCP loading ───────────────────
 
@@ -1246,6 +1248,8 @@ def run_textual_interactive(
             )
 
             container = self.query_one("#chat", VerticalScroll)
+            self._chat_following = True
+            self._new_content_below = False
 
             # 1. Mount user message + loading spinner
             if not skip_user_message:
@@ -1478,17 +1482,22 @@ def run_textual_interactive(
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
                             break
-                        if not _anchor_engaged and container.max_scroll_y > 0:
-                            # Engage anchor without the force-scroll that
-                            # anchor() performs, so we preserve the user's
-                            # scroll position. Uses private attrs because
-                            # no public API supports this.
-                            _anchor_engaged = True
-                            container._anchored = True
-                            if container.scroll_y >= container.max_scroll_y - 2:
-                                container._anchor_released = False
-                            else:
-                                container._anchor_released = True
+                        if container.max_scroll_y > 0:
+                            at_end = container.is_vertical_scroll_end
+                            if not _anchor_engaged:
+                                _anchor_engaged = True
+                                if at_end:
+                                    container.anchor()
+                                else:
+                                    self._chat_following = False
+                                    self._new_content_below = True
+                            elif self._chat_following and not at_end:
+                                self._chat_following = False
+                                self._new_content_below = True
+                            elif not self._chat_following and at_end:
+                                container.anchor()
+                                self._chat_following = True
+                                self._new_content_below = False
                         event_type = state.handle_event(event)
 
                         new_phase = state.compute_phase()
@@ -2026,8 +2035,9 @@ def run_textual_interactive(
                         on_thinking_cb(state.thinking_text.rstrip())
                     # Re-anchor so final content is visible, but only
                     # if the user hasn't scrolled away.
-                    if not container._anchor_released:
+                    if self._chat_following:
                         self._anchor_chat(container)
+                    self._new_content_below = False
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
@@ -3009,7 +3019,7 @@ def run_textual_interactive(
             if (
                 self._busy
                 and self._status_phase != ResearchPhase.THINKING
-                and self.query_one("#chat", VerticalScroll)._anchor_released
+                and self._new_content_below
             ):
                 hint.append(" │ ", style=f"on {STATUS_BAR_BG} {STATUS_DIM}")
                 hint.append(
