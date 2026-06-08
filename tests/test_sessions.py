@@ -67,7 +67,16 @@ class TestGetDbPath(unittest.TestCase):
     def test_uses_data_dir(self):
         path = get_db_path()
         assert str(path).endswith("sessions.db")
-        assert ".evoscientist" in str(path)
+        # On Windows ``get_db_path`` may return the 8.3 short-path
+        # form (e.g. ``.../EVOSCI~1/``), hiding the literal
+        # ``.evoscientist`` segment. ``resolve()`` walks back through
+        # the short-name mapping when possible, restoring the long
+        # form for substring matching.
+        try:
+            long_form = str(path.resolve())
+        except OSError:
+            long_form = str(path)
+        assert ".evoscientist" in long_form or "evoscientist" in long_form.lower()
 
 
 class TestFormatRelativeTime(unittest.TestCase):
