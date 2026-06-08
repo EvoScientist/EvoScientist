@@ -65,7 +65,9 @@ BLOCKED_COMMANDS = [
 # Patterns checked against the FULL command string (dangerous even inside quotes)
 _FORCED_FULL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
-        re.compile(r"(?:^|\s)~(?:[A-Za-z._-][A-Za-z0-9._-]*(?:/|\s|$)|/|\s|$)"),
+        re.compile(
+            r"""(?:^|[\s"'(])~(?:[A-Za-z._-][A-Za-z0-9._-]*(?:/|[\s"'),$]|$)|/|[\s"'),$]|$)"""
+        ),
         "references home directory '~' (may leak sensitive files)",
     ),
     (re.compile(r"\$[A-Za-z_{]"), "expands environment variables (may leak secrets)"),
@@ -73,8 +75,17 @@ _FORCED_FULL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\b(?:printenv|env)\b"),
         "reads environment variables (may leak secrets)",
     ),
+    (re.compile(r"\bos\.environ\b"), "reads environment variables (may leak secrets)"),
+    (
+        re.compile(r"\bexpanduser\b"),
+        "expands home directory path (may leak sensitive files)",
+    ),
     (re.compile(r"\$\("), "contains $() command substitution"),
     (re.compile(r"`"), "contains backtick command substitution"),
+    (
+        re.compile(r"\b(?:os\.(?:system|exec\w*|popen)|subprocess)\b"),
+        "executes commands via Python (bypasses shell safeguards)",
+    ),
     (
         re.compile(
             r"\b(?:pip|pip3|uv)\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b"

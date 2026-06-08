@@ -76,6 +76,35 @@ class TestValidateCommand:
             in check_forced_confirmation("python -m pip install pandas").lower()
         )
 
+    def test_python_os_environ_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('python -c "print(os.environ)"') is not None
+        assert check_forced_confirmation("python -c \"os.environ['KEY']\"") is not None
+
+    def test_python_expanduser_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert (
+            check_forced_confirmation("python -c \"expanduser('~/secret')\"")
+            is not None
+        )
+        assert (
+            check_forced_confirmation("python -c \"Path('~/x').expanduser()\"")
+            is not None
+        )
+
+    def test_python_command_execution_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("python -c \"os.system('ls')\"") is not None
+        assert check_forced_confirmation("python -c \"os.execv('x', [])\"") is not None
+        assert check_forced_confirmation("python -c \"os.popen('ls')\"") is not None
+        assert (
+            check_forced_confirmation("python -c \"subprocess.run(['ls'])\"")
+            is not None
+        )
+
     def test_blocked_rm_rf_absolute(self):
         result = validate_command("rm -rf /important")
         assert result is not None
