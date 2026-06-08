@@ -157,3 +157,61 @@ class TestAuxiliaryMiddlewareScope:
 
         assert cap["tool_selector"] is main_model
         assert cap["context_editing"] is main_model
+
+    def test_pure_path_tool_selector_uses_threaded_main_when_aux_empty(self):
+        cap, fake_ts, fake_ce = self._capture()
+        cfg = _mock_cfg()
+        cfg.model = "new-main"
+        cfg.provider = "new-provider"
+        cfg.auxiliary_model = ""
+        cfg.auxiliary_provider = ""
+        main_model = object()
+
+        with (
+            patch.object(E, "_ensure_config", side_effect=AssertionError),
+            patch.object(E, "_ensure_chat_model", side_effect=AssertionError),
+            patch.object(E, "_ensure_auxiliary_chat_model", side_effect=AssertionError),
+            patch(
+                "EvoScientist.middleware.create_tool_selector_middleware",
+                side_effect=fake_ts,
+            ),
+            patch(
+                "EvoScientist.middleware.create_context_editing_middleware",
+                side_effect=fake_ce,
+            ),
+        ):
+            E._get_default_middleware(cfg=cfg, chat_model=main_model)
+
+        assert cap["tool_selector"] is main_model
+        assert cap["context_editing"] is main_model
+
+    def test_pure_path_tool_selector_builds_aux_from_threaded_config(self):
+        cap, fake_ts, fake_ce = self._capture()
+        cfg = _mock_cfg()
+        cfg.model = "new-main"
+        cfg.provider = "new-provider"
+        cfg.auxiliary_model = "new-aux"
+        cfg.auxiliary_provider = "aux-provider"
+        main_model, aux_model = object(), object()
+
+        with (
+            patch.object(E, "_ensure_config", side_effect=AssertionError),
+            patch.object(E, "_ensure_chat_model", side_effect=AssertionError),
+            patch.object(E, "_ensure_auxiliary_chat_model", side_effect=AssertionError),
+            patch(
+                "EvoScientist.llm.get_chat_model", return_value=aux_model
+            ) as get_model,
+            patch(
+                "EvoScientist.middleware.create_tool_selector_middleware",
+                side_effect=fake_ts,
+            ),
+            patch(
+                "EvoScientist.middleware.create_context_editing_middleware",
+                side_effect=fake_ce,
+            ),
+        ):
+            E._get_default_middleware(cfg=cfg, chat_model=main_model)
+
+        get_model.assert_called_once_with(model="new-aux", provider="aux-provider")
+        assert cap["tool_selector"] is aux_model
+        assert cap["context_editing"] is main_model

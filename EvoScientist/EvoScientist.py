@@ -699,9 +699,19 @@ def _get_default_middleware(
     # keep the main model (they do real work, not a one-off helper call).
     # context_editing stays on the main model — its model only sizes the
     # context-window trigger for the main agent's own history.
-    tool_selector_model = (
-        model if for_async_subagent else _ensure_auxiliary_chat_model()
-    )
+    if for_async_subagent:
+        tool_selector_model = model
+    elif chat_model is None:
+        tool_selector_model = _ensure_auxiliary_chat_model()
+    else:
+        aux_model = cfg.auxiliary_model or cfg.model
+        aux_provider = cfg.auxiliary_provider or cfg.provider
+        if (aux_model, aux_provider) == (cfg.model, cfg.provider):
+            tool_selector_model = model
+        else:
+            from .llm import get_chat_model
+
+            tool_selector_model = get_chat_model(model=aux_model, provider=aux_provider)
     mw = [
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
