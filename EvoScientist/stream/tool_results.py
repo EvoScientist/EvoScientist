@@ -60,12 +60,13 @@ def _extract_command_tool_content(output: Command, tool_call_id: str) -> str | N
     if update is None:
         return None
     messages = update.get("messages")
-    if not isinstance(messages, list) or len(messages) != 1:
+    if not isinstance(messages, list):
         return None
-    msg = messages[0]
-    if not isinstance(msg, ToolMessage):
-        return None
-    if msg.tool_call_id != tool_call_id:
-        return None
-    content, _ = _extract_tool_content(msg)
-    return content
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        if msg.tool_call_id != tool_call_id:
+            continue
+        content, _ = _extract_tool_content(msg)
+        return content
+    return None

@@ -62,11 +62,16 @@ class _SubagentRegistry:
     def __init__(self) -> None:
         self._by_path: dict[tuple[str, ...], _SubagentInfo] = {}
         self._changed = asyncio.Event()
+        self._closed = False
 
     def register(self, path: tuple[str, ...], name: str, description: str = "") -> None:
         if not path:
             return
         self._by_path[path] = _SubagentInfo(path, name, description)
+        self._changed.set()
+
+    def close(self) -> None:
+        self._closed = True
         self._changed.set()
 
     def resolve(self, namespace: tuple[str, ...]) -> _SubagentInfo | None:
@@ -76,20 +81,18 @@ class _SubagentRegistry:
                 return info
         return None
 
-    async def wait_resolve(
-        self, namespace: tuple[str, ...], timeout: float = 0.2
-    ) -> _SubagentInfo | None:
+    async def wait_resolve(self, namespace: tuple[str, ...]) -> _SubagentInfo | None:
         if not namespace:
             return None
-        if info := self.resolve(namespace):
-            return info
-        self._changed.clear()
-        if info := self.resolve(namespace):
-            return info
-        try:
-            await asyncio.wait_for(self._changed.wait(), timeout)
-        except TimeoutError:
-            pass
+        while not self._closed:
+            if info := self.resolve(namespace):
+                return info
+            self._changed.clear()
+            if info := self.resolve(namespace):
+                return info
+            if self._closed:
+                break
+            await self._changed.wait()
         return self.resolve(namespace)
 
 
@@ -113,6 +116,12 @@ class _V3EventProcessor:
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter)
+
+    @staticmethod
+    def _tool_scope(
+        namespace: tuple[str, ...], subagent: _SubagentInfo | None
+    ) -> tuple[str, ...]:
+        return subagent.path if subagent is not None else namespace
 
     async def process(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         method = event.get("method")
@@ -273,7 +282,7 @@ class _V3EventProcessor:
         args: dict[str, Any],
         tool_call_id: str,
     ) -> list[dict[str, Any]]:
-        key = (namespace, tool_call_id)
+        key = (self._tool_scope(namespace, subagent), tool_call_id)
         if key in self._emitted_tool_calls:
             return []
         self._emitted_tool_calls.add(key)
@@ -354,7 +363,10 @@ class _V3EventProcessor:
                 return events
             input_args = _as_raw_map(data_map.get("input"))
             args = dict(input_args) if input_args is not None else {}
-            self._tool_inputs[(namespace, tool_call_id)] = (name, args)
+            self._tool_inputs[(self._tool_scope(namespace, subagent), tool_call_id)] = (
+                name,
+                args,
+            )
             events.extend(
                 self._emit_tool_call_once(
                     namespace=namespace,
@@ -371,7 +383,7 @@ class _V3EventProcessor:
             if not tool_call_id:
                 return events
             name, _args = self._tool_inputs.pop(
-                (namespace, tool_call_id),
+                (self._tool_scope(namespace, subagent), tool_call_id),
                 (str(data_map.get("tool_name") or "unknown"), {}),
             )
             message = data_map.get("message")
@@ -695,34 +707,37 @@ async def stream_agent_events(
 
         async def _consume_subagents() -> None:
             completion_tasks: list[asyncio.Task[Any]] = []
-            async for subagent in subagent_iter:
-                path = tuple(str(part) for part in subagent.path)
-                name = subagent.name
-                if not name:
-                    continue
-                name = str(name)
-                description = ""
-                cause = subagent.cause
-                trigger_call_id = ""
-                if cause and cause["type"] == "toolCall":
-                    trigger_call_id = cause["tool_call_id"]
-                instance_id = ":".join(path)
-                await queue.put(
-                    emitter.subagent_start(
-                        name,
-                        description,
-                        instance_id=instance_id,
-                        tool_call_id=trigger_call_id,
-                    ).data
-                )
-                subagents.register(path, name, description)
-                completion_tasks.append(
-                    asyncio.create_task(
-                        _await_subagent_done(subagent, name, instance_id)
+            try:
+                async for subagent in subagent_iter:
+                    path = tuple(str(part) for part in subagent.path)
+                    name = subagent.name
+                    if not name:
+                        continue
+                    name = str(name)
+                    description = ""
+                    cause = subagent.cause
+                    trigger_call_id = ""
+                    if cause and cause["type"] == "toolCall":
+                        trigger_call_id = cause["tool_call_id"]
+                    instance_id = ":".join(path)
+                    await queue.put(
+                        emitter.subagent_start(
+                            name,
+                            description,
+                            instance_id=instance_id,
+                            tool_call_id=trigger_call_id,
+                        ).data
                     )
-                )
-            if completion_tasks:
-                await asyncio.gather(*completion_tasks)
+                    subagents.register(path, name, description)
+                    completion_tasks.append(
+                        asyncio.create_task(
+                            _await_subagent_done(subagent, name, instance_id)
+                        )
+                    )
+                if completion_tasks:
+                    await asyncio.gather(*completion_tasks)
+            finally:
+                subagents.close()
 
         async def _run_producer(coro: Any) -> None:
             try:

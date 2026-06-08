@@ -324,8 +324,7 @@ class TestExtractSummarizationText:
         )
 
     def test_string_blocks_in_list(self):
-        class Msg:
-            def __init__(self):
-                self.content = ["hello", "world"]
-
-        assert _extract_summarization_text(Msg()) == "helloworld"
+        assert (
+            _extract_summarization_text(HumanMessage(content=["hello", "world"]))
+            == "helloworld"
+        )

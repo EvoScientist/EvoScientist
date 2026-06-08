@@ -255,12 +255,9 @@ class FakeSubagent:
     path: Iterable[Any]
     name: str = "research-agent"
     tool_call_id: str = ""
-    trigger_call_id: str = ""
 
     def __post_init__(self):
         self.path = tuple(self.path)
-        if not self.trigger_call_id:
-            self.trigger_call_id = "_".join(str(p) for p in self.path)
         if not self.tool_call_id:
             self.tool_call_id = "call_" + "_".join(str(p) for p in self.path)
 

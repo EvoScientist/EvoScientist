@@ -16,7 +16,10 @@ from EvoScientist.stream.summarization import (
     _extract_summary_message_text,
     _find_summarization_event_payload,
 )
-from EvoScientist.stream.tool_results import _extract_tool_content
+from EvoScientist.stream.tool_results import (
+    _extract_command_tool_content,
+    _extract_tool_content,
+)
 from tests.conftest import run_async
 from tests.stream_v3_fakes import (
     ErroringV3Agent,
@@ -110,6 +113,27 @@ class TestExtractToolContent:
         assert is_image is False
         assert "Line 1" in content
         assert "Line 2" in content
+
+    def test_command_tool_content_scans_multiple_messages(self):
+        """Command updates may contain multiple messages; match by tool_call_id."""
+        output = Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Ignore me",
+                        name="read_file",
+                        tool_call_id="other",
+                    ),
+                    ToolMessage(
+                        content=[{"type": "image", "base64": "iVBORw0KGgo..."}],
+                        name="read_file",
+                        tool_call_id="target",
+                    ),
+                ]
+            }
+        )
+
+        assert _extract_command_tool_content(output, "target") == "[OK] Image displayed"
 
 
 # =============================================================================
@@ -743,6 +767,89 @@ class TestV3ProtocolStreaming:
         )
         assert event_types.index("subagent_end") < event_types.index("done")
 
+    def test_namespaced_events_wait_for_delayed_subagent_registration(self):
+        """Subagent events are not dropped if protocol events arrive first."""
+        namespace = ("task", "late")
+
+        class DelayedSubagentRun:
+            def __init__(self):
+                self.subagents = self._subagent_iter()
+
+            async def _subagent_iter(self):
+                await asyncio.sleep(0)
+                yield FakeSubagent(namespace, "research-agent")
+
+            def __aiter__(self):
+                return self._events()
+
+            async def _events(self):
+                yield message_delta("Sub-agent finding.", namespace=namespace)
+
+            async def abort(self):
+                pass
+
+        class Agent:
+            def __init__(self):
+                self._run = DelayedSubagentRun()
+
+            def astream_events(self, *_args, **_kwargs):
+                return self._run
+
+            async def aget_state(self, _config):
+                class Snapshot:
+                    def __init__(self):
+                        self.values = {}
+
+                return Snapshot()
+
+        events = collect_events(Agent())
+        event_types = [e["type"] for e in events]
+        text = next(e for e in events if e.get("type") == "subagent_text")
+
+        assert text["content"] == "Sub-agent finding."
+        assert text["instance_id"] == "task:late"
+        assert event_types.index("subagent_start") < event_types.index("subagent_text")
+
+    def test_subagent_tool_dedupe_uses_resolved_path(self):
+        """Tool call/result events can arrive on namespace suffixes for one subagent."""
+        subagent_path = ("task", "abc")
+        call_namespace = (*subagent_path, "agent")
+        tool_namespace = (*subagent_path, "tools")
+        output = ToolMessage(
+            content="Found result",
+            name="search",
+            tool_call_id="sa-tc",
+        )
+        agent = FakeV3Agent(
+            [
+                message_tool_call_block(
+                    "search",
+                    {"query": "papers"},
+                    tool_call_id="sa-tc",
+                    namespace=call_namespace,
+                ),
+                tool_started(
+                    "search",
+                    {"query": "papers"},
+                    tool_call_id="sa-tc",
+                    namespace=tool_namespace,
+                ),
+                tool_finished(output, tool_call_id="sa-tc", namespace=tool_namespace),
+            ],
+            subagents=[FakeSubagent(subagent_path, "research-agent")],
+        )
+        events = collect_events(agent)
+
+        calls = [e for e in events if e.get("type") == "subagent_tool_call"]
+        results = [e for e in events if e.get("type") == "subagent_tool_result"]
+
+        assert len(calls) == 1
+        assert calls[0]["instance_id"] == "task:abc"
+        assert calls[0]["id"] == "sa-tc"
+        assert len(results) == 1
+        assert results[0]["instance_id"] == "task:abc"
+        assert results[0]["id"] == "sa-tc"
+
     def test_subagent_end_is_emitted_before_later_root_text(self):
         """Finished subagents stop showing as active while root streaming continues."""
         output_returned = asyncio.Event()
@@ -750,7 +857,6 @@ class TestV3ProtocolStreaming:
         class CompletingSubagent:
             path = ("task", "done-first")
             name = "research-agent"
-            trigger_call_id = "done-first"
 
             @property
             def cause(self) -> dict[str, str]:
