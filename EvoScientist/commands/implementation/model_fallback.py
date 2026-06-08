@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from ..base import Argument, Command, CommandContext
+from ..base import Argument, Command, CommandContext, SubCommand
 from ..manager import manager
 
 
@@ -27,6 +27,7 @@ class ModelFallbackCommand(Command):
     name = "/model-fallback"
     alias: ClassVar[list[str]] = ["/fallback"]
     description = "Manage fallback models (add/remove/list/clear)"
+    category = "Model"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="action",
@@ -34,6 +35,14 @@ class ModelFallbackCommand(Command):
             description="add|remove|list|clear|save|help",
             required=False,
         ),
+    ]
+    subcommands = [
+        SubCommand("add", "Add a fallback model"),
+        SubCommand("remove", "Remove a fallback by position"),
+        SubCommand("list", "Show the current fallback chain"),
+        SubCommand("clear", "Remove all fallback models"),
+        SubCommand("save", "Save current chain to config"),
+        SubCommand("help", "Show subcommand reference"),
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

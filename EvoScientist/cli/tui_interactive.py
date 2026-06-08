@@ -364,6 +364,15 @@ def run_textual_interactive(
             padding: 0 1;
             border-bottom: solid #0284c7;
         }
+        #completion-help {
+            display: none;
+            height: auto;
+            max-height: 8;
+            background: #1a1b26;
+            padding: 0 2;
+            color: #6b7280;
+            border-bottom: solid #334155;
+        }
         #status {
             height: 1;
             min-height: 1;
@@ -416,8 +425,9 @@ def run_textual_interactive(
             self._queued_messages: list[
                 str
             ] = []  # queued messages to send after current turn
-            self._comp_items: list[tuple[str, str]] = []
+            self._comp_items: list[tuple[str, str, str]] = []
             self._comp_index: int = -1
+            self._comp_suppress_reset: bool = False
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
@@ -735,6 +745,7 @@ def run_textual_interactive(
             with Container(id="input-shell"):
                 yield Static("", id="queued-message")
                 yield Static("", id="completions")
+                yield Static("", id="completion-help")
                 with Horizontal(id="input-row"):
                     yield Static(">", id="input-cursor")
                     yield ChatTextArea(
@@ -2371,35 +2382,35 @@ def run_textual_interactive(
             self._run_task = asyncio.ensure_future(self._run_turn(text))
 
         def on_text_area_changed(self, event: ChatTextArea.Changed) -> None:
+            # Tab-cycling sets this flag to avoid resetting the index
+            # when _apply_selected_completion changes prompt.value.
+            if self._comp_suppress_reset:
+                self._comp_suppress_reset = False
+                return
+
             text = event.text_area.text
             comp_widget = self.query_one("#completions", Static)
 
-            # @file mention completion
-            if "@" in text:
-                candidates = complete_file_mention(text, workspace_dir)
-                if candidates:
-                    self._comp_items = candidates
-                    self._comp_index = -1
-                    self._render_completions()
-                    comp_widget.display = True
-                    return
-
+            # Slash-command and subcommand completions take priority
             if text.startswith("/"):
-                prefix = text.lower()
-                matches = [
-                    (cmd, desc)
-                    for cmd, desc in cmd_manager.list_commands()
-                    if cmd.startswith(prefix)
-                ]
-                if len(matches) == 1 and matches[0][0] == prefix:
-                    self._hide_completions()
-                    return
+                matches = cmd_manager.get_completions_for_input(text)
                 if matches:
                     self._comp_items = matches
                     self._comp_index = -1
                     self._render_completions()
                     comp_widget.display = True
                     return
+
+            # @file mention completion (only for non-command input)
+            if "@" in text:
+                candidates = complete_file_mention(text, workspace_dir)
+                if candidates:
+                    self._comp_items = [(c, d, "") for c, d in candidates]
+                    self._comp_index = -1
+                    self._render_completions()
+                    comp_widget.display = True
+                    return
+
             self._hide_completions()
 
         def _render_queue_indicator(self) -> None:
@@ -2491,7 +2502,11 @@ def run_textual_interactive(
             # Handle completion list selection (up key)
             comp_widget = self.query_one("#completions", Static)
             if comp_widget.display and self._comp_items:
-                self._comp_index = (self._comp_index - 1) % len(self._comp_items)
+                n = len(self._comp_items)
+                if self._comp_index <= 0:
+                    self._comp_index = n - 1
+                else:
+                    self._comp_index -= 1
                 self._render_completions()
                 return
 
@@ -2636,10 +2651,11 @@ def run_textual_interactive(
             """
             comp_widget = self.query_one("#completions", Static)
             if not (comp_widget.display and self._comp_items):
-                # No completions active — keep focus on the prompt.
                 self.query_one("#prompt", ChatTextArea).focus()
                 return
             self._comp_index = (self._comp_index + 1) % len(self._comp_items)
+            self._render_completions()
+            self._comp_suppress_reset = True
             self._apply_selected_completion()
 
         def _handle_completion_enter(self) -> bool:
@@ -2661,6 +2677,7 @@ def run_textual_interactive(
             if self._comp_index < 0:
                 self._comp_index = 0
 
+            self._comp_suppress_reset = True
             self._apply_selected_completion()
             self._hide_completions()
             return True
@@ -2669,7 +2686,8 @@ def run_textual_interactive(
             """Apply the currently selected completion to the input field.
 
             For ``@file`` completions the last ``@token`` is replaced in-place;
-            for slash-command completions the entire input is replaced.
+            for top-level ``/command`` completions the entire input is replaced;
+            for subcommand/argument completions the last token is replaced.
             """
             if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
                 return
@@ -2686,29 +2704,60 @@ def run_textual_interactive(
                 else:
                     new_val = current + selected + " "
                 prompt.value = new_val
-            else:
+            elif selected.startswith("/"):
                 prompt.value = selected + " "
+            else:
+                current = prompt.value
+                if current.endswith(" "):
+                    prompt.value = current + selected + " "
+                else:
+                    base = current.rsplit(" ", 1)[0]
+                    prompt.value = base + " " + selected + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
-            comp_widget = self.query_one("#completions", Static)
-            comp_widget.display = False
+            self.query_one("#completions", Static).display = False
+            self.query_one("#completion-help", Static).display = False
 
         def _render_completions(self) -> None:
             comp_text = Text()
-            for i, (cmd, desc) in enumerate(self._comp_items):
+            last_cat = ""
+            for i, item in enumerate(self._comp_items):
+                cmd, desc = item[0], item[1]
+                cat = item[2] if len(item) > 2 else ""
+                if cat and cat != last_cat:
+                    if last_cat:
+                        comp_text.append("\n")
+                    comp_text.append(f" {cat}\n", style="bold #6b7280")
+                    last_cat = cat
                 if i == self._comp_index:
-                    comp_text.append("\u25b8 ", style="bold")
-                    comp_text.append(f"{cmd:<30}", style="bold")
+                    comp_text.append("  \u25b8 ", style="bold")
+                    comp_text.append(f"{cmd:<28}", style="bold")
                     comp_text.append(desc, style="bold")
                 else:
-                    comp_text.append("  ", style="#888888")
-                    comp_text.append(f"{cmd:<30}", style="#888888")
+                    comp_text.append("    ", style="#888888")
+                    comp_text.append(f"{cmd:<28}", style="#888888")
                     comp_text.append(desc, style="#888888")
                 if i < len(self._comp_items) - 1:
                     comp_text.append("\n")
             self.query_one("#completions", Static).update(comp_text)
+
+            help_widget = self.query_one("#completion-help", Static)
+            if 0 <= self._comp_index < len(self._comp_items):
+                selected = self._comp_items[self._comp_index][0]
+                if selected.startswith("/"):
+                    cmd_obj = cmd_manager.get_command(selected)
+                else:
+                    parts = self.query_one("#prompt", ChatTextArea).value.strip().split()
+                    cmd_obj = cmd_manager.get_command(parts[0]) if parts else None
+                if cmd_obj is not None:
+                    help_widget.update(Text(cmd_obj.build_help_text(), style="#9ca3af"))
+                    help_widget.display = True
+                else:
+                    help_widget.display = False
+            else:
+                help_widget.display = False
 
         # ── Slash commands ─────────────────────────────────────
 

@@ -68,6 +68,65 @@ class CommandManager:
                 seen.add(cmd)
         return results
 
+    _CATEGORY_ORDER = ["Session", "Skills", "MCP", "Channels", "Model", "General"]
+
+    def get_completions_for_input(
+        self, text: str
+    ) -> list[tuple[str, str, str]]:
+        """Multi-stage completion resolver.
+
+        Returns ``(completion_text, description, category)`` triples.
+        Stage 0 returns top-level commands; stage 1+ delegates to
+        :meth:`Command.get_completions`.
+        """
+        trailing_space = text.endswith(" ")
+        text = text.strip()
+        if not text.startswith("/"):
+            return []
+
+        parts = text.split()
+        if trailing_space and parts:
+            parts.append("")
+
+        if len(parts) <= 1:
+            prefix = text.lower()
+            seen: set[int] = set()
+            by_cat: dict[str, list[tuple[str, str]]] = {}
+            for cmd in self._commands.values():
+                if id(cmd) in seen:
+                    continue
+                # Match against canonical name and all registered aliases
+                all_names = [cmd.name.lower()] + [
+                    a.lower() if a.startswith("/") else f"/{a.lower()}"
+                    for a in cmd.alias
+                ]
+                if any(n.startswith(prefix) for n in all_names):
+                    seen.add(id(cmd))
+                    by_cat.setdefault(cmd.category, []).append(
+                        (cmd.name, cmd.description)
+                    )
+            # Exact match on a leaf command → hide popup
+            exact_cmd = self.get_command(prefix)
+            if exact_cmd and not exact_cmd.subcommands:
+                all_matches = [v for vs in by_cat.values() for v in vs]
+                if len(all_matches) == 1:
+                    return []
+            results: list[tuple[str, str, str]] = []
+            for cat in self._CATEGORY_ORDER:
+                for name, desc in by_cat.get(cat, []):
+                    results.append((name, desc, cat))
+            for cat, items in by_cat.items():
+                if cat not in self._CATEGORY_ORDER:
+                    for name, desc in items:
+                        results.append((name, desc, cat))
+            return results
+
+        # Stage 1+: resolve command (works for aliases via get_command)
+        cmd = self.get_command(parts[0])
+        if cmd is None:
+            return []
+        return [(t, d, "") for t, d in cmd.get_completions(parts[1:])]
+
     async def execute(self, command_str: str, ctx: CommandContext) -> bool:
         """Parse and execute a command string.
 

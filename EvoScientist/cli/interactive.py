@@ -198,17 +198,24 @@ class SlashCommandCompleter(Completer):
                     yield Completion(path, start_position=start, display_meta=type_hint)
                 return
 
-        # Slash command completion
+        # Slash command / subcommand completion
         if not text.startswith("/"):
             return
-        # ``list_commands`` is dedup'd on the Command instance so aliases
-        # (e.g. /quit, /q for /exit) don't appear as separate rows.
-        for cmd, desc in sorted(cmd_manager.list_commands()):
-            if cmd.startswith(text):
+        for comp_text, desc, _cat in cmd_manager.get_completions_for_input(text):
+            if comp_text.startswith("/"):
                 yield Completion(
-                    cmd,
+                    comp_text,
                     start_position=-len(text),
-                    display=f"{cmd:<40}",
+                    display=f"{comp_text:<40}",
+                    display_meta=desc,
+                )
+            else:
+                last_space = text.rfind(" ")
+                start = -(len(text) - last_space - 1) if last_space >= 0 else -len(text)
+                yield Completion(
+                    comp_text,
+                    start_position=start,
+                    display=f"{comp_text:<30}",
                     display_meta=desc,
                 )
 

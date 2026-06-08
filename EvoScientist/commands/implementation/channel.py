@@ -4,7 +4,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ..base import Command, CommandContext
+from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 
@@ -13,6 +13,20 @@ class ChannelCommand(Command):
 
     name = "/channel"
     description = "Configure messaging channels"
+    category = "Channels"
+    subcommands = [
+        SubCommand("status", "Show channel status"),
+        SubCommand("stop", "Stop running channels"),
+        SubCommand("telegram", "Start Telegram channel"),
+        SubCommand("discord", "Start Discord channel"),
+        SubCommand("slack", "Start Slack channel"),
+        SubCommand("feishu", "Start Feishu channel"),
+        SubCommand("dingtalk", "Start DingTalk channel"),
+        SubCommand("wechat", "Start WeChat channel"),
+        SubCommand("email", "Start Email channel"),
+        SubCommand("imessage", "Start iMessage channel"),
+    ]
+    examples = ["/channel telegram", "/channel stop telegram"]
 
     def needs_agent(self, args: list[str]) -> bool:
         # ``status`` and ``stop`` are introspection / teardown; they

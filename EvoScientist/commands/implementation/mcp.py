@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rich.table import Table
 
-from ..base import Command, CommandContext
+from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 
@@ -11,6 +11,33 @@ class MCPCommand(Command):
 
     name = "/mcp"
     description = "Manage MCP servers"
+    category = "MCP"
+    subcommands = [
+        SubCommand("list", "List configured servers"),
+        SubCommand("config", "Show detailed server config"),
+        SubCommand("add", "Add a server"),
+        SubCommand("edit", "Edit an existing server"),
+        SubCommand("remove", "Remove a server"),
+        SubCommand("install", "Browse and install servers"),
+    ]
+    examples = ["/mcp add myserver npx @foo/bar", "/mcp config myserver"]
+
+    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+        if len(tokens) <= 1:
+            return super().get_completions(tokens)
+        subcmd = tokens[0].lower()
+        if subcmd in ("config", "remove", "edit") and len(tokens) == 2:
+            try:
+                from ...mcp import load_mcp_config
+
+                config = load_mcp_config()
+                prefix = tokens[1].lower()
+                return [
+                    (name, "") for name in config if name.lower().startswith(prefix)
+                ]
+            except Exception:
+                return []
+        return []
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         if not args or args[0] == "list":
