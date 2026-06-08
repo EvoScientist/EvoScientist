@@ -7,12 +7,11 @@ use so that importing this module is fast and non-agent CLI commands
 
 Usage:
     from EvoScientist import EvoScientist_agent
+    from EvoScientist.stream.events import stream_agent_events
 
     # Notebook / programmatic usage
-    for state in EvoScientist_agent.stream(
-        {"messages": [HumanMessage(content="your question")]},
-        config={"configurable": {"thread_id": "1"}},
-        stream_mode="values",
+    async for event in stream_agent_events(
+        EvoScientist_agent, "your question", thread_id="1"
     ):
         ...
 """

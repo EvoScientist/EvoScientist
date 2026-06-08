@@ -52,6 +52,7 @@ from .history_suggester import HistorySuggester
 from .status_bar import (
     STATUS_BAR_BG,
     STATUS_DIM,
+    STATUS_GOOD,
     STATUS_HINT_BUSY,
     STATUS_HINT_IDLE,
     STATUS_HINT_WRITING,
@@ -443,6 +444,8 @@ def run_textual_interactive(
             self._status_phase: ResearchPhase = ResearchPhase.IDLE
             self._turn_started_at: datetime | None = None
             self._compacting_widget: CompactingWidget | None = None
+            self._chat_following: bool = True
+            self._new_content_below: bool = False
 
         # ── Background agent / MCP loading ───────────────────
 
@@ -551,7 +554,7 @@ def run_textual_interactive(
                 title=title,
             )
             await container.mount(picker)
-            self._schedule_scroll_to_bottom(container, delays=())
+            self._anchor_chat(container)
             picker.focus()
 
             return await self._wait_for_thread_pick(picker)
@@ -568,7 +571,7 @@ def run_textual_interactive(
                 pre_filter_tag=pre_filter_tag,
             )
             await container.mount(browser)
-            self._schedule_scroll_to_bottom(container, delays=())
+            self._anchor_chat(container)
             browser.focus()
 
             return await self._wait_for_skill_browse(browser)
@@ -585,7 +588,7 @@ def run_textual_interactive(
                 pre_filter_tag=pre_filter_tag,
             )
             await container.mount(browser)
-            self._schedule_scroll_to_bottom(container, delays=())
+            self._anchor_chat(container)
             browser.focus()
 
             return await self._wait_for_mcp_browse(browser)
@@ -605,7 +608,7 @@ def run_textual_interactive(
                 current_provider=current_provider,
             )
             await container.mount(picker)
-            self._schedule_scroll_to_bottom(container, delays=())
+            self._anchor_chat(container)
             picker.focus()
 
             return await self._wait_for_model_pick(picker)
@@ -997,37 +1000,16 @@ def run_textual_interactive(
 
         # ── Widget helpers ─────────────────────────────────────
 
-        def _schedule_scroll_to_bottom(
-            self,
-            container: VerticalScroll,
-            *,
-            delays: tuple[float, ...] = (0.3, 0.8),
-            immediate: bool = True,
-        ) -> None:
-            """Schedule deferred scrolls so the viewport lands at the bottom.
-
-            Markdown- and list-heavy widgets lay out across multiple refresh
-            cycles, so a single ``scroll_end()`` may fire against a stale
-            ``virtual_size`` and leave the viewport mid-content. Re-schedule
-            ``scroll_end`` at each delay to follow subsequent reflows.
-            """
-            if immediate:
-                self.call_after_refresh(
-                    lambda: container.scroll_end(animate=False),
-                )
-            for delay in delays:
-                self.set_timer(
-                    delay,
-                    lambda: self.call_after_refresh(
-                        lambda: container.scroll_end(animate=False),
-                    ),
-                )
+        def _anchor_chat(self, container: VerticalScroll | None = None) -> None:
+            """Re-engage the scroll anchor so the viewport pins to the bottom."""
+            if container is None:
+                container = self.query_one("#chat", VerticalScroll)
+            container.anchor()
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
             container = self.query_one("#chat", VerticalScroll)
             container.mount(SystemMessage(text, msg_style=style))
-            container.scroll_end(animate=False)
 
         def _mount_renderable(self, renderable: Any) -> None:
             """Mount a Rich renderable (e.g. Table) as a Static widget."""
@@ -1044,7 +1026,6 @@ def run_textual_interactive(
                 container.mount(CompactSummaryWidget(renderable.summary_text))
             else:
                 container.mount(Static(renderable))
-            container.scroll_end(animate=False)
 
         async def _start_compacting_indicator(self) -> None:
             """Show a transient timer widget while /compact is running."""
@@ -1053,7 +1034,6 @@ def run_textual_interactive(
             widget = CompactingWidget()
             self._compacting_widget = widget
             await container.mount(widget)
-            container.scroll_end(animate=False)
 
         async def _stop_compacting_indicator(self) -> None:
             """Remove the transient /compact progress widget, if present."""
@@ -1268,6 +1248,8 @@ def run_textual_interactive(
             )
 
             container = self.query_one("#chat", VerticalScroll)
+            self._chat_following = True
+            self._new_content_below = False
 
             # 1. Mount user message + loading spinner
             if not skip_user_message:
@@ -1310,26 +1292,6 @@ def run_textual_interactive(
             _todo_sent = False
             _media_sent: set[str] = set()
             _MIN_THINKING_LEN = 200
-            _scroll_pending = False
-
-            def _schedule_scroll() -> None:
-                """Throttle scroll_end to at most once per 200ms.
-
-                Uses call_after_refresh so the scroll happens after Textual
-                finishes its layout pass — otherwise scroll_end may see
-                stale widget heights and not scroll far enough.
-                """
-                nonlocal _scroll_pending
-                if not _scroll_pending:
-                    _scroll_pending = True
-                    self.set_timer(0.2, _do_scroll)
-
-            def _do_scroll() -> None:
-                nonlocal _scroll_pending
-                _scroll_pending = False
-                self.call_after_refresh(
-                    lambda: container.scroll_end(animate=False),
-                )
 
             metadata = build_metadata(self._workspace_dir, self._current_model)
             response = ""
@@ -1415,7 +1377,6 @@ def run_textual_interactive(
                         if suffix:
                             await response_display.assistant.append_content(suffix)
 
-                _schedule_scroll()
                 return final_text
 
             def _finalize_active_summarization() -> None:
@@ -1478,21 +1439,17 @@ def run_textual_interactive(
                 for tw in tool_widgets.values():
                     tw.display = True
 
-            def _find_or_rename_sa_widget(
-                resolved_name: str,
+            def _get_sa_widget(
+                instance_id: str,
+                name: str = "",
                 description: str = "",
             ) -> SubAgentWidget | None:
-                """Look up a sub-agent widget, renaming 'sub-agent' entry if needed."""
-                if resolved_name in subagent_widgets:
-                    w = subagent_widgets[resolved_name]
+                if instance_id in subagent_widgets:
+                    w = subagent_widgets[instance_id]
+                    if name and w._sa_name != name:
+                        w.update_name(name, description or w._description)
                     if description and not w._description:
                         w.update_name(w._sa_name, description)
-                    return w
-                # Rename "sub-agent" → real name (mirrors state._get_or_create_subagent)
-                if resolved_name != "sub-agent" and "sub-agent" in subagent_widgets:
-                    w = subagent_widgets.pop("sub-agent")
-                    w.update_name(resolved_name, description)
-                    subagent_widgets[resolved_name] = w
                     return w
                 return None
 
@@ -1511,6 +1468,7 @@ def run_textual_interactive(
                     thinking_w = None
                     summarization_w = None
                 try:
+                    _anchor_engaged = False
                     async for event in stream_agent_events(
                         self._agent_loader.agent,
                         _stream_input,
@@ -1520,6 +1478,22 @@ def run_textual_interactive(
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
                             break
+                        if container.max_scroll_y > 0:
+                            at_end = container.is_vertical_scroll_end
+                            if not _anchor_engaged:
+                                _anchor_engaged = True
+                                if at_end:
+                                    container.anchor()
+                                else:
+                                    self._chat_following = False
+                                    self._new_content_below = True
+                            elif self._chat_following and not at_end:
+                                self._chat_following = False
+                                self._new_content_below = True
+                            elif not self._chat_following and at_end:
+                                container.anchor()
+                                self._chat_following = True
+                                self._new_content_below = False
                         event_type = state.handle_event(event)
 
                         new_phase = state.compute_phase()
@@ -1625,7 +1599,6 @@ def run_textual_interactive(
                                 )
 
                                 await container.mount(ToolSelectionWidget(tools))
-                                _schedule_scroll()
 
                         elif event_type == "text":
                             chunk = event.get("content", "")
@@ -1663,7 +1636,7 @@ def run_textual_interactive(
 
                         elif event_type == "tool_call":
                             tool_name = event.get("name", "unknown")
-                            tool_id = event.get("id", "")
+                            tool_id = event["id"]
                             tool_args = event.get("args", {})
                             # Finalize thinking if still active
                             if thinking_w is not None and thinking_w._is_active:
@@ -1691,8 +1664,7 @@ def run_textual_interactive(
                                 else:
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
-                                    if tool_id:
-                                        tool_widgets[tool_id] = w
+                                    tool_widgets[tool_id] = w
                             # Update todo widget on write_todos.
                             # Insert before tool call widget so Task List
                             # panel appears above the tool call.
@@ -1713,38 +1685,18 @@ def run_textual_interactive(
                             result_name = event.get("name", "unknown")
                             result_content = event.get("content", "")
                             result_success = event.get("success", True)
-                            # Match via state's deduplicated tool_calls (uses tool_id)
-                            matched = False
-                            matched_tid = ""
-                            result_idx = len(state.tool_results) - 1
-                            if 0 <= result_idx < len(state.tool_calls):
-                                tc = state.tool_calls[result_idx]
-                                tid = tc.get("id", "")
-                                if tid and tid in tool_widgets:
-                                    tw = tool_widgets[tid]
-                                    if tw._status == "running":
-                                        if result_success:
-                                            tw.set_success(result_content)
-                                        else:
-                                            tw.set_error(result_content)
-                                        matched = True
-                                        matched_tid = tid
-                            # Fallback: match first running widget with same name
-                            if not matched:
-                                for fid, tw in tool_widgets.items():
-                                    if (
-                                        tw.tool_name == result_name
-                                        and tw._status == "running"
-                                    ):
-                                        if result_success:
-                                            tw.set_success(result_content)
-                                        else:
-                                            tw.set_error(result_content)
-                                        matched = True
-                                        matched_tid = fid
-                                        break
+                            matched_tid = event["id"]
+                            tw = tool_widgets.get(matched_tid)
+                            if tw is not None and tw._status == "running":
+                                if result_success:
+                                    tw.set_success(result_content)
+                                else:
+                                    tw.set_error(result_content)
                             # Track completion order for collapsing
-                            if matched_tid and matched_tid not in completed_tool_order:
+                            if (
+                                tw is not None
+                                and matched_tid not in completed_tool_order
+                            ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
                             # Update todo from results
@@ -1769,44 +1721,44 @@ def run_textual_interactive(
                                 await container.mount(processing_w)
 
                         elif event_type == "subagent_start":
-                            sa_name = event.get("name", "sub-agent")
+                            sa_name = event["name"]
                             sa_desc = event.get("description", "")
-                            existing = _find_or_rename_sa_widget(sa_name, sa_desc)
+                            instance_id = event["instance_id"]
+                            existing = _get_sa_widget(instance_id, sa_name, sa_desc)
                             if existing is None:
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
-                                subagent_widgets[sa_name] = sa_w
+                                subagent_widgets[instance_id] = sa_w
 
                         elif event_type == "subagent_tool_call":
-                            sa_name = event.get("subagent", "sub-agent")
-                            sa_name = state._resolve_subagent_name(sa_name)
-                            sa_w = _find_or_rename_sa_widget(sa_name)
+                            instance_id = event["instance_id"]
+                            sa_w = _get_sa_widget(
+                                instance_id, event.get("subagent", "")
+                            )
                             if sa_w is None:
-                                sa_w = SubAgentWidget(sa_name)
-                                await container.mount(sa_w)
-                                subagent_widgets[sa_name] = sa_w
+                                continue
                             await sa_w.add_tool_call(
                                 event.get("name", "unknown"),
                                 event.get("args", {}),
-                                event.get("id", ""),
+                                event["id"],
                             )
 
                         elif event_type == "subagent_tool_result":
-                            sa_name = event.get("subagent", "sub-agent")
-                            sa_name = state._resolve_subagent_name(sa_name)
-                            sa_w = _find_or_rename_sa_widget(sa_name)
+                            instance_id = event["instance_id"]
+                            sa_w = _get_sa_widget(
+                                instance_id, event.get("subagent", "")
+                            )
                             if sa_w is not None:
                                 sa_w.complete_tool(
                                     event.get("name", "unknown"),
                                     event.get("content", ""),
                                     event.get("success", True),
-                                    event.get("id", ""),
+                                    event["id"],
                                 )
 
                         elif event_type == "subagent_end":
-                            sa_name = event.get("name", "sub-agent")
-                            sa_name = state._resolve_subagent_name(sa_name)
-                            sa_w = _find_or_rename_sa_widget(sa_name)
+                            instance_id = event["instance_id"]
+                            sa_w = _get_sa_widget(instance_id, event.get("name", ""))
                             if sa_w is not None:
                                 sa_w.finalize()
 
@@ -1835,7 +1787,6 @@ def run_textual_interactive(
                                     _prompt.disabled = True
                                     ask_w = AskUserWidget(questions)
                                     await container.mount(ask_w)
-                                    _schedule_scroll()
                                     self.call_after_refresh(ask_w.focus_active)
                                     result = await self._wait_for_ask_user(ask_w)
                                     try:
@@ -1914,7 +1865,6 @@ def run_textual_interactive(
 
                             approval_w = ApprovalWidget(action_reqs)
                             await container.mount(approval_w)
-                            _schedule_scroll()
                             decided_event = await self._wait_for_approval(approval_w)
                             await approval_w.remove()
                             _prompt.disabled = False
@@ -1961,11 +1911,6 @@ def run_textual_interactive(
                                 if response_display.assistant is None:
                                     response_display.assistant = AssistantMessage(clean)
                                     await container.mount(response_display.assistant)
-                                    self._schedule_scroll_to_bottom(
-                                        container,
-                                        delays=(0.15, 0.4, 0.8, 1.5),
-                                        immediate=False,
-                                    )
                                 elif response_display.assistant._content != clean:
                                     response_display.assistant._content = clean
                                     await response_display.assistant.stop_stream()
@@ -1993,9 +1938,6 @@ def run_textual_interactive(
                         elif event_type == "error":
                             error_msg = event.get("message", "Unknown error")
                             self._append_system(f"Error: {error_msg}", style="red")
-
-                        # Scroll after Textual processes the layout update
-                        _schedule_scroll()
 
                     response = (state.response_text or "").strip()
 
@@ -2066,8 +2008,11 @@ def run_textual_interactive(
                         and len(state.thinking_text) >= _MIN_THINKING_LEN
                     ):
                         on_thinking_cb(state.thinking_text.rstrip())
-                    # Final scrolls to ensure last content is visible.
-                    self._schedule_scroll_to_bottom(container)
+                    # Re-anchor so final content is visible, but only
+                    # if the user hasn't scrolled away.
+                    if self._chat_following:
+                        self._anchor_chat(container)
+                    self._new_content_below = False
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
@@ -2194,7 +2139,6 @@ def run_textual_interactive(
                     f"[{msg.channel_type}: Received from {msg.sender}]",
                     style="dim",
                 )
-                container.scroll_end(animate=False)
 
                 # Build channel callbacks (fire-and-forget to avoid blocking UI)
                 def _send_to_channel(coro, label: str) -> None:
@@ -2840,12 +2784,9 @@ def run_textual_interactive(
             await container.mount(
                 SystemMessage("── End of history ──", msg_style="dim")
             )
-            # History can hold dozens of Markdown-heavy AssistantMessages
-            # whose async layout keeps growing virtual_size for several
-            # seconds; schedule enough retries to catch the final reflow.
-            self._schedule_scroll_to_bottom(
-                container, delays=(0.1, 0.3, 0.6, 1.0, 1.8, 3.0)
-            )
+            # Anchor so the viewport pins to the bottom as Markdown-heavy
+            # AssistantMessages finish their async layout reflows.
+            self._anchor_chat(container)
 
         # ── Quit handling ──────────────────────────────────────
 
@@ -3049,8 +2990,18 @@ def run_textual_interactive(
 
             hint = Text.assemble(
                 (hint_label, hint_style),
-                (" │ ", f"on {STATUS_BAR_BG} {STATUS_DIM}"),
             )
+            if (
+                self._busy
+                and self._status_phase != ResearchPhase.THINKING
+                and self._new_content_below
+            ):
+                hint.append(" │ ", style=f"on {STATUS_BAR_BG} {STATUS_DIM}")
+                hint.append(
+                    "↓ New content below",
+                    style=f"on {STATUS_BAR_BG} {STATUS_GOOD} bold",
+                )
+            hint.append(" │ ", style=f"on {STATUS_BAR_BG} {STATUS_DIM}")
             remaining_width = max(1, width - len(hint.plain))
             metrics = build_status_text(
                 self._status_snapshot,

@@ -596,6 +596,7 @@ def start_langgraph_dev(
                 "--n-jobs-per-worker",
                 str(jobs_per_worker),
                 "--no-browser",
+                "--no-reload",
             ],
             cwd=str(workspace_dir),
             stdout=log_handle,
