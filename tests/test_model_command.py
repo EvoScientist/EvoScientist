@@ -513,15 +513,91 @@ class TestApplyModelIntegration:
         # Global state reflects the switch end-to-end, committed via the setters.
         assert mod._chat_model_key == ("minimax-m2.7", "openrouter")
         assert mod._chat_model is sentinels[("minimax-m2.7", "openrouter")]
-        # The committed temp_cfg became the active config; the original cfg
-        # object is no longer mutated in place.
-        assert mod._config.model == "minimax-m2.7"
-        assert mod._config.provider == "openrouter"
+        # The switch is applied to the LIVE cfg in place and ``_config`` stays
+        # bound to that same object, so callers holding the active config by
+        # reference (e.g. serve's ``agent_holder["config"]``) observe the swap.
+        assert mod._config is cfg
+        assert cfg.model == "minimax-m2.7"
+        assert cfg.provider == "openrouter"
 
         # User-visible success message.
         msg = ctx.ui.append_system.call_args[0][0]
         assert "minimax-m2.7" in msg
         assert "openrouter" in msg
+
+
+class TestApplyModelPreservesConfigByReference:
+    """Regression for the din0s review on #267: serve mode (and any long-lived
+    caller) holds the active config object by reference via
+    ``agent_holder["config"]``.  The pure-path commit must apply the switch to
+    that LIVE object in place — not rebind ``_config`` to a fresh ``temp_cfg``
+    copy — otherwise a later workspace-changing ``/resume`` reloads the agent
+    from the stale startup config and silently reverts the ``/model`` switch.
+
+    Critically this must hold across *repeated* switches: the earlier
+    "also mutate cfg but still rebind to temp_cfg" remedy only survives one
+    switch (the held object stops being the active ``_config`` after the first).
+    """
+
+    def test_held_config_reference_tracks_repeated_switches(self, evo_module_state):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        mod = evo_module_state
+
+        def _fake_get_chat_model(model, provider=None):
+            m = MagicMock(name=f"chat_model[{model}|{provider}]")
+            m._bound_model = model
+            return m
+
+        def _fake_load_agent(
+            workspace_dir=None,
+            checkpointer=None,
+            config=None,
+            chat_model=None,
+            *,
+            on_mcp_progress=None,
+        ):
+            return MagicMock(name="fake-agent")
+
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        mod._config = cfg
+        mod._chat_model = None
+        mod._chat_model_key = None
+        mod._EvoScientist_agent = None
+
+        # Simulate serve capturing the startup config object once (commands.py:
+        # ``agent_holder = {... "config": config}``) and never re-reading it.
+        agent_holder = {"config": cfg}
+
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.ui.supports_interactive = True
+        ctx.workspace_dir = "/tmp/test_byref"
+        ctx.checkpointer = None
+
+        cmd = ModelCommand()
+        with (
+            patch(
+                "EvoScientist.llm.get_chat_model",
+                side_effect=_fake_get_chat_model,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=_fake_load_agent,
+            ),
+        ):
+            for model, provider in [
+                ("claude-opus-4-8", "anthropic"),
+                ("minimax-m2.7", "openrouter"),
+                ("claude-sonnet-4-6", "anthropic"),
+            ]:
+                _run(cmd._apply_model(ctx, model, provider))
+                # The held reference must reflect the LATEST switch on every
+                # iteration — not just the first — and stay the active config.
+                assert agent_holder["config"].model == model
+                assert agent_holder["config"].provider == provider
+                assert mod._config is agent_holder["config"]
 
 
 class TestModelCommandLoadAgentFailure:

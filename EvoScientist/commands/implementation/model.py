@@ -176,9 +176,16 @@ class ModelCommand(Command):
 
         # Agent built with no global mutation — commit the switch atomically.
         # These are pure assignments and cannot fail, so the session can never
-        # be left half-switched. ``temp_cfg`` (not the original ``cfg``) becomes
-        # the active config; nothing depends on the old config object identity.
-        set_active_config(temp_cfg)
+        # be left half-switched. Apply the switch to the LIVE ``cfg`` in place
+        # (the active config object) instead of rebinding ``_config`` to the
+        # fresh ``temp_cfg`` — callers that hold the active config by reference
+        # (e.g. serve's ``agent_holder["config"]`` and its workspace-changing
+        # ``/resume`` reload) must observe the new model/provider. The verify
+        # build above used the ``temp_cfg`` copy, so a failed build never reaches
+        # here and the live ``cfg`` stays untouched (failure still no-ops).
+        cfg.model = model_name
+        cfg.provider = provider
+        set_active_config(cfg)
         set_chat_model_instance(new_chat_model, (model_name, provider))
         ctx.agent = new_agent
 
