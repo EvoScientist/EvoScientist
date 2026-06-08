@@ -45,7 +45,26 @@ You help researchers move from question to publishable contribution. That spans 
 # own constants below to keep this section focused on flow)
 # =============================================================================
 
-EXPERIMENT_WORKFLOW = """# Experiment Workflow
+_OBSERVATION_MEMORY_INTAKE_STEP = (
+    "- When prior work may matter, search `/memories/observations/` for saved "
+    "findings, failed attempts, commands, and decisions. Incorporate relevant "
+    "observations into planning. Skip this when there is no useful memory yet."
+)
+
+_MEMORY_EVOLUTION_SECTION = """### Memory Evolution (after significant outcomes)
+After meaningful research, implementation, evaluation, or debugging outcomes,
+consider whether a compact reusable note passes the memory bar before calling
+`record_observation`. Most outcomes should stay in the final answer, artifacts,
+or execution summary. Use observation memory only for durable, non-obvious,
+evidence-backed findings, decisions, failed approaches, tool constraints,
+evaluator outcomes, or project lessons that are likely to change future
+behavior. Distill reusable insight rather than saving raw task output or a
+transcript of what happened. When you call `record_observation`, include a
+one-line `summary` that lets future agents decide whether to read the full
+observation.
+"""
+
+_EXPERIMENT_WORKFLOW_PREAMBLE = """# Experiment Workflow
 
 When the task is to plan, run, or report on experiments, follow the workflow below.
 
@@ -76,14 +95,21 @@ Not every project needs all steps. Match the starting point to what the user alr
 - Apply multiple-testing correction when comparing many conditions.
 - State limitations, negative results, and sensitivity to key parameters.
 - Track reproducibility (seeds, versions, configs, and exact commands).
+"""
 
-## Step 1: Intake & Scope
-- Read the proposal and extract goals, datasets, constraints, and evaluation metrics.
-- Capture key assumptions and open questions.
-- Check `/memories/` for prior research knowledge: `ideation-memory.md` (known promising and failed directions) and `experiment-memory.md` (proven strategies from past cycles). Incorporate relevant findings into planning. Skip if these files do not exist yet.
-- Save the original proposal to `/research_request.md`.
 
-## Step 2: Plan (Recommended Structure)
+def _build_intake_scope(*, enable_observation_memory: bool) -> str:
+    bullets = [
+        "- Read the proposal and extract goals, datasets, constraints, and evaluation metrics.",
+        "- Capture key assumptions and open questions.",
+    ]
+    if enable_observation_memory:
+        bullets.append(_OBSERVATION_MEMORY_INTAKE_STEP)
+    bullets.append("- Save the original proposal to `/research_request.md`.")
+    return "\n".join(["## Step 1: Intake & Scope", *bullets])
+
+
+_EXPERIMENT_WORKFLOW_EXECUTION = """## Step 2: Plan (Recommended Structure)
 - Create experiment stages with success signals (flexible, not rigid).
 - Identify resource/data dependencies and baseline requirements.
 - Use `write_todos` to track the execution plan and updates.
@@ -131,17 +157,10 @@ Before delegating code tasks to code-agent, ask the user which code generation m
 - Prefer evidence-driven iteration: error analysis, sanity checks, and minimal ablations.
 - Update `/todos.md` to reflect new iterations.
 - Stop iterating when evidence is sufficient or diminishing returns appear.
+"""
 
-### Memory Evolution (after significant outcomes)
-At these trigger points, invoke the `evo-memory` skill (read `/skills/evo-memory/SKILL.md` for the protocols, I/O specs, and classification rules):
 
-- After **research-ideation** completes
-- After **experiment-pipeline** fails
-- After **experiment-pipeline** succeeds
-
-If the `evo-memory` skill is not installed, manually log key learnings to `/memories/`: what worked, what failed, and why.
-
-### Stage Reflection (Recommended Checkpoint)
+_EXPERIMENT_WORKFLOW_REFLECTION_AND_CLOSE = """### Stage Reflection (Recommended Checkpoint)
 After any meaningful experimental stage (baseline, new dataset, new training recipe, etc.), delegate a short reflection to the planner-agent and use it to update the remaining plan.
 
 Trigger this checkpoint when:
@@ -193,6 +212,26 @@ Empty arrays are valid. If no changes are needed, return the JSON with empty arr
 - Confirm the report answers the proposal and documents key settings/results.
 """
 
+
+def _build_experiment_workflow(
+    *,
+    enable_observation_memory: bool = True,
+    enable_observation_writes: bool = True,
+) -> str:
+    """Build the workflow section with memory instructions matching config."""
+    sections = [
+        _EXPERIMENT_WORKFLOW_PREAMBLE,
+        _build_intake_scope(enable_observation_memory=enable_observation_memory),
+        _EXPERIMENT_WORKFLOW_EXECUTION,
+    ]
+    if enable_observation_memory and enable_observation_writes:
+        sections.append(_MEMORY_EVOLUTION_SECTION)
+    sections.append(_EXPERIMENT_WORKFLOW_REFLECTION_AND_CLOSE)
+    return "\n\n".join(section.strip() for section in sections)
+
+
+EXPERIMENT_WORKFLOW = _build_experiment_workflow()
+
 # =============================================================================
 # Report template (single source of truth — referenced from Step 5)
 # =============================================================================
@@ -225,11 +264,10 @@ WRITING_GUIDELINES = """# Writing Guidelines
 # =============================================================================
 
 # NOTE: the "300s" default below is intentionally hardcoded static text, not
-# templated from config. get_system_prompt() must stay byte-stable for prompt
-# caching, so the configured value is NOT injected here. The actually-enforced
-# timeout is cfg.sandbox_execute_timeout (CustomSandboxBackend); this number is
-# just the documented default, and the per-command `timeout` override is the
-# mechanism that matters to the agent.
+# templated from config. The actually-enforced timeout is
+# cfg.sandbox_execute_timeout (CustomSandboxBackend); this number is just the
+# documented default, and the per-command `timeout` override is the mechanism
+# that matters to the agent.
 SHELL_GUIDELINES = """# Shell Execution Guidelines
 
 When using the `execute` tool for shell commands:
@@ -350,7 +388,11 @@ It is fine to fetch one task and defer another from the same batch.
 # =============================================================================
 
 
-def get_system_prompt() -> str:
+def get_system_prompt(
+    *,
+    enable_observation_memory: bool = True,
+    enable_observation_writes: bool = True,
+) -> str:
     """Generate the complete static system prompt.
 
     Sections are concatenated in this order:
@@ -364,16 +406,20 @@ def get_system_prompt() -> str:
     7. :data:`ASYNC_NOTIFICATIONS`
 
     Runtime context is injected per-turn by
-    :class:`EvoScientist.middleware.RuntimeContextMiddleware`, so the static
-    prefix here remains byte-stable across midnight rollover and across
-    long-running daemons.
+    :class:`EvoScientist.middleware.RuntimeContextMiddleware`, so dates and
+    similar per-turn values are not baked into this prompt. Memory-related
+    workflow sections can vary with the configured memory controls.
 
     Returns:
         Combined static system prompt string.
     """
+    workflow = _build_experiment_workflow(
+        enable_observation_memory=enable_observation_memory,
+        enable_observation_writes=enable_observation_writes,
+    )
     sections = [
         EVOSCIENTIST_IDENTITY,
-        EXPERIMENT_WORKFLOW,
+        workflow,
         REPORT_TEMPLATE,
         WRITING_GUIDELINES,
         SHELL_GUIDELINES,

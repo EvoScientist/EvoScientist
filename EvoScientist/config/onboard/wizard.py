@@ -18,6 +18,7 @@ from ..settings import (
 from .channels import _step_channels
 from .steps import (
     _step_anthropic_auth_mode,
+    _step_auxiliary_enable,
     _step_base_url,
     _step_langgraph_dev_port,
     _step_mcp_servers,
@@ -40,6 +41,7 @@ from .style import (
     CONFIRM_STYLE,
     QMARK,
     _print_header,
+    _print_section,
     _print_step_skipped,
     console,
 )
@@ -50,6 +52,7 @@ STEPS = [
     "Provider",
     "API Key",
     "Model",
+    "Auxiliary Model",
     "Tavily Key",
     "Workspace",
     "Thinking",
@@ -145,6 +148,7 @@ _SECTION_LABELS: list[tuple[str, str]] = [
     ("port", "LangGraph server port"),
     ("provider", "LLM provider + auth + API key"),
     ("model", "Model + reasoning effort"),
+    ("auxiliary_model", "Auxiliary model (optional)"),
     ("tavily", "Tavily search key"),
     ("workspace", "Workspace mode"),
     ("thinking", "Thinking panel"),
@@ -453,6 +457,7 @@ def run_onboard(
             if "provider" in sections_to_run:
                 from .prompter import GoBack
 
+                _print_section("EvoScientist · Pilot (Main model)")
                 _require("provider", "LLM provider")
                 # Provider sub-loop: auth_mode can raise GoBack to re-pick provider.
                 # We snapshot config at the top of each iteration so a GoBack can
@@ -663,6 +668,63 @@ def run_onboard(
                     )
                 if provider == "openrouter" and _preset("model") is None:
                     config.reasoning_effort = _step_reasoning_effort(config)
+                _autosave(config)
+
+            if "auxiliary_model" in sections_to_run:
+                _print_section("Co-pilot (Auxiliary model)")
+                if strict:
+                    # Optional; never prompt under --non-interactive. Keep
+                    # current (default empty = use main model).
+                    _print_step_skipped(
+                        "Auxiliary Model",
+                        "kept current" if config.auxiliary_model else "not set",
+                    )
+                elif _step_auxiliary_enable(config):
+                    # Assemble: pick provider -> base URL (custom) -> key -> model,
+                    # mirroring the main flow's order. Keys/base URLs are stored
+                    # per provider, so when the auxiliary provider matches the main
+                    # one they're already set and the user just keeps them (Enter).
+                    # Ollama needs no key. Re-runs default to the saved auxiliary
+                    # provider/model rather than the main ones.
+                    aux_provider = _step_provider(
+                        config,
+                        label="co-pilot",
+                        default_value=config.auxiliary_provider,
+                    )
+                    config.auxiliary_provider = aux_provider
+                    if aux_provider == "custom-openai":
+                        config.custom_openai_base_url = _step_base_url(
+                            config,
+                            current_value=config.custom_openai_base_url
+                            or os.environ.get("CUSTOM_OPENAI_BASE_URL", ""),
+                        )
+                    elif aux_provider == "custom-anthropic":
+                        config.custom_anthropic_base_url = _step_base_url(
+                            config,
+                            current_value=config.custom_anthropic_base_url
+                            or os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", ""),
+                        )
+                    elif aux_provider == "minimax":
+                        config.minimax_base_url = _step_minimax_region(config)
+                    if aux_provider != "ollama":
+                        aux_key_attr = _PROVIDER_KEY_ATTR.get(
+                            aux_provider, "openai_api_key"
+                        )
+                        new_aux_key = _step_provider_api_key(
+                            config, aux_provider, skip_validation
+                        )
+                        if new_aux_key is not None:
+                            setattr(config, aux_key_attr, new_aux_key)
+                    config.auxiliary_model = _step_model(
+                        config,
+                        aux_provider,
+                        label="co-pilot",
+                        default_value=config.auxiliary_model,
+                    )
+                else:
+                    # Skip: single driver — clear any prior auxiliary config.
+                    config.auxiliary_provider = ""
+                    config.auxiliary_model = ""
                 _autosave(config)
 
             if "tavily" in sections_to_run:

@@ -104,6 +104,21 @@ def _print_header() -> None:
     console.print()
 
 
+_SECTION_WIDTH = 53  # ~ the Setup Wizard panel width (not the full terminal)
+
+
+def _print_section(title: str) -> None:
+    """Print a compact bold-cyan section divider, e.g. ──── Pilot ────.
+
+    Sized to roughly the Setup Wizard panel width and styled like the section
+    markers used elsewhere in the CLI, rather than a full-width rule.
+    """
+    label = f" {title} "
+    pad = max(2, _SECTION_WIDTH - len(label))
+    left = pad // 2
+    console.print(f"[bold cyan]{'─' * left}{label}{'─' * (pad - left)}[/bold cyan]")
+
+
 def _print_step_result(step_name: str, value: str, success: bool = True) -> None:
     """Print a completed step result inline.
 

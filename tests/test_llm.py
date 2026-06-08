@@ -402,13 +402,15 @@ class TestThirdPartyRouting:
         """OpenRouter should use native 'openrouter' provider via init_chat_model."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key-456")
+        # Assert the DEFAULT effort, so isolate from any leaked env override.
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
 
         get_chat_model("x-ai/grok-4.3", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openrouter"
         assert call_kwargs["api_key"] == "or-key-456"
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "disabled"}
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_reasoning_user_override(self, mock_init, monkeypatch):
@@ -435,7 +437,7 @@ class TestThirdPartyRouting:
         get_chat_model("x-ai/grok-4.3", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "disabled"}
+        assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_routes_through_openai(self, mock_init, monkeypatch):
@@ -1992,6 +1994,142 @@ class TestPatchOpenAICaptureReasoningContent:
         assert len(msg.tool_calls) == 1
         assert msg.tool_calls[0]["name"] == "get_weather"
         assert msg.additional_kwargs.get("reasoning_content") == "use the tool"
+
+
+class TestIsResponsesReasoningItem:
+    """_is_responses_reasoning_item flags encrypted OpenAI-Responses items."""
+
+    def test_rs_id_is_responses_item(self):
+        from EvoScientist.llm.patches import _is_responses_reasoning_item
+
+        assert _is_responses_reasoning_item({"id": "rs_09363d42", "type": "x"})
+
+    def test_encrypted_data_is_responses_item(self):
+        from EvoScientist.llm.patches import _is_responses_reasoning_item
+
+        assert _is_responses_reasoning_item({"data": "gAAAAAB...", "type": "x"})
+
+    def test_plain_text_reasoning_is_not_responses_item(self):
+        from EvoScientist.llm.patches import _is_responses_reasoning_item
+
+        assert not _is_responses_reasoning_item(
+            {"type": "reasoning.text", "text": "thinking", "index": 0}
+        )
+        assert not _is_responses_reasoning_item("not a dict")
+
+
+class TestPatchOpenrouterStripResponsesReasoning:
+    """OpenAI-Responses encrypted reasoning items (`rs_` id / encrypted data)
+    are stripped from outgoing OpenRouter assistant messages, preventing the
+    multi-turn "Item with id 'rs_...' not found" 400 (store=false; #37777).
+    """
+
+    def _apply(self):
+        import langchain_openrouter.chat_models as mod
+
+        import EvoScientist.llm.patches as patches
+
+        orig = mod._convert_message_to_dict
+        orig_flag = patches._openrouter_reasoning_strip_patched
+        patches._openrouter_reasoning_strip_patched = False
+        patches._patch_openrouter_strip_responses_reasoning()
+        return patches, mod, orig, orig_flag
+
+    @staticmethod
+    def _restore(patches, mod, orig, orig_flag):
+        mod._convert_message_to_dict = orig
+        patches._openrouter_reasoning_strip_patched = orig_flag
+
+    def test_strips_encrypted_item_drops_key_when_empty(self):
+        from langchain_core.messages import AIMessage
+
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+            msg = AIMessage(
+                content="done",
+                additional_kwargs={
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.summary",
+                            "format": "openai-responses-v1",
+                            "id": "rs_09363d42b054",
+                            "data": "gAAAAAB...",
+                            "summary": "real reasoning text",
+                            "index": 0,
+                        }
+                    ],
+                },
+            )
+            result = mod._convert_message_to_dict(msg)
+            # sole entry was an rs_ item → reasoning_details removed entirely.
+            assert "reasoning_details" not in result
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    def test_keeps_plain_text_reasoning(self):
+        from langchain_core.messages import AIMessage
+
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+            msg = AIMessage(
+                content="done",
+                additional_kwargs={
+                    "reasoning_details": [
+                        {"type": "reasoning.text", "text": "thinking", "index": 0},
+                        {"id": "rs_abc", "data": "blob", "index": 1},
+                    ],
+                },
+            )
+            result = mod._convert_message_to_dict(msg)
+            kept = result["reasoning_details"]
+            assert len(kept) == 1
+            assert kept[0]["type"] == "reasoning.text"
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    def test_does_not_mutate_original_message(self):
+        from langchain_core.messages import AIMessage
+
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+            details = [{"id": "rs_abc", "data": "blob"}]
+            msg = AIMessage(
+                content="x", additional_kwargs={"reasoning_details": details}
+            )
+            mod._convert_message_to_dict(msg)
+            # stored history untouched — we filter a fresh list, not in place.
+            assert details == [{"id": "rs_abc", "data": "blob"}]
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    def test_patch_is_idempotent(self):
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+            wrapper = mod._convert_message_to_dict
+            # Second call is guarded by the flag → must not re-wrap.
+            patches._patch_openrouter_strip_responses_reasoning()
+            assert mod._convert_message_to_dict is wrapper
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    def test_non_dict_entry_is_kept(self):
+        from langchain_core.messages import AIMessage
+
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+            msg = AIMessage(
+                content="done",
+                additional_kwargs={
+                    "reasoning_details": [
+                        "opaque",  # non-dict slipped in → kept, not crashed on
+                        {"id": "rs_abc", "data": "blob", "index": 1},
+                    ],
+                },
+            )
+            result = mod._convert_message_to_dict(msg)
+            assert result["reasoning_details"] == ["opaque"]
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
 
 
 # =============================================================================

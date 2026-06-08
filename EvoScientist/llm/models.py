@@ -20,6 +20,7 @@ from .patches import (
     _patch_ccproxy_system_to_developer,
     _patch_deepseek_reasoning_passback,
     _patch_openai_compat_content,
+    _patch_openrouter_strip_responses_reasoning,
 )
 
 _MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
@@ -149,6 +150,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
     ("grok-4.3", "x-ai/grok-4.3", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
+    ("qwen3.7-plus", "qwen/qwen3.7-plus", "openrouter"),
     ("qwen3.6-flash", "qwen/qwen3.6-flash", "openrouter"),
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
@@ -174,11 +176,21 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
     ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
     # DashScope Coding Plan (阿里云代码计划 — subscription sk-sp-* endpoint)
+    ("qwen3.7-max", "qwen3.7-max", "dashscope-code"),
+    ("qwen3.7-plus", "qwen3.7-plus", "dashscope-code"),
+    ("qwen3.6-max", "qwen3.6-max-preview", "dashscope-code"),
+    ("qwen3.6-plus", "qwen3.6-plus", "dashscope-code"),
+    ("qwen3.6-flash", "qwen3.6-flash", "dashscope-code"),
     ("qwen3-coder", "qwen3-coder-plus", "dashscope-code"),
     ("qwen3-coder-next", "qwen3-coder-next", "dashscope-code"),
     ("qwen3-max", "qwen3-max", "dashscope-code"),
     ("qwen3.5-plus", "qwen3.5-plus", "dashscope-code"),
     # DashScope (阿里云 — Qwen models, default for simple lookups)
+    ("qwen3.7-max", "qwen3.7-max", "dashscope"),
+    ("qwen3.7-plus", "qwen3.7-plus", "dashscope"),
+    ("qwen3.6-max", "qwen3.6-max-preview", "dashscope"),
+    ("qwen3.6-plus", "qwen3.6-plus", "dashscope"),
+    ("qwen3.6-flash", "qwen3.6-flash", "dashscope"),
     ("qwen3-coder", "qwen3-coder-plus", "dashscope"),
     ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
     ("qwen-max", "qwen-max", "dashscope"),
@@ -403,9 +415,15 @@ def get_chat_model(
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key
-        # Enable reasoning; disable summary to avoid multi-turn schema errors.
+        # Reasoning via `effort` + `summary: "auto"` so a readable reasoning
+        # summary is returned for display. OpenAI-Responses also emits encrypted
+        # reasoning items (`rs_*` id) that can't be replayed on multi-turn
+        # passback (OpenRouter's `/responses` beta is stateless, store=false —
+        # "Item with id 'rs_...' not found"); the patch strips them on passback,
+        # so enabling `summary` is safe. See langchain-ai/langchain#37777.
         effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or "high"
-        kwargs.setdefault("reasoning", {"effort": effort, "summary": "disabled"})
+        kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
+        _patch_openrouter_strip_responses_reasoning()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:

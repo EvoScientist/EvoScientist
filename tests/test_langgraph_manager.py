@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.langgraph_dev import manager
 
 
@@ -183,19 +184,52 @@ class TestKillOwnedStaleProcess:
 
 
 class TestEnsureLanggraphDev:
-    def test_returns_none_when_async_disabled(self):
-        cfg = SimpleNamespace(enable_async_subagents=False)
-        assert manager.ensure_langgraph_dev(cfg) is None
-        # And the availability flag should remain False.
+    def test_starts_when_async_disabled_but_memory_workers_enabled(self, tmp_path):
+        """EvoMemory workers can require langgraph dev even without async subagents."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = True
+        cfg.langgraph_dev_port = 6174
+        cfg.langgraph_dev_file_persistence = True
+        proc = MagicMock()
+        with (
+            patch.object(manager, "is_langgraph_dev_running", return_value=False),
+            patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
+            patch.object(manager, "_FILE_LOCK_PATH", tmp_path / "lg.lock"),
+            patch.object(manager, "_PID_DIR", tmp_path / "pids"),
+        ):
+            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
+
+        assert result is proc
+        start.assert_called_once()
+        assert manager.is_async_subagents_available() is True
+
+    def test_skips_when_async_and_memory_workers_disabled(self, tmp_path):
+        """No background server is needed without async subagents or workers."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.langgraph_dev_port = 6174
+        cfg.langgraph_dev_file_persistence = True
+        with (
+            patch.object(manager, "is_langgraph_dev_running") as mock_running,
+            patch.object(manager, "start_langgraph_dev") as start,
+            patch.object(manager, "_FILE_LOCK_PATH", tmp_path / "lg.lock"),
+            patch.object(manager, "_PID_DIR", tmp_path / "pids"),
+        ):
+            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
+
+        assert result is None
+        mock_running.assert_not_called()
+        start.assert_not_called()
         assert manager.is_async_subagents_available() is False
 
     def test_reuses_existing_healthy_subprocess(self, tmp_path):
         """When the subprocess is already running, no new Popen call."""
-        cfg = SimpleNamespace(
-            enable_async_subagents=True,
-            langgraph_dev_port=6174,
-            langgraph_dev_file_persistence=True,
-        )
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = True
+        cfg.langgraph_dev_port = 6174
+        cfg.langgraph_dev_file_persistence = True
         with (
             patch.object(
                 manager, "is_langgraph_dev_running", return_value=True

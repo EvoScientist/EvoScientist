@@ -84,7 +84,7 @@ class TestGetSystemPrompt:
 
         Anything sent to `/memory/...` falls through to CustomSandboxBackend
         (workspace files), bypassing the persistent FilesystemBackend that
-        owns ideation-memory.md / experiment-memory.md.
+        owns persistent memory files.
         """
         result = get_system_prompt()
         # `/memory/` as a filesystem path (after a backtick or whitespace, before
@@ -95,6 +95,26 @@ class TestGetSystemPrompt:
         assert not re.search(r"[\s`]/memory/[a-zA-Z]", result), (
             "Found `/memory/<file>` in system prompt — should be `/memories/<file>`"
         )
+
+    def test_observation_writes_can_be_removed(self):
+        result = get_system_prompt(
+            enable_observation_memory=True,
+            enable_observation_writes=False,
+        )
+
+        assert "/memories/observations/" in result
+        assert "record_observation" not in result
+        assert "Memory Evolution" not in result
+
+    def test_observation_memory_can_be_removed(self):
+        result = get_system_prompt(
+            enable_observation_memory=False,
+            enable_observation_writes=False,
+        )
+
+        assert "/memories/observations/" not in result
+        assert "record_observation" not in result
+        assert "Memory Evolution" not in result
 
 
 class TestEvoScientistIdentity:

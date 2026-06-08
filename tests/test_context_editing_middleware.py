@@ -114,6 +114,8 @@ def test_default_middleware_includes_context_editing(mock_config, mock_model, mo
     cfg = MagicMock()
     cfg.enable_ask_user = False
     cfg.auto_approve = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _get_default_middleware
@@ -148,6 +150,8 @@ def test_context_editing_before_overflow_mapper(mock_config, mock_model, mock_ts
     cfg = MagicMock()
     cfg.enable_ask_user = False
     cfg.auto_approve = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _get_default_middleware

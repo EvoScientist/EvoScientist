@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import asdict, dataclass, fields
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +22,40 @@ from dotenv import find_dotenv, load_dotenv
 # (stream/display.py, channels/consumer.py) — keep aligned with the agent's
 # `interrupt_on` set in EvoScientist.py.
 HITL_SHELL_TOOLS = ("execute", "run_in_background")
+
+
+class MemoryObservationTarget(StrEnum):
+    """Runtime locations that can receive `record_observation`."""
+
+    AGENT = "agent"
+    TURN_WORKER = "turn_worker"
+    SUBAGENT_WORKER = "subagent_worker"
+
+
+class MemoryObservationWriter(StrEnum):
+    """Configured observation-writing policy."""
+
+    OFF = "off"
+    AGENT = "agent"
+    WORKER = "worker"
+    ALL = "all"
+
+    def enables(self, target: MemoryObservationTarget) -> bool:
+        match self:
+            case MemoryObservationWriter.OFF:
+                return False
+            case MemoryObservationWriter.AGENT:
+                return target == MemoryObservationTarget.AGENT
+            case MemoryObservationWriter.WORKER:
+                return target == MemoryObservationTarget.SUBAGENT_WORKER
+            case MemoryObservationWriter.ALL:
+                return target in (
+                    MemoryObservationTarget.AGENT,
+                    MemoryObservationTarget.SUBAGENT_WORKER,
+                )
+
+
+DEFAULT_MEMORY_OBSERVATION_WRITER = MemoryObservationWriter.ALL
 
 # =============================================================================
 # Configuration paths
@@ -60,6 +95,8 @@ class EvoScientistConfig:
         tavily_api_key: Tavily API key for web search.
         provider: Default LLM provider ('anthropic', 'openai', 'google-genai', or 'nvidia').
         model: Default model name (short name or full ID).
+        auxiliary_provider: Provider for auxiliary_model (empty = use main provider).
+        auxiliary_model: Model for memory workers + tool selector (empty = use main model).
         default_mode: Default workspace mode ('daemon' or 'run').
         default_workdir: Default workspace directory (empty = use current working directory).
         show_thinking: Whether to show thinking panels in CLI.
@@ -94,6 +131,10 @@ class EvoScientistConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+    # Optional auxiliary model for background/helper LLM calls (memory workers +
+    # tool selector). Empty = fall back to the main model/provider.
+    auxiliary_provider: str = ""  # empty = use main provider
+    auxiliary_model: str = ""  # empty = use main model
 
     # Async Sub-agent Settings
     # When True (default), the EvoSci CLI auto-starts a langgraph dev subprocess
@@ -148,6 +189,24 @@ class EvoScientistConfig:
     # rate limits, context overflow, or API quota errors would trip first.
     # Lower (e.g., 5000) if you want a tighter safety net against runaway loops.
     recursion_limit: int = 1_000_000
+
+    # Memory Settings
+    # Profile memory injects and maintains `/memories/profile/...` files.
+    memory_profile_enabled: bool = True
+    # Observation memory indexes `/memories/observations/...` and adds
+    # observation-read guidance/context. Writes require this switch plus an
+    # allowed `memory_observation_writer` role below.
+    memory_observations_enabled: bool = True
+    # Which observation-writing path receives the `record_observation` tool:
+    # "off" disables writes; "agent" means live agents; "worker" means the
+    # subagent memory worker; "all" means live agents and the subagent memory
+    # worker. The turn memory worker remains profile-only.
+    memory_observation_writer: MemoryObservationWriter = (
+        DEFAULT_MEMORY_OBSERVATION_WRITER
+    )
+    # Post-turn and post-subagent memory workers. Disable for no-background-memory
+    # controls while still allowing live agents to read configured memory.
+    memory_workers_enabled: bool = True
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -325,6 +384,56 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        try:
+            writer = MemoryObservationWriter(
+                str(self.memory_observation_writer).strip().lower()
+            )
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Invalid memory_observation_writer %r; falling back to %s.",
+                self.memory_observation_writer,
+                DEFAULT_MEMORY_OBSERVATION_WRITER.value,
+            )
+            writer = DEFAULT_MEMORY_OBSERVATION_WRITER
+        self.memory_observation_writer = writer
+
+
+@dataclass(frozen=True)
+class MemoryControls:
+    """Resolved memory feature switches used by agent and worker wiring."""
+
+    profile_enabled: bool
+    observations_enabled: bool
+    observation_writer: MemoryObservationWriter
+    workers_enabled: bool
+
+    @classmethod
+    def from_config(cls, config: EvoScientistConfig) -> MemoryControls:
+        return cls(
+            profile_enabled=config.memory_profile_enabled,
+            observations_enabled=config.memory_observations_enabled,
+            observation_writer=config.memory_observation_writer,
+            workers_enabled=config.memory_workers_enabled,
+        )
+
+    @property
+    def memory_enabled(self) -> bool:
+        return self.profile_enabled or self.observations_enabled
+
+    def observation_tool_enabled(self, target: MemoryObservationTarget) -> bool:
+        return self.observations_enabled and self.observation_writer.enables(target)
+
+    def worker_needed(self, target: MemoryObservationTarget) -> bool:
+        if not self.workers_enabled:
+            return False
+        match target:
+            case MemoryObservationTarget.TURN_WORKER:
+                return self.profile_enabled
+            case MemoryObservationTarget.SUBAGENT_WORKER:
+                return self.profile_enabled or self.observation_tool_enabled(target)
+            case MemoryObservationTarget.AGENT:
+                return False
+
 
 # =============================================================================
 # Config file operations
@@ -376,7 +485,7 @@ def save_config(config: EvoScientistConfig) -> None:
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = asdict(config)
+    data = _config_to_dict(config)
 
     # Save all fields including empty API keys (users can set them via env vars instead)
     with open(config_path, "w") as f:
@@ -388,6 +497,13 @@ def reset_config() -> None:
     config_path = get_config_path()
     if config_path.exists():
         config_path.unlink()
+
+
+def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
+    """Return a plain serializable config dict."""
+    data = asdict(config)
+    data["memory_observation_writer"] = config.memory_observation_writer.value
+    return data
 
 
 # =============================================================================
@@ -430,7 +546,10 @@ def get_config_value(key: str) -> Any:
         The value, or None if key doesn't exist.
     """
     config = load_config()
-    return getattr(config, key, None)
+    value = getattr(config, key, None)
+    if isinstance(value, MemoryObservationWriter):
+        return value.value
+    return value
 
 
 def set_config_value(key: str, value: Any) -> bool:
@@ -465,6 +584,11 @@ def set_config_value(key: str, value: Any) -> bool:
 
     if key == "sandbox_execute_timeout" and value <= 0:
         return False
+    if key == "memory_observation_writer":
+        try:
+            value = MemoryObservationWriter(str(value).strip().lower())
+        except ValueError:
+            return False
 
     setattr(config, key, value)
     save_config(config)
@@ -477,7 +601,7 @@ def list_config() -> dict[str, Any]:
     Returns:
         Dictionary of all configuration key-value pairs.
     """
-    return asdict(load_config())
+    return _config_to_dict(load_config())
 
 
 # =============================================================================
@@ -514,6 +638,8 @@ _ENV_MAPPINGS = {
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
+    "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
+    "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
@@ -528,6 +654,10 @@ _ENV_MAPPINGS = {
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
+    "memory_profile_enabled": "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
+    "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
+    "memory_observation_writer": "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
+    "memory_workers_enabled": "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
 }
 
 
@@ -552,7 +682,7 @@ def get_effective_config(
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
-    data = asdict(config)
+    data = _config_to_dict(config)
 
     # Apply environment variable overrides
     for config_key, env_key in _ENV_MAPPINGS.items():

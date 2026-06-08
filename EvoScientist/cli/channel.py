@@ -404,6 +404,11 @@ async def _dispatch_channel_slash_impl(
         return True  # must return — do NOT fall through to the agent
 
     if cmd_executed:
+        if ctx.command_error is not None:
+            details = ctx.command_error or "(no details)"
+            _set_channel_response(msg.msg_id, f"Command error: {details}")
+            return True
+
         if on_cmd_completed is not None:
             try:
                 # Command output already flushed by ``cmd_manager.execute``

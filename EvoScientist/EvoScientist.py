@@ -25,7 +25,13 @@ from pathlib import Path
 from langchain.agents.middleware import AgentMiddleware
 
 from . import paths as _paths_mod
-from .config import apply_config_to_env, get_effective_config
+from .config import (
+    MemoryControls,
+    MemoryObservationTarget,
+    apply_config_to_env,
+    get_effective_config,
+)
+from .memory import MemorySourceType
 from .paths import set_active_workspace, set_workspace_root
 from .prompts import get_system_prompt
 
@@ -38,6 +44,7 @@ logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 
 SUBAGENTS_CONFIG = Path(__file__).parent / "subagents"
 SKILLS_DIR = str(Path(__file__).parent / "skills")
+DEFAULT_SKILL_SOURCES = ("/skills/",)
 
 # =============================================================================
 # Lazy state — initialized on first use, not at import time
@@ -51,6 +58,13 @@ _chat_model = None
 # _ensure_config(new_cfg) has overwritten the active config — causing
 # /model switch to lag one step (see issue #179).
 _chat_model_key: tuple[str | None, str | None] | None = None
+
+# Auxiliary model for background/helper LLM calls (memory workers + main-agent
+# tool selector). Cached separately from the main model; falls back to the main
+# instance when the auxiliary_* config fields are empty (see
+# _ensure_auxiliary_chat_model).
+_auxiliary_chat_model = None
+_auxiliary_chat_model_key: tuple[str | None, str | None] | None = None
 
 # Cache MCP tools by the effective config signature to avoid reconnecting
 # to MCP servers on every `/new` when config is unchanged.
@@ -120,6 +134,32 @@ def _ensure_chat_model():
     return _chat_model
 
 
+def _ensure_auxiliary_chat_model():
+    """Return the auxiliary chat model for background/helper LLM calls.
+
+    Resolves ``(cfg.auxiliary_model or cfg.model, cfg.auxiliary_provider or
+    cfg.provider)``. When the auxiliary fields are empty — or resolve to the same
+    ``(model, provider)`` pair as the main model — returns the main
+    ``_ensure_chat_model()`` instance directly, so no second client is built.
+    Otherwise it is cached separately under its own key. Onboard sets the
+    provider alongside the model, so the ``or cfg.provider`` fallback only
+    matters for a model set without an explicit auxiliary provider.
+    """
+    global _auxiliary_chat_model, _auxiliary_chat_model_key
+    from .llm import get_chat_model
+
+    cfg = _ensure_config()
+    aux_model = cfg.auxiliary_model or cfg.model
+    aux_provider = cfg.auxiliary_provider or cfg.provider
+    if (aux_model, aux_provider) == (cfg.model, cfg.provider):
+        return _ensure_chat_model()
+    key = (aux_model, aux_provider)
+    if _auxiliary_chat_model is None or _auxiliary_chat_model_key != key:
+        _auxiliary_chat_model = get_chat_model(model=aux_model, provider=aux_provider)
+        _auxiliary_chat_model_key = key
+    return _auxiliary_chat_model
+
+
 def set_chat_model(model: str, provider: str | None = None):
     """Replace the cached chat model with a new one.
 
@@ -131,6 +171,12 @@ def set_chat_model(model: str, provider: str | None = None):
     Returns the current chat model instance.
     """
     from .llm import get_chat_model
+
+    # Invalidate the auxiliary cache too: when auxiliary_* is empty it mirrors
+    # the main model, so a /model switch must let it re-resolve to the new main.
+    global _auxiliary_chat_model, _auxiliary_chat_model_key
+    _auxiliary_chat_model = None
+    _auxiliary_chat_model_key = None
 
     key = (model, provider)
     if _chat_model is None or _chat_model_key != key:
@@ -189,7 +235,21 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
 # =============================================================================
 
 
-def _inject_subagent_middleware(subs: list[dict]) -> None:
+def _configured_system_prompt(cfg) -> str:
+    memory_controls = MemoryControls.from_config(cfg)
+    return get_system_prompt(
+        enable_observation_memory=memory_controls.observations_enabled,
+        enable_observation_writes=memory_controls.observation_tool_enabled(
+            MemoryObservationTarget.AGENT
+        ),
+    )
+
+
+def _inject_subagent_middleware(
+    subs: list[dict],
+    *,
+    workspace_dir: str | Path | None = None,
+) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
     Without this, subagent tool errors are caught by LangGraph's default
@@ -198,22 +258,69 @@ def _inject_subagent_middleware(subs: list[dict]) -> None:
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        MemoryLifecycleRole,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
+        create_memory_lifecycle_middleware,
+        create_memory_middleware,
         create_runtime_context_middleware,
     )
 
+    cfg = _ensure_config()
+    memory_controls = MemoryControls.from_config(cfg)
+    memory_dir = str(_paths_mod.MEMORIES_DIR)
     for sa in subs:
-        sa.setdefault("middleware", []).extend(
-            [
-                # No ``model=`` — subagents share the main agent's model,
-                # so defer to the factory's ``_ensure_chat_model()`` fallback.
-                create_context_editing_middleware(),
-                create_runtime_context_middleware(),
-                ToolErrorHandlerMiddleware(),
-                ContextOverflowMapperMiddleware(),
-            ]
+        name = str(sa.get("name") or "sub-agent")
+        source_type = MemorySourceType.SUBAGENT
+        memory_middleware = create_memory_middleware(
+            memory_dir,
+            workspace_dir=workspace_dir,
+            source_type=source_type,
+            source_agent=name,
+            enable_profile_memory=memory_controls.profile_enabled,
+            enable_observation_memory=memory_controls.observations_enabled,
+            enable_observation_tool=memory_controls.observation_tool_enabled(
+                MemoryObservationTarget.AGENT
+            ),
         )
+        middleware = [
+            # No ``model=`` — subagents share the main agent's model,
+            # so defer to the factory's ``_ensure_chat_model()`` fallback.
+            create_context_editing_middleware(),
+            create_runtime_context_middleware(),
+            ToolErrorHandlerMiddleware(),
+            ContextOverflowMapperMiddleware(),
+        ]
+        if memory_controls.memory_enabled:
+            middleware.append(memory_middleware)
+        if memory_controls.worker_needed(MemoryObservationTarget.SUBAGENT_WORKER):
+            middleware.append(
+                create_memory_lifecycle_middleware(
+                    memory_dir,
+                    workspace_dir=workspace_dir,
+                    project_id=memory_middleware.project_id,
+                    role=MemoryLifecycleRole.SUBAGENT,
+                    source_agent=name,
+                )
+            )
+        sa.setdefault("middleware", []).extend(middleware)
+
+
+def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
+    """Materialize DeepAgents' default subagent so our middleware wraps it."""
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    name = GENERAL_PURPOSE_SUBAGENT["name"]
+    if any(sa.get("name") == name for sa in subs):
+        return
+
+    subs.insert(
+        0,
+        {
+            **GENERAL_PURPOSE_SUBAGENT,
+            "skills": list(DEFAULT_SKILL_SOURCES),
+        },
+    )
 
 
 def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
@@ -315,7 +422,7 @@ def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> l
     return out
 
 
-def _build_base_kwargs(base_backend, base_middleware):
+def _build_base_kwargs(base_backend, base_middleware, *, workspace_dir=None):
     """Build agent kwargs *without* MCP (fast, no subprocess spawning)."""
     from .tools import skill_manager, tavily_search, think_tool
     from .utils import load_subagents
@@ -329,7 +436,8 @@ def _build_base_kwargs(base_backend, base_middleware):
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
     )
-    _inject_subagent_middleware(subs)
+    _ensure_general_purpose_subagent(subs)
+    _inject_subagent_middleware(subs, workspace_dir=workspace_dir)
     subs = _maybe_swap_async_subagents(subs, base_middleware)
     return {
         "name": "EvoScientist",
@@ -338,12 +446,18 @@ def _build_base_kwargs(base_backend, base_middleware):
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": get_system_prompt(),
-        "skills": ["/skills/"],
+        "system_prompt": _configured_system_prompt(_ensure_config()),
+        "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
 
-def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=None):
+def load_mcp_and_build_kwargs(
+    base_backend,
+    base_middleware,
+    *,
+    on_mcp_progress=None,
+    workspace_dir=None,
+):
     """Load MCP tools (cached by config) and build agent kwargs.
 
     Re-connects to MCP servers only when the effective MCP config changes.
@@ -358,7 +472,11 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
 
     mcp_by_agent = _load_mcp_tools_cached(on_progress=on_mcp_progress)
     if not mcp_by_agent:
-        return _build_base_kwargs(base_backend, base_middleware)
+        return _build_base_kwargs(
+            base_backend,
+            base_middleware,
+            workspace_dir=workspace_dir,
+        )
 
     tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
@@ -378,7 +496,8 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
         tool_registry=registry,
     )
 
-    _inject_subagent_middleware(subs)
+    _ensure_general_purpose_subagent(subs)
+    _inject_subagent_middleware(subs, workspace_dir=workspace_dir)
 
     # Inject MCP tools into subagents by name
     for sa in subs:
@@ -396,8 +515,8 @@ def load_mcp_and_build_kwargs(base_backend, base_middleware, *, on_mcp_progress=
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": get_system_prompt(),
-        "skills": ["/skills/"],
+        "system_prompt": _configured_system_prompt(_ensure_config()),
+        "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
 
@@ -446,6 +565,7 @@ def _get_default_middleware(
     *,
     for_async_subagent: bool = False,
     workspace_dir: str | Path | None = None,
+    memory_source_agent: str = "EvoScientist",
 ):
     """Build the default middleware list.
 
@@ -460,14 +580,18 @@ def _get_default_middleware(
             ``subagents/_factory.py`` deliberately skips ``interrupt_on=`` on
             the deepagents level. Defaults to False (full middleware list)
             for the CLI's in-process agent.
+        memory_source_agent: Attribution name for profile/observation writes.
+            Async sub-agent factories pass their deployed agent name here.
     """
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
+        MemoryLifecycleRole,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
+        create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_runtime_context_middleware,
         create_tool_selector_middleware,
@@ -479,20 +603,68 @@ def _get_default_middleware(
         load_fallback_chain(cfg.model_fallbacks)
     model = _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    source_type = (
+        MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
+    )
+    memory_controls = MemoryControls.from_config(cfg)
+    worker_target = (
+        MemoryObservationTarget.SUBAGENT_WORKER
+        if for_async_subagent
+        else MemoryObservationTarget.TURN_WORKER
+    )
     # ``ConfigurableModelMiddleware`` is placed first so it wraps
     # ``ModelFallbackMiddleware``: a configurable.model override sets the
     # PRIMARY model only, leaving the fallback chain free to try its own
     # alternatives instead of re-overriding every retry to the same model.
+    memory_middleware = create_memory_middleware(
+        memory_dir,
+        workspace_dir=workspace_dir,
+        source_type=source_type,
+        source_agent=memory_source_agent,
+        enable_profile_memory=memory_controls.profile_enabled,
+        enable_observation_memory=memory_controls.observations_enabled,
+        enable_observation_tool=memory_controls.observation_tool_enabled(
+            MemoryObservationTarget.AGENT
+        ),
+    )
+    # Main-agent tool selection may use the auxiliary model; async sub-agents
+    # keep the main model (they do real work, not a one-off helper call).
+    # context_editing stays on the main model — its model only sizes the
+    # context-window trigger for the main agent's own history.
+    tool_selector_model = (
+        model if for_async_subagent else _ensure_auxiliary_chat_model()
+    )
     mw = [
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(model=model),
+        *create_tool_selector_middleware(model=tool_selector_model),
+        # Interpreter prompt must land before runtime/memory context, so this
+        # middleware sits ahead of runtime_context in the stack.
+        create_code_interpreter_middleware(
+            timeout=cfg.code_interpreter_timeout,
+            max_result_chars=cfg.code_interpreter_max_result_chars,
+        ),
         create_runtime_context_middleware(),
-        create_memory_middleware(memory_dir, workspace_dir=workspace_dir),
     ]
+    if memory_controls.memory_enabled:
+        mw.append(memory_middleware)
+    if memory_controls.worker_needed(worker_target):
+        mw.append(
+            create_memory_lifecycle_middleware(
+                memory_dir,
+                workspace_dir=workspace_dir,
+                project_id=memory_middleware.project_id,
+                role=(
+                    MemoryLifecycleRole.SUBAGENT
+                    if for_async_subagent
+                    else MemoryLifecycleRole.TURN
+                ),
+                source_agent=memory_source_agent,
+            )
+        )
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
         from .middleware.ask_user import AskUserMiddleware
@@ -507,12 +679,6 @@ def _get_default_middleware(
 
         mw.append(BackgroundExecutionMiddleware())
 
-    mw.append(
-        create_code_interpreter_middleware(
-            timeout=cfg.code_interpreter_timeout,
-            max_result_chars=cfg.code_interpreter_max_result_chars,
-        )
-    )
     return mw
 
 
@@ -550,9 +716,17 @@ def _get_default_agent():
         hitl_interrupt_on = {"execute": True, "run_in_background": True}
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
-            kwargs = _build_base_kwargs(be, mw)
+            kwargs = _build_base_kwargs(
+                be,
+                mw,
+                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+            )
         else:
-            kwargs = load_mcp_and_build_kwargs(be, mw)
+            kwargs = load_mcp_and_build_kwargs(
+                be,
+                mw,
+                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+            )
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
@@ -568,7 +742,7 @@ def __getattr__(name: str):
     if name == "chat_model":
         return _ensure_chat_model()
     if name == "SYSTEM_PROMPT":
-        return get_system_prompt()
+        return _configured_system_prompt(_ensure_config())
     if name == "backend":
         return _get_default_backend()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -665,7 +839,12 @@ def create_cli_agent(
     hitl_interrupt_on = {"execute": True, "run_in_background": True}
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
-    kwargs = load_mcp_and_build_kwargs(be, mw, on_mcp_progress=on_mcp_progress)
+    kwargs = load_mcp_and_build_kwargs(
+        be,
+        mw,
+        on_mcp_progress=on_mcp_progress,
+        workspace_dir=workspace_dir,
+    )
 
     return create_deep_agent(
         **kwargs,

@@ -373,6 +373,86 @@ def test_on_cmd_completed_skipped_on_fall_through_and_error():
     completed.assert_not_called()
 
 
+def test_command_error_skips_completion_hook_and_reports_error():
+    """A command caught as failed by CommandManager must not look successful."""
+    msg = _make_msg(content="/resume abc")
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+    completed = AsyncMock()
+
+    async def _execute(_command, ctx):
+        ctx.command_error = "workspace conflict"
+        ctx.ui.append_system("Error executing /resume: workspace conflict", style="red")
+        await ctx.ui.flush()
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["abc"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            side_effect=_execute,
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = _run(
+            dispatch_channel_slash_command(
+                msg,
+                agent=None,
+                thread_id="old-thread",
+                workspace_dir="/old-workspace",
+                checkpointer=None,
+                append_system=MagicMock(),
+                on_cmd_completed=completed,
+            )
+        )
+
+    assert handled is True
+    completed.assert_not_awaited()
+    mock_set_resp.assert_called_once_with("msg-1", "Command error: workspace conflict")
+
+
+def test_empty_command_error_still_reports_error():
+    """An empty string error is still a command failure sentinel."""
+    msg = _make_msg(content="/resume abc")
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+    completed = AsyncMock()
+
+    async def _execute(_command, ctx):
+        ctx.command_error = ""
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["abc"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            side_effect=_execute,
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = _run(
+            dispatch_channel_slash_command(
+                msg,
+                agent=None,
+                thread_id="old-thread",
+                workspace_dir="/old-workspace",
+                checkpointer=None,
+                append_system=MagicMock(),
+                on_cmd_completed=completed,
+            )
+        )
+
+    assert handled is True
+    completed.assert_not_awaited()
+    mock_set_resp.assert_called_once_with("msg-1", "Command error: (no details)")
+
+
 def test_on_cmd_completed_exception_is_absorbed():
     """A raising hook must NOT prevent the channel response from being set."""
     msg = _make_msg()

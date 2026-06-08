@@ -22,7 +22,7 @@ from rich.text import Text
 import EvoScientist.cli.channel as _ch_mod
 from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
-from ..commands import CommandContext
+from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
 from ..paths import DATA_DIR
 from ..sessions import (
@@ -191,7 +191,7 @@ async def _sync_tui_command_completion(
     app: Any,
     ctx: CommandContext,
     original_agent: Any,
-    cmd: Any,
+    cmd: Command,
 ) -> None:
     """Adopt successful command-side state changes back into the TUI app."""
     agent_swapped = ctx.agent is not None and ctx.agent is not original_agent
@@ -260,8 +260,14 @@ def run_textual_interactive(
     thread_id: str | None,
     load_agent: Callable[..., Any],
     create_session_workspace: Callable[[str | None], str],
+    config: Any | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop."""
+    if config is None:
+        from ..config import get_effective_config
+
+        config = get_effective_config()
+
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
@@ -642,47 +648,57 @@ def run_textual_interactive(
             if workspace_dir:
                 # Mirror the Rich CLI fix: when a /resume restores a thread
                 # whose workspace differs from the one the langgraph dev
-                # subprocess was launched with, the deployed sub-agents
-                # would otherwise keep operating on the previous workspace.
-                # Sync the subprocess to the new workspace; the manager
-                # auto-detects the change and restarts (or no-ops if disabled
-                # or unchanged). Run in a worker thread so the Textual event
-                # loop keeps refreshing the UI during the up-to-60s wait, and
-                # show a live timer widget (like /compact) so the user sees
-                # progress instead of a frozen static line.
+                # subprocess was launched with, background workers and
+                # deployed sub-agents would otherwise keep operating on the
+                # previous workspace. Sync the subprocess to the new workspace;
+                # the manager auto-detects the change and restarts when needed.
+                # Run in a worker thread so the Textual event loop keeps
+                # refreshing the UI during the up-to-60s wait, and show a live
+                # timer widget (like /compact) so the user sees progress
+                # instead of a frozen static line.
                 #
-                # ``self._workspace_dir`` is mutated AFTER the sync succeeds
-                # so a WorkspaceMismatchError leaves the session pointing at
-                # the existing workspace instead of half-resuming into the
-                # conflicting one.
-                from ..config import load_config
+                # ``self._workspace_dir`` is mutated AFTER mismatch checks so
+                # WorkspaceMismatchError leaves the session pointing at the
+                # existing workspace. Other sync failures resume locally in
+                # the TUI while background workers may be unavailable.
+                from ..langgraph_dev.manager import (
+                    WorkspaceMismatchError,
+                    ensure_langgraph_dev,
+                )
+                from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
-                _resume_cfg = load_config()
-                if getattr(_resume_cfg, "enable_async_subagents", False):
-                    from ..langgraph_dev.manager import (
-                        WorkspaceMismatchError,
+                sync_widget = WorkspaceSyncWidget()
+                container = self.query_one("#chat", VerticalScroll)
+                await container.mount(sync_widget)
+                container.scroll_end(animate=False)
+                try:
+                    await asyncio.to_thread(
                         ensure_langgraph_dev,
+                        config,
+                        workspace_dir=workspace_dir,
                     )
-                    from .widgets.workspace_sync_widget import WorkspaceSyncWidget
-
-                    sync_widget = WorkspaceSyncWidget()
-                    container = self.query_one("#chat", VerticalScroll)
-                    await container.mount(sync_widget)
-                    container.scroll_end(animate=False)
-                    try:
-                        await asyncio.to_thread(
-                            ensure_langgraph_dev,
-                            _resume_cfg,
-                            workspace_dir=workspace_dir,
-                        )
-                    except WorkspaceMismatchError as exc:
-                        # Another EvoSci process owns the langgraph dev for a
-                        # different workspace. Abort the resume without
-                        # mutating session state.
-                        self.notify(str(exc), severity="error", timeout=10)
-                        return
-                    finally:
-                        await sync_widget.cleanup()
+                except WorkspaceMismatchError as exc:
+                    # Another EvoSci process owns the langgraph dev for a
+                    # different workspace. Abort the resume without mutating
+                    # session state. Raise so command UIs, including channel
+                    # UI, report failure instead of continuing with
+                    # success/history output.
+                    raise RuntimeError(str(exc)) from exc
+                except Exception:
+                    _channel_logger.warning(
+                        "Failed to sync background agent server for resumed "
+                        "workspace %s; continuing resume in degraded mode",
+                        workspace_dir,
+                        exc_info=True,
+                    )
+                    self.append_system(
+                        "Background agent server sync failed; resumed local "
+                        "session, but async subagents and EvoMemory workers "
+                        "may be unavailable.",
+                        style="yellow",
+                    )
+                finally:
+                    await sync_widget.cleanup()
                 self._workspace_dir = workspace_dir
 
             if thread_id != self._conversation_tid:
@@ -975,7 +991,7 @@ def run_textual_interactive(
             self,
             ctx: CommandContext,
             original_agent: Any,
-            cmd: Any,
+            cmd: Command,
         ) -> None:
             await _sync_tui_command_completion(self, ctx, original_agent, cmd)
 
@@ -3155,48 +3171,42 @@ def run_textual_interactive(
                         # workspace BEFORE the Textual app takes over the
                         # terminal. Mirrors interactive.py's Rich-CLI fix.
                         # Without this, --resume against a thread from a
-                        # different workspace would leave deployed sub-agents
-                        # operating on the launch directory's files.
+                        # different workspace would leave background workers
+                        # and deployed sub-agents operating on the launch
+                        # directory's files.
                         from ..stream.console import console as _resume_console
 
                         try:
-                            from ..config import load_config
-                            from ..langgraph_dev.manager import (
-                                WorkspaceMismatchError,
-                                ensure_langgraph_dev,
+                            from ..langgraph_dev.manager import WorkspaceMismatchError
+                            from .commands import (
+                                _sync_background_agent_server_workspace,
                             )
 
-                            _ws_cfg = load_config()
-                            if getattr(_ws_cfg, "enable_async_subagents", False):
-                                with _resume_console.status(
-                                    "[dim]Syncing async sub-agent server to "
-                                    "resumed workspace...[/dim]",
-                                    spinner="dots",
-                                ):
-                                    await asyncio.to_thread(
-                                        ensure_langgraph_dev,
-                                        _ws_cfg,
-                                        workspace_dir=ws,
-                                    )
+                            await _sync_background_agent_server_workspace(
+                                config,
+                                workspace_dir=ws,
+                            )
                         except WorkspaceMismatchError as _ws_mismatch_exc:
                             # Surface the user-actionable message via the
                             # Rich console (TUI hasn't taken over the terminal
                             # yet) and abort the resume so the TUI doesn't
                             # start up pointing at the conflicting workspace
-                            # with async sub-agents routed at a server pinned
-                            # to a different workspace.
+                            # with background work routed at a server pinned to
+                            # a different workspace.
                             _resume_console.print(f"[red]{_ws_mismatch_exc}[/red]")
                             mismatch_aborted = True
                         except Exception as _ws_sync_exc:
                             # Non-fatal at startup — async sub-agents fall back
-                            # to sync via the manager's own availability flag.
+                            # to sync via the manager's own availability flag,
+                            # and memory workers skip while the server is down.
                             # Surface the exception so unexpected failures
                             # (import errors, regressions in
                             # ensure_langgraph_dev, etc.) don't hide silently.
                             logging.getLogger(__name__).warning(
                                 "TUI startup workspace sync to langgraph dev "
                                 "failed: %s. Async sub-agents will fall back "
-                                "to in-process sync delegation for this session.",
+                                "to in-process sync delegation and EvoMemory "
+                                "workers will skip for this session.",
                                 _ws_sync_exc,
                             )
                     if mismatch_aborted:

@@ -8,14 +8,15 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
-import typer  # type: ignore[import-untyped]
+import typer
 from rich.markup import escape
 from rich.table import Table
 
+from ..commands.base import Command, CommandContext
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
-from ..paths import ensure_dirs, set_workspace_root
+from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
@@ -435,10 +436,11 @@ class CompactSummaryRenderable:
 
 
 def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
-    """Conditionally start the langgraph dev subprocess for async sub-agents.
+    """Start the langgraph dev subprocess for background agent work.
 
-    Shared by both the interactive entry and the serve entry — keeps the
-    user-visible status message and the conditional in one place.
+    Shared by both the interactive entry and the serve entry so the
+    user-visible status message and workspace-mismatch handling stay in one
+    place.
 
     Raises ``typer.Exit(1)`` (after surfacing a red error) when an
     externally-managed langgraph dev is already running for a different
@@ -447,19 +449,44 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     state would route async sub-agent calls to a process pinned to /A
     while the main agent runs in /B.
     """
-    if not getattr(config, "enable_async_subagents", False):
-        return
     from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
 
     try:
         with console.status(
-            "[dim]Starting async sub-agent server (langgraph dev)...[/dim]",
+            "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
             ensure_langgraph_dev(config, workspace_dir=workspace_dir)
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+
+async def _sync_background_agent_server_workspace(
+    config: Any,
+    *,
+    workspace_dir: str,
+    status_message: str = (
+        "[dim]Syncing background agent server to resumed workspace...[/dim]"
+    ),
+) -> None:
+    """Sync langgraph dev to a resumed workspace for background agent work.
+
+    ``ensure_langgraph_dev`` is intentionally always called: EvoMemory
+    background workers require the server even when async subagents are disabled.
+    WorkspaceMismatchError is left for callers to handle according to their UI
+    flow.
+    """
+    import asyncio
+
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+
+    with console.status(status_message, spinner="dots"):
+        await asyncio.to_thread(
+            ensure_langgraph_dev,
+            config,
+            workspace_dir=workspace_dir,
+        )
 
 
 def _resolve_context_window(
@@ -592,8 +619,9 @@ async def compact_conversation(
         return CompactResult("noop", "Nothing to compact — start a conversation first.")
 
     from langchain_core.messages.utils import count_tokens_approximately
+    from langchain_core.runnables import RunnableConfig
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
     try:
         state_snapshot = await agent.aget_state(config)
@@ -714,7 +742,12 @@ async def compact_conversation(
     finally:
         var_child_runnable_config.reset(_token)
 
-    summary_msg = middleware._build_new_messages_with_path(summary, file_path)[0]
+    from langchain_core.messages import HumanMessage
+
+    summary_msg = cast(
+        HumanMessage,
+        middleware._build_new_messages_with_path(summary, file_path)[0],
+    )
 
     # Compute token savings (message-level, used for pct calculation)
     tokens_summary = count_tokens_approximately([summary_msg])
@@ -805,9 +838,101 @@ def _make_serve_start_new_session_cb(
     return _cb
 
 
+def _serve_resume_config(
+    agent_holder: dict[str, Any],
+    config: Any | None,
+) -> Any | None:
+    """Return the effective config to use for serve-mode resume sync."""
+    return config if config is not None else agent_holder.get("config")
+
+
+async def _apply_serve_resume_state(
+    agent_holder: dict[str, Any],
+    channel_runtime: Any | None,
+    *,
+    thread_id: str,
+    workspace_dir: str | None,
+    config: Any | None = None,
+) -> None:
+    """Adopt a resumed thread/workspace into serve-mode runtime state.
+
+    Workspace-bound resources are rebuilt and synced before mutating the shared
+    holder. The agent is loaded before syncing the external server so a load
+    failure cannot move the server away from the currently active session.
+    """
+    import asyncio
+
+    old_workspace = agent_holder.get("workspace_dir")
+    new_workspace = (
+        workspace_dir if workspace_dir and workspace_dir != old_workspace else None
+    )
+    new_agent: Any | None = None
+
+    if new_workspace is not None:
+        effective_config = _serve_resume_config(agent_holder, config)
+        if effective_config is None:
+            raise RuntimeError(
+                "Cannot resume into a different workspace in serve mode without "
+                "the effective configuration."
+            )
+        try:
+            new_agent = await asyncio.to_thread(
+                _load_agent,
+                workspace_dir=new_workspace,
+                config=effective_config,
+            )
+            await _sync_background_agent_server_workspace(
+                effective_config,
+                workspace_dir=new_workspace,
+            )
+        except Exception:
+            if old_workspace:
+                set_active_workspace(old_workspace)
+            raise
+
+    old_thread_id = agent_holder.get("thread_id")
+    thread_changed = bool(thread_id) and thread_id != old_thread_id
+    if thread_changed:
+        forget_channel_origin(old_thread_id)
+        agent_holder["thread_id"] = thread_id
+        if channel_runtime is not None:
+            channel_runtime.thread_id = thread_id
+
+    if new_workspace is not None:
+        agent_holder["workspace_dir"] = new_workspace
+        agent_holder["agent"] = new_agent
+        if channel_runtime is not None:
+            channel_runtime.agent = new_agent
+
+
+def _make_serve_handle_session_resume_cb(
+    agent_holder: dict[str, Any],
+    channel_runtime: Any | None = None,
+    *,
+    config: Any | None = None,
+):
+    """Build the ChannelCommandUI resume callback for serve mode."""
+
+    async def _cb(thread_id: str, workspace_dir: str | None = None) -> None:
+        old_thread_id = agent_holder.get("thread_id")
+        await _apply_serve_resume_state(
+            agent_holder,
+            channel_runtime,
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            config=config,
+        )
+        if thread_id and thread_id != old_thread_id:
+            agent_holder["_resume_warning_thread_id"] = thread_id
+
+    return _cb
+
+
 def _make_serve_cmd_completed_hook(
     agent_holder: dict[str, Any],
     channel_runtime: Any | None = None,
+    *,
+    config: Any | None = None,
 ):
     """Build the ``on_cmd_completed`` hook used by serve mode.
 
@@ -827,11 +952,17 @@ def _make_serve_cmd_completed_hook(
     without spinning up the whole serve loop.
     """
 
-    async def _hook(ctx: Any, original_agent: Any, cmd: Any) -> None:
+    async def _hook(ctx: CommandContext, original_agent: Any, cmd: Command) -> None:
         if ctx.agent is not None and ctx.agent is not original_agent:
             agent_holder["agent"] = ctx.agent
             if channel_runtime is not None:
                 channel_runtime.agent = ctx.agent
+
+        old_thread_id = agent_holder.get("thread_id")
+        resume_warning_thread_id = agent_holder.pop(
+            "_resume_warning_thread_id",
+            None,
+        )
 
         # ``/resume`` mutates ``ctx.thread_id`` directly (its UI callback
         # is a no-op in serve mode since there's no REPL to reset).  Pick
@@ -841,23 +972,32 @@ def _make_serve_cmd_completed_hook(
         # ``ctx.thread_id`` unchanged — ``thread_changed`` gates both
         # the adoption and the user-facing warning so neither fires in
         # that case.
-        new_tid = getattr(ctx, "thread_id", None)
-        thread_changed = bool(new_tid) and new_tid != agent_holder.get("thread_id")
-        if thread_changed:
-            forget_channel_origin(agent_holder.get("thread_id"))
-            agent_holder["thread_id"] = new_tid
-            if channel_runtime is not None:
-                channel_runtime.thread_id = new_tid
+        new_tid = ctx.thread_id
+        if cmd.name == "/resume":
+            await _apply_serve_resume_state(
+                agent_holder,
+                channel_runtime,
+                thread_id=new_tid,
+                workspace_dir=ctx.workspace_dir,
+                config=config,
+            )
+        else:
+            thread_changed = bool(new_tid) and new_tid != old_thread_id
+            if thread_changed:
+                forget_channel_origin(old_thread_id)
+                agent_holder["thread_id"] = new_tid
+                if channel_runtime is not None:
+                    channel_runtime.thread_id = new_tid
 
-        new_workspace = getattr(ctx, "workspace_dir", None)
-        if new_workspace and new_workspace != agent_holder.get("workspace_dir"):
-            agent_holder["workspace_dir"] = new_workspace
+        thread_changed = bool(new_tid) and new_tid != old_thread_id
 
         # Surface the in-memory-state limitation to the channel user
         # for ``/resume`` so the missing history isn't silent.  Flush
         # is required because ``cmd_manager.execute`` already flushed
         # the command's own output before calling this hook.
-        if getattr(cmd, "name", None) == "/resume" and thread_changed:
+        if cmd.name == "/resume" and (
+            thread_changed or resume_warning_thread_id == new_tid
+        ):
             try:
                 ctx.ui.append_system(
                     "Note: serve mode uses in-memory state — "
@@ -879,6 +1019,7 @@ def _serve_process_message(
     workspace_dir: str,
     show_thinking: bool,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
+    handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
     start_new_session_cb: Callable[[], None] | None = None,
     channel_runtime: Any | None = None,
 ) -> None:
@@ -1004,8 +1145,17 @@ def _serve_process_message(
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
                     or _make_serve_start_new_session_cb(agent_holder, channel_runtime),
+                    handle_session_resume_cb=handle_session_resume_cb
+                    or _make_serve_handle_session_resume_cb(
+                        agent_holder,
+                        channel_runtime,
+                    ),
                     on_cmd_completed=on_cmd_completed
-                    or _make_serve_cmd_completed_hook(agent_holder, channel_runtime),
+                    or _make_serve_cmd_completed_hook(
+                        agent_holder,
+                        channel_runtime,
+                        config=agent_holder.get("config"),
+                    ),
                     channel_runtime=channel_runtime,
                 )
             )
@@ -1254,6 +1404,7 @@ def serve(
         "agent": agent,
         "thread_id": tid,
         "workspace_dir": ws,
+        "config": config,
     }
 
     from ..commands.base import ChannelRuntime
@@ -1264,7 +1415,10 @@ def serve(
     # them for every inbound message.  Without this hoist each message
     # would allocate a fresh closure pair.
     _serve_on_cmd_completed = _make_serve_cmd_completed_hook(
-        agent_holder, channel_runtime
+        agent_holder, channel_runtime, config=config
+    )
+    _serve_handle_session_resume_cb = _make_serve_handle_session_resume_cb(
+        agent_holder, channel_runtime, config=config
     )
     _serve_start_new_session_cb = _make_serve_start_new_session_cb(
         agent_holder, channel_runtime
@@ -1323,6 +1477,7 @@ def serve(
                         workspace_dir=ws,
                         show_thinking=effective_channel_thinking,
                         on_cmd_completed=_serve_on_cmd_completed,
+                        handle_session_resume_cb=_serve_handle_session_resume_cb,
                         start_new_session_cb=_serve_start_new_session_cb,
                         channel_runtime=channel_runtime,
                     )
@@ -2049,7 +2204,7 @@ def _main_callback(
                     except Exception:
                         pass
 
-        import nest_asyncio  # type: ignore[import-untyped]
+        import nest_asyncio
 
         nest_asyncio.apply()
         asyncio.get_event_loop().run_until_complete(_single_shot())
