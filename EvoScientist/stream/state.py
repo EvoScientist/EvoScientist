@@ -213,6 +213,7 @@ class StreamState:
                     "name": result_name,
                     "content": result_content,
                     "id": event["id"],
+                    "success": event.get("success", True),
                 }
             )
             # Update todo list from write_todos / read_todos tool results.
