@@ -175,6 +175,77 @@ class TestConvertVirtualPaths:
         result = convert_virtual_paths_in_command(command)
         assert result == "ssh host 'ls ./home/username/project'"
 
+    def test_quoted_virtual_path_with_whitespace_is_rewritten(self):
+        """A virtual path quoted to keep its whitespace must still be
+        recognised as one path token and rewritten (was: the regex's
+        ``(?<=\\s)`` lookbehind failed after the opening ``"``, so the
+        whole quoted path was left as-is and the shell broke it at the
+        embedded space).
+        """
+        result = convert_virtual_paths_in_command('python "/main file.py"')
+        tokens = shlex.split(result)
+        assert tokens == ["python", "./main file.py"]
+        # Defence-in-depth: the original quoted form must NOT survive
+        # — otherwise the shell still receives the inner unquoted string
+        # and breaks at the space.
+        assert '"/main file.py"' not in result
+
+    def test_quoted_skills_path_with_whitespace_in_skill_name_resolved(
+        self, monkeypatch, tmp_path
+    ):
+        """A quoted ``/skills/<name with space>/...`` path must be
+        resolved as a single token, not truncated at the space (was:
+        the regex stopped at the first whitespace, so the resolver
+        received ``/skills/<word>`` and the suffix landed as a separate
+        argument).
+        """
+        # Tier setup identical to TestVirtualMountResolution._setup_tiers
+        user_dir = tmp_path / "ws_skills"
+        global_dir = tmp_path / "global_skills"
+        builtin_dir = tmp_path / "builtin_skills"
+        memories_dir = tmp_path / "memories"
+        for d in (user_dir, global_dir, builtin_dir, memories_dir):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+        (builtin_dir / "find skills").mkdir()
+        (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
+
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
+
+        tokens = shlex.split(result)
+        assert tokens[0] == "python"
+        assert tokens[1] == str(builtin_dir / "find skills" / "tool.py")
+
+    def test_quoted_system_path_with_workspace_and_whitespace_corrected(self):
+        """A quoted system path that references the workspace dir name
+        (which itself contains a space) must be auto-corrected to the
+        workspace-relative form, not left as the original quoted string.
+        """
+        result = convert_virtual_paths_in_command(
+            'python "/Users/user/my project/src/main.py"',
+            workspace_name="my project",
+        )
+        tokens = shlex.split(result)
+        assert tokens == ["python", "./src/main.py"]
+
+    def test_quoted_path_with_whitespace_round_trip_safe(self):
+        """Whatever quote style the splice picks, ``shlex.split`` of the
+        result must round-trip back to a single token equal to the
+        intended replacement — quote-style agnostic. Specifically the
+        embedded space must NOT cause the shell to see the path as
+        two arguments.
+        """
+        result = convert_virtual_paths_in_command('python "/main file.py"')
+        tokens = shlex.split(result)
+        # The path must remain a single argument regardless of how
+        # the splice chose to quote it (single / double / escaped).
+        assert tokens == ["python", "./main file.py"]
+
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
 
