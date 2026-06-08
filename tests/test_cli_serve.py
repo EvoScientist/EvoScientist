@@ -6,6 +6,7 @@ import os
 from types import SimpleNamespace
 
 from EvoScientist.cli import commands
+from EvoScientist.config import MemoryObservationWriter
 
 
 def _make_config(
@@ -27,6 +28,11 @@ def _make_config(
         auto_approve=auto_approve,
         auto_mode=auto_mode,
         enable_ask_user=enable_ask_user,
+        enable_async_subagents=False,
+        memory_profile_enabled=True,
+        memory_observations_enabled=True,
+        memory_observation_writer=MemoryObservationWriter.ALL,
+        memory_workers_enabled=False,
         provider="anthropic",
         anthropic_auth_mode="api_key",
         openai_auth_mode="api_key",

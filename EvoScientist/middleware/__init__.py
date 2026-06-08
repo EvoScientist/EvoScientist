@@ -22,6 +22,11 @@ from .memory import (
     EvoMemoryMiddleware,
     create_memory_middleware,
 )
+from .memory_lifecycle import (
+    EvoMemoryLifecycleMiddleware,
+    MemoryLifecycleRole,
+    create_memory_lifecycle_middleware,
+)
 from .model_fallback import ModelFallbackMiddleware, load_fallback_chain
 from .runtime_context import RuntimeContextMiddleware, create_runtime_context_middleware
 from .tool_error_handler import ToolErrorHandlerMiddleware
@@ -35,7 +40,9 @@ __all__ = [
     "Choice",
     "ConfigurableModelMiddleware",
     "ContextOverflowMapperMiddleware",
+    "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
+    "MemoryLifecycleRole",
     "ModelFallbackMiddleware",
     "Question",
     "RuntimeContextMiddleware",
@@ -43,6 +50,7 @@ __all__ = [
     "compute_context_editing_trigger",
     "create_code_interpreter_middleware",
     "create_context_editing_middleware",
+    "create_memory_lifecycle_middleware",
     "create_memory_middleware",
     "create_runtime_context_middleware",
     "create_tool_selector_middleware",

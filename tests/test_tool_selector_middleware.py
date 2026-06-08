@@ -161,6 +161,8 @@ def test_default_middleware_includes_tool_selector(mock_config, mock_model, mock
     cfg = MagicMock()
     cfg.enable_ask_user = False
     cfg.auto_approve = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _get_default_middleware
@@ -196,6 +198,8 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     cfg = MagicMock()
     cfg.enable_ask_user = False
     cfg.auto_approve = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _get_default_middleware

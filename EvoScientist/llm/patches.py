@@ -14,6 +14,9 @@ Patches:
     - _patch_deepseek_reasoning_passback: re-inject reasoning_content into
       outgoing DeepSeek assistant messages for thinking-mode multi-turn /
       tool_use scenarios
+    - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
+      encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
+      (store=false → "Item with id rs_... not found")
 
 Utilities:
     - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
@@ -724,6 +727,60 @@ def _patch_openai_capture_reasoning_content() -> None:
 
 
 _patch_openai_capture_reasoning_content()
+
+
+# ---------------------------------------------------------------------------
+# Patch (lazy, OpenRouter only): strip OpenAI-Responses encrypted reasoning
+# items from outgoing assistant messages.
+#
+# OpenRouter's `/responses` beta is stateless — it does not propagate
+# `store=true` / `previous_response_id` upstream. So when a prior turn's
+# assistant message carries a reasoning item with an `rs_*` id (the encrypted
+# Responses reasoning block), replaying it on the next turn fails with HTTP 400:
+#   "Item with id 'rs_...' not found. Items are not persisted when `store` is
+#    set to false. ... remove this item from your input."
+# (observed against both Azure and OpenAI upstreams — so deepagents'
+# azure-ignore is not sufficient). The only robust fix is to drop these items
+# on passback, exactly as the upstream error instructs. Reasoning DISPLAY is
+# unaffected: it happens when the item is generated, not on passback.
+# Related: langchain-ai/langchain#37777.
+# ---------------------------------------------------------------------------
+_openrouter_reasoning_strip_patched = False
+
+
+def _is_responses_reasoning_item(entry: Any) -> bool:
+    """True for an OpenAI-Responses encrypted reasoning item (`rs_` id / data)."""
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("id") or "").startswith("rs_") or bool(entry.get("data"))
+
+
+def _patch_openrouter_strip_responses_reasoning() -> None:
+    global _openrouter_reasoning_strip_patched
+    if _openrouter_reasoning_strip_patched:
+        return
+    try:
+        import langchain_openrouter.chat_models as _mod
+
+        _orig = _mod._convert_message_to_dict
+
+        def _patched(message: Any) -> Any:
+            result = _orig(message)
+            details = (
+                result.get("reasoning_details") if isinstance(result, dict) else None
+            )
+            if isinstance(details, list):
+                kept = [e for e in details if not _is_responses_reasoning_item(e)]
+                if kept:
+                    result["reasoning_details"] = kept
+                else:
+                    result.pop("reasoning_details", None)
+            return result
+
+        _mod._convert_message_to_dict = _patched
+        _openrouter_reasoning_strip_patched = True
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

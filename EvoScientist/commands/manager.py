@@ -93,12 +93,14 @@ class CommandManager:
         if not cmd:
             return False
 
+        ctx.command_error = None
         try:
             await cmd.execute(ctx, args)
             await ctx.ui.flush()
             return True
         except Exception as e:
             _logger.exception(f"Error executing command {cmd_name}: {e}")
+            ctx.command_error = str(e)
             ctx.ui.append_system(f"Error executing {cmd_name}: {e}", style="red")
             await ctx.ui.flush()
             return True

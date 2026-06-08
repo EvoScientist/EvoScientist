@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.1.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.1.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -109,7 +109,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 ## ✨ Features
 - **🤖 Multi-Agent Team** — 6 sub-agents (plan, research, code, debug, analyze, write) working in concert.
-- **🧠 Persistent Memory** — Context, preferences, and findings survive across sessions.
+- **🧠 Self-Evolving Memory** — User profile and observations auto-distilled each turn, growing across sessions.
 - **🌐 Multi-Provider** — Anthropic, OpenAI, Google, MiniMax, NVIDIA — one config to switch.
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
 - **🖥️ Browser WebUI (beta)** — Workspace-panel web app, one terminal via `--ui webui`.
@@ -136,6 +136,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[07 Jun 2026]** **[v0.1.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.4)** — Auxiliary model for background tasks & tool selection, observation-memory lifecycle, Qwen3.7-Max/Plus (DashScope), UI-backend selection, plus an OpenRouter multi-turn reasoning fix.
 - **[03 Jun 2026]** **[v0.1.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.3)** — Multimodal handling (image + PDF/doc flatten/hoisting, text-only model fallback), runtime-context middleware, memory middleware → profile files with stream timeline narration, textual CJK-input fix.
 - **[02 Jun 2026]** **[v0.1.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.2)** — Browser WebUI mode (beta), `EvoSci deploy` standalone LangGraph server, default model → claude-sonnet-4-6, MiniMax M3, plus sandbox-timeout and async-notifier channel-routing fixes.
 - **[19 May 2026]** **[v0.1.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.1)** — deepagents 0.6.2 DeltaChannel upgrade, tier-aware skill mounts, status & elapsed-time bar, QQ inline buttons.

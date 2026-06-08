@@ -43,7 +43,7 @@ from .validators import validate_tavily_key
 
 
 def _step_ui_backend(config: EvoScientistConfig) -> str:
-    """Step 0: Select UI backend (Textual TUI, Rich CLI, or browser WebUI).
+    """Step 0: Select UI backend (desktop WebUI, Textual TUI, or Rich CLI).
 
     Args:
         config: Current configuration.
@@ -52,9 +52,9 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         Selected backend name ("tui", "cli", or "webui").
     """
     choices = [
+        Choice(title="WebUI (desktop interface, beta)", value="webui"),
         Choice(title="TUI (full-screen interface, recommended)", value="tui"),
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
-        Choice(title="WebUI (browser interface, beta)", value="webui"),
     ]
 
     # Map legacy values to current ones
@@ -228,11 +228,20 @@ def _step_webui_port(config: EvoScientistConfig) -> int:
     return port
 
 
-def _step_provider(config: EvoScientistConfig) -> str:
+def _step_provider(
+    config: EvoScientistConfig,
+    *,
+    label: str | None = None,
+    default_value: str | None = None,
+) -> str:
     """Step 1: Select LLM provider.
 
     Args:
         config: Current configuration.
+        label: Optional role label (e.g. "co-pilot") to clarify which model this
+            provider is for. When omitted, the generic main-model prompt is used.
+        default_value: Preselect this provider instead of ``config.provider``
+            (e.g. the auxiliary provider when configuring the co-pilot).
 
     Returns:
         Selected provider name.
@@ -297,12 +306,13 @@ def _step_provider(config: EvoScientistConfig) -> str:
         ),
     ]
 
-    # Set default based on current config
+    # Set default based on current config (or an explicit override).
     valid_providers = {c.value for c in choices}
-    default = config.provider if config.provider in valid_providers else "anthropic"
+    preferred = default_value or config.provider
+    default = preferred if preferred in valid_providers else "anthropic"
 
     provider = questionary.select(
-        "Select your LLM provider:",
+        f"Select {label} provider:" if label else "Select your LLM provider:",
         choices=choices,
         default=default,
         style=WIZARD_STYLE,
@@ -671,6 +681,8 @@ def _step_model(
     provider: str,
     *,
     ollama_detected_models: list[str] | None = None,
+    label: str | None = None,
+    default_value: str | None = None,
 ) -> str:
     """Step 3: Select model for the provider.
 
@@ -678,10 +690,16 @@ def _step_model(
         config: Current configuration.
         provider: Selected provider name.
         ollama_detected_models: Model names detected from a live Ollama server.
+        label: Optional role label (e.g. "co-pilot") for the prompt. When omitted,
+            the generic main-model prompt is used.
+        default_value: Preselect this model instead of ``config.model`` (e.g. the
+            auxiliary model when configuring the co-pilot).
 
     Returns:
         Selected model name.
     """
+    model_prompt = f"Select {label} model:" if label else "Select model:"
+    model_default = default_value or config.model
     # Ollama: show only what's actually pulled on the server
     if provider == "ollama":
         if ollama_detected_models:
@@ -692,11 +710,11 @@ def _step_model(
             choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
             default = ollama_detected_models[0]
-            if config.model in ollama_detected_models:
-                default = config.model
+            if model_default in ollama_detected_models:
+                default = model_default
 
             selected = questionary.select(
-                "Select model:",
+                model_prompt,
                 choices=choices,
                 default=default,
                 style=WIZARD_STYLE,
@@ -742,7 +760,7 @@ def _step_model(
                 style=WIZARD_STYLE,
                 qmark=QMARK,
                 placeholder=FormattedText([("fg:#858585", " e.g. owner/model-name")]),
-                default=config.model or "",
+                default=model_default or "",
             ).ask()
             if model is None:
                 raise KeyboardInterrupt()
@@ -763,14 +781,23 @@ def _step_model(
         choices.append(Choice(title=f"{name} ({model_id})", value=name))
     choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
-    # Determine default
-    if config.model in provider_models:
-        default = config.model
+    # Determine default. An explicit ``default_value`` override (e.g. a saved
+    # co-pilot model on a re-run) that isn't a registry model is a custom name:
+    # preselect "Type a model name..." and prefill it. A plain ``config.model``
+    # that just isn't in the current provider's list (e.g. the provider was
+    # changed) falls back to the first model, NOT the custom entry.
+    custom_default = (
+        default_value if default_value and default_value not in provider_models else ""
+    )
+    if model_default in provider_models:
+        default = model_default
+    elif custom_default:
+        default = _CUSTOM_SENTINEL
     else:
         default = provider_models[0]
 
     selected = questionary.select(
-        "Select model:",
+        model_prompt,
         choices=choices,
         default=default,
         style=WIZARD_STYLE,
@@ -786,6 +813,7 @@ def _step_model(
 
     model = questionary.text(
         "Model name:",
+        default=custom_default,
         style=WIZARD_STYLE,
         qmark=QMARK,
         placeholder=FormattedText([("fg:#858585", " e.g. owner/model-name")]),
@@ -797,6 +825,40 @@ def _step_model(
         model = provider_models[0]
         console.print(f"  [dim]Using default: {model}[/dim]")
     return model
+
+
+def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
+    """Step 3.25: Choose whether to assemble a co-pilot (auxiliary) model.
+
+    The co-pilot runs background/helper LLM calls — EvoMemory (memory workers)
+    and the main agent's tool selector — so it can be a cheaper/faster model.
+    Returns True when the user picks "Assemble"; the caller then runs the
+    provider/key/model pickers. Returns False to keep the pilot (main model)
+    everywhere.
+    """
+    console.print(
+        "  [dim]A cheaper/faster co-pilot for EvoMemory (memory workers).[/dim]"
+    )
+    choice = questionary.select(
+        "Co-pilot (auxiliary model):",
+        choices=[
+            Choice(
+                title="Skip — single pilot (main model handles everything)",
+                value="skip",
+            ),
+            Choice(
+                title="Assemble a co-pilot — separate cheaper/faster model",
+                value="assemble",
+            ),
+        ],
+        default="assemble" if config.auxiliary_model else "skip",
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
+    ).ask()
+    if choice is None:
+        raise KeyboardInterrupt()
+    return choice == "assemble"
 
 
 def _step_reasoning_effort(config: EvoScientistConfig) -> str:
@@ -935,17 +997,22 @@ _RECOMMENDED_SKILLS = [
     },
     # ── Third-party (K-Dense) ──
     {
-        "label": "Scientific Skills  (147 research & experiment skills, third party by K-Dense)",
-        "source": "K-Dense-AI/claude-scientific-skills@scientific-skills",
+        "label": "Scientific Skills  (143 research & experiment skills, third party by K-Dense)",
+        "source": "K-Dense-AI/scientific-agent-skills@skills",
     },
     {
-        "label": "Scientific Writer  (23 writing, review & presentation skills, third party by K-Dense)",
+        "label": "Scientific Writer  (27 writing, review & presentation skills, third party by K-Dense)",
         "source": "K-Dense-AI/claude-scientific-writer@skills",
     },
     # ── Third-party (Orchestra Research) ──
     {
-        "label": "AI Research Skills  (85 skills for training, evaluation, deployment, etc., third party by Orchestra Research)",
+        "label": "AI Research Skills  (98 skills for training, evaluation, deployment, etc., third party by Orchestra Research)",
         "source": "Orchestra-Research/AI-Research-SKILLs",
+    },
+    # ── Third-party (Google DeepMind) ──
+    {
+        "label": "Science Skills  (37 genomics, structural-biology & literature skills, third party by Google DeepMind)",
+        "source": "google-deepmind/science-skills@skills",
     },
     # ── Third-party (Anthropic) ──
     {
