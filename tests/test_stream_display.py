@@ -70,6 +70,7 @@ def test_streaming_display_keeps_narration_visible_while_processing_tool_result(
         ],
         tool_results=[
             {
+                "id": "tc1",
                 "name": "read_file",
                 "content": "# User profile\n\n- Likes concise updates.",
             }
@@ -83,6 +84,38 @@ def test_streaming_display_keeps_narration_visible_while_processing_tool_result(
     assert "Reading memory" in rendered
     assert "Analyzing results" in rendered
     assert rendered.index("Here is the answer.") < rendered.index("Reading memory")
+
+
+def test_streaming_display_pairs_root_tool_results_by_id():
+    """Out-of-order same-name root tool results should not pair by list index."""
+    renderable = create_streaming_display(
+        tool_calls=[
+            {
+                "id": "tc-a",
+                "name": "execute",
+                "args": {"command": "python a.py"},
+            },
+            {
+                "id": "tc-b",
+                "name": "execute",
+                "args": {"command": "python b.py"},
+            },
+        ],
+        tool_results=[
+            {
+                "id": "tc-b",
+                "name": "execute",
+                "content": "Error: result from b",
+            }
+        ],
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "execute(python a.py)" in rendered
+    assert "execute(python b.py)" in rendered
+    assert rendered.index("execute(python a.py)") < rendered.index("Running")
+    assert rendered.index("execute(python b.py)") < rendered.index("result from b")
 
 
 def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():
@@ -130,6 +163,7 @@ def test_streaming_display_keeps_narration_separate_when_answer_streams():
         ],
         tool_results=[
             {
+                "id": "tc1",
                 "name": "execute",
                 "content": "check complete",
             }
@@ -168,6 +202,7 @@ def test_streaming_display_keeps_narration_separate_in_final_frame():
         ],
         tool_results=[
             {
+                "id": "tc1",
                 "name": "execute",
                 "content": "check complete",
             }
@@ -247,10 +282,12 @@ def test_streaming_display_interleaves_multiple_narration_segments():
         ],
         tool_results=[
             {
+                "id": "tc1",
                 "name": "execute",
                 "content": "check.py",
             },
             {
+                "id": "tc2",
                 "name": "execute",
                 "content": "check complete",
             },
@@ -287,6 +324,7 @@ def test_streaming_display_preserves_narration_for_collapsed_completed_tool():
     ]
     tool_results = [
         {
+            "id": f"tc{i}",
             "name": "execute",
             "content": f"step {i} complete",
         }
@@ -344,7 +382,7 @@ def test_streaming_display_preserves_narration_for_collapsed_running_tool():
 def test_streaming_display_preserves_task_narration_while_subagent_runs():
     """Narration before a task call should stay attached to the task section."""
     narration = "I'll ask a specialist to inspect this.\n"
-    subagent = SubAgentState("code-agent", "inspect this")
+    subagent = SubAgentState("code-agent", "inspect this", "task:code", "task1")
     subagent.is_active = True
     subagent.add_tool_call("execute", {"command": "rg -n TODO ."}, "sa1")
 
@@ -381,7 +419,7 @@ def test_streaming_display_orders_final_task_narration_by_tool_index():
     first = "I'll ask a specialist to inspect this.\n"
     second = "Now I will run the result locally.\n"
     answer = "The local run passed."
-    subagent = SubAgentState("code-agent", "inspect this")
+    subagent = SubAgentState("code-agent", "inspect this", "task:code", "task1")
     subagent.is_active = False
     subagent.add_tool_call("execute", {"command": "rg -n TODO ."}, "sa1")
     subagent.add_tool_result("execute", "todo.py", True, "sa1")
@@ -411,10 +449,12 @@ def test_streaming_display_orders_final_task_narration_by_tool_index():
         ],
         tool_results=[
             {
+                "id": "task1",
                 "name": "task",
                 "content": "todo.py",
             },
             {
+                "id": "tc2",
                 "name": "execute",
                 "content": "passed",
             },

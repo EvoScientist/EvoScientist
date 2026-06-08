@@ -24,48 +24,66 @@ class TestStreamEventEmitter:
         assert ev.data["id"] == "tc1"
 
     def test_tool_result(self):
-        ev = StreamEventEmitter.tool_result("execute", "[OK] done", success=True)
+        ev = StreamEventEmitter.tool_result(
+            "execute", "[OK] done", success=True, tool_call_id="tc1"
+        )
         assert ev.type == "tool_result"
         assert ev.data["name"] == "execute"
         assert ev.data["content"] == "[OK] done"
         assert ev.data["success"] is True
+        assert ev.data["id"] == "tc1"
 
     def test_tool_result_failure(self):
-        ev = StreamEventEmitter.tool_result("execute", "Error: fail", success=False)
+        ev = StreamEventEmitter.tool_result(
+            "execute", "Error: fail", success=False, tool_call_id="tc1"
+        )
         assert ev.data["success"] is False
 
     def test_subagent_start(self):
-        ev = StreamEventEmitter.subagent_start("research-agent", "Find papers")
+        ev = StreamEventEmitter.subagent_start(
+            "research-agent",
+            "Find papers",
+            instance_id="task:abc",
+            tool_call_id="call_task_1",
+        )
         assert ev.type == "subagent_start"
         assert ev.data["name"] == "research-agent"
         assert ev.data["description"] == "Find papers"
+        assert ev.data["instance_id"] == "task:abc"
+        assert ev.data["tool_call_id"] == "call_task_1"
 
     def test_subagent_tool_call(self):
         ev = StreamEventEmitter.subagent_tool_call(
-            "research-agent", "tavily_search", {"query": "q"}, "tc2"
+            "research-agent",
+            "tavily_search",
+            {"query": "q"},
+            "tc2",
+            "task:abc",
         )
         assert ev.type == "subagent_tool_call"
         assert ev.data["subagent"] == "research-agent"
         assert ev.data["name"] == "tavily_search"
+        assert ev.data["instance_id"] == "task:abc"
 
     def test_subagent_tool_result(self):
         ev = StreamEventEmitter.subagent_tool_result(
-            "research-agent", "tavily_search", "results", True
+            "research-agent",
+            "tavily_search",
+            "results",
+            True,
+            tool_call_id="tc2",
+            instance_id="task:abc",
         )
         assert ev.type == "subagent_tool_result"
         assert ev.data["subagent"] == "research-agent"
-        assert ev.data["id"] == ""  # default when caller omits tool_call_id
-
-    def test_subagent_tool_result_with_id(self):
-        ev = StreamEventEmitter.subagent_tool_result(
-            "research-agent", "execute", "ok", True, tool_call_id="tc_xyz"
-        )
-        assert ev.data["id"] == "tc_xyz"
+        assert ev.data["id"] == "tc2"
+        assert ev.data["instance_id"] == "task:abc"
 
     def test_subagent_end(self):
-        ev = StreamEventEmitter.subagent_end("research-agent")
+        ev = StreamEventEmitter.subagent_end("research-agent", "task:abc")
         assert ev.type == "subagent_end"
         assert ev.data["name"] == "research-agent"
+        assert ev.data["instance_id"] == "task:abc"
 
     def test_done(self):
         ev = StreamEventEmitter.done("final answer")
@@ -101,13 +119,15 @@ class TestStreamEventEmitter:
         events = [
             StreamEventEmitter.thinking("x"),
             StreamEventEmitter.text("x"),
-            StreamEventEmitter.tool_call("t", {}),
-            StreamEventEmitter.tool_result("t", "x"),
-            StreamEventEmitter.subagent_start("s", "d"),
-            StreamEventEmitter.subagent_tool_call("s", "t", {}),
-            StreamEventEmitter.subagent_tool_result("s", "t", "x"),
-            StreamEventEmitter.subagent_text("s", "c"),
-            StreamEventEmitter.subagent_end("s"),
+            StreamEventEmitter.tool_call("t", {}, "tc1"),
+            StreamEventEmitter.tool_result("t", "x", True, "tc1"),
+            StreamEventEmitter.subagent_start("s", "d", "task:1", "call_task_1"),
+            StreamEventEmitter.subagent_tool_call("s", "t", {}, "tc2", "task:1"),
+            StreamEventEmitter.subagent_tool_result(
+                "s", "t", "x", True, "tc2", "task:1"
+            ),
+            StreamEventEmitter.subagent_text("s", "c", "task:1"),
+            StreamEventEmitter.subagent_end("s", "task:1"),
             StreamEventEmitter.interrupt("i", []),
             StreamEventEmitter.done(),
             StreamEventEmitter.error("e"),

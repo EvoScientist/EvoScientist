@@ -233,11 +233,11 @@ class TestFormatToolCompact:
 
     def test_task_with_desc_only(self):
         result = format_tool_compact("task", {"description": "do stuff"})
-        assert "Cooking with sub-agent" in result
+        assert result == "task(description=do stuff)"
 
     def test_task_no_info(self):
         result = format_tool_compact("task", {"other": "value"})
-        assert result == "Cooking with sub-agent"
+        assert result == "task(other=value)"
 
     def test_tavily_search(self):
         result = format_tool_compact("tavily_search", {"query": "python testing"})

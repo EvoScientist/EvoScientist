@@ -311,6 +311,18 @@ def _render_tool_call_line(tc: dict, tr: dict | None) -> Text:
     return tool_text
 
 
+def _tool_result_for_call(
+    tool_results: list,
+    tool_call: dict,
+) -> dict | None:
+    """Match root tool results by DeepAgents tool_call_id."""
+    tool_id = tool_call["id"]
+    return next(
+        (result for result in tool_results if result["id"] == tool_id),
+        None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sub-agent section rendering
 # ---------------------------------------------------------------------------
@@ -626,24 +638,13 @@ def create_streaming_display(
                 elements.append(Text(""))  # blank separator
                 elements.append(narration_markdown)
 
-    def _find_task_subagent(tc: dict, shown_sa_names: set[str]) -> SubAgentState | None:
-        sa_name = tc.get("args", {}).get("subagent_type", "")
-        task_desc = tc.get("args", {}).get("description", "")
+    def _find_task_subagent(tc: dict, shown_sa_ids: set[str]) -> SubAgentState | None:
+        tool_id = tc["id"]
         for sa in subagents:
-            if sa.name in shown_sa_names:
+            if sa.instance_id in shown_sa_ids:
                 continue
-            if sa.name == sa_name or (
-                task_desc and task_desc in (sa.description or "")
-            ):
+            if sa.parent_tool_call_id == tool_id:
                 return sa
-
-        candidates = [
-            sa
-            for sa in subagents
-            if sa.name not in shown_sa_names and (sa.tool_calls or sa.is_active)
-        ]
-        if len(candidates) == 1:
-            return candidates[0]
         return None
 
     def _append_task_entry(
@@ -651,14 +652,14 @@ def create_streaming_display(
         tc: dict,
         tr: dict | None,
         *,
-        shown_sa_names: set[str],
+        shown_sa_ids: set[str],
         compact: bool,
     ) -> None:
         _append_narration_before_tool(tool_index)
         elements.append(_render_tool_call_line(tc, tr))
-        matched_sa = _find_task_subagent(tc, shown_sa_names)
+        matched_sa = _find_task_subagent(tc, shown_sa_ids)
         if matched_sa is not None:
-            shown_sa_names.add(matched_sa.name)
+            shown_sa_ids.add(matched_sa.instance_id)
             elements.extend(_render_subagent_section(matched_sa, compact=compact))
 
     # Tool calls and results paired display
@@ -666,7 +667,7 @@ def create_streaming_display(
     # Task tool calls are ALWAYS visible (they represent sub-agent delegations)
     MAX_VISIBLE_TOOLS = 4
     MAX_VISIBLE_RUNNING = 3
-    shown_sa_names: set[str] = set()
+    shown_sa_ids: set[str] = set()
 
     if tool_calls:
         # Split into categories
@@ -675,8 +676,8 @@ def create_streaming_display(
         running_regular = []  # running non-task tools
 
         for i, tc in enumerate(tool_calls):
-            has_result = i < len(tool_results)
-            tr = tool_results[i] if has_result else None
+            tr = _tool_result_for_call(tool_results, tc)
+            has_result = tr is not None
             is_task = tc.get("name") == "task"
 
             if is_task:
@@ -697,7 +698,7 @@ def create_streaming_display(
                         tool_index,
                         tc,
                         tr,
-                        shown_sa_names=shown_sa_names,
+                        shown_sa_ids=shown_sa_ids,
                         compact=True,
                     )
                     continue
@@ -716,7 +717,9 @@ def create_streaming_display(
 
             # Render any sub-agents not already shown via task tool calls
             for sa in subagents:
-                if sa.name not in shown_sa_names and (sa.tool_calls or sa.is_active):
+                if sa.instance_id not in shown_sa_ids and (
+                    sa.tool_calls or sa.is_active
+                ):
                     elements.extend(_render_subagent_section(sa, compact=True))
 
         else:
@@ -759,12 +762,12 @@ def create_streaming_display(
                 key=lambda item: item[0],
             ):
                 if tc.get("name") == "task":
-                    matched_sa = _find_task_subagent(tc, shown_sa_names)
+                    matched_sa = _find_task_subagent(tc, shown_sa_ids)
                     _append_task_entry(
                         tool_index,
                         tc,
                         tr,
-                        shown_sa_names=shown_sa_names,
+                        shown_sa_ids=shown_sa_ids,
                         compact=not matched_sa.is_active if matched_sa else True,
                     )
                     continue
@@ -826,7 +829,7 @@ def create_streaming_display(
         # Sub-agent activity sections
         # Active: full bordered view; Completed: compact 1-line summary
         for sa in subagents:
-            if sa.name not in shown_sa_names and (sa.tool_calls or sa.is_active):
+            if sa.instance_id not in shown_sa_ids and (sa.tool_calls or sa.is_active):
                 elements.extend(_render_subagent_section(sa, compact=not sa.is_active))
 
         # Processing state after tool execution
@@ -914,11 +917,11 @@ def display_final_results(
         )
 
     if show_tools and state.tool_calls:
-        shown_sa_names: set[str] = set()
+        shown_sa_ids: set[str] = set()
 
-        for i, tc in enumerate(state.tool_calls):
-            has_result = i < len(state.tool_results)
-            tr = state.tool_results[i] if has_result else None
+        for tc in state.tool_calls:
+            tr = _tool_result_for_call(state.tool_results, tc)
+            has_result = tr is not None
             content = tr.get("content", "") if tr is not None else ""
             tool_name = tc.get("name", "")
             is_task = tool_name.lower() == "task"
@@ -926,17 +929,13 @@ def display_final_results(
             # Task tools: show delegation line + compact sub-agent summary
             if is_task:
                 console.print(_render_tool_call_line(tc, tr))
-                sa_name = tc.get("args", {}).get("subagent_type", "")
-                task_desc = tc.get("args", {}).get("description", "")
                 matched_sa = None
                 for sa in state.subagents:
-                    if sa.name == sa_name or (
-                        task_desc and task_desc in (sa.description or "")
-                    ):
+                    if sa.parent_tool_call_id == tc["id"]:
                         matched_sa = sa
                         break
                 if matched_sa:
-                    shown_sa_names.add(matched_sa.name)
+                    shown_sa_ids.add(matched_sa.instance_id)
                     for elem in _render_subagent_section(matched_sa, compact=True):
                         console.print(elem)
                 continue
@@ -955,7 +954,7 @@ def display_final_results(
 
         # Render any sub-agents not already shown via task tool calls
         for sa in state.subagents:
-            if sa.name not in shown_sa_names and (sa.tool_calls or sa.is_active):
+            if sa.instance_id not in shown_sa_ids and (sa.tool_calls or sa.is_active):
                 for elem in _render_subagent_section(sa, compact=True):
                     console.print(elem)
 
@@ -1047,12 +1046,8 @@ def _resolve_hitl_approval(
 
     needs_prompt = False
     for req in action_requests:
-        name = (
-            req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
-        )
-        args = (
-            req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
-        )
+        name = req.get("name", "")
+        args = req.get("args", {})
 
         if name not in HITL_SHELL_TOOLS:
             continue  # Only shell-running tools need manual approval
@@ -1091,12 +1086,8 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     console.print()
     panel_text = Text()
     for i, req in enumerate(action_requests):
-        name = (
-            req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
-        )
-        args = (
-            req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
-        )
+        name = req.get("name", "")
+        args = req.get("args", {})
         desc = format_tool_compact(name, args if isinstance(args, dict) else {})
         if panel_text.plain:
             panel_text.append("\n")
@@ -1669,18 +1660,15 @@ async def _astream_to_console(
         # Only show subagent starts as real-time progress.
         # Full results rendered by display_final_results() after streaming.
         if etype == "subagent_start":
-            name = event.get("name", "sub-agent")
-            # Skip generic "sub-agent" — real name arrives later;
-            # static prints can't be overwritten like Live display.
-            if name and name != "sub-agent":
-                desc = event.get("description", "")
-                line = Text()
-                line.append("\u25b6 ", style="cyan bold")
-                line.append(f"Cooking with {name}", style="cyan bold")
-                if desc:
-                    short = desc[:50] + "\u2026" if len(desc) > 50 else desc
-                    line.append(f" \u2014 {short}", style="dim")
-                console.print(line)
+            name = event["name"]
+            desc = event.get("description", "")
+            line = Text()
+            line.append("\u25b6 ", style="cyan bold")
+            line.append(f"Cooking with {name}", style="cyan bold")
+            if desc:
+                short = desc[:50] + "\u2026" if len(desc) > 50 else desc
+                line.append(f" \u2014 {short}", style="dim")
+            console.print(line)
 
     # Final output (streaming layout: tools → Task List → subagents → response)
 
@@ -1707,10 +1695,10 @@ async def _astream_to_console(
         )
 
     # 1) Regular (non-task) tools — above Task List
-    for i, tc in enumerate(state.tool_calls):
+    for tc in state.tool_calls:
         if tc.get("name", "").lower() == "task":
             continue
-        tr = state.tool_results[i] if i < len(state.tool_results) else None
+        tr = _tool_result_for_call(state.tool_results, tc)
         console.print(_render_tool_call_line(tc, tr))
         if tr and not is_success(tr.get("content", "")):
             for elem in format_tool_result_compact(tr["name"], tr.get("content", "")):

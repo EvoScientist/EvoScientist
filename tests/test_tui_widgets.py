@@ -58,9 +58,9 @@ class TestLoadingWidget(unittest.TestCase):
         w._timer_handle = timer
         w.remove = AsyncMock()
 
-        import asyncio
+        from tests.conftest import run_async
 
-        asyncio.run(w.cleanup())
+        run_async(w.cleanup())
 
         assert timer.stopped is True
         assert w._timer_handle is None

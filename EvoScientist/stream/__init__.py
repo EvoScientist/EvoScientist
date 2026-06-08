@@ -3,7 +3,6 @@ Stream module - streaming event processing for CLI display.
 
 Provides:
 - StreamEventEmitter: Standardized event creation
-- ToolCallTracker: Incremental JSON parsing for tool parameters
 - ToolResultFormatter: Content-aware result formatting with Rich
 - Utility functions and constants
 - SubAgentState / StreamState: Stream state tracking
@@ -28,7 +27,6 @@ __getattr__, __dir__, __all__ = _lazy.attach(
         "events",
         "formatter",
         "state",
-        "tracker",
         "utils",
     ],
     submod_attrs={
@@ -50,7 +48,6 @@ __getattr__, __dir__, __all__ = _lazy.attach(
             "_build_todo_stats",
             "_parse_todo_items",
         ],
-        "tracker": ["ToolCallInfo", "ToolCallTracker"],
         "utils": [
             "FAILURE_PREFIX",
             "SUCCESS_PREFIX",

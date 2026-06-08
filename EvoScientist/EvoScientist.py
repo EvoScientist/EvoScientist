@@ -9,11 +9,12 @@ Usage:
     from EvoScientist import EvoScientist_agent
 
     # Notebook / programmatic usage
-    for state in EvoScientist_agent.stream(
+    stream = await EvoScientist_agent.astream_events(
         {"messages": [HumanMessage(content="your question")]},
         config={"configurable": {"thread_id": "1"}},
-        stream_mode="values",
-    ):
+        version="v3",
+    )
+    async for event in stream:
         ...
 """
 
