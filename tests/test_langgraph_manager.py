@@ -375,8 +375,13 @@ class TestStartLanggraphDevRotatesLog:
     def test_rotate_called_before_open(self, tmp_path, monkeypatch):
         log = tmp_path / "langgraph_dev.log"
         log.write_bytes(b"x" * 2048)  # contents don't matter for the check
-        # Redirect the module-level paths to the temp dir so we don't
-        # touch the real ~/.config/evoscientist/ on a dev machine.
+        # Redirect every module-level path that ``start_langgraph_dev``
+        # touches so the test can't write to the real
+        # ``~/.config/evoscientist/`` on a dev machine. Patching only
+        # ``_LOG_FILE`` would still let ``_PID_DIR.mkdir(...)`` create
+        # a real directory on disk during the rotation prelude.
+        pid_dir = tmp_path / "pids"
+        monkeypatch.setattr(manager, "_PID_DIR", pid_dir)
         monkeypatch.setattr(manager, "_LOG_FILE", log)
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
         # Make ``_packaged_langgraph_config`` point at a real file so
@@ -401,3 +406,9 @@ class TestStartLanggraphDevRotatesLog:
                 pass  # expected — we just need rotation to have happened
         # After start attempt, the oversize log must have been rotated.
         assert (tmp_path / "langgraph_dev.log.1").exists()
+        # And the redirect held — nothing leaked into the real
+        # ``~/.config/evoscientist/`` (we'd have observed a
+        # ``langgraph_dev.log.1`` *next* to the user's real log, not
+        # under ``tmp_path``). The ``pid_dir`` we redirected to must
+        # exist, proving the function reached past the mkdir prelude.
+        assert pid_dir.is_dir()
