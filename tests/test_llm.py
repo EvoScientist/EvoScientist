@@ -526,6 +526,25 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_kwargs"]["cache_control"] == override
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_anthropic_prompt_cache_warns_on_invalid_model_kwargs(
+        self, mock_init, monkeypatch
+    ):
+        """Invalid model_kwargs shape should warn and skip cache injection."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "true")
+
+        with pytest.warns(UserWarning, match="model_kwargs` is not a dict"):
+            get_chat_model(
+                "claude-sonnet-4.6",
+                provider="openrouter",
+                model_kwargs="bad",
+            )
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_kwargs"] == "bad"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_routes_through_openai(self, mock_init, monkeypatch):
         """Custom provider should route through OpenAI with env-configured base_url."""
         mock_init.return_value = "mock_model"

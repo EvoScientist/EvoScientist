@@ -10,6 +10,7 @@ endpoints) and convenient short names for common models.
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any
 
 from langchain.chat_models import init_chat_model
@@ -253,7 +254,18 @@ def _has_cache_control_override(kwargs: dict[str, Any]) -> bool:
     if "cache_control" in kwargs:
         return True
     model_kwargs = kwargs.get("model_kwargs")
-    return isinstance(model_kwargs, dict) and "cache_control" in model_kwargs
+    if model_kwargs is None:
+        return False
+    if not isinstance(model_kwargs, dict):
+        warnings.warn(
+            "OpenRouter Anthropic prompt caching was not applied because "
+            "`model_kwargs` is not a dict; pass cache_control explicitly or use "
+            "a dict-shaped model_kwargs.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return True
+    return "cache_control" in model_kwargs
 
 
 def _apply_openrouter_anthropic_prompt_cache(
