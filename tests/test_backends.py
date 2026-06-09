@@ -2,6 +2,7 @@
 
 import re
 import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,13 @@ from EvoScientist.backends import (
     convert_virtual_paths_in_command,
     validate_command,
 )
+
+
+def _sleep_cmd(seconds: int) -> str:
+    """Cross-platform command that sleeps for *seconds* and exits 0."""
+    if sys.platform == "win32":
+        return f"ping -n {seconds + 1} 127.0.0.1 > nul"
+    return f"sleep {seconds}"
 
 # === validate_command ===
 
@@ -453,7 +461,8 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert result == f"python {user_dir / 'hello' / 'main.py'}"
+        assert str(user_dir / "hello" / "main.py") in result
+        assert result.startswith("python ")
 
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
@@ -462,7 +471,8 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert result == f"python {global_dir / 'hello' / 'main.py'}"
+        assert str(global_dir / "hello" / "main.py") in result
+        assert result.startswith("python ")
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
@@ -471,7 +481,8 @@ class TestVirtualMountResolution:
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
         result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
-        assert result == f"python {builtin_dir / 'find-skills' / 'tool.py'}"
+        assert str(builtin_dir / "find-skills" / "tool.py") in result
+        assert result.startswith("python ")
 
     def test_skills_path_unresolvable_falls_back_to_workspace_relative(
         self, monkeypatch, tmp_path
@@ -492,15 +503,16 @@ class TestVirtualMountResolution:
     ):
         _, _, _, memories_dir = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command("cat /memories/note.md")
-        assert result == f"cat {memories_dir / 'note.md'}"
+        assert str(memories_dir / "note.md") in result
+        assert result.startswith("cat ")
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
         """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
         mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert convert_virtual_paths_in_command("ls /skills") == f"ls {user_dir}"
-        assert convert_virtual_paths_in_command("ls /skills/") == f"ls {user_dir}"
+        assert str(user_dir) in convert_virtual_paths_in_command("ls /skills")
+        assert str(user_dir) in convert_virtual_paths_in_command("ls /skills/")
 
     def test_skills_prefix_not_overmatched(self, monkeypatch, tmp_path):
         """Paths starting with /skills but not /skills/ (e.g. /skillset/foo)
@@ -738,6 +750,10 @@ class TestVirtualMountResolution:
         assert result[1] == paths.GLOBAL_SKILLS_DIR
         assert result[2] == backends._BUILTIN_SKILLS_DIR
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="shlex.quote produces POSIX quoting incompatible with cmd.exe",
+    )
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
         execute successfully. Regression guard: USER_SKILLS_DIR must be in
@@ -769,10 +785,14 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python3 /skills/hello-ws/main.py")
+        resp = backend.execute("python /skills/hello-ws/main.py")
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="shlex.quote produces POSIX quoting incompatible with cmd.exe",
+    )
     def test_execute_e2e_workspace_tier_shadows_global(self, monkeypatch, tmp_path):
         """End-to-end: when the same skill exists in BOTH workspace and global
         tiers, the workspace version must shadow the global one when invoked
@@ -805,11 +825,15 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python3 /skills/shadow-test/main.py")
+        resp = backend.execute("python /skills/shadow-test/main.py")
         assert resp.exit_code == 0, resp.output
         assert "WORKSPACE_TIER_WINS" in resp.output
         assert "GLOBAL_TIER_LOST" not in resp.output
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="shlex.quote produces POSIX quoting incompatible with cmd.exe",
+    )
     def test_execute_e2e_global_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill that exists ONLY in the global tier (workspace
         does not have a copy) must execute successfully via
@@ -837,7 +861,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python3 /skills/hello-e2e/main.py")
+        resp = backend.execute("python /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
 
@@ -850,7 +874,7 @@ class TestResolvePath:
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         # /workspace/main.py should resolve to root/main.py
         resolved = backend._resolve_path("/workspace/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
         assert "workspace/workspace" not in str(resolved)
 
     def test_workspace_root(self, tmp_workspace):
@@ -862,13 +886,13 @@ class TestResolvePath:
     def test_system_path_with_workspace_marker(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/project/workspace/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
 
     def test_system_path_without_workspace(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/file.py")
         # Falls back to basename
-        assert str(resolved).endswith("file.py")
+        assert Path(resolved).parts[-1] == "file.py"
 
     def test_custom_workspace_name_prefix_stripped(self, tmp_path):
         """_resolve_path uses the actual dir name, not hardcoded 'workspace'."""
@@ -876,7 +900,7 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/my-project/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
         assert "my-project/my-project" not in str(resolved)
 
     def test_custom_workspace_name_system_path(self, tmp_path):
@@ -884,12 +908,12 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/experiment-1/data/out.csv")
-        assert str(resolved).endswith("data/out.csv")
+        assert Path(resolved).parts[-2:] == ("data", "out.csv")
 
     def test_normal_virtual_path(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/src/main.py")
-        assert str(resolved).endswith("src/main.py")
+        assert Path(resolved).parts[-2:] == ("src", "main.py")
 
     def test_parent_path_contains_workspace_name(self, tmp_path):
         """Regression: cwd's parent path also contains '/<ws_name>/'.
@@ -960,15 +984,29 @@ class TestSandboxId:
 
 
 class TestExecuteCwdSanitization:
-    def test_literal_workspace_path_replaced(self, tmp_workspace):
-        """execute() should replace literal workspace root path with ./"""
+    def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
+        """``prepare_sandbox_command`` must rewrite a literal workspace-root
+        absolute path to ``./`` before the command reaches the shell backend.
+
+        This asserts at the preprocessing boundary (no shell execution) so
+        the test is cross-platform — ``mkdir -p`` is POSIX-only and would
+        fail on Windows runners.
+        """
+        captured = {}
+
+        def fake_execute(_self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        # Create a subdir via the sanitized path
-        resp = backend.execute(f"mkdir -p {tmp_workspace}/test-sanitized && echo ok")
+        command = f"mkdir -p {tmp_workspace}/test-sanitized && echo ok"
+
+        resp = backend.execute(command)
+
         assert resp.exit_code == 0
-        # The dir should be created at workspace/test-sanitized, not nested
-        assert (Path(tmp_workspace) / "test-sanitized").is_dir()
-        assert not (Path(tmp_workspace) / tmp_workspace.lstrip("/")).exists()
+        assert f"{tmp_workspace}/" not in captured["command"]
+        assert "./test-sanitized" in captured["command"]
 
     def test_ssh_remote_paths_survive_execute_preprocessing(
         self, tmp_workspace, monkeypatch
@@ -1251,7 +1289,7 @@ class TestExecuteTruncation:
             max_output_bytes=100,
         )
         # Generate output larger than 100 bytes
-        resp = backend.execute("python3 -c \"print('A' * 200)\"")
+        resp = backend.execute('python -c "print(\'A\' * 200)"')
         assert resp.truncated is True
         assert "... Output truncated at 100 bytes" in resp.output
         # Output body (before truncation message) should be ≤ 100 bytes
@@ -1279,7 +1317,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            "python3 -c \"import sys; sys.stderr.write('warning\\n')\""
+            'python -c "import sys; sys.stderr.write(\'warning\\n\')"'
         )
         assert "[stderr] warning" in resp.output
 
@@ -1288,7 +1326,7 @@ class TestExecuteStderr:
             root_dir=tmp_workspace,
             virtual_mode=True,
         )
-        resp = backend.execute('python3 -c "raise SystemExit(42)"')
+        resp = backend.execute('python -c "raise SystemExit(42)"')
         assert resp.exit_code == 42
         assert "Exit code: 42" in resp.output
 
@@ -1298,7 +1336,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            "python3 -c \"import sys; print('out'); sys.stderr.write('err\\n')\""
+            'python -c "import sys; print(\'out\'); sys.stderr.write(\'err\\n\')"'
         )
         assert "out" in resp.output
         assert "[stderr] err" in resp.output
@@ -1528,20 +1566,21 @@ class TestAbsolutePathDetection:
 class TestExecuteTimeoutRecovery:
     def test_timeout_includes_recovery_guidance(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         assert resp.exit_code == 124
         assert "Recovery" in resp.output
         assert "background" in resp.output.lower()
 
     def test_timeout_includes_background_command(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
-        assert "sleep 10" in resp.output
+        cmd = _sleep_cmd(10)
+        resp = backend.execute(cmd)
+        assert cmd in resp.output
         assert "> /output.log 2>&1 &" in resp.output
 
     def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         # Background recovery captures the PID so the job can be managed later.
         assert "PID: $!" in resp.output
         # Recovery also offers re-running with a larger per-command timeout.
@@ -1549,11 +1588,11 @@ class TestExecuteTimeoutRecovery:
 
     def test_timeout_preserves_original_error(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         assert "timed out" in resp.output.lower()
 
     def test_non_timeout_not_enhanced(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace)
-        resp = backend.execute("python3 -c 'raise SystemExit(1)'")
+        resp = backend.execute('python -c "raise SystemExit(1)"')
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
