@@ -23,6 +23,8 @@ import subprocess
 import threading
 import time
 import uuid
+
+import psutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -234,16 +236,25 @@ def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
 
     On POSIX ``start_new_session=True`` makes the child a process-group
     leader; ``os.killpg`` terminates the entire group (shell + any
-    grandchildren).  On Windows ``os.killpg`` does not exist, so we fall
-    back to ``Popen.terminate()`` / ``Popen.kill()`` which call
-    ``TerminateProcess`` on the direct child.  With ``shell=True`` the
-    child is ``cmd.exe``, and killing it cascades to its children.
+    grandchildren).  On Windows ``TerminateProcess`` (used by
+    ``Popen.terminate()`` / ``Popen.kill()``) only kills the direct
+    child — it does *not* cascade to grandchildren.  We use ``psutil``
+    to walk the process tree and signal every descendant.
     """
     if os.name == "nt":
-        if forceful:
-            popen.kill()
-        else:
-            popen.terminate()
+        try:
+            proc = psutil.Process(popen.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+        targets = [proc] + proc.children(recursive=True)
+        for p in targets:
+            try:
+                if forceful:
+                    p.kill()
+                else:
+                    p.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
     else:
         sig = signal.SIGKILL if forceful else signal.SIGTERM
         try:

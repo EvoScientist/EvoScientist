@@ -557,7 +557,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute(f"{sys.executable} /skills/hello-ws/main.py")
+        resp = backend.execute("python /skills/hello-ws/main.py")
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
@@ -597,7 +597,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute(f"{sys.executable} /skills/shadow-test/main.py")
+        resp = backend.execute("python /skills/shadow-test/main.py")
         assert resp.exit_code == 0, resp.output
         assert "WORKSPACE_TIER_WINS" in resp.output
         assert "GLOBAL_TIER_LOST" not in resp.output
@@ -633,7 +633,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute(f"{sys.executable} /skills/hello-e2e/main.py")
+        resp = backend.execute("python /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
 
@@ -1063,7 +1063,7 @@ class TestExecuteTruncation:
             max_output_bytes=100,
         )
         # Generate output larger than 100 bytes
-        resp = backend.execute(f"{sys.executable} -c \"print('A' * 200)\"")
+        resp = backend.execute("python -c \"print('A' * 200)\"")
         assert resp.truncated is True
         assert "... Output truncated at 100 bytes" in resp.output
         # Output body (before truncation message) should be ≤ 100 bytes
@@ -1090,9 +1090,7 @@ class TestExecuteStderr:
             root_dir=tmp_workspace,
             virtual_mode=True,
         )
-        resp = backend.execute(
-            f"{sys.executable} -c \"import sys; sys.stderr.write('warning\\n')\""
-        )
+        resp = backend.execute("python -c \"import sys; sys.stderr.write('warning\\n')\"")
         assert "[stderr] warning" in resp.output
 
     def test_execute_nonzero_exit_code_in_output(self, tmp_workspace):
@@ -1100,7 +1098,7 @@ class TestExecuteStderr:
             root_dir=tmp_workspace,
             virtual_mode=True,
         )
-        resp = backend.execute(f'{sys.executable} -c "raise SystemExit(42)"')
+        resp = backend.execute('python -c "raise SystemExit(42)"')
         assert resp.exit_code == 42
         assert "Exit code: 42" in resp.output
 
@@ -1110,7 +1108,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            f"{sys.executable} -c \"import sys; print('out'); sys.stderr.write('err\\n')\""
+            "python -c \"import sys; print('out'); sys.stderr.write('err\\n')\""
         )
         assert "out" in resp.output
         assert "[stderr] err" in resp.output
@@ -1367,6 +1365,6 @@ class TestExecuteTimeoutRecovery:
 
     def test_non_timeout_not_enhanced(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace)
-        resp = backend.execute(f'{sys.executable} -c "raise SystemExit(1)"')
+        resp = backend.execute('python -c "raise SystemExit(1)"')
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
