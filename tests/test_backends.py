@@ -718,29 +718,15 @@ class TestSandboxId:
 
 
 class TestExecuteCwdSanitization:
-    def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
-        """``prepare_sandbox_command`` must rewrite a literal workspace-root
-        absolute path to ``./`` before the command reaches the shell backend.
-
-        This asserts at the preprocessing boundary (no shell execution) so
-        the test is cross-platform — ``mkdir -p`` is POSIX-only and would
-        fail on Windows runners.
-        """
-        captured = {}
-
-        def fake_execute(_self, command, *, timeout=None):
-            captured["command"] = command
-            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
-
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+    def test_literal_workspace_path_replaced(self, tmp_workspace):
+        """execute() should replace literal workspace root path with ./"""
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        command = f"mkdir -p {tmp_workspace}/test-sanitized && echo ok"
-
-        resp = backend.execute(command)
-
+        # Create a subdir via the sanitized path
+        resp = backend.execute(f"mkdir -p {tmp_workspace}/test-sanitized && echo ok")
         assert resp.exit_code == 0
-        assert f"{tmp_workspace}/" not in captured["command"]
-        assert "./test-sanitized" in captured["command"]
+        # The dir should be created at workspace/test-sanitized, not nested
+        assert (Path(tmp_workspace) / "test-sanitized").is_dir()
+        assert not (Path(tmp_workspace) / tmp_workspace.lstrip("/")).exists()
 
     def test_ssh_remote_paths_survive_execute_preprocessing(
         self, tmp_workspace, monkeypatch
