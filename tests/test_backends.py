@@ -1367,6 +1367,6 @@ class TestExecuteTimeoutRecovery:
 
     def test_non_timeout_not_enhanced(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace)
-        resp = backend.execute(f"{sys.executable} -c 'raise SystemExit(1)'")
+        resp = backend.execute(f'{sys.executable} -c "raise SystemExit(1)"')
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
