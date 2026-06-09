@@ -105,20 +105,30 @@ class TestListPidsOnPort:
 
 class TestKillOwnedStaleProcess:
     def test_returns_false_if_no_pid_file(self, tmp_path):
-        with patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=tmp_path / "missing.pid")):
+        with patch.object(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(manager.RUNTIME, pid_file=tmp_path / "missing.pid"),
+        ):
             assert manager._kill_owned_stale_process(6174) is False
 
     def test_returns_false_if_pid_file_unreadable(self, tmp_path):
         pid_file = tmp_path / "bad.pid"
         pid_file.write_text("not-a-number")
-        with patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)):
+        with patch.object(
+            manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)
+        ):
             assert manager._kill_owned_stale_process(6174) is False
 
     def test_returns_false_if_pid_not_in_occupiers(self, tmp_path):
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
         with (
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[99999]),
         ):
             assert manager._kill_owned_stale_process(6174) is False
@@ -133,7 +143,11 @@ class TestKillOwnedStaleProcess:
         fake_proc = MagicMock()
         fake_proc.cmdline.return_value = ["bash", "-c", "echo hi"]
         with (
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(manager.psutil, "Process", return_value=fake_proc),
         ):
@@ -154,7 +168,11 @@ class TestKillOwnedStaleProcess:
             "dev",
         ]
         with (
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(manager.psutil, "Process", return_value=fake_proc),
         ):
@@ -167,7 +185,11 @@ class TestKillOwnedStaleProcess:
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
         with (
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(
                 manager.psutil,
@@ -196,8 +218,16 @@ class TestEnsureLanggraphDev:
         with (
             patch.object(manager, "is_langgraph_dev_running", return_value=False),
             patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock")),
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids")),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock"),
+            ),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids"),
+            ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
 
@@ -215,8 +245,16 @@ class TestEnsureLanggraphDev:
         with (
             patch.object(manager, "is_langgraph_dev_running") as mock_running,
             patch.object(manager, "start_langgraph_dev") as start,
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock")),
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids")),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock"),
+            ),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids"),
+            ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
 
@@ -236,11 +274,19 @@ class TestEnsureLanggraphDev:
                 manager, "is_langgraph_dev_running", return_value=True
             ) as mock_running,
             patch.object(manager, "start_langgraph_dev") as mock_start,
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock")),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock"),
+            ),
             # Isolate from real ``~/.config/evoscientist/`` — without this
             # patch, the FileLock setup would mkdir the user's actual config
             # dir as a test side-effect.
-            patch.object(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids")),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids"),
+            ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
             # We didn't spawn anything — there's already a healthy server.
@@ -382,8 +428,12 @@ class TestStartLanggraphDevRotatesLog:
         # ``_LOG_FILE`` would still let ``_PID_DIR.mkdir(...)`` create
         # a real directory on disk during the rotation prelude.
         pid_dir = tmp_path / "pids"
-        monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=pid_dir))
-        monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, log_file=log))
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=pid_dir)
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, log_file=log)
+        )
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
         # Make ``_packaged_langgraph_config`` point at a real file so
         # ``start_langgraph_dev`` doesn't bail at the existence check
@@ -393,13 +443,15 @@ class TestStartLanggraphDevRotatesLog:
         # Don't actually start a subprocess — just verify the rotation
         # call happens. We mock the spawn to raise immediately so the
         # rest of start_langgraph_dev aborts before doing anything else.
-        with patch.object(
-            manager, "_langgraph_exe", return_value="/fake/langgraph"
-        ), patch.object(
-            manager, "_packaged_langgraph_config", return_value=fake_config
-        ), patch(
-            "EvoScientist.langgraph_dev.manager.subprocess.Popen",
-            side_effect=FileNotFoundError("subprocess not available"),
+        with (
+            patch.object(manager, "_langgraph_exe", return_value="/fake/langgraph"),
+            patch.object(
+                manager, "_packaged_langgraph_config", return_value=fake_config
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.subprocess.Popen",
+                side_effect=FileNotFoundError("subprocess not available"),
+            ),
         ):
             try:
                 manager.start_langgraph_dev(workspace_dir=tmp_path)

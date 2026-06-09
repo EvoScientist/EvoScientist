@@ -158,6 +158,7 @@ def _rotate_log_if_needed(log_path: Path) -> None:
             exc,
         )
 
+
 # Workspace fingerprint sidecar — JSON recording the workspace + pid of the
 # running langgraph dev. Cross-process callers (e.g. TUI starting up while
 # ``EvoSci deploy`` is already running) read this on the reuse path to refuse

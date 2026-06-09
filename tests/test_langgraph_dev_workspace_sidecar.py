@@ -34,7 +34,11 @@ def test_sidecar_path_is_next_to_pid_file():
 
 def test_write_workspace_sidecar_records_workspace_and_pid(tmp_path, monkeypatch):
     """``_write_workspace_sidecar`` writes JSON with workspace + pid."""
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"),
+    )
     workspace = tmp_path / "some" / "ws"
     manager._write_workspace_sidecar(workspace_dir=workspace, pid=12345)
     data = json.loads((tmp_path / "ws.json").read_text())
@@ -43,14 +47,24 @@ def test_write_workspace_sidecar_records_workspace_and_pid(tmp_path, monkeypatch
 
 
 def test_read_workspace_sidecar_returns_none_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "absent.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.RUNTIME, workspace_sidecar=tmp_path / "absent.json"
+        ),
+    )
     assert manager._read_workspace_sidecar() is None
 
 
 def test_read_workspace_sidecar_returns_none_on_corrupt_json(tmp_path, monkeypatch):
     sidecar = tmp_path / "bad.json"
     sidecar.write_text("not json at all")
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=sidecar))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=sidecar),
+    )
     assert manager._read_workspace_sidecar() is None
 
 
@@ -77,12 +91,20 @@ def test_read_workspace_sidecar_returns_none_on_wrong_schema(
     an unhandled exception or producing a misleading match check."""
     sidecar = tmp_path / "schema.json"
     sidecar.write_text(payload)
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=sidecar))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=sidecar),
+    )
     assert manager._read_workspace_sidecar() is None
 
 
 def test_read_workspace_sidecar_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "rt.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "rt.json"),
+    )
     workspace = tmp_path / "x" / "y"
     manager._write_workspace_sidecar(workspace_dir=workspace, pid=42)
     data = manager._read_workspace_sidecar()
@@ -97,7 +119,11 @@ def test_ensure_langgraph_dev_refuses_on_workspace_mismatch(tmp_path, monkeypatc
     """Cross-process reuse with sidecar workspace ≠ requested → raises."""
     ws_a = tmp_path / "A"
     ws_b = tmp_path / "B"
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"),
+    )
     manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
 
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
@@ -120,7 +146,11 @@ def test_ensure_langgraph_dev_refuses_on_mismatch_with_stale_process(
     different langgraph dev rebound the port."""
     ws_a = tmp_path / "A"
     ws_b = tmp_path / "B"
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"),
+    )
     manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
 
     class _DeadProc:
@@ -142,7 +172,11 @@ def test_ensure_langgraph_dev_refuses_on_mismatch_with_stale_process(
 def test_ensure_langgraph_dev_reuses_when_workspace_matches(tmp_path, monkeypatch):
     """Cross-process reuse with matching sidecar workspace → no raise."""
     ws_a = tmp_path / "A"
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "ws.json"),
+    )
     manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
 
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
@@ -158,7 +192,13 @@ def test_ensure_langgraph_dev_reuses_when_workspace_matches(tmp_path, monkeypatc
 def test_ensure_langgraph_dev_reuses_when_sidecar_missing(tmp_path, monkeypatch):
     """Backward compat: pre-feature langgraph dev (no sidecar) falls back to
     the existing log-warning behavior rather than refusing."""
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=tmp_path / "absent.json"))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.RUNTIME, workspace_sidecar=tmp_path / "absent.json"
+        ),
+    )
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
     monkeypatch.setattr(manager, "_PROCESS", None)
     monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
@@ -173,8 +213,14 @@ def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch):
     """``stop_langgraph_dev`` should unlink the sidecar alongside the PID file."""
     sidecar = tmp_path / "ws.json"
     pid_file = tmp_path / "pid.txt"
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, workspace_sidecar=sidecar))
-    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(manager.RUNTIME, workspace_sidecar=sidecar),
+    )
+    monkeypatch.setattr(
+        manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)
+    )
     manager._write_workspace_sidecar(workspace_dir=tmp_path / "x", pid=42)
     assert sidecar.exists()
 
