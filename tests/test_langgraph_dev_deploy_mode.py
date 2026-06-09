@@ -92,7 +92,9 @@ def test_deploy_mode_false_default_sets_stripped(monkeypatch, tmp_path, runtime_
     )
 
 
-def test_deploy_mode_explicitly_false_sets_stripped(monkeypatch, tmp_path, runtime_paths):
+def test_deploy_mode_explicitly_false_sets_stripped(
+    monkeypatch, tmp_path, runtime_paths
+):
     """Same as default, but with deploy_mode=False stated explicitly."""
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
@@ -107,7 +109,9 @@ def test_deploy_mode_explicitly_false_sets_stripped(monkeypatch, tmp_path, runti
     assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "stripped"
 
 
-def test_deploy_mode_always_set_to_one_of_full_or_stripped(monkeypatch, tmp_path, runtime_paths):
+def test_deploy_mode_always_set_to_one_of_full_or_stripped(
+    monkeypatch, tmp_path, runtime_paths
+):
     """Regression: the subprocess always sees exactly one of the two enum
     values for ``EVOSCIENTIST_DEPLOY_MODE`` — never unset, never garbage."""
     for deploy_mode, expected in ((True, "full"), (False, "stripped")):
@@ -125,7 +129,9 @@ def test_deploy_mode_always_set_to_one_of_full_or_stripped(monkeypatch, tmp_path
         )
 
 
-def test_inherited_stripped_overridden_when_deploy_mode_true(monkeypatch, tmp_path, runtime_paths):
+def test_inherited_stripped_overridden_when_deploy_mode_true(
+    monkeypatch, tmp_path, runtime_paths
+):
     """If the parent process exports ``EVOSCIENTIST_DEPLOY_MODE=stripped`` and
     we ask for deploy mode, the subprocess env must see the resolved value
     (``full``), not the stale inherited one."""
@@ -145,7 +151,9 @@ def test_inherited_stripped_overridden_when_deploy_mode_true(monkeypatch, tmp_pa
     )
 
 
-def test_inherited_full_overridden_when_deploy_mode_false(monkeypatch, tmp_path, runtime_paths):
+def test_inherited_full_overridden_when_deploy_mode_false(
+    monkeypatch, tmp_path, runtime_paths
+):
     """Symmetric: parent exports ``EVOSCIENTIST_DEPLOY_MODE=full``, CLI/serve
     calls start_langgraph_dev with default (deploy_mode=False), inherited
     value must be overridden to ``stripped``."""
@@ -188,7 +196,9 @@ def test_inherited_arbitrary_value_overridden(monkeypatch, tmp_path, runtime_pat
             )
 
 
-def test_workspace_dir_env_var_set_regardless_of_mode(monkeypatch, tmp_path, runtime_paths):
+def test_workspace_dir_env_var_set_regardless_of_mode(
+    monkeypatch, tmp_path, runtime_paths
+):
     """EVOSCIENTIST_WORKSPACE_DIR is independent of deploy_mode."""
     for deploy_mode in (True, False):
         captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)

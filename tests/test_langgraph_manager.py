@@ -207,7 +207,9 @@ class TestKillOwnedStaleProcess:
 
 
 class TestEnsureLanggraphDev:
-    def test_starts_when_async_disabled_but_memory_workers_enabled(self, tmp_path, runtime_paths):
+    def test_starts_when_async_disabled_but_memory_workers_enabled(
+        self, tmp_path, runtime_paths
+    ):
         """EvoMemory workers can require langgraph dev even without async subagents."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
@@ -222,9 +224,7 @@ class TestEnsureLanggraphDev:
                 manager,
                 "RUNTIME",
                 dataclasses.replace(
-                    manager.LanggraphRuntimePaths.for_directory(
-                        tmp_path / "pids"
-                    ),
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
                     lock_file=tmp_path / "lg.lock",
                 ),
             ),
@@ -235,7 +235,9 @@ class TestEnsureLanggraphDev:
         start.assert_called_once()
         assert manager.is_async_subagents_available() is True
 
-    def test_skips_when_async_and_memory_workers_disabled(self, tmp_path, runtime_paths):
+    def test_skips_when_async_and_memory_workers_disabled(
+        self, tmp_path, runtime_paths
+    ):
         """No background server is needed without async subagents or workers."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
@@ -249,9 +251,7 @@ class TestEnsureLanggraphDev:
                 manager,
                 "RUNTIME",
                 dataclasses.replace(
-                    manager.LanggraphRuntimePaths.for_directory(
-                        tmp_path / "pids"
-                    ),
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
                     lock_file=tmp_path / "lg.lock",
                 ),
             ),
@@ -278,9 +278,7 @@ class TestEnsureLanggraphDev:
                 manager,
                 "RUNTIME",
                 dataclasses.replace(
-                    manager.LanggraphRuntimePaths.for_directory(
-                        tmp_path / "pids"
-                    ),
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
                     lock_file=tmp_path / "lg.lock",
                 ),
             ),
