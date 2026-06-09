@@ -219,6 +219,8 @@ class EvoScientistConfig:
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
     reasoning_effort: str = "high"
+    # Opt into Anthropic prompt caching for OpenRouter anthropic/* models.
+    openrouter_anthropic_prompt_cache: bool = False
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -631,6 +633,9 @@ _ENV_MAPPINGS = {
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
+    "openrouter_anthropic_prompt_cache": (
+        "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
+    ),
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
@@ -752,6 +757,10 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
+    if config.openrouter_anthropic_prompt_cache and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "true"
     if config.use_responses_api and not os.environ.get(
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):
