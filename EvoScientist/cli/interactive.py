@@ -201,8 +201,25 @@ class SlashCommandCompleter(Completer):
         # Slash command completion
         if not text.startswith("/"):
             return
-        # ``list_commands`` is dedup'd on the Command instance so aliases
-        # (e.g. /quit, /q for /exit) don't appear as separate rows.
+
+        parts = text.strip().split()
+        has_trailing_space = text.endswith(" ")
+
+        # Subcommand completion: user typed "/mcp lis" or "/mcp "
+        if has_trailing_space or len(parts) >= 2:
+            cmd_name = parts[0].lower()
+            sub_prefix = parts[1].lower() if len(parts) >= 2 else ""
+            for name, desc in cmd_manager.list_subcommands(cmd_name):
+                if name.startswith(sub_prefix):
+                    start_pos = -len(sub_prefix) if sub_prefix else 0
+                    yield Completion(
+                        name,
+                        start_position=start_pos,
+                        display_meta=desc,
+                    )
+            return
+
+        # Top-level command completion
         for cmd, desc in sorted(cmd_manager.list_commands()):
             if cmd.startswith(text):
                 yield Completion(

@@ -693,7 +693,7 @@ class TestCompletionLogic(unittest.TestCase):
     # Stub infrastructure
     # ------------------------------------------------------------------
 
-    def _make_app(self, comp_items=None, comp_index=-1):
+    def _make_app(self, comp_items=None, comp_index=-1, comp_is_subcommand=False):
         """Return a stub app-like object with completion state."""
         from rich.text import Text
 
@@ -727,6 +727,14 @@ class TestCompletionLogic(unittest.TestCase):
         from EvoScientist.commands import manager as cmd_manager
 
         _slash_commands = cmd_manager.list_commands()
+        _subcommands: dict[str, list[tuple[str, str]]] = {
+            name: cmd_manager.list_subcommands(name)
+            for name in {
+                "/mcp",
+                "/channel",
+                "/model-fallback",
+            }
+        }
 
         # Build stub --------------------------------------------------------
         class _StubApp:
@@ -735,10 +743,12 @@ class TestCompletionLogic(unittest.TestCase):
             def __init__(self):
                 self._comp_items: list = list(comp_items or [])
                 self._comp_index: int = comp_index
+                self._comp_is_subcommand: bool = comp_is_subcommand or False
                 # Expose fakes for assertions
                 self._fake_input = fake_input
                 self._fake_completions = fake_completions
                 self._SLASH_COMMANDS = _slash_commands
+                self._SUBCS = _subcommands
 
             def query_one(self, selector, widget_type=None):
                 # Match by selector string; widget_type is ignored in stub
@@ -761,13 +771,20 @@ class TestCompletionLogic(unittest.TestCase):
             def _apply_selected_completion(self):
                 selected_cmd = self._comp_items[self._comp_index][0]
                 prompt = self.query_one("#prompt")
-                prompt.value = selected_cmd + " "
+                if self._comp_is_subcommand:
+                    current = prompt.value
+                    last_space = current.rfind(" ")
+                    prefix = current[: last_space + 1] if last_space >= 0 else ""
+                    prompt.value = prefix + selected_cmd + " "
+                else:
+                    prompt.value = selected_cmd + " "
                 prompt.cursor_position = len(prompt.value)
                 self._render_completions()
 
             def _hide_completions(self):
                 self._comp_items = []
                 self._comp_index = -1
+                self._comp_is_subcommand = False
                 comp_widget = self.query_one("#completions")
                 comp_widget.display = False
 
@@ -788,24 +805,66 @@ class TestCompletionLogic(unittest.TestCase):
                 comp_widget.update(comp_text)
 
             def on_input_changed(self, text: str):
-                """Simplified version matching the real on_input_changed logic."""
+                """Simplified version matching the real multi-stage logic."""
                 comp_widget = self.query_one("#completions")
-                if text.startswith("/"):
-                    prefix = text.lower()
+                if not text.startswith("/"):
+                    self._hide_completions()
+                    return
+
+                parts = text.split()
+                cmd_name = parts[0].lower()
+                has_trailing_space = text.endswith(" ")
+
+                if len(parts) == 1:
+                    prefix = text.lower().rstrip()
                     matches = [
                         (cmd, desc)
                         for cmd, desc in self._SLASH_COMMANDS
                         if cmd.startswith(prefix)
                     ]
                     if len(matches) == 1 and matches[0][0] == prefix:
-                        self._hide_completions()
-                        return
+                        if cmd_name not in self._SUBCS:
+                            self._hide_completions()
+                            return
+                        if not has_trailing_space:
+                            self._hide_completions()
+                            return
+                        sub_matches = self._SUBCS.get(cmd_name, [])
+                        if sub_matches:
+                            self._comp_items = sub_matches
+                            self._comp_index = -1
+                            self._comp_is_subcommand = True
+                            self._render_completions()
+                            comp_widget.display = True
+                            return
                     if matches:
                         self._comp_items = matches
                         self._comp_index = -1
+                        self._comp_is_subcommand = False
                         self._render_completions()
                         comp_widget.display = True
                         return
+                else:
+                    if cmd_name in self._SUBCS:
+                        sub_prefix = parts[1].lower() if len(parts) > 1 else ""
+                        sub_matches = [
+                            (name, desc)
+                            for name, desc in self._SUBCS[cmd_name]
+                            if name.startswith(sub_prefix)
+                        ]
+                        if sub_matches:
+                            if (
+                                len(sub_matches) == 1
+                                and sub_matches[0][0] == sub_prefix
+                            ):
+                                self._hide_completions()
+                                return
+                            self._comp_items = sub_matches
+                            self._comp_index = -1
+                            self._comp_is_subcommand = True
+                            self._render_completions()
+                            comp_widget.display = True
+                            return
                 self._hide_completions()
 
             def on_key(self, key: str):
@@ -964,6 +1023,51 @@ class TestCompletionLogic(unittest.TestCase):
 
         app.on_input_changed("/zzznomatch")
         assert app._fake_completions.display is False
+
+    # ------------------------------------------------------------------
+    # on_input_changed — subcommand completion
+    # ------------------------------------------------------------------
+
+    def test_input_changed_shows_subcommands_on_trailing_space(self):
+        """Typing '/mcp ' (exact match + trailing space) shows subcommands."""
+        app = self._make_app()
+        app.on_input_changed("/mcp ")
+        assert app._fake_completions.display is True
+        assert app._comp_is_subcommand is True
+        names = {name for name, _desc in app._comp_items}
+        assert "list" in names
+        assert "add" in names
+
+    def test_input_changed_subcommand_prefix_filter(self):
+        """Typing '/mcp lis' filters subcommands by prefix."""
+        app = self._make_app()
+        app.on_input_changed("/mcp lis")
+        assert app._fake_completions.display is True
+        assert app._comp_is_subcommand is True
+        names = {name for name, _desc in app._comp_items}
+        assert names == {"list"}
+
+    def test_input_changed_exact_subcommand_hides(self):
+        """Typing '/mcp list' (exact subcommand match) hides completions."""
+        app = self._make_app()
+        app.on_input_changed("/mcp list")
+        assert app._fake_completions.display is False
+
+    def test_input_changed_non_subcommand_cmd_hides(self):
+        """Typing '/help ' (command with no subcommands) hides."""
+        app = self._make_app()
+        app.on_input_changed("/help ")
+        assert app._fake_completions.display is False
+
+    def test_apply_selected_subcommand_preserves_prefix(self):
+        """TAB on a subcommand preserves '/mcp ' prefix."""
+        items = [("list", "List servers")]
+        app = self._make_app(
+            comp_items=items, comp_index=0, comp_is_subcommand=True
+        )
+        app._fake_input.value = "/mcp lis"
+        app._apply_selected_completion()
+        assert app._fake_input.value == "/mcp list "
 
     # ------------------------------------------------------------------
     # on_key  (enter only — up/down handled by priority bindings)

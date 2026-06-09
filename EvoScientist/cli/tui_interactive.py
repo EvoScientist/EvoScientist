@@ -419,6 +419,7 @@ def run_textual_interactive(
             ] = []  # queued messages to send after current turn
             self._comp_items: list[tuple[str, str]] = []
             self._comp_index: int = -1
+            self._comp_is_subcommand: bool = False
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
@@ -2335,7 +2336,7 @@ def run_textual_interactive(
 
                 if len(parts) == 1:
                     # Top-level command completion
-                    prefix = text.lower()
+                    prefix = text.lower().rstrip()
                     matches = [
                         (cmd, desc)
                         for cmd, desc in cmd_manager.list_commands()
@@ -2354,12 +2355,14 @@ def run_textual_interactive(
                         if sub_matches:
                             self._comp_items = sub_matches
                             self._comp_index = -1
+                            self._comp_is_subcommand = True
                             self._render_completions()
                             comp_widget.display = True
                             return
                     if matches:
                         self._comp_items = matches
                         self._comp_index = -1
+                        self._comp_is_subcommand = False
                         self._render_completions()
                         comp_widget.display = True
                         return
@@ -2380,6 +2383,7 @@ def run_textual_interactive(
                                 return
                             self._comp_items = sub_matches
                             self._comp_index = -1
+                            self._comp_is_subcommand = True
                             self._render_completions()
                             comp_widget.display = True
                             return
@@ -2670,11 +2674,18 @@ def run_textual_interactive(
                     new_val = current + selected + " "
                 prompt.value = new_val
             else:
-                prompt.value = selected + " "
+                if self._comp_is_subcommand:
+                    current = prompt.value
+                    last_space = current.rfind(" ")
+                    prefix = current[: last_space + 1] if last_space >= 0 else ""
+                    prompt.value = prefix + selected + " "
+                else:
+                    prompt.value = selected + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
+            self._comp_is_subcommand = False
             comp_widget = self.query_one("#completions", Static)
             comp_widget.display = False
 
