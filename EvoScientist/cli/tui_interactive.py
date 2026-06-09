@@ -2329,21 +2329,60 @@ def run_textual_interactive(
                     return
 
             if text.startswith("/"):
-                prefix = text.lower()
-                matches = [
-                    (cmd, desc)
-                    for cmd, desc in cmd_manager.list_commands()
-                    if cmd.startswith(prefix)
-                ]
-                if len(matches) == 1 and matches[0][0] == prefix:
-                    self._hide_completions()
-                    return
-                if matches:
-                    self._comp_items = matches
-                    self._comp_index = -1
-                    self._render_completions()
-                    comp_widget.display = True
-                    return
+                parts = text.split()
+                cmd_name = parts[0].lower()
+                has_trailing_space = text.endswith(" ")
+
+                if len(parts) == 1:
+                    # Top-level command completion
+                    prefix = text.lower()
+                    matches = [
+                        (cmd, desc)
+                        for cmd, desc in cmd_manager.list_commands()
+                        if cmd.startswith(prefix)
+                    ]
+                    if len(matches) == 1 and matches[0][0] == prefix:
+                        # Exact match — hide UNLESS the command has subcommands
+                        if not cmd_manager.get_subcommands(prefix):
+                            self._hide_completions()
+                            return
+                        # Has subcommands: show them instead of hiding
+                        if not has_trailing_space:
+                            self._hide_completions()
+                            return
+                        sub_matches = cmd_manager.list_subcommands(cmd_name)
+                        if sub_matches:
+                            self._comp_items = sub_matches
+                            self._comp_index = -1
+                            self._render_completions()
+                            comp_widget.display = True
+                            return
+                    if matches:
+                        self._comp_items = matches
+                        self._comp_index = -1
+                        self._render_completions()
+                        comp_widget.display = True
+                        return
+                else:
+                    # Multi-stage: subcommand completion
+                    cmd = cmd_manager.get_command(cmd_name)
+                    if cmd and cmd.subcommands:
+                        sub_prefix = parts[1].lower() if len(parts) > 1 else ""
+                        sub_matches = [
+                            (name, desc)
+                            for name, desc in cmd_manager.list_subcommands(cmd_name)
+                            if name.startswith(sub_prefix)
+                        ]
+                        if sub_matches:
+                            if len(sub_matches) == 1 and sub_matches[0][0] == sub_prefix:
+                                # Exact subcommand match — hide
+                                self._hide_completions()
+                                return
+                            self._comp_items = sub_matches
+                            self._comp_index = -1
+                            self._render_completions()
+                            comp_widget.display = True
+                            return
             self._hide_completions()
 
         def _render_queue_indicator(self) -> None:

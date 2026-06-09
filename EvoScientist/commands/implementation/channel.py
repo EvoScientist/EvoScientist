@@ -4,7 +4,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ..base import Command, CommandContext
+from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 
@@ -13,6 +13,10 @@ class ChannelCommand(Command):
 
     name = "/channel"
     description = "Configure messaging channels"
+    subcommands = [
+        SubCommand("status", "Show running channel status"),
+        SubCommand("stop", "Stop a running channel"),
+    ]
 
     def needs_agent(self, args: list[str]) -> bool:
         # ``status`` and ``stop`` are introspection / teardown; they

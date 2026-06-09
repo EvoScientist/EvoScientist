@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rich.table import Table
 
-from ..base import Command, CommandContext
+from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 
@@ -11,6 +11,14 @@ class MCPCommand(Command):
 
     name = "/mcp"
     description = "Manage MCP servers"
+    subcommands = [
+        SubCommand("list", "List configured MCP servers"),
+        SubCommand("config", "Show server configuration details"),
+        SubCommand("add", "Add a new MCP server"),
+        SubCommand("edit", "Edit an MCP server configuration"),
+        SubCommand("remove", "Remove an MCP server"),
+        SubCommand("install", "Browse and install MCP servers"),
+    ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         if not args or args[0] == "list":
