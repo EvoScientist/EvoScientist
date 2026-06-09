@@ -8,6 +8,7 @@ Verifies the single-env-var enum routing:
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from pathlib import Path
 
@@ -44,8 +45,8 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path) -> dict:
 
     # _PID_DIR / _LOG_FILE point under user dir — redirect to tmp.
     pid_dir = tmp_path / "pid_dir"
-    monkeypatch.setattr(manager, "_PID_DIR", pid_dir)
-    monkeypatch.setattr(manager, "_LOG_FILE", tmp_path / "langgraph_dev.log")
+    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=pid_dir))
+    monkeypatch.setattr(manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, log_file=tmp_path / "langgraph_dev.log"))
 
     def _fake_popen(args, **kwargs):
         captured["args"] = args
