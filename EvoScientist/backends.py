@@ -78,12 +78,7 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
         if command.startswith("&>", index):
             return "&>"
         ch = command[index]
-        # NOTE: ``(``, ``)``, and `` ` `` are NOT operators here. They
-        # are kept inside word tokens so the path rewriter can match
-        # paths that span ``$(...)`` or are wrapped in backticks. The
-        # SSH helpers that also use this tokenizer (e.g. ``_ssh_invocations``)
-        # don't care about subshells, so this is safe.
-        if ch in ";|&":
+        if ch in "`();|&":
             return ch
         if ch in "<>":
             if index + 1 < n and command[index + 1] == ch:
@@ -717,13 +712,23 @@ def _value_span_to_raw_span(
     quote_char: str | None = None
     raw_start = raw_end = -1
 
-    # If the token is quoted, the opening quote char appears in
-    # ``raw`` but not in ``value``. Skip it so phase 1 starts at
-    # the first value char.
+    # If the token is quoted, the opening quote char may not be at
+    # position 0 — the tokenizer sets ``quoted=True`` whenever a
+    # quote pair appears *anywhere* in the token (e.g.
+    # ``/main" file.py"``).  Walk forward consuming unquoted chars
+    # (1:1 in raw and value) until the first quote is found.
     if quoted and raw:
         in_quote = True
-        quote_char = raw[0]
-        raw_pos = 1
+        for idx, ch in enumerate(raw):
+            if ch in ('"', "'"):
+                quote_char = ch
+                raw_pos = idx + 1
+                break
+            val_pos += 1
+        else:
+            in_quote = False
+            quote_char = None
+            raw_pos = 0
 
     # Phase 1: advance ``raw_pos`` until ``val_pos`` reaches
     # ``v_start``. Then record ``raw_start`` as the current
