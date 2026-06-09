@@ -15,6 +15,14 @@ from EvoScientist.backends import (
     validate_command,
 )
 
+
+def _sleep_cmd(seconds: int) -> str:
+    """Cross-platform command that sleeps for *seconds* and exits 0."""
+    if sys.platform == "win32":
+        return f"ping -n {seconds + 1} 127.0.0.1 > nul"
+    return f"sleep {seconds}"
+
+
 # === validate_command ===
 
 
@@ -1332,20 +1340,21 @@ class TestAbsolutePathDetection:
 class TestExecuteTimeoutRecovery:
     def test_timeout_includes_recovery_guidance(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         assert resp.exit_code == 124
         assert "Recovery" in resp.output
         assert "background" in resp.output.lower()
 
     def test_timeout_includes_background_command(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
-        assert "sleep 10" in resp.output
+        cmd = _sleep_cmd(10)
+        resp = backend.execute(cmd)
+        assert cmd in resp.output
         assert "> /output.log 2>&1 &" in resp.output
 
     def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         # Background recovery captures the PID so the job can be managed later.
         assert "PID: $!" in resp.output
         # Recovery also offers re-running with a larger per-command timeout.
@@ -1353,11 +1362,11 @@ class TestExecuteTimeoutRecovery:
 
     def test_timeout_preserves_original_error(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         assert "timed out" in resp.output.lower()
 
     def test_non_timeout_not_enhanced(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace)
-        resp = backend.execute("python3 -c 'raise SystemExit(1)'")
+        resp = backend.execute(f"{sys.executable} -c 'raise SystemExit(1)'")
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
