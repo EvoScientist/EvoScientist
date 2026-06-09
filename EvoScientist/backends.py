@@ -605,6 +605,18 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
     return None
 
 
+def _guard_bare_absolute(result: str | None) -> str | None:
+    """If *result* is a bare absolute path (no surrounding quotes),
+    single-quote it so the post-process regex won't re-rewrite it."""
+    if (
+        result
+        and result.startswith("/")
+        and result == result.strip("'\"")
+    ):
+        return "'" + result + "'"
+    return result
+
+
 def _rewrite_quoted_path(
     path: str,
     workspace_name: str | None,
@@ -620,7 +632,7 @@ def _rewrite_quoted_path(
 
     resolved = _resolve_virtual_mount_path(path)
     if resolved is not None:
-        return resolved  # already shlex.quoted
+        return _guard_bare_absolute(resolved)  # already shlex.quoted
 
     # Fix hallucinated system absolute paths that reference the workspace.
     if workspace_name:
@@ -630,15 +642,15 @@ def _rewrite_quoted_path(
                 idx = path.rfind(marker)
                 if idx != -1:
                     relative = path[idx + len(marker) :]
-                    return shlex.quote("./" + relative if relative else ".")
+                    return _guard_bare_absolute(shlex.quote("./" + relative if relative else "."))
                 if path.endswith(f"/{workspace_name}"):
-                    return shlex.quote(".")
+                    return _guard_bare_absolute(shlex.quote("."))
                 break
 
     # Convert virtual path
     if path == "/":
         return shlex.quote(".")
-    return shlex.quote("." + path)
+    return _guard_bare_absolute(shlex.quote("." + path))
 
 
 def convert_virtual_paths_in_command(
