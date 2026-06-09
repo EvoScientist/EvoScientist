@@ -244,9 +244,9 @@ def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
     if os.name == "nt":
         try:
             proc = psutil.Process(popen.pid)
+            targets = [proc] + proc.children(recursive=True)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return
-        targets = [proc] + proc.children(recursive=True)
         for p in targets:
             try:
                 if forceful:
