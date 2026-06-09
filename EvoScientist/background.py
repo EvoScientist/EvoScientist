@@ -259,7 +259,7 @@ def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
         sig = signal.SIGKILL if forceful else signal.SIGTERM
         try:
             os.killpg(os.getpgid(popen.pid), sig)
-        except (ProcessLookupError, OSError):
+        except ProcessLookupError:
             pass
 
 
