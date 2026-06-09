@@ -78,7 +78,12 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
         if command.startswith("&>", index):
             return "&>"
         ch = command[index]
-        if ch in "`();|&":
+        # NOTE: ``(``, ``)``, and `` ` `` are NOT operators here. They
+        # are kept inside word tokens so the path rewriter can match
+        # paths that span ``$(...)`` or are wrapped in backticks. The
+        # SSH helpers that also use this tokenizer (e.g. ``_ssh_invocations``)
+        # don't care about subshells, so this is safe.
+        if ch in ";|&":
             return ch
         if ch in "<>":
             if index + 1 < n and command[index + 1] == ch:
@@ -655,6 +660,117 @@ def _rewrite_virtual_token(
     return "." + token
 
 
+def _try_rewrite(
+    command: str,
+    abs_start: int,
+    abs_end: int,
+    workspace_name: str | None,
+    replacements: list[tuple[int, int, str]],
+) -> None:
+    """Compute the rewrite for ``command[abs_start:abs_end]`` and
+    append it to ``replacements`` if non-trivial.
+
+    Skips URL path components (e.g. ``/a`` in
+    ``https://example.com/a``) and paths that don't actually change
+    after the rewrite (so the splice list only contains real
+    replacements).
+    """
+    raw_path = command[abs_start:abs_end]
+    # Unescape backslash-escapes before rewriting. The shell
+    # processes ``\\<char>`` as ``<char>``, so a path like
+    # ``/main\\ file.py`` is seen by the shell as ``/main file.py``.
+    # The rewriter works with the unescaped form so the new path
+    # has spaces (not backslashes) where the original did.
+    unescaped = re.sub(r"\\(.)", r"\1", raw_path)
+    new_path = _rewrite_virtual_token(unescaped, workspace_name)
+    if new_path is None or new_path == unescaped:
+        return
+    replacements.append((abs_start, abs_end, new_path))
+
+
+def _value_span_to_raw_span(
+    raw: str, value: str, v_start: int, v_end: int, quoted: bool = False
+) -> tuple[int, int]:
+    """Map a span in ``value`` (the unquoted form of a tokenizer
+    token) back to the corresponding span in ``raw`` (the original
+    text including quote chars and backslash-escapes).
+
+    The tokenizer's ``raw`` and ``value`` fields describe the same
+    underlying text but with different processing: ``value`` strips
+    outer quote pairs and applies backslash-escape processing, so
+    its length can differ from ``raw`` and the chars are not
+    positionally aligned 1:1 (a backslash escape in the raw consumes
+    2 chars in the raw but 1 char in the value; the surrounding
+    quote chars in the raw don't appear in the value at all).
+
+    Pass ``quoted=True`` when the token's source began with a
+    ``"`` or ``'`` so the function knows to skip the opening quote
+    char (which doesn't appear in the value) before phase 1.
+
+    Returns ``(raw_start, raw_end)`` such that
+    ``raw[raw_start:raw_end]`` is the substring of the source that
+    corresponds to ``value[v_start:v_end]``.
+    """
+    raw_pos = 0
+    val_pos = 0
+    in_quote = False
+    quote_char: str | None = None
+    raw_start = raw_end = -1
+
+    # If the token is quoted, the opening quote char appears in
+    # ``raw`` but not in ``value``. Skip it so phase 1 starts at
+    # the first value char.
+    if quoted and raw:
+        in_quote = True
+        quote_char = raw[0]
+        raw_pos = 1
+
+    # Phase 1: advance ``raw_pos`` until ``val_pos`` reaches
+    # ``v_start``. Then record ``raw_start`` as the current
+    # ``raw_pos`` — this is the position of the char in ``raw``
+    # that corresponds to ``value[v_start]``.
+    while raw_pos < len(raw) and val_pos < v_start:
+        ch = raw[raw_pos]
+        if in_quote and ch == quote_char:
+            in_quote = False
+            quote_char = None
+            raw_pos += 1
+        elif in_quote and ch == "\\" and raw_pos + 1 < len(raw) and quote_char == '"':
+            raw_pos += 2
+            val_pos += 1
+        elif not in_quote and ch == "\\" and raw_pos + 1 < len(raw):
+            raw_pos += 2
+            val_pos += 1
+        else:
+            raw_pos += 1
+            val_pos += 1
+    if raw_start == -1:
+        raw_start = raw_pos
+
+    # Phase 2: advance further until ``val_pos`` reaches ``v_end``.
+    # ``raw_end`` is the position AFTER the last char in ``raw``
+    # that corresponds to ``value[v_end - 1]``.
+    while raw_pos < len(raw) and val_pos < v_end:
+        ch = raw[raw_pos]
+        if in_quote and ch == quote_char:
+            in_quote = False
+            quote_char = None
+            raw_pos += 1
+        elif in_quote and ch == "\\" and raw_pos + 1 < len(raw) and quote_char == '"':
+            raw_pos += 2
+            val_pos += 1
+        elif not in_quote and ch == "\\" and raw_pos + 1 < len(raw):
+            raw_pos += 2
+            val_pos += 1
+        else:
+            raw_pos += 1
+            val_pos += 1
+    if raw_end == -1:
+        raw_end = raw_pos
+
+    return raw_start, raw_end
+
+
 def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
@@ -690,74 +806,68 @@ def convert_virtual_paths_in_command(
         ...     "mkdir -p /Users/u/proj/dir", workspace_name="proj")
         'mkdir -p ./dir'
     """
-    # shlex in posix mode handles quoted regions, escape sequences, and
-    # the shell metachar set (; | & < >) the original regex excluded.
-    # If parsing fails (unbalanced quotes etc.) we leave the command
-    # alone — the previous regex would also misbehave there, and
-    # silently mangling the command would be worse than not rewriting.
-    try:
-        splitter = shlex.shlex(command, posix=True, punctuation_chars=";|&<>")
-        splitter.whitespace_split = True
-        tokens = list(splitter)
-    except ValueError:
-        return command
-
+    # Use the existing position-tracking tokenizer. Its ``raw`` and
+    # ``value`` fields give us a per-token view: ``raw`` is the
+    # original text in the source (including quote chars and
+    # backslash-escapes), ``value`` is the unquoted form (with
+    # escape processing applied). We run the path regex on the
+    # value (where spaces inside a quote are preserved as part of
+    # the value), then map the value span back to the raw span via
+    # a parallel walk.
+    tokens = _shell_token_spans(command)
     if not tokens:
         return command
 
-    # Locate each token's span in the original command. shlex strips
-    # outer quotes from the returned token text, so `find` lands on the
-    # unquoted content inside any original quotes — exactly the span
-    # we want to splice. Walking with a cursor handles repeated tokens
-    # (e.g. `ls /a /a`).
-    spans: list[tuple[str, int, int]] = []
-    cursor = 0
-    for tok in tokens:
-        if not tok:
-            continue
-        idx = command.find(tok, cursor)
-        if idx == -1:
-            return command
-        spans.append((tok, idx, idx + len(tok)))
-        cursor = idx + len(tok)
-
-    # Two ways a virtual path can appear inside a token:
-    #   (a) the token IS the path (e.g. token "/main file.py" from
-    #       `"…/main file.py"` — the original quotes kept the embedded
-    #       space intact);
-    #   (b) the path is embedded after other text (e.g. token
-    #       "ls /home/u" from `'ls /home/u'`).
-    # For (a) we rewrite the whole token; for (b) the original regex
-    # picks the path portion. Both branches feed the splice below.
-    embedded_path_re = re.compile(r'(?<=\s)/[^\s;|&<>\'"`]*')
-
     replacements: list[tuple[int, int, str]] = []
-    for tok, tok_start, tok_end in spans:
-        if tok.startswith("/"):
-            if "://" in tok:
-                # Token starts with "/" only because the URL's path
-                # component does. Skip — URLs are never virtual paths.
-                continue
-            path_start, path_end = tok_start, tok_end
-        else:
-            match = embedded_path_re.search(tok)
-            if match is None:
-                continue
-            abs_start = tok_start + match.start()
-            abs_end = tok_start + match.end()
-            # URL check: the original regex used a windowed substring
-            # around the match to detect URLs whose path component
-            # happens to start with "/". Mirror that here so URLs
-            # like `https://example.com/x` aren't treated as paths.
-            if "://" in command[max(0, abs_start - 10) : abs_end + 10]:
-                continue
-            path_start, path_end = abs_start, abs_end
-
-        path = command[path_start:path_end]
-        new_path = _rewrite_virtual_token(path, workspace_name)
-        if new_path is None or new_path == path:
+    for tok in tokens:
+        if tok.get("type") != "word":
             continue
-        replacements.append((path_start, path_end, new_path))
+        tok_start = int(tok["start"])
+        tok_end = int(tok["end"])
+        raw = command[tok_start:tok_end]
+        value = str(tok["value"])
+        quoted = bool(tok.get("quoted", False))
+
+        # A path can appear in two shapes within a token:
+        #   (a) the path is the whole token (value starts with ``/``).
+        #       For unquoted tokens, the path stops at the first
+        #       space (which is a word boundary in the source). For
+        #       quoted tokens, the path is the whole value — the
+        #       spaces were inside the original quote and are
+        #       preserved in the value.
+        #   (b) the path is embedded after other text (e.g. ``cat /a``
+        #       → path ``/a`` is preceded by ``cat `` in the value).
+        #       Always stops at the first space.
+        if value.startswith("/"):
+            if quoted:
+                v_end = len(value)
+            else:
+                space_idx = value.find(" ")
+                v_end = space_idx if space_idx != -1 else len(value)
+            raw_start, raw_end = _value_span_to_raw_span(
+                raw, value, 0, v_end, quoted=quoted
+            )
+            abs_start = tok_start + raw_start
+            abs_end = tok_start + raw_end
+            if "://" not in command[max(0, abs_start - 10) : abs_end + 10]:
+                _try_rewrite(
+                    command, abs_start, abs_end, workspace_name, replacements
+                )
+
+        # Embedded paths: ``/foo`` preceded by whitespace in the
+        # value. Body stops at the first space (an unquoted space
+        # in the value is always a word boundary in the source).
+        for m in re.finditer(r'(?<=\s)/(?:\\.|[^\s;|&<>\\\'"`])*', value):
+            v_start, v_end = m.start(), m.end()
+            raw_start, raw_end = _value_span_to_raw_span(
+                raw, value, v_start, v_end, quoted=quoted
+            )
+            abs_start = tok_start + raw_start
+            abs_end = tok_start + raw_end
+            if "://" not in command[max(0, abs_start - 10) : abs_end + 10]:
+                _try_rewrite(
+                    command, abs_start, abs_end, workspace_name, replacements
+                )
 
     # If the matched path is wrapped in matching quote chars in the
     # original command, extend the splice to include those chars. This
@@ -765,24 +875,28 @@ def convert_virtual_paths_in_command(
     # with a fresh `shlex.quote` of the new path — avoiding the
     # double-quoting trap (shlex.quote inside original `"…"` would
     # leave literal `'` chars in the argument value).
+    #
+    # Paths inside a larger quoted region (e.g. /a inside "cat /a /b")
+    # do NOT get the extension: the surrounding chars aren't quotes, so
+    # the heuristic doesn't fire. The path is spliced in place,
+    # preserving the surrounding structure.
     extended: list[tuple[int, int, str]] = []
-    for start, end, new_path in replacements:
+    for s, e, np in replacements:
         if (
-            start > 0
-            and end < len(command)
-            and command[start - 1] == command[end]
-            and command[start - 1] in ('"', "'", "`")
+            s > 0
+            and e < len(command)
+            and command[s - 1] == command[e]
+            and command[s - 1] in ('"', "'", "`")
         ):
-            extended.append((start - 1, end + 1, new_path))
+            extended.append((s - 1, e + 1, np))
         else:
-            extended.append((start, end, new_path))
+            extended.append((s, e, np))
 
     # Apply splices in reverse so each replacement doesn't shift the
     # positions of earlier ones.
     result = command
-    for start, end, new_path in reversed(extended):
-        result = result[:start] + shlex.quote(new_path) + result[end:]
-
+    for s, e, np in reversed(extended):
+        result = result[:s] + shlex.quote(np) + result[e:]
     return result
 
 

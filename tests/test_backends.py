@@ -246,6 +246,168 @@ class TestConvertVirtualPaths:
         # the splice chose to quote it (single / double / escaped).
         assert tokens == ["python", "./main file.py"]
 
+    # --- Contract pinned by the @din0s review of PR #269 ---
+    #
+    # Each of the following tests fails against the shlex-based
+    # implementation in commit 4b06c87 and passes against the
+    # position-tracking rewrite. Together they pin the contract: the
+    # rewriter handles backslash-escaped paths, rewrites all paths
+    # inside a token (not just the first), and preserves paths inside
+    # larger quoted regions when no quote-extension applies.
+
+    def test_backslash_escape_rewrites_path(self):
+        """Bug 1 (maintainer-flagged): a backslash-escaped path
+        (``python /main\\ file.py``) must be rewritten as one path.
+        The shlex-based implementation bails out because shlex
+        unescapes the token text, so the source ``/main\\ file.py``
+        did not match the token text ``/main file.py`` in the
+        ``command.find`` walk.
+        """
+        result = convert_virtual_paths_in_command(r"python /main\ file.py")
+        # The rewriter must splice a shell-quoted replacement, not
+        # leave the original (which would be passed to the shell as
+        # two arguments).
+        assert '"/main\\ file.py"' not in result
+        # Round-trip safety: ``shlex.split`` of the result yields the
+        # same two arguments the user would have written if they had
+        # used a quoted path.
+        assert shlex.split(result) == ["python", "./main file.py"]
+
+    def test_multiple_paths_in_quoted_region_all_rewritten(self):
+        """Bug 2 (maintainer-flagged): every ``/``-prefixed path inside
+        a quoted token must be rewritten, not just the first. Was:
+        ``bash -c "cat /a /b"`` → ``bash -c "cat ./a /b"`` (so ``/b``
+        targeted root). Must be: ``bash -c "cat ./a ./b"``.
+        """
+        result = convert_virtual_paths_in_command('bash -c "cat /a /b"')
+        assert result == 'bash -c "cat ./a ./b"'
+        # We don't assert ``"/b" not in result`` because the rewritten
+        # ``./b`` contains ``/b`` as a substring — that's the whole
+        # point of the rewrite.
+
+    def test_mixed_quoted_unquoted_paths_each_rewritten(self):
+        """A command mixing unquoted and quoted paths must rewrite
+        each path token independently. ``ls /a "/b c" /d`` has three
+        word tokens; the path regex matches ``/a`` and ``/d`` as
+        separate tokens, and ``/b c`` inside the quoted token is
+        matched as one path (the placeholder-based body allows the
+        space inside the quote). The quote-extension heuristic
+        replaces the whole ``"…c"`` region with ``shlex.quote(new_path)``,
+        so the result has the rewritten path re-quoted in single
+        quotes (``./b c`` has a space, ``shlex.quote`` wraps it).
+        """
+        result = convert_virtual_paths_in_command('ls /a "/b c" /d')
+        assert result == "ls ./a './b c' ./d"
+        assert shlex.split(result) == ["ls", "./a", "./b c", "./d"]
+
+    def test_path_inside_larger_quoted_region_rewritten_in_place(self):
+        """A path embedded inside a larger quoted region (e.g. ``/a``
+        inside ``python "see /a"``) is rewritten in place. The
+        surrounding quote chars are NOT consumed by the splice — the
+        quote-extension heuristic only fires when the path spans the
+        entire quoted region. This pins the intentional contract.
+        """
+        result = convert_virtual_paths_in_command('python "see /a"')
+        assert result == 'python "see ./a"'
+
+    def test_unquoted_path_with_space_partially_rewritten_known_limitation(
+        self, monkeypatch, tmp_path
+    ):
+        """Known limitation: a path with embedded whitespace and no
+        surrounding quotes (``python /skills/my skill/main.py``) is
+        split by the tokenizer at the unescaped space. The rewriter
+        rewrites the first token (``/skills/my`` → ``./skills/my``)
+        and leaves the second (``skill/main.py``) untouched. The shell
+        then sees the result as two arguments. Workaround: quote the
+        path or avoid spaces in directory names. This test pins the
+        partial-rewrite behavior so a future change is intentional.
+        """
+        # Tier setup so the resolver is in a known empty state. The
+        # resolver falls through to the workspace-relative form
+        # ``./skills/<rel>`` for paths no tier contains.
+        for d in (
+            tmp_path / "ws_skills",
+            tmp_path / "global_skills",
+            tmp_path / "builtin_skills",
+            tmp_path / "memories",
+        ):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
+        monkeypatch.setattr(
+            paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills"
+        )
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(
+            backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
+        )
+        result = convert_virtual_paths_in_command(
+            "python /skills/my skill/main.py"
+        )
+        assert result == "python ./skills/my skill/main.py"
+
+    def test_url_with_path_component_preserved(self):
+        """A URL whose path component starts with ``/`` must not be
+        treated as a virtual path. The path regex's lookbehind refuses
+        to match ``/`` preceded by a word char (so ``/a`` in
+        ``example.com/a`` doesn't match) and the 10-char URL-containment
+        window catches any remaining edge case.
+        """
+        result = convert_virtual_paths_in_command("curl https://example.com/a/b")
+        assert result == "curl https://example.com/a/b"
+        # Also: a URL in a separate argv position from a path must
+        # not interfere with the path's rewrite.
+        result = convert_virtual_paths_in_command(
+            'python "see /a" && curl https://example.com/b/c'
+        )
+        assert result == 'python "see ./a" && curl https://example.com/b/c'
+
+    def test_redirect_target_path_rewritten(self):
+        """Paths on either side of a redirect operator (``>``, ``<``,
+        ``>>``) are matched independently by the path regex's
+        word-boundary lookbehind (``(?<![a-zA-Z0-9_=])`` accepts the
+        ``>`` as a path boundary). Each path must be rewritten.
+        """
+        result = convert_virtual_paths_in_command("cat /a > /b")
+        assert result == "cat ./a > ./b"
+
+    def test_repeated_path_token_rewritten_each(self):
+        """The path regex must produce one replacement per occurrence
+        of a path in the command, not one per token. ``ls /a /a /a``
+        has three separate ``/a`` matches and each is rewritten.
+        """
+        result = convert_virtual_paths_in_command("ls /a /a /a")
+        assert result == "ls ./a ./a ./a"
+
+    def test_unresolvable_quoted_skills_path_uses_workspace_relative_form(
+        self, monkeypatch, tmp_path
+    ):
+        """A quoted ``/skills/...`` path that no tier contains falls
+        through to the workspace-relative ``./skills/<rel>`` form. The
+        splice re-quotes the result; if the new path has no
+        whitespace, ``shlex.quote`` is a no-op and the surrounding
+        quote chars are dropped cleanly.
+        """
+        # Tier setup so the resolver is in a known empty state.
+        for d in (
+            tmp_path / "ws_skills",
+            tmp_path / "global_skills",
+            tmp_path / "builtin_skills",
+            tmp_path / "memories",
+        ):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
+        monkeypatch.setattr(
+            paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills"
+        )
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(
+            backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
+        )
+        result = convert_virtual_paths_in_command(
+            'python "/skills/never-installed/foo.py"'
+        )
+        assert result == "python ./skills/never-installed/foo.py"
+
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
 
