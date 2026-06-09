@@ -1090,7 +1090,9 @@ class TestExecuteStderr:
             root_dir=tmp_workspace,
             virtual_mode=True,
         )
-        resp = backend.execute("python -c \"import sys; sys.stderr.write('warning\\n')\"")
+        resp = backend.execute(
+            "python -c \"import sys; sys.stderr.write('warning\\n')\""
+        )
         assert "[stderr] warning" in resp.output
 
     def test_execute_nonzero_exit_code_in_output(self, tmp_workspace):
