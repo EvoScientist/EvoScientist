@@ -573,25 +573,20 @@ def _skills_tier_paths() -> tuple[Path, Path | None, Path]:
 
 
 def _resolve_virtual_mount_path(token: str) -> str | None:
-    """Resolve a virtual mount token to a path string, or ``None`` when
+    """Resolve a virtual mount token to a shell-safe token, or ``None`` when
     *token* is not a registered virtual mount.
 
-    Returns the *unquoted* path. Callers embedding the result in a shell
-    command should pass it through ``shlex.quote`` to handle spaces and
-    shell metacharacters — see :func:`convert_virtual_paths_in_command`,
-    which does so when splicing the rewrite back into the command line.
-
     For ``/skills/...``: walks ``_skills_tier_paths()`` priority (USER →
-    GLOBAL → BUILTIN), returning the first tier where the path exists.
-    On miss, returns a workspace-relative ``./skills/<rel>`` form —
-    agent typed a virtual path, so the shell error should reference a
+    GLOBAL → BUILTIN), returning ``shlex.quote`` of the first tier where the
+    path exists. On miss, returns a workspace-relative ``./skills/<rel>``
+    form — agent typed a virtual path, so the shell error should reference a
     location they recognise (`USER_SKILLS_DIR` defaults to
     ``WORKSPACE_ROOT / "skills"``, which is also where ``MergedSkillsBackend``
     would write a new skill).
 
     For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
-    absolute. Memories live outside the workspace, so a relative form
-    would point at an unrelated location.
+    absolute and ``shlex.quote``-wrapped. Memories live outside the
+    workspace, so a relative form would point at an unrelated location.
     """
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
@@ -600,304 +595,114 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
                 continue
             candidate = Path(tier) / rel
             if candidate.exists():
-                return str(candidate)
-        return "./skills/" + rel if rel else "./skills"
+                return shlex.quote(str(candidate))
+        return shlex.quote("./skills/" + rel if rel else "./skills")
 
     rel = _subpath_under_mount(token, "/memories")
     if rel is not None:
-        return str(Path(paths.MEMORIES_DIR) / rel)
+        return shlex.quote(str(Path(paths.MEMORIES_DIR) / rel))
 
     return None
 
 
-def _rewrite_virtual_token(token: str, workspace_name: str | None) -> str | None:
-    """Return the replacement for a single shlex-extracted token, or
-    ``None`` when the token should be left unchanged.
-
-    *token* is the unquoted token text — surrounding quote pairs have
-    already been stripped by shlex. The returned string is also
-    unquoted; the caller is responsible for shell-quoting when splicing
-    it back into the command line.
+def _rewrite_quoted_path(
+    path: str,
+    workspace_name: str | None,
+) -> str | None:
+    """Return the shell-quoted replacement for *path* (the decoded
+    content of a quoted ``"..."`` or ``'...'`` argument),
+    or ``None`` if no rewrite applies.
     """
-    if "://" in token:
+    if not path or "://" in path[max(0, len(path) - 10) :]:
         return None
-    if not token.startswith("/"):
+    if not path.startswith("/"):
         return None
 
-    resolved = _resolve_virtual_mount_path(token)
+    resolved = _resolve_virtual_mount_path(path)
     if resolved is not None:
-        return resolved
+        return resolved  # already shlex.quoted
 
     # Fix hallucinated system absolute paths that reference the workspace.
-    # E.g. /Users/user/.../myproject/file.py → ./file.py
-    # This mirrors _resolve_path() logic but for shell command strings.
     if workspace_name:
         for prefix in _SYSTEM_PATH_PREFIXES:
-            if token.startswith(prefix):
+            if path.startswith(prefix):
                 marker = f"/{workspace_name}/"
-                # rfind, not find: the workspace's parent path may itself
-                # contain "/<workspace_name>/" (e.g. dev tree under
-                # ~/workspace/.../workspace). Last occurrence is the
-                # boundary closest to the file.
-                idx = token.rfind(marker)
+                idx = path.rfind(marker)
                 if idx != -1:
-                    relative = token[idx + len(marker) :]
-                    return "./" + relative if relative else "."
-                if token.endswith(f"/{workspace_name}"):
-                    return "."
-                break  # Matched system prefix but no workspace → fall through
+                    relative = path[idx + len(marker) :]
+                    return shlex.quote("./" + relative if relative else ".")
+                if path.endswith(f"/{workspace_name}"):
+                    return shlex.quote(".")
+                break
 
     # Convert virtual path
-    if token == "/":
-        return "."
-    return "." + token
-
-
-def _try_rewrite(
-    command: str,
-    abs_start: int,
-    abs_end: int,
-    workspace_name: str | None,
-    replacements: list[tuple[int, int, str]],
-) -> None:
-    """Compute the rewrite for ``command[abs_start:abs_end]`` and
-    append it to ``replacements`` if non-trivial.
-
-    Skips URL path components (e.g. ``/a`` in
-    ``https://example.com/a``) and paths that don't actually change
-    after the rewrite (so the splice list only contains real
-    replacements).
-    """
-    raw_path = command[abs_start:abs_end]
-    # Unescape backslash-escapes before rewriting. The shell
-    # processes ``\\<char>`` as ``<char>``, so a path like
-    # ``/main\\ file.py`` is seen by the shell as ``/main file.py``.
-    # The rewriter works with the unescaped form so the new path
-    # has spaces (not backslashes) where the original did.
-    unescaped = re.sub(r"\\(.)", r"\1", raw_path)
-    new_path = _rewrite_virtual_token(unescaped, workspace_name)
-    if new_path is None or new_path == unescaped:
-        return
-    replacements.append((abs_start, abs_end, new_path))
-
-
-def _value_span_to_raw_span(
-    raw: str, value: str, v_start: int, v_end: int, quoted: bool = False
-) -> tuple[int, int]:
-    """Map a span in ``value`` (the unquoted form of a tokenizer
-    token) back to the corresponding span in ``raw`` (the original
-    text including quote chars and backslash-escapes).
-
-    The tokenizer's ``raw`` and ``value`` fields describe the same
-    underlying text but with different processing: ``value`` strips
-    outer quote pairs and applies backslash-escape processing, so
-    its length can differ from ``raw`` and the chars are not
-    positionally aligned 1:1 (a backslash escape in the raw consumes
-    2 chars in the raw but 1 char in the value; the surrounding
-    quote chars in the raw don't appear in the value at all).
-
-    Pass ``quoted=True`` when the tokenizer set ``quoted=True`` on the
-    span — meaning a quote pair appears *somewhere* in the token (not
-    necessarily at the start).  The function scans forward to find the
-    first quote char and consumes unquoted chars 1:1 before it.
-
-    Returns ``(raw_start, raw_end)`` such that
-    ``raw[raw_start:raw_end]`` is the substring of the source that
-    corresponds to ``value[v_start:v_end]``.
-    """
-    raw_pos = 0
-    val_pos = 0
-    in_quote = False
-    quote_char: str | None = None
-    raw_start = raw_end = -1
-
-    # If the token is quoted, the opening quote char may not be at
-    # position 0 — the tokenizer sets ``quoted=True`` whenever a
-    # quote pair appears *anywhere* in the token (e.g.
-    # ``/main" file.py"``).  Walk forward consuming unquoted chars
-    # (1:1 in raw and value) until the first quote is found.
-    if quoted and raw:
-        in_quote = True
-        for idx, ch in enumerate(raw):
-            if ch in ('"', "'"):
-                quote_char = ch
-                raw_pos = idx + 1
-                break
-            val_pos += 1
-        else:
-            in_quote = False
-            quote_char = None
-            raw_pos = 0
-
-    # Phase 1: advance ``raw_pos`` until ``val_pos`` reaches
-    # ``v_start``. Then record ``raw_start`` as the current
-    # ``raw_pos`` — this is the position of the char in ``raw``
-    # that corresponds to ``value[v_start]``.
-    while raw_pos < len(raw) and val_pos < v_start:
-        ch = raw[raw_pos]
-        if in_quote and ch == quote_char:
-            in_quote = False
-            quote_char = None
-            raw_pos += 1
-        elif in_quote and ch == "\\" and raw_pos + 1 < len(raw) and quote_char == '"':
-            raw_pos += 2
-            val_pos += 1
-        elif not in_quote and ch == "\\" and raw_pos + 1 < len(raw):
-            raw_pos += 2
-            val_pos += 1
-        else:
-            raw_pos += 1
-            val_pos += 1
-    if raw_start == -1:
-        raw_start = raw_pos
-
-    # Phase 2: advance further until ``val_pos`` reaches ``v_end``.
-    # ``raw_end`` is the position AFTER the last char in ``raw``
-    # that corresponds to ``value[v_end - 1]``.
-    while raw_pos < len(raw) and val_pos < v_end:
-        ch = raw[raw_pos]
-        if in_quote and ch == quote_char:
-            in_quote = False
-            quote_char = None
-            raw_pos += 1
-        elif in_quote and ch == "\\" and raw_pos + 1 < len(raw) and quote_char == '"':
-            raw_pos += 2
-            val_pos += 1
-        elif not in_quote and ch == "\\" and raw_pos + 1 < len(raw):
-            raw_pos += 2
-            val_pos += 1
-        else:
-            raw_pos += 1
-            val_pos += 1
-    if raw_end == -1:
-        raw_end = raw_pos
-
-    return raw_start, raw_end
+    if path == "/":
+        return shlex.quote(".")
+    return shlex.quote("." + path)
 
 
 def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
 ) -> str:
-    """
-    Convert virtual paths (starting with /) in commands to relative paths.
+    """Convert virtual paths (starting with ``/``) in commands to relative paths.
 
     Also auto-corrects hallucinated system absolute paths that reference the
     workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
 
-    Tier-aware mounts (``/skills/...``, ``/memories/...``) are expanded to
-    absolute paths via ``_resolve_virtual_mount_path``. Callers that pass
-    the result through ``validate_command`` MUST whitelist the tier roots
-    via ``allow_prefixes`` to avoid false-positive system-path blocks.
-
-    Tokenization is shell-aware (``shlex`` in posix mode), so paths
-    containing whitespace are kept whole when the user quotes them —
-    e.g. ``python "/skills/my skill/main.py"`` is rewritten as one
-    argument rather than truncated at the embedded space. See #237.
-
-    Args:
-        command: Original command.
-        workspace_name: Basename of the workspace directory (e.g. ``"workspace"``,
-            ``"my-project"``).  When provided, system paths containing
-            ``/<workspace_name>/`` are auto-corrected.
-
-    Examples:
-        >>> convert_virtual_paths_in_command("python /main.py")
-        'python ./main.py'
-        >>> convert_virtual_paths_in_command("ls /")
-        'ls .'
-        >>> convert_virtual_paths_in_command(
-        ...     "mkdir -p /Users/u/proj/dir", workspace_name="proj")
-        'mkdir -p ./dir'
+    Pre-process: quoted arguments whose content starts with ``/`` are
+    rewritten as a single shell token — this fixes #237 where
+    ``python "/skills/my skill/main.py"`` was truncated at the embedded
+    space.  After pre-processing, the original regex handles unquoted
+    paths and workspace-name correction as before.
     """
-    # Use the existing position-tracking tokenizer. Its ``raw`` and
-    # ``value`` fields give us a per-token view: ``raw`` is the
-    # original text in the source (including quote chars and
-    # backslash-escapes), ``value`` is the unquoted form (with
-    # escape processing applied). We run the path regex on the
-    # value (where spaces inside a quote are preserved as part of
-    # the value), then map the value span back to the raw span via
-    # a parallel walk.
-    tokens = _shell_token_spans(command)
-    if not tokens:
-        return command
-
-    replacements: list[tuple[int, int, str]] = []
-    for tok in tokens:
-        if tok.get("type") != "word":
-            continue
-        tok_start = int(tok["start"])
-        tok_end = int(tok["end"])
-        raw = command[tok_start:tok_end]
-        value = str(tok["value"])
-        quoted = bool(tok.get("quoted", False))
-
-        # A path can appear in two shapes within a token:
-        #   (a) the path is the whole token (value starts with ``/``).
-        #       For unquoted tokens, the path stops at the first
-        #       space (which is a word boundary in the source). For
-        #       quoted tokens, the path is the whole value — the
-        #       spaces were inside the original quote and are
-        #       preserved in the value.
-        #   (b) the path is embedded after other text (e.g. ``cat /a``
-        #       → path ``/a`` is preceded by ``cat `` in the value).
-        #       Always stops at the first space.
-        if value.startswith("/"):
-            if quoted:
-                v_end = len(value)
-            else:
-                space_idx = value.find(" ")
-                v_end = space_idx if space_idx != -1 else len(value)
-            raw_start, raw_end = _value_span_to_raw_span(
-                raw, value, 0, v_end, quoted=quoted
+    # Pre-process: rewrite quoted paths whose decoded content starts with /
+    command = re.sub(
+        r'(["\'])((?:\\.|(?!\1).)*?)\1',
+        lambda m: (
+            _rewrite_quoted_path(
+                re.sub(r"\\(.)", r"\1", m.group(2)),
+                workspace_name,
             )
-            abs_start = tok_start + raw_start
-            abs_end = tok_start + raw_end
-            if "://" not in command[max(0, abs_start - 10) : abs_end + 10]:
-                _try_rewrite(command, abs_start, abs_end, workspace_name, replacements)
+            or m.group(0)
+        ),
+        command,
+    )
 
-        # Embedded paths: ``/foo`` preceded by whitespace in the
-        # value. Body stops at the first space (an unquoted space
-        # in the value is always a word boundary in the source).
-        for m in re.finditer(r'(?<=\s)/(?:\\.|[^\s;|&<>\\\'"`])*', value):
-            v_start, v_end = m.start(), m.end()
-            raw_start, raw_end = _value_span_to_raw_span(
-                raw, value, v_start, v_end, quoted=quoted
-            )
-            abs_start = tok_start + raw_start
-            abs_end = tok_start + raw_end
-            if "://" not in command[max(0, abs_start - 10) : abs_end + 10]:
-                _try_rewrite(command, abs_start, abs_end, workspace_name, replacements)
+    def replace_virtual_path(match: re.Match[str]) -> str:
+        path = match.group(0)
 
-    # If the matched path is wrapped in matching quote chars in the
-    # original command, extend the splice to include those chars. This
-    # lets the splice drop the original quote style and replace it
-    # with a fresh `shlex.quote` of the new path — avoiding the
-    # double-quoting trap (shlex.quote inside original `"…"` would
-    # leave literal `'` chars in the argument value).
-    #
-    # Paths inside a larger quoted region (e.g. /a inside "cat /a /b")
-    # do NOT get the extension: the surrounding chars aren't quotes, so
-    # the heuristic doesn't fire. The path is spliced in place,
-    # preserving the surrounding structure.
-    extended: list[tuple[int, int, str]] = []
-    for s, e, np in replacements:
-        if (
-            s > 0
-            and e < len(command)
-            and command[s - 1] == command[e]
-            and command[s - 1] in ('"', "'", "`")
-        ):
-            extended.append((s - 1, e + 1, np))
-        else:
-            extended.append((s, e, np))
+        # Skip content that looks like a URL
+        if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
+            return path
 
-    # Apply splices in reverse so each replacement doesn't shift the
-    # positions of earlier ones.
-    result = command
-    for s, e, np in reversed(extended):
-        result = result[:s] + shlex.quote(np) + result[e:]
-    return result
+        resolved = _resolve_virtual_mount_path(path)
+        if resolved is not None:
+            return resolved
+
+        # Fix hallucinated system absolute paths that reference the workspace.
+        if workspace_name:
+            for prefix in _SYSTEM_PATH_PREFIXES:
+                if path.startswith(prefix):
+                    marker = f"/{workspace_name}/"
+                    idx = path.rfind(marker)
+                    if idx != -1:
+                        relative = path[idx + len(marker) :]
+                        return "./" + relative if relative else "."
+                    elif path.endswith(f"/{workspace_name}"):
+                        return "."
+                    break  # Matched system prefix but no workspace → fall through
+
+        # Convert virtual path
+        if path == "/":
+            return "."
+        return "." + path
+
+    # Match pattern: paths starting with / (but not URLs)
+    pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'
+    converted = re.sub(pattern, replace_virtual_path, command)
+
+    return converted
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):
