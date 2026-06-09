@@ -422,19 +422,27 @@ class TestStartLanggraphDevRotatesLog:
     def test_rotate_called_before_open(self, tmp_path, monkeypatch):
         log = tmp_path / "langgraph_dev.log"
         log.write_bytes(b"x" * 2048)  # contents don't matter for the check
-        # Redirect every module-level path that ``start_langgraph_dev``
-        # touches so the test can't write to the real
-        # ``~/.config/evoscientist/`` on a dev machine. Patching only
-        # ``_LOG_FILE`` would still let ``_PID_DIR.mkdir(...)`` create
-        # a real directory on disk during the rotation prelude.
+        # Build a fully temp-rooted runtime bundle via
+        # ``for_directory`` so *every* path (pid_dir, pid_file,
+        # workspace_sidecar, lock_file) is rooted under ``tmp_path``.
+        # ``dataclasses.replace(manager.RUNTIME, …)`` would still carry
+        # ``pid_file`` / ``workspace_sidecar`` / ``lock_file`` from the
+        # production object pointing at ``~/.config/evoscientist/``.
         pid_dir = tmp_path / "pids"
         monkeypatch.setattr(
-            manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_dir=pid_dir)
-        )
-        monkeypatch.setattr(
-            manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, log_file=log)
+            manager,
+            "RUNTIME",
+            dataclasses.replace(
+                manager.LanggraphRuntimePaths.for_directory(pid_dir),
+                log_file=log,
+            ),
         )
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        # This test only verifies log rotation — we must not touch real
+        # sockets.  Patch ``_can_bind_port`` so the bind-poll loop in
+        # ``_wait_for_port_bindable`` passes immediately regardless of
+        # whether port 6174 is in use on the dev machine.
+        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
         # Make ``_packaged_langgraph_config`` point at a real file so
         # ``start_langgraph_dev`` doesn't bail at the existence check
         # before reaching the rotation call.
