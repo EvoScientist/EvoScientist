@@ -608,11 +608,7 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
 def _guard_bare_absolute(result: str | None) -> str | None:
     """If *result* is a bare absolute path (no surrounding quotes),
     single-quote it so the post-process regex won't re-rewrite it."""
-    if (
-        result
-        and result.startswith("/")
-        and result == result.strip("'\"")
-    ):
+    if result and result.startswith("/") and result == result.strip("'\""):
         return "'" + result + "'"
     return result
 
@@ -642,7 +638,9 @@ def _rewrite_quoted_path(
                 idx = path.rfind(marker)
                 if idx != -1:
                     relative = path[idx + len(marker) :]
-                    return _guard_bare_absolute(shlex.quote("./" + relative if relative else "."))
+                    return _guard_bare_absolute(
+                        shlex.quote("./" + relative if relative else ".")
+                    )
                 if path.endswith(f"/{workspace_name}"):
                     return _guard_bare_absolute(shlex.quote("."))
                 break
