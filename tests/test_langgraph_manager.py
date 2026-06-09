@@ -104,30 +104,30 @@ class TestListPidsOnPort:
 
 
 class TestKillOwnedStaleProcess:
-    def test_returns_false_if_no_pid_file(self, tmp_path):
+    def test_returns_false_if_no_pid_file(self, tmp_path, runtime_paths):
         with patch.object(
             manager,
             "RUNTIME",
-            dataclasses.replace(manager.RUNTIME, pid_file=tmp_path / "missing.pid"),
+            dataclasses.replace(runtime_paths, pid_file=tmp_path / "missing.pid"),
         ):
             assert manager._kill_owned_stale_process(6174) is False
 
-    def test_returns_false_if_pid_file_unreadable(self, tmp_path):
+    def test_returns_false_if_pid_file_unreadable(self, tmp_path, runtime_paths):
         pid_file = tmp_path / "bad.pid"
         pid_file.write_text("not-a-number")
         with patch.object(
-            manager, "RUNTIME", dataclasses.replace(manager.RUNTIME, pid_file=pid_file)
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, pid_file=pid_file)
         ):
             assert manager._kill_owned_stale_process(6174) is False
 
-    def test_returns_false_if_pid_not_in_occupiers(self, tmp_path):
+    def test_returns_false_if_pid_not_in_occupiers(self, tmp_path, runtime_paths):
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
         with (
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
             ),
             patch.object(manager, "_list_pids_on_port", return_value=[99999]),
         ):
@@ -136,7 +136,7 @@ class TestKillOwnedStaleProcess:
             # else, not a stale ours.
             assert pid_file.exists()
 
-    def test_refuses_to_kill_recycled_pid(self, tmp_path):
+    def test_refuses_to_kill_recycled_pid(self, tmp_path, runtime_paths):
         """PID matches but cmdline doesn't contain 'langgraph' → don't kill."""
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
@@ -146,7 +146,7 @@ class TestKillOwnedStaleProcess:
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
             ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(manager.psutil, "Process", return_value=fake_proc),
@@ -157,7 +157,7 @@ class TestKillOwnedStaleProcess:
             # gone, PID was recycled by an unrelated process).
             assert not pid_file.exists()
 
-    def test_kills_when_cmdline_matches_langgraph(self, tmp_path):
+    def test_kills_when_cmdline_matches_langgraph(self, tmp_path, runtime_paths):
         """Owned PID + cmdline contains 'langgraph' → kill + cleanup PID file."""
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
@@ -171,7 +171,7 @@ class TestKillOwnedStaleProcess:
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
             ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(manager.psutil, "Process", return_value=fake_proc),
@@ -180,7 +180,7 @@ class TestKillOwnedStaleProcess:
             fake_proc.kill.assert_called_once()
             assert not pid_file.exists()
 
-    def test_handles_dead_pid(self, tmp_path):
+    def test_handles_dead_pid(self, tmp_path, runtime_paths):
         """PID file claims a PID but the process is gone → cleanup PID file, no error."""
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
@@ -188,7 +188,7 @@ class TestKillOwnedStaleProcess:
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_file=pid_file),
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
             ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(
@@ -207,7 +207,7 @@ class TestKillOwnedStaleProcess:
 
 
 class TestEnsureLanggraphDev:
-    def test_starts_when_async_disabled_but_memory_workers_enabled(self, tmp_path):
+    def test_starts_when_async_disabled_but_memory_workers_enabled(self, tmp_path, runtime_paths):
         """EvoMemory workers can require langgraph dev even without async subagents."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
@@ -221,12 +221,11 @@ class TestEnsureLanggraphDev:
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock"),
-            ),
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids"),
+                dataclasses.replace(
+                    runtime_paths,
+                    lock_file=tmp_path / "lg.lock",
+                    pid_dir=tmp_path / "pids",
+                ),
             ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
@@ -235,7 +234,7 @@ class TestEnsureLanggraphDev:
         start.assert_called_once()
         assert manager.is_async_subagents_available() is True
 
-    def test_skips_when_async_and_memory_workers_disabled(self, tmp_path):
+    def test_skips_when_async_and_memory_workers_disabled(self, tmp_path, runtime_paths):
         """No background server is needed without async subagents or workers."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
@@ -248,12 +247,11 @@ class TestEnsureLanggraphDev:
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock"),
-            ),
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids"),
+                dataclasses.replace(
+                    runtime_paths,
+                    lock_file=tmp_path / "lg.lock",
+                    pid_dir=tmp_path / "pids",
+                ),
             ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
@@ -263,7 +261,7 @@ class TestEnsureLanggraphDev:
         start.assert_not_called()
         assert manager.is_async_subagents_available() is False
 
-    def test_reuses_existing_healthy_subprocess(self, tmp_path):
+    def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
         """When the subprocess is already running, no new Popen call."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = True
@@ -277,15 +275,11 @@ class TestEnsureLanggraphDev:
             patch.object(
                 manager,
                 "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, lock_file=tmp_path / "lg.lock"),
-            ),
-            # Isolate from real ``~/.config/evoscientist/`` — without this
-            # patch, the FileLock setup would mkdir the user's actual config
-            # dir as a test side-effect.
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(manager.RUNTIME, pid_dir=tmp_path / "pids"),
+                dataclasses.replace(
+                    runtime_paths,
+                    lock_file=tmp_path / "lg.lock",
+                    pid_dir=tmp_path / "pids",
+                ),
             ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
@@ -328,7 +322,7 @@ class TestRotateLogIfNeeded:
     is patched to a small value per-test to keep the fixtures tiny.
     """
 
-    def test_no_existing_file_is_noop(self, tmp_path):
+    def test_no_existing_file_is_noop(self, tmp_path, runtime_paths):
         log = tmp_path / "langgraph_dev.log"
         manager._rotate_log_if_needed(log)
         assert not log.exists()
@@ -425,7 +419,7 @@ class TestStartLanggraphDevRotatesLog:
         # Build a fully temp-rooted runtime bundle via
         # ``for_directory`` so *every* path (pid_dir, pid_file,
         # workspace_sidecar, lock_file) is rooted under ``tmp_path``.
-        # ``dataclasses.replace(manager.RUNTIME, …)`` would still carry
+        # ``dataclasses.replace(runtime_paths, …)`` would still carry
         # ``pid_file`` / ``workspace_sidecar`` / ``lock_file`` from the
         # production object pointing at ``~/.config/evoscientist/``.
         pid_dir = tmp_path / "pids"
