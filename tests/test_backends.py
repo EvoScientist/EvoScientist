@@ -750,28 +750,29 @@ class TestSandboxId:
 
 
 class TestExecuteCwdSanitization:
-    def test_literal_workspace_path_replaced(self, tmp_workspace):
-        """execute() should replace literal workspace root path with ./"""
-        # ``tmp_workspace`` arrives as ``str`` (the ``tmp_workspace``
-        # fixture is a string fixture, not the ``tmp_path`` Path). Wrap
-        # it in ``Path`` for ``.as_posix()`` and downstream use.
-        workspace = Path(tmp_workspace)
+    def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
+        """``prepare_sandbox_command`` must rewrite a literal workspace-root
+        absolute path to ``./`` before the command reaches the shell backend.
+
+        This asserts at the preprocessing boundary (no shell execution) so
+        the test is cross-platform — ``mkdir -p`` is POSIX-only and would
+        fail on Windows runners.
+        """
+        captured = {}
+
+        def fake_execute(_self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        # ``mkdir -p`` is POSIX-only; on Windows the shell rejects the
-        # command entirely. Use the cross-platform ``sys.executable`` to
-        # create the directory so the assertion under test (path
-        # sanitization) runs on every platform.
-        resp = backend.execute(
-            f"{sys.executable} -c \"import os; "
-            f"os.makedirs({workspace.as_posix()!r} + '/test-sanitized', "
-            "exist_ok=True)\""
-        )
-        assert resp.exit_code == 0, resp.output
-        # Sanitization must have rewritten the literal workspace path
-        # to ``./`` (or the platform equivalent), so the directory was
-        # created directly under the workspace, not at some other
-        # location derived from the unsanitized literal.
-        assert (workspace / "test-sanitized").is_dir()
+        command = f"mkdir -p {tmp_workspace}/test-sanitized && echo ok"
+
+        resp = backend.execute(command)
+
+        assert resp.exit_code == 0
+        assert f"{tmp_workspace}/" not in captured["command"]
+        assert "./test-sanitized" in captured["command"]
 
     def test_ssh_remote_paths_survive_execute_preprocessing(
         self, tmp_workspace, monkeypatch
