@@ -229,6 +229,29 @@ def status(
     )
 
 
+def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
+    """Kill the process group/tree in a cross-platform way.
+
+    On POSIX ``start_new_session=True`` makes the child a process-group
+    leader; ``os.killpg`` terminates the entire group (shell + any
+    grandchildren).  On Windows ``os.killpg`` does not exist, so we fall
+    back to ``Popen.terminate()`` / ``Popen.kill()`` which call
+    ``TerminateProcess`` on the direct child.  With ``shell=True`` the
+    child is ``cmd.exe``, and killing it cascades to its children.
+    """
+    if os.name == "nt":
+        if forceful:
+            popen.kill()
+        else:
+            popen.terminate()
+    else:
+        sig = signal.SIGKILL if forceful else signal.SIGTERM
+        try:
+            os.killpg(os.getpgid(popen.pid), sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+
 def stop(process_id: str) -> str:
     """Terminate ``process_id`` and its process group (SIGTERM, then SIGKILL)."""
     with _LOCK:
@@ -242,11 +265,11 @@ def stop(process_id: str) -> str:
         # notification (the user already knows — no need to ping them).
         proc.stopped = True
         # The watcher's popen.wait() reaps without the lock, so a tiny PID-reuse race
-        # remains (getpgid on a recycled pid). ProcessLookupError handles the common case;
-        # the window is too narrow to be worth coordinating the watcher.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
+        # remains (getpgid on a recycled pid).  On POSIX ProcessLookupError covers the
+        # common case; on Windows ``Popen.terminate()`` is a no-op on a dead handle
+        # so we poll after the call instead.
+        _kill_process_tree(proc.popen, forceful=False)
+        if proc.popen.poll() is not None:
             _record_exit(proc)
             return f"Process {process_id} is no longer running."
 
@@ -260,10 +283,7 @@ def stop(process_id: str) -> str:
     else:
         with _LOCK:
             if proc.popen.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _kill_process_tree(proc.popen, forceful=True)
             _record_exit(proc)
 
     with _LOCK:
