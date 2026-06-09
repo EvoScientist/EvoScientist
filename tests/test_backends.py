@@ -22,6 +22,7 @@ def _sleep_cmd(seconds: int) -> str:
         return f"ping -n {seconds + 1} 127.0.0.1 > nul"
     return f"sleep {seconds}"
 
+
 # === validate_command ===
 
 
@@ -352,16 +353,12 @@ class TestConvertVirtualPaths:
         ):
             d.mkdir()
         monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
-        monkeypatch.setattr(
-            paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills"
-        )
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
         monkeypatch.setattr(
             backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
         )
-        result = convert_virtual_paths_in_command(
-            "python /skills/my skill/main.py"
-        )
+        result = convert_virtual_paths_in_command("python /skills/my skill/main.py")
         assert result == "python ./skills/my skill/main.py"
 
     def test_url_with_path_component_preserved(self):
@@ -415,9 +412,7 @@ class TestConvertVirtualPaths:
         ):
             d.mkdir()
         monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
-        monkeypatch.setattr(
-            paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills"
-        )
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
         monkeypatch.setattr(
             backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
@@ -1291,7 +1286,7 @@ class TestExecuteTruncation:
             max_output_bytes=100,
         )
         # Generate output larger than 100 bytes
-        resp = backend.execute('python -c "print(\'A\' * 200)"')
+        resp = backend.execute("python -c \"print('A' * 200)\"")
         assert resp.truncated is True
         assert "... Output truncated at 100 bytes" in resp.output
         # Output body (before truncation message) should be ≤ 100 bytes
@@ -1319,7 +1314,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            'python -c "import sys; sys.stderr.write(\'warning\\n\')"'
+            "python -c \"import sys; sys.stderr.write('warning\\n')\""
         )
         assert "[stderr] warning" in resp.output
 
@@ -1338,7 +1333,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            'python -c "import sys; print(\'out\'); sys.stderr.write(\'err\\n\')"'
+            "python -c \"import sys; print('out'); sys.stderr.write('err\\n')\""
         )
         assert "out" in resp.output
         assert "[stderr] err" in resp.output

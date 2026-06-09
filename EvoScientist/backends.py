@@ -610,9 +610,7 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
     return None
 
 
-def _rewrite_virtual_token(
-    token: str, workspace_name: str | None
-) -> str | None:
+def _rewrite_virtual_token(token: str, workspace_name: str | None) -> str | None:
     """Return the replacement for a single shlex-extracted token, or
     ``None`` when the token should be left unchanged.
 
@@ -856,9 +854,7 @@ def convert_virtual_paths_in_command(
             abs_start = tok_start + raw_start
             abs_end = tok_start + raw_end
             if "://" not in command[max(0, abs_start - 10) : abs_end + 10]:
-                _try_rewrite(
-                    command, abs_start, abs_end, workspace_name, replacements
-                )
+                _try_rewrite(command, abs_start, abs_end, workspace_name, replacements)
 
         # Embedded paths: ``/foo`` preceded by whitespace in the
         # value. Body stops at the first space (an unquoted space
@@ -871,9 +867,7 @@ def convert_virtual_paths_in_command(
             abs_start = tok_start + raw_start
             abs_end = tok_start + raw_end
             if "://" not in command[max(0, abs_start - 10) : abs_end + 10]:
-                _try_rewrite(
-                    command, abs_start, abs_end, workspace_name, replacements
-                )
+                _try_rewrite(command, abs_start, abs_end, workspace_name, replacements)
 
     # If the matched path is wrapped in matching quote chars in the
     # original command, extend the splice to include those chars. This
