@@ -23,12 +23,12 @@ import subprocess
 import threading
 import time
 import uuid
-
-import psutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
     if os.name == "nt":
         try:
             proc = psutil.Process(popen.pid)
-            targets = [proc] + proc.children(recursive=True)
+            targets = [proc, *proc.children(recursive=True)]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return
         for p in targets:
