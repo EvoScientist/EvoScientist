@@ -100,7 +100,7 @@ def runtime_paths(tmp_path, monkeypatch):
     Replaces the module-level ``RUNTIME`` with a fully temp-rooted bundle
     so every path (``pid_dir``, ``pid_file``, ``log_file``,
     ``workspace_sidecar``, ``lock_file``) is contained under ``tmp_path``.
-    
+
     Tests that need a variant of a single field can still call
     ``dataclasses.replace(runtime_paths, log_file=…)`` etc. — the
     baseline is already isolated, so forgetting a field just keeps it
