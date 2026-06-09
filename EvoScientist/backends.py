@@ -698,9 +698,10 @@ def _value_span_to_raw_span(
     2 chars in the raw but 1 char in the value; the surrounding
     quote chars in the raw don't appear in the value at all).
 
-    Pass ``quoted=True`` when the token's source began with a
-    ``"`` or ``'`` so the function knows to skip the opening quote
-    char (which doesn't appear in the value) before phase 1.
+    Pass ``quoted=True`` when the tokenizer set ``quoted=True`` on the
+    span — meaning a quote pair appears *somewhere* in the token (not
+    necessarily at the start).  The function scans forward to find the
+    first quote char and consumes unquoted chars 1:1 before it.
 
     Returns ``(raw_start, raw_end)`` such that
     ``raw[raw_start:raw_end]`` is the substring of the source that

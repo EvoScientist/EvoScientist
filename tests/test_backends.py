@@ -143,7 +143,9 @@ class TestConvertVirtualPaths:
         )
         # Must not error or truncate the command.
         assert "mkdir -p" in result
-        assert "notes" in result
+        # The ``/workspace/notes`` segment after ``$(...)`` is still a
+        # ``/``-path and must be rewritten.
+        assert "./workspace/notes" in result
 
     def test_system_path_custom_workspace_name(self):
         """Should work with any workspace directory name, not just 'workspace'."""
