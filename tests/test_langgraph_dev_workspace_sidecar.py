@@ -51,7 +51,7 @@ def test_read_workspace_sidecar_returns_none_when_missing(tmp_path, monkeypatch,
         manager,
         "RUNTIME",
         dataclasses.replace(
-            manager.RUNTIME, workspace_sidecar=tmp_path / "absent.json"
+            runtime_paths, workspace_sidecar=tmp_path / "absent.json"
         ),
     )
     assert manager._read_workspace_sidecar() is None
@@ -196,7 +196,7 @@ def test_ensure_langgraph_dev_reuses_when_sidecar_missing(tmp_path, monkeypatch,
         manager,
         "RUNTIME",
         dataclasses.replace(
-            manager.RUNTIME, workspace_sidecar=tmp_path / "absent.json"
+            runtime_paths, workspace_sidecar=tmp_path / "absent.json"
         ),
     )
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)

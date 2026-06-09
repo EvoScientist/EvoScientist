@@ -222,9 +222,10 @@ class TestEnsureLanggraphDev:
                 manager,
                 "RUNTIME",
                 dataclasses.replace(
-                    runtime_paths,
+                    manager.LanggraphRuntimePaths.for_directory(
+                        tmp_path / "pids"
+                    ),
                     lock_file=tmp_path / "lg.lock",
-                    pid_dir=tmp_path / "pids",
                 ),
             ),
         ):
@@ -248,9 +249,10 @@ class TestEnsureLanggraphDev:
                 manager,
                 "RUNTIME",
                 dataclasses.replace(
-                    runtime_paths,
+                    manager.LanggraphRuntimePaths.for_directory(
+                        tmp_path / "pids"
+                    ),
                     lock_file=tmp_path / "lg.lock",
-                    pid_dir=tmp_path / "pids",
                 ),
             ),
         ):
@@ -276,9 +278,10 @@ class TestEnsureLanggraphDev:
                 manager,
                 "RUNTIME",
                 dataclasses.replace(
-                    runtime_paths,
+                    manager.LanggraphRuntimePaths.for_directory(
+                        tmp_path / "pids"
+                    ),
                     lock_file=tmp_path / "lg.lock",
-                    pid_dir=tmp_path / "pids",
                 ),
             ),
         ):
@@ -316,13 +319,13 @@ class TestIsAsyncSubagentsAvailable:
 
 class TestRotateLogIfNeeded:
     """``_rotate_log_if_needed`` implements the single-backup rollover
-    policy from #209. When ``_LOG_FILE`` exceeds the module's
+    policy from #209. When ``RUNTIME.log_file`` exceeds the module's
     ``_LOG_ROTATION_BYTES`` threshold, rename to ``<log>.1`` (overwriting
     any existing backup) so the next open() starts fresh. Threshold
     is patched to a small value per-test to keep the fixtures tiny.
     """
 
-    def test_no_existing_file_is_noop(self, tmp_path, runtime_paths):
+    def test_no_existing_file_is_noop(self, tmp_path):
         log = tmp_path / "langgraph_dev.log"
         manager._rotate_log_if_needed(log)
         assert not log.exists()

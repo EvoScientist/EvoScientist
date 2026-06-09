@@ -84,13 +84,7 @@ class LanggraphRuntimePaths:
 # :meth:`LanggraphRuntimePaths.for_directory` to point at a temp dir
 # without touching the user's real home directory.
 DEFAULT_PID_DIR = Path.home() / ".config" / "evoscientist"
-RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths(
-    pid_dir=DEFAULT_PID_DIR,
-    pid_file=DEFAULT_PID_DIR / "langgraph_dev.pid",
-    log_file=DEFAULT_PID_DIR / "langgraph_dev.log",
-    workspace_sidecar=DEFAULT_PID_DIR / "langgraph_dev.workspace.json",
-    lock_file=DEFAULT_PID_DIR / "langgraph_dev.lock",
-)
+RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths.for_directory(DEFAULT_PID_DIR)
 
 
 def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
