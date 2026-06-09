@@ -2377,7 +2377,10 @@ def run_textual_interactive(
                             if name.startswith(sub_prefix)
                         ]
                         if sub_matches:
-                            if len(sub_matches) == 1 and sub_matches[0][0] == sub_prefix:
+                            if (
+                                len(sub_matches) == 1
+                                and sub_matches[0][0] == sub_prefix
+                            ):
                                 # Exact subcommand match — hide
                                 self._hide_completions()
                                 return

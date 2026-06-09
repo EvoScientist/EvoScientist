@@ -1062,9 +1062,7 @@ class TestCompletionLogic(unittest.TestCase):
     def test_apply_selected_subcommand_preserves_prefix(self):
         """TAB on a subcommand preserves '/mcp ' prefix."""
         items = [("list", "List servers")]
-        app = self._make_app(
-            comp_items=items, comp_index=0, comp_is_subcommand=True
-        )
+        app = self._make_app(comp_items=items, comp_index=0, comp_is_subcommand=True)
         app._fake_input.value = "/mcp lis"
         app._apply_selected_completion()
         assert app._fake_input.value == "/mcp list "
