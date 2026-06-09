@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -13,7 +15,7 @@ class ChannelCommand(Command):
 
     name = "/channel"
     description = "Configure messaging channels"
-    subcommands = [
+    subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("status", "Show running channel status"),
         SubCommand("stop", "Stop a running channel"),
     ]

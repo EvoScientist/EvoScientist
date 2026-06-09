@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.table import Table
 
 from ..base import Command, CommandContext, SubCommand
@@ -11,7 +13,7 @@ class MCPCommand(Command):
 
     name = "/mcp"
     description = "Manage MCP servers"
-    subcommands = [
+    subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("list", "List configured MCP servers"),
         SubCommand("config", "Show server configuration details"),
         SubCommand("add", "Add a new MCP server"),
