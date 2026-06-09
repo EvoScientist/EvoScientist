@@ -22,39 +22,40 @@ class ResearchPhase(StrEnum):
 class SubAgentState:
     """Tracks a single sub-agent's activity."""
 
-    def __init__(self, name: str, description: str = ""):
+    def __init__(
+        self,
+        name: str,
+        description: str = "",
+        instance_id: str = "",
+        parent_tool_call_id: str = "",
+    ):
         self.name = name
         self.description = description
+        self.instance_id = instance_id
+        self.parent_tool_call_id = parent_tool_call_id
         self.tool_calls: list[dict] = []
         self.tool_results: list[dict] = []
         self._result_map: dict[str, dict] = {}  # tool_call_id -> result
         self.is_active = True
 
-    def add_tool_call(self, name: str, args: dict, tool_id: str = ""):
-        # Skip empty-name calls without an id (incomplete streaming chunks)
-        if not name and not tool_id:
+    def add_tool_call(self, name: str, args: dict, tool_id: str):
+        if not name or not tool_id:
             return
         tc_data = {"id": tool_id, "name": name, "args": args}
-        if tool_id:
-            for i, tc in enumerate(self.tool_calls):
-                if tc.get("id") == tool_id:
-                    # Merge: keep the non-empty name/args
-                    if name:
-                        self.tool_calls[i]["name"] = name
-                    if args:
-                        self.tool_calls[i]["args"] = args
-                    return
-        # Skip if name is empty and we can't deduplicate by id
-        if not name:
-            return
+        for i, tc in enumerate(self.tool_calls):
+            if tc["id"] == tool_id:
+                self.tool_calls[i]["name"] = name
+                if args:
+                    self.tool_calls[i]["args"] = args
+                return
         self.tool_calls.append(tc_data)
 
     def add_tool_result(
         self,
         name: str,
         content: str,
-        success: bool = True,
-        tool_call_id: str = "",
+        success: bool,
+        tool_call_id: str,
     ):
         result = {
             "name": name,
@@ -63,39 +64,14 @@ class SubAgentState:
             "tool_call_id": tool_call_id,
         }
         self.tool_results.append(result)
-        # Preferred: exact id match (correct under concurrent same-name tools).
-        if tool_call_id:
-            for tc in self.tool_calls:
-                if tc.get("id") == tool_call_id:
-                    self._result_map[tool_call_id] = result
-                    return
-        # Fallback: first unmatched tool call with same name.
         for tc in self.tool_calls:
-            tc_id = tc.get("id", "")
-            tc_name = tc.get("name", "")
-            if tc_id and tc_id not in self._result_map and tc_name == name:
-                self._result_map[tc_id] = result
-                return
-        # Last resort: first unmatched tool call regardless of name.
-        for tc in self.tool_calls:
-            tc_id = tc.get("id", "")
-            if tc_id and tc_id not in self._result_map:
-                self._result_map[tc_id] = result
+            if tc["id"] == tool_call_id:
+                self._result_map[tool_call_id] = result
                 return
 
     def get_result_for(self, tc: dict) -> dict | None:
         """Get matched result for a tool call."""
-        tc_id = tc.get("id", "")
-        if tc_id:
-            return self._result_map.get(tc_id)
-        # Fallback: index-based matching
-        try:
-            idx = self.tool_calls.index(tc)
-            if idx < len(self.tool_results):
-                return self.tool_results[idx]
-        except ValueError:
-            pass
-        return None
+        return self._result_map.get(tc["id"])
 
 
 class StreamState:
@@ -113,7 +89,7 @@ class StreamState:
         self.is_processing = False
         # Sub-agent tracking
         self.subagents: list[SubAgentState] = []
-        self._subagent_map: dict[str, SubAgentState] = {}  # name -> state
+        self._subagent_map: dict[str, SubAgentState] = {}
         # Todo list tracking
         self.todo_items: list[dict] = []
         # Latest text segment (reset on each tool_call)
@@ -150,51 +126,28 @@ class StreamState:
         return self._cached_md
 
     def _get_or_create_subagent(
-        self, name: str, description: str = ""
+        self,
+        name: str,
+        description: str,
+        instance_id: str,
+        parent_tool_call_id: str = "",
     ) -> SubAgentState:
-        if name not in self._subagent_map:
-            # Case 1: real name arrives, "sub-agent" entry exists -> rename it
-            if name != "sub-agent" and "sub-agent" in self._subagent_map:
-                old_sa = self._subagent_map.pop("sub-agent")
-                old_sa.name = name
-                if description:
-                    old_sa.description = description
-                self._subagent_map[name] = old_sa
-                return old_sa
-            # Case 2: "sub-agent" arrives but a pre-registered real-name entry
-            #         exists with no tool calls -> merge into it
-            if name == "sub-agent":
-                active_named = [
-                    sa
-                    for sa in self.subagents
-                    if sa.is_active and sa.name != "sub-agent"
-                ]
-                if len(active_named) == 1 and not active_named[0].tool_calls:
-                    self._subagent_map[name] = active_named[0]
-                    return active_named[0]
-            sa = SubAgentState(name, description)
+        key = instance_id
+        if key not in self._subagent_map:
+            sa = SubAgentState(name, description, instance_id, parent_tool_call_id)
             self.subagents.append(sa)
-            self._subagent_map[name] = sa
+            self._subagent_map[key] = sa
         else:
-            existing = self._subagent_map[name]
+            existing = self._subagent_map[key]
+            if name and existing.name != name:
+                existing.name = name
             if description and not existing.description:
                 existing.description = description
-            # If this entry was created as "sub-agent" placeholder and the
-            # actual name is different, update.
-            if name != "sub-agent" and existing.name == "sub-agent":
-                existing.name = name
-        return self._subagent_map[name]
-
-    def _resolve_subagent_name(self, name: str) -> str:
-        """Resolve "sub-agent" to the single active named sub-agent when possible."""
-        if name != "sub-agent":
-            return name
-        active_named = [
-            sa.name for sa in self.subagents if sa.is_active and sa.name != "sub-agent"
-        ]
-        if len(active_named) == 1:
-            return active_named[0]
-        return name
+            if instance_id and not existing.instance_id:
+                existing.instance_id = instance_id
+            if parent_tool_call_id and not existing.parent_tool_call_id:
+                existing.parent_tool_call_id = parent_tool_call_id
+        return self._subagent_map[key]
 
     def handle_event(self, event: dict) -> str:
         """Process a single stream event, update internal state, return event type."""
@@ -220,7 +173,7 @@ class StreamState:
             self.is_responding = False
             self.is_processing = False
 
-            tool_id = event.get("id", "")
+            tool_id = event["id"]
             tool_name = event.get("name", "unknown")
             tool_args = event.get("args", {})
             tc_data = {
@@ -229,21 +182,13 @@ class StreamState:
                 "args": tool_args,
             }
 
-            if tool_id:
-                updated = False
-                for i, tc in enumerate(self.tool_calls):
-                    if tc.get("id") == tool_id:
-                        self.tool_calls[i] = tc_data
-                        updated = True
-                        break
-                if not updated:
-                    if self.latest_text.strip():
-                        self.narration_segments.append(
-                            (len(self.tool_calls), self.latest_text)
-                        )
-                        self.narrated_response_end = len(self.response_text)
-                    self.tool_calls.append(tc_data)
-            else:
+            updated = False
+            for i, tc in enumerate(self.tool_calls):
+                if tc["id"] == tool_id:
+                    self.tool_calls[i] = tc_data
+                    updated = True
+                    break
+            if not updated:
                 if self.latest_text.strip():
                     self.narration_segments.append(
                         (len(self.tool_calls), self.latest_text)
@@ -267,49 +212,53 @@ class StreamState:
                 {
                     "name": result_name,
                     "content": result_content,
+                    "id": event["id"],
+                    "success": event.get("success", True),
                 }
             )
-            # Update todo list from write_todos / read_todos results (fallback)
+            # Update todo list from write_todos / read_todos tool results.
             if result_name in ("write_todos", "read_todos"):
                 parsed = _parse_todo_items(result_content)
                 if parsed:
                     self.todo_items = parsed
 
         elif event_type == "subagent_start":
-            name = event.get("name", "sub-agent")
+            name = event["name"]
             desc = event.get("description", "")
-            sa = self._get_or_create_subagent(name, desc)
+            instance_id = event["instance_id"]
+            sa = self._get_or_create_subagent(
+                name, desc, instance_id, event["tool_call_id"]
+            )
             sa.is_active = True
 
         elif event_type == "subagent_tool_call":
-            sa_name = self._resolve_subagent_name(event.get("subagent", "sub-agent"))
-            sa = self._get_or_create_subagent(sa_name)
+            instance_id = event["instance_id"]
+            sa = self._subagent_map.get(instance_id)
+            if sa is None:
+                return event_type
             sa.add_tool_call(
                 event.get("name", "unknown"),
                 event.get("args", {}),
-                event.get("id", ""),
+                event["id"],
             )
 
         elif event_type == "subagent_tool_result":
-            sa_name = self._resolve_subagent_name(event.get("subagent", "sub-agent"))
-            sa = self._get_or_create_subagent(sa_name)
+            instance_id = event["instance_id"]
+            sa = self._subagent_map.get(instance_id)
+            if sa is None:
+                return event_type
             sa.add_tool_result(
                 event.get("name", "unknown"),
                 event.get("content", ""),
                 event.get("success", True),
-                event.get("id", ""),
+                event["id"],
             )
 
         elif event_type == "subagent_end":
-            name = self._resolve_subagent_name(event.get("name", "sub-agent"))
-            if name in self._subagent_map:
-                self._subagent_map[name].is_active = False
-            elif name == "sub-agent":
-                # Couldn't resolve -- deactivate the oldest active sub-agent
-                for sa in self.subagents:
-                    if sa.is_active:
-                        sa.is_active = False
-                        break
+            instance_id = event["instance_id"]
+            key = instance_id
+            if key in self._subagent_map:
+                self._subagent_map[key].is_active = False
 
         elif event_type == "interrupt":
             self.pending_interrupt = event

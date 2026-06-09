@@ -1,10 +1,17 @@
 """Tests for HITL (Human-in-the-Loop) approval mechanism."""
 
-import asyncio
 from unittest.mock import MagicMock, patch
+
+from langgraph.types import Interrupt
 
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
 from EvoScientist.stream.state import StreamState
+from tests.stream_v3_fakes import (
+    FakeV3Agent,
+    collect_events,
+    message_delta,
+    protocol_event,
+)
 
 # =============================================================================
 # StreamEventEmitter.interrupt()
@@ -371,28 +378,12 @@ class TestHitlConfig:
 
 
 class TestInterruptEventParsing:
-    def _run_async(self, coro):
-        """Run async code with a fresh event loop."""
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-
     def test_interrupt_from_updates_mode(self):
         """__interrupt__ in updates mode yields interrupt event."""
-        from langchain_core.messages import AIMessageChunk
-
-        from EvoScientist.stream.events import stream_agent_events
-
-        mock_agent = MagicMock()
-
-        ai_chunk = AIMessageChunk(content="thinking...", id="msg1")
-
         interrupt_data = {
             "__interrupt__": [
-                {
-                    "value": {
+                Interrupt(
+                    value={
                         "action_requests": [
                             {"name": "execute", "args": {"command": "ls"}, "id": "tc1"}
                         ],
@@ -403,30 +394,18 @@ class TestInterruptEventParsing:
                             }
                         ],
                     },
-                    "ns": ["main"],
-                    "resumable": True,
-                }
+                    id="main",
+                )
             ]
         }
 
-        chunks = [
-            ((), "messages", (ai_chunk, {})),
-            ((), "updates", interrupt_data),
-        ]
-
-        async def fake_astream(*a, **kw):
-            for c in chunks:
-                yield c
-
-        mock_agent.astream = fake_astream
-
-        events = []
-
-        async def collect():
-            async for ev in stream_agent_events(mock_agent, "test", "thread-1"):
-                events.append(ev)
-
-        self._run_async(collect())
+        agent = FakeV3Agent(
+            [
+                message_delta("thinking..."),
+                protocol_event("updates", interrupt_data),
+            ]
+        )
+        events = collect_events(agent, message="test", thread_id="thread-1")
 
         types = [e["type"] for e in events]
         assert "interrupt" in types
@@ -438,27 +417,12 @@ class TestInterruptEventParsing:
 
     def test_updates_without_interrupt_skipped(self):
         """Regular updates mode data is skipped as before."""
-        from EvoScientist.stream.events import stream_agent_events
-
-        mock_agent = MagicMock()
-
-        chunks = [
-            ((), "updates", {"some_node": {"key": "value"}}),
-        ]
-
-        async def fake_astream(*a, **kw):
-            for c in chunks:
-                yield c
-
-        mock_agent.astream = fake_astream
-
-        events = []
-
-        async def collect():
-            async for ev in stream_agent_events(mock_agent, "test", "thread-1"):
-                events.append(ev)
-
-        self._run_async(collect())
+        agent = FakeV3Agent(
+            [
+                protocol_event("updates", {"some_node": {"key": "value"}}),
+            ]
+        )
+        events = collect_events(agent, message="test", thread_id="thread-1")
 
         types = [e["type"] for e in events]
         assert "interrupt" not in types

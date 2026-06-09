@@ -1439,21 +1439,17 @@ def run_textual_interactive(
                 for tw in tool_widgets.values():
                     tw.display = True
 
-            def _find_or_rename_sa_widget(
-                resolved_name: str,
+            def _get_sa_widget(
+                instance_id: str,
+                name: str = "",
                 description: str = "",
             ) -> SubAgentWidget | None:
-                """Look up a sub-agent widget, renaming 'sub-agent' entry if needed."""
-                if resolved_name in subagent_widgets:
-                    w = subagent_widgets[resolved_name]
+                if instance_id in subagent_widgets:
+                    w = subagent_widgets[instance_id]
+                    if name and w._sa_name != name:
+                        w.update_name(name, description or w._description)
                     if description and not w._description:
                         w.update_name(w._sa_name, description)
-                    return w
-                # Rename "sub-agent" → real name (mirrors state._get_or_create_subagent)
-                if resolved_name != "sub-agent" and "sub-agent" in subagent_widgets:
-                    w = subagent_widgets.pop("sub-agent")
-                    w.update_name(resolved_name, description)
-                    subagent_widgets[resolved_name] = w
                     return w
                 return None
 
@@ -1640,7 +1636,7 @@ def run_textual_interactive(
 
                         elif event_type == "tool_call":
                             tool_name = event.get("name", "unknown")
-                            tool_id = event.get("id", "")
+                            tool_id = event["id"]
                             tool_args = event.get("args", {})
                             # Finalize thinking if still active
                             if thinking_w is not None and thinking_w._is_active:
@@ -1668,8 +1664,7 @@ def run_textual_interactive(
                                 else:
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
-                                    if tool_id:
-                                        tool_widgets[tool_id] = w
+                                    tool_widgets[tool_id] = w
                             # Update todo widget on write_todos.
                             # Insert before tool call widget so Task List
                             # panel appears above the tool call.
@@ -1690,38 +1685,18 @@ def run_textual_interactive(
                             result_name = event.get("name", "unknown")
                             result_content = event.get("content", "")
                             result_success = event.get("success", True)
-                            # Match via state's deduplicated tool_calls (uses tool_id)
-                            matched = False
-                            matched_tid = ""
-                            result_idx = len(state.tool_results) - 1
-                            if 0 <= result_idx < len(state.tool_calls):
-                                tc = state.tool_calls[result_idx]
-                                tid = tc.get("id", "")
-                                if tid and tid in tool_widgets:
-                                    tw = tool_widgets[tid]
-                                    if tw._status == "running":
-                                        if result_success:
-                                            tw.set_success(result_content)
-                                        else:
-                                            tw.set_error(result_content)
-                                        matched = True
-                                        matched_tid = tid
-                            # Fallback: match first running widget with same name
-                            if not matched:
-                                for fid, tw in tool_widgets.items():
-                                    if (
-                                        tw.tool_name == result_name
-                                        and tw._status == "running"
-                                    ):
-                                        if result_success:
-                                            tw.set_success(result_content)
-                                        else:
-                                            tw.set_error(result_content)
-                                        matched = True
-                                        matched_tid = fid
-                                        break
+                            matched_tid = event["id"]
+                            tw = tool_widgets.get(matched_tid)
+                            if tw is not None and tw._status == "running":
+                                if result_success:
+                                    tw.set_success(result_content)
+                                else:
+                                    tw.set_error(result_content)
                             # Track completion order for collapsing
-                            if matched_tid and matched_tid not in completed_tool_order:
+                            if (
+                                tw is not None
+                                and matched_tid not in completed_tool_order
+                            ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
                             # Update todo from results
@@ -1746,44 +1721,44 @@ def run_textual_interactive(
                                 await container.mount(processing_w)
 
                         elif event_type == "subagent_start":
-                            sa_name = event.get("name", "sub-agent")
+                            sa_name = event["name"]
                             sa_desc = event.get("description", "")
-                            existing = _find_or_rename_sa_widget(sa_name, sa_desc)
+                            instance_id = event["instance_id"]
+                            existing = _get_sa_widget(instance_id, sa_name, sa_desc)
                             if existing is None:
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
-                                subagent_widgets[sa_name] = sa_w
+                                subagent_widgets[instance_id] = sa_w
 
                         elif event_type == "subagent_tool_call":
-                            sa_name = event.get("subagent", "sub-agent")
-                            sa_name = state._resolve_subagent_name(sa_name)
-                            sa_w = _find_or_rename_sa_widget(sa_name)
+                            instance_id = event["instance_id"]
+                            sa_w = _get_sa_widget(
+                                instance_id, event.get("subagent", "")
+                            )
                             if sa_w is None:
-                                sa_w = SubAgentWidget(sa_name)
-                                await container.mount(sa_w)
-                                subagent_widgets[sa_name] = sa_w
+                                continue
                             await sa_w.add_tool_call(
                                 event.get("name", "unknown"),
                                 event.get("args", {}),
-                                event.get("id", ""),
+                                event["id"],
                             )
 
                         elif event_type == "subagent_tool_result":
-                            sa_name = event.get("subagent", "sub-agent")
-                            sa_name = state._resolve_subagent_name(sa_name)
-                            sa_w = _find_or_rename_sa_widget(sa_name)
+                            instance_id = event["instance_id"]
+                            sa_w = _get_sa_widget(
+                                instance_id, event.get("subagent", "")
+                            )
                             if sa_w is not None:
                                 sa_w.complete_tool(
                                     event.get("name", "unknown"),
                                     event.get("content", ""),
                                     event.get("success", True),
-                                    event.get("id", ""),
+                                    event["id"],
                                 )
 
                         elif event_type == "subagent_end":
-                            sa_name = event.get("name", "sub-agent")
-                            sa_name = state._resolve_subagent_name(sa_name)
-                            sa_w = _find_or_rename_sa_widget(sa_name)
+                            instance_id = event["instance_id"]
+                            sa_w = _get_sa_widget(instance_id, event.get("name", ""))
                             if sa_w is not None:
                                 sa_w.finalize()
 

@@ -13,16 +13,19 @@ import asyncio
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from langchain_core.messages import AIMessageChunk
-
 from EvoScientist.channels.base import Channel
 from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer, _join_subagent_text
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
-from EvoScientist.stream.events import stream_agent_events
 from tests.conftest import run_async as _run
+from tests.stream_v3_fakes import (
+    FakeSubagent,
+    FakeV3Agent,
+    collect_events,
+    message_delta,
+)
 
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
@@ -39,29 +42,6 @@ class _FakeConfig:
     dm_policy: str = "allowlist"
 
 
-def _make_ai_chunk(content: str = "", **kwargs):
-    return AIMessageChunk(content=content, **kwargs)
-
-
-async def _async_iter(items):
-    for item in items:
-        yield item
-
-
-def _collect_events(agent, message="hi", thread_id="t1"):
-    async def _run_inner():
-        events = []
-        async for ev in stream_agent_events(agent, message, thread_id):
-            events.append(ev)
-        return events
-
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_run_inner())
-    finally:
-        loop.close()
-
-
 # ═══════════════════════════════════════════════════════════════════
 # 1. StreamEventEmitter.subagent_text
 # ═══════════════════════════════════════════════════════════════════
@@ -69,29 +49,29 @@ def _collect_events(agent, message="hi", thread_id="t1"):
 
 class TestSubagentTextEmitter:
     def test_creates_correct_event_type(self):
-        ev = StreamEventEmitter.subagent_text("research-agent", "Found 3 papers.")
+        ev = StreamEventEmitter.subagent_text(
+            "research-agent", "Found 3 papers.", "task:research"
+        )
         assert isinstance(ev, StreamEvent)
         assert ev.type == "subagent_text"
 
     def test_data_contains_subagent_and_content(self):
-        ev = StreamEventEmitter.subagent_text("analyst", "Result summary")
+        ev = StreamEventEmitter.subagent_text(
+            "analyst", "Result summary", "task:analyst"
+        )
         assert ev.data["subagent"] == "analyst"
         assert ev.data["content"] == "Result summary"
 
     def test_data_contains_type_key(self):
         """Event data dict should include 'type' matching event type (project convention)."""
-        ev = StreamEventEmitter.subagent_text("a", "b")
+        ev = StreamEventEmitter.subagent_text("a", "b", "task:a")
         assert ev.data["type"] == "subagent_text"
 
     def test_empty_content(self):
-        ev = StreamEventEmitter.subagent_text("agent", "")
+        ev = StreamEventEmitter.subagent_text("agent", "", "task:agent")
         assert ev.data["content"] == ""
 
-    def test_instance_id_defaults_to_empty(self):
-        ev = StreamEventEmitter.subagent_text("agent", "content")
-        assert ev.data["instance_id"] == ""
-
-    def test_instance_id_included_when_provided(self):
+    def test_instance_id_included(self):
         ev = StreamEventEmitter.subagent_text(
             "agent", "content", instance_id="tracker:abc"
         )
@@ -99,7 +79,7 @@ class TestSubagentTextEmitter:
 
     def test_included_in_all_events_type_check(self):
         """subagent_text must pass the same invariant as other emitters."""
-        ev = StreamEventEmitter.subagent_text("s", "c")
+        ev = StreamEventEmitter.subagent_text("s", "c", "task:s")
         assert "type" in ev.data
         assert ev.data["type"] == ev.type
 
@@ -114,16 +94,16 @@ class TestStreamAgentEventsSubagentText:
 
     def test_subagent_text_emitted_for_subagent_chunks(self):
         """When a sub-agent produces text, subagent_text events should appear."""
-        subagent_chunk = _make_ai_chunk("Sub-agent finding: X is significant.")
-        mock_agent = AsyncMock()
-        mock_agent.astream = MagicMock(
-            return_value=_async_iter(
-                [
-                    (("sub:research",), "messages", (subagent_chunk, {})),
-                ]
-            )
+        namespace = ("sub", "research")
+        agent = FakeV3Agent(
+            [
+                message_delta(
+                    "Sub-agent finding: X is significant.", namespace=namespace
+                )
+            ],
+            subagents=[FakeSubagent(namespace, "research-agent")],
         )
-        events = _collect_events(mock_agent)
+        events = collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         assert len(sa_text) == 1
         assert "Sub-agent finding" in sa_text[0]["content"]
@@ -132,16 +112,8 @@ class TestStreamAgentEventsSubagentText:
 
     def test_subagent_text_not_emitted_for_main_agent(self):
         """Main agent text should produce 'text' events, not 'subagent_text'."""
-        chunk = _make_ai_chunk("Main agent reply.")
-        mock_agent = AsyncMock()
-        mock_agent.astream = MagicMock(
-            return_value=_async_iter(
-                [
-                    ((), "messages", (chunk, {})),
-                ]
-            )
-        )
-        events = _collect_events(mock_agent)
+        agent = FakeV3Agent([message_delta("Main agent reply.")])
+        events = collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         text_events = [e for e in events if e.get("type") == "text"]
         assert len(sa_text) == 0
@@ -149,14 +121,16 @@ class TestStreamAgentEventsSubagentText:
 
     def test_multiple_subagent_text_chunks_all_emitted(self):
         """Multiple text chunks from a sub-agent all yield subagent_text events."""
-        chunks = [
-            (("sub:a",), "messages", (_make_ai_chunk("Part 1."), {})),
-            (("sub:a",), "messages", (_make_ai_chunk("Part 2."), {})),
-            (("sub:a",), "messages", (_make_ai_chunk("Part 3."), {})),
-        ]
-        mock_agent = AsyncMock()
-        mock_agent.astream = MagicMock(return_value=_async_iter(chunks))
-        events = _collect_events(mock_agent)
+        namespace = ("sub", "a")
+        agent = FakeV3Agent(
+            [
+                message_delta("Part 1.", namespace=namespace),
+                message_delta("Part 2.", namespace=namespace),
+                message_delta("Part 3.", namespace=namespace),
+            ],
+            subagents=[FakeSubagent(namespace, "research-agent")],
+        )
+        events = collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         assert len(sa_text) == 3
         combined = "".join(e["content"] for e in sa_text)
@@ -176,33 +150,21 @@ class TestStreamAgentEventsSubagentText:
         the two instances apart even though their 'subagent' field is
         identical.
         """
-        # Two different namespaces with task: IDs, same lc_agent_name
-        chunks = [
-            (
-                ("ns:task:id1:agent",),
-                "messages",
-                (
-                    _make_ai_chunk("Instance-1 text."),
-                    {"lc_agent_name": "research-agent"},
-                ),
-            ),
-            (
-                ("ns:task:id2:agent",),
-                "messages",
-                (
-                    _make_ai_chunk("Instance-2 text."),
-                    {"lc_agent_name": "research-agent"},
-                ),
-            ),
-            (
-                ("ns:task:id1:agent",),
-                "messages",
-                (_make_ai_chunk(" More from 1."), {"lc_agent_name": "research-agent"}),
-            ),
-        ]
-        mock_agent = AsyncMock()
-        mock_agent.astream = MagicMock(return_value=_async_iter(chunks))
-        events = _collect_events(mock_agent)
+        # Two different v3 namespaces, same projected subagent display name.
+        ns1 = ("ns", "task", "id1", "agent")
+        ns2 = ("ns", "task", "id2", "agent")
+        agent = FakeV3Agent(
+            [
+                message_delta("Instance-1 text.", namespace=ns1),
+                message_delta("Instance-2 text.", namespace=ns2),
+                message_delta(" More from 1.", namespace=ns1),
+            ],
+            subagents=[
+                FakeSubagent(ns1, "research-agent"),
+                FakeSubagent(ns2, "research-agent"),
+            ],
+        )
+        events = collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         assert len(sa_text) == 3
 
@@ -287,11 +249,13 @@ class TestConsumerSubagentTextFallback:
             {
                 "type": "subagent_text",
                 "subagent": "research",
+                "instance_id": "task:research",
                 "content": "Found 3 relevant papers.",
             },
             {
                 "type": "subagent_text",
                 "subagent": "research",
+                "instance_id": "task:research",
                 "content": " Key insight: X is Y.",
             },
             {"type": "done", "content": ""},
@@ -330,6 +294,7 @@ class TestConsumerSubagentTextFallback:
             {
                 "type": "subagent_text",
                 "subagent": "research",
+                "instance_id": "task:research",
                 "content": "Sub-agent detail.",
             },
             {"type": "text", "content": "Here is my summary."},
@@ -543,6 +508,7 @@ class TestConsumerSubagentTextFallback:
             {
                 "type": "subagent_text",
                 "subagent": "research",
+                "instance_id": "task:research",
                 "content": "Sub-agent work.",
             },
             {"type": "done", "content": "Final summary from done event."},
@@ -656,16 +622,19 @@ class TestConsumerParallelSubagentFallback:
             {
                 "type": "subagent_text",
                 "subagent": "research",
+                "instance_id": "task:research",
                 "content": "Found papers.",
             },
             {
                 "type": "subagent_text",
                 "subagent": "analysis",
+                "instance_id": "task:analysis",
                 "content": "Metric is high.",
             },
             {
                 "type": "subagent_text",
                 "subagent": "research",
+                "instance_id": "task:research",
                 "content": " Key insight.",
             },
             {"type": "done", "content": ""},
@@ -699,7 +668,12 @@ class TestConsumerParallelSubagentFallback:
     def test_single_agent_no_attribution_prefix(self):
         """Single sub-agent fallback has no [name]: prefix."""
         events = [
-            {"type": "subagent_text", "subagent": "research", "content": "Only agent."},
+            {
+                "type": "subagent_text",
+                "subagent": "research",
+                "instance_id": "task:research",
+                "content": "Only agent.",
+            },
             {"type": "done", "content": ""},
         ]
         consumer, bus, fake_stream = _make_consumer(events)
@@ -722,38 +696,6 @@ class TestConsumerParallelSubagentFallback:
 
                 assert outbound.content == "Only agent."
                 assert "[research]" not in outbound.content
-
-                await consumer.stop()
-                await task
-
-        _run(_test())
-
-    def test_missing_subagent_field_uses_unknown(self):
-        """Events without 'subagent' field are grouped under 'unknown'."""
-        events = [
-            {"type": "subagent_text", "content": "No agent name."},
-            {"type": "done", "content": ""},
-        ]
-        consumer, bus, fake_stream = _make_consumer(events)
-
-        async def _test():
-            with patch(
-                "EvoScientist.stream.events.stream_agent_events",
-                new=fake_stream,
-            ):
-                msg = BusInbound(
-                    channel="stub",
-                    sender_id="u1",
-                    chat_id="c1",
-                    content="test",
-                )
-                await bus.publish_inbound(msg)
-
-                task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
-
-                # Single agent (unknown), no prefix
-                assert outbound.content == "No agent name."
 
                 await consumer.stop()
                 await task
@@ -825,39 +767,6 @@ class TestConsumerSameNameInterleaved:
                     "[research-agent #2]: Instance-2 sentence X. Instance-2 sentence Y."
                     in outbound.content
                 )
-
-                await consumer.stop()
-                await task
-
-        _run(_test())
-
-    def test_same_name_no_instance_id_still_concatenated(self):
-        """Without instance_id (legacy events), same-name chunks still merge into one buffer."""
-        events = [
-            {"type": "subagent_text", "subagent": "research-agent", "content": "A."},
-            {"type": "subagent_text", "subagent": "research-agent", "content": " B."},
-            {"type": "done", "content": ""},
-        ]
-        consumer, bus, fake_stream = _make_consumer(events)
-
-        async def _test():
-            with patch(
-                "EvoScientist.stream.events.stream_agent_events",
-                new=fake_stream,
-            ):
-                msg = BusInbound(
-                    channel="stub",
-                    sender_id="u1",
-                    chat_id="c1",
-                    content="test",
-                )
-                await bus.publish_inbound(msg)
-
-                task = asyncio.create_task(consumer.run())
-                outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
-
-                # Single instance (no instance_id), no prefix
-                assert outbound.content == "A. B."
 
                 await consumer.stop()
                 await task

@@ -215,12 +215,6 @@ def format_tool_compact(name: str, args: dict | None) -> str:
                     task_desc = task_desc[:47] + "\u2026"
                 return f"Cooking with {sa_type} — {task_desc}"
             return f"Cooking with {sa_type}"
-        # Fallback if no subagent_type
-        if task_desc:
-            if len(task_desc) > 50:
-                task_desc = task_desc[:47] + "\u2026"
-            return f"Cooking with sub-agent — {task_desc}"
-        return "Cooking with sub-agent"
 
     # Web search
     if name_lower in ("tavily_search", "internet_search"):
