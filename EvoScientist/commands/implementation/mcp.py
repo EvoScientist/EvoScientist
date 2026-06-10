@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.table import Table
 
 from ..base import Command, CommandContext, SubCommand
@@ -12,7 +14,7 @@ class MCPCommand(Command):
     name = "/mcp"
     description = "Manage MCP servers"
     category = "MCP"
-    subcommands = [
+    subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("list", "List configured servers"),
         SubCommand("config", "Show detailed server config"),
         SubCommand("add", "Add a server"),
@@ -20,7 +22,10 @@ class MCPCommand(Command):
         SubCommand("remove", "Remove a server"),
         SubCommand("install", "Browse and install servers"),
     ]
-    examples = ["/mcp add myserver npx @foo/bar", "/mcp config myserver"]
+    examples: ClassVar[list[str]] = [
+        "/mcp add myserver npx @foo/bar",
+        "/mcp config myserver",
+    ]
 
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
         if len(tokens) <= 1:

@@ -36,7 +36,7 @@ class ModelFallbackCommand(Command):
             required=False,
         ),
     ]
-    subcommands = [
+    subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("add", "Add a fallback model"),
         SubCommand("remove", "Remove a fallback by position"),
         SubCommand("list", "Show the current fallback chain"),

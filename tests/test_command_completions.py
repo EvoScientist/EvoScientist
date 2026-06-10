@@ -2,7 +2,6 @@
 
 from unittest.mock import patch
 
-from EvoScientist.commands.base import Command, SubCommand
 from EvoScientist.commands.manager import CommandManager
 
 

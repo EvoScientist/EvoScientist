@@ -185,39 +185,40 @@ class SlashCommandCompleter(Completer):
         text = document.text_before_cursor
         workspace_dir = self._workspace_getter()
 
-        # @file mention completion
+        # Slash command / subcommand completion takes priority
+        if text.startswith("/"):
+            for comp_text, desc, _cat in cmd_manager.get_completions_for_input(text):
+                if comp_text.startswith("/"):
+                    yield Completion(
+                        comp_text,
+                        start_position=-len(text),
+                        display=f"{comp_text:<40}",
+                        display_meta=desc,
+                    )
+                else:
+                    last_space = text.rfind(" ")
+                    start = (
+                        -(len(text) - last_space - 1) if last_space >= 0 else -len(text)
+                    )
+                    yield Completion(
+                        comp_text,
+                        start_position=start,
+                        display=f"{comp_text:<30}",
+                        display_meta=desc,
+                    )
+            return
+
+        # @file mention completion (only for non-command input)
         if "@" in text:
             candidates = complete_file_mention(text, workspace_dir)
             if candidates:
-                # Replace from the last '@' token
                 import re as _re
 
-                m = _re.search(r"@[^\s]*$", text)
+                m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', text)
                 start = -len(m.group(0)) if m else 0
                 for path, type_hint in candidates:
                     yield Completion(path, start_position=start, display_meta=type_hint)
                 return
-
-        # Slash command / subcommand completion
-        if not text.startswith("/"):
-            return
-        for comp_text, desc, _cat in cmd_manager.get_completions_for_input(text):
-            if comp_text.startswith("/"):
-                yield Completion(
-                    comp_text,
-                    start_position=-len(text),
-                    display=f"{comp_text:<40}",
-                    display_meta=desc,
-                )
-            else:
-                last_space = text.rfind(" ")
-                start = -(len(text) - last_space - 1) if last_space >= 0 else -len(text)
-                yield Completion(
-                    comp_text,
-                    start_position=start,
-                    display=f"{comp_text:<30}",
-                    display_meta=desc,
-                )
 
 
 # =============================================================================

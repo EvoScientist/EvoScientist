@@ -427,7 +427,7 @@ def run_textual_interactive(
             ] = []  # queued messages to send after current turn
             self._comp_items: list[tuple[str, str, str]] = []
             self._comp_index: int = -1
-            self._comp_suppress_reset: bool = False
+            self._comp_suppress_changes: int = 0
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
@@ -2382,10 +2382,10 @@ def run_textual_interactive(
             self._run_task = asyncio.ensure_future(self._run_turn(text))
 
         def on_text_area_changed(self, event: ChatTextArea.Changed) -> None:
-            # Tab-cycling sets this flag to avoid resetting the index
-            # when _apply_selected_completion changes prompt.value.
-            if self._comp_suppress_reset:
-                self._comp_suppress_reset = False
+            # Tab/Enter set a counter to suppress Changed events fired
+            # by the value setter (clear + insert = 2 events).
+            if self._comp_suppress_changes > 0:
+                self._comp_suppress_changes -= 1
                 return
 
             text = event.text_area.text
@@ -2403,7 +2403,7 @@ def run_textual_interactive(
 
             # @file mention completion (only for non-command input)
             if "@" in text:
-                candidates = complete_file_mention(text, workspace_dir)
+                candidates = complete_file_mention(text, self._workspace_dir)
                 if candidates:
                     self._comp_items = [(c, d, "") for c, d in candidates]
                     self._comp_index = -1
@@ -2433,6 +2433,10 @@ def run_textual_interactive(
 
         def action_cancel_queued(self) -> None:
             """Cancel the last queued message on Esc."""
+            comp_widget = self.query_one("#completions", Static)
+            if comp_widget.display:
+                self._hide_completions()
+                return
             # Cancel ask_user if active (widget handles Escape internally,
             # but this is a safety fallback)
             if self._ask_user_future and not self._ask_user_future.done():
@@ -2643,7 +2647,7 @@ def run_textual_interactive(
             prompt.focus()
 
         def action_tab_complete(self) -> None:
-            """Handle TAB: cycle completions when visible, otherwise no-op.
+            """Handle TAB: cycle completions when visible, trigger if not.
 
             Registered as a priority binding so it intercepts before Textual's
             default focus-next behaviour, which would steal focus from the input
@@ -2651,12 +2655,38 @@ def run_textual_interactive(
             """
             comp_widget = self.query_one("#completions", Static)
             if not (comp_widget.display and self._comp_items):
-                self.query_one("#prompt", ChatTextArea).focus()
+                # Try to trigger completions from current input
+                prompt = self.query_one("#prompt", ChatTextArea)
+                prompt.focus()
+                text = prompt.value
+                matches: list[tuple[str, str, str]] = []
+                if text.startswith("/"):
+                    matches = cmd_manager.get_completions_for_input(text)
+                elif "@" in text:
+                    candidates = complete_file_mention(text, self._workspace_dir)
+                    if candidates:
+                        matches = [(c, d, "") for c, d in candidates]
+                if not matches:
+                    return
+                self._comp_items = matches
+                self._comp_index = -1
+                self._render_completions()
+                comp_widget.display = True
                 return
             self._comp_index = (self._comp_index + 1) % len(self._comp_items)
             self._render_completions()
-            self._comp_suppress_reset = True
+            selected = self._comp_items[self._comp_index][0]
+            is_dir = selected.startswith("@") and selected.rstrip('"').endswith("/")
+            if not is_dir:
+                # value setter fires 2 Changed events (clear + insert)
+                self._comp_suppress_changes = 2
             self._apply_selected_completion()
+            # After applying a final @file (not dir), hide the popup so
+            # the user doesn't see stale suggestions.
+            if is_dir:
+                return
+            if selected.startswith("@"):
+                self._hide_completions()
 
         def _handle_completion_enter(self) -> bool:
             """Called by ChatTextArea before submitting on Enter.
@@ -2677,9 +2707,15 @@ def run_textual_interactive(
             if self._comp_index < 0:
                 self._comp_index = 0
 
-            self._comp_suppress_reset = True
+            selected = self._comp_items[self._comp_index][0]
+            is_dir = selected.startswith("@") and selected.rstrip('"').endswith("/")
             self._apply_selected_completion()
-            self._hide_completions()
+            if not is_dir:
+                self._hide_completions()
+                # Suppress the 2 Changed events from the value setter
+                # (clear + insert). Must be set AFTER _hide_completions
+                # which resets the counter.
+                self._comp_suppress_changes = 2
             return True
 
         def _apply_selected_completion(self) -> None:
@@ -2697,26 +2733,25 @@ def run_textual_interactive(
             if selected.startswith("@"):
                 import re as _re
 
+                is_dir = selected.rstrip('"').endswith("/")
+                suffix = "" if is_dir else " "
                 current = prompt.value
-                m = _re.search(r"@[^\s]*$", current)
+                m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', current)
                 if m:
-                    new_val = current[: m.start()] + selected + " "
+                    new_val = current[: m.start()] + selected + suffix
                 else:
-                    new_val = current + selected + " "
+                    new_val = current + selected + suffix
                 prompt.value = new_val
             elif selected.startswith("/"):
                 prompt.value = selected + " "
             else:
-                current = prompt.value
-                if current.endswith(" "):
-                    prompt.value = current + selected + " "
-                else:
-                    base = current.rsplit(" ", 1)[0]
-                    prompt.value = base + " " + selected + " "
+                base = prompt.value.rstrip().rsplit(" ", 1)[0]
+                prompt.value = base + " " + selected + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
+            self._comp_suppress_changes = 0
             self.query_one("#completions", Static).display = False
             self.query_one("#completion-help", Static).display = False
 
@@ -2749,7 +2784,9 @@ def run_textual_interactive(
                 if selected.startswith("/"):
                     cmd_obj = cmd_manager.get_command(selected)
                 else:
-                    parts = self.query_one("#prompt", ChatTextArea).value.strip().split()
+                    parts = (
+                        self.query_one("#prompt", ChatTextArea).value.strip().split()
+                    )
                     cmd_obj = cmd_manager.get_command(parts[0]) if parts else None
                 if cmd_obj is not None:
                     help_widget.update(Text(cmd_obj.build_help_text(), style="#9ca3af"))

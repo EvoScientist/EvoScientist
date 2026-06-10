@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+from typing import ClassVar
 
 from .base import Command, CommandContext
 
@@ -68,11 +69,16 @@ class CommandManager:
                 seen.add(cmd)
         return results
 
-    _CATEGORY_ORDER = ["Session", "Skills", "MCP", "Channels", "Model", "General"]
+    _CATEGORY_ORDER: ClassVar[list[str]] = [
+        "Session",
+        "Skills",
+        "MCP",
+        "Channels",
+        "Model",
+        "General",
+    ]
 
-    def get_completions_for_input(
-        self, text: str
-    ) -> list[tuple[str, str, str]]:
+    def get_completions_for_input(self, text: str) -> list[tuple[str, str, str]]:
         """Multi-stage completion resolver.
 
         Returns ``(completion_text, description, category)`` triples.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -14,7 +16,7 @@ class ChannelCommand(Command):
     name = "/channel"
     description = "Configure messaging channels"
     category = "Channels"
-    subcommands = [
+    subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("status", "Show channel status"),
         SubCommand("stop", "Stop running channels"),
         SubCommand("telegram", "Start Telegram channel"),
@@ -26,7 +28,7 @@ class ChannelCommand(Command):
         SubCommand("email", "Start Email channel"),
         SubCommand("imessage", "Start iMessage channel"),
     ]
-    examples = ["/channel telegram", "/channel stop telegram"]
+    examples: ClassVar[list[str]] = ["/channel telegram", "/channel stop telegram"]
 
     def needs_agent(self, args: list[str]) -> bool:
         # ``status`` and ``stop`` are introspection / teardown; they
