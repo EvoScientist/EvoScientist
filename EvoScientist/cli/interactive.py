@@ -208,10 +208,16 @@ class SlashCommandCompleter(Completer):
         # Subcommand completion: user typed "/mcp lis" or "/mcp "
         if has_trailing_space or len(parts) >= 2:
             cmd_name = parts[0].lower()
+            if len(parts) >= 3:
+                return  # subcommand already typed — stop completing
             sub_prefix = parts[1].lower() if len(parts) >= 2 else ""
             for name, desc in cmd_manager.list_subcommands(cmd_name):
                 if name.startswith(sub_prefix):
-                    start_pos = -len(sub_prefix) if sub_prefix else 0
+                    if has_trailing_space:
+                        # Replace only the sub-prefix, not the trailing space
+                        start_pos = -len(sub_prefix) - 1 if sub_prefix else 0
+                    else:
+                        start_pos = -len(sub_prefix) if sub_prefix else 0
                     yield Completion(
                         name,
                         start_position=start_pos,

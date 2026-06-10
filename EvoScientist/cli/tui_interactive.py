@@ -2368,6 +2368,9 @@ def run_textual_interactive(
                         return
                 else:
                     # Multi-stage: subcommand completion
+                    if len(parts) >= 3:
+                        self._hide_completions()
+                        return
                     cmd = cmd_manager.get_command(cmd_name)
                     if cmd and cmd.subcommands:
                         sub_prefix = parts[1].lower() if len(parts) > 1 else ""
@@ -2377,13 +2380,6 @@ def run_textual_interactive(
                             if name.startswith(sub_prefix)
                         ]
                         if sub_matches:
-                            if (
-                                len(sub_matches) == 1
-                                and sub_matches[0][0] == sub_prefix
-                            ):
-                                # Exact subcommand match — hide
-                                self._hide_completions()
-                                return
                             self._comp_items = sub_matches
                             self._comp_index = -1
                             self._comp_is_subcommand = True

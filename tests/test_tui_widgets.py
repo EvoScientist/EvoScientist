@@ -845,6 +845,9 @@ class TestCompletionLogic(unittest.TestCase):
                         comp_widget.display = True
                         return
                 else:
+                    if len(parts) >= 3:
+                        self._hide_completions()
+                        return
                     if cmd_name in self._SUBCS:
                         sub_prefix = parts[1].lower() if len(parts) > 1 else ""
                         sub_matches = [
@@ -853,12 +856,6 @@ class TestCompletionLogic(unittest.TestCase):
                             if name.startswith(sub_prefix)
                         ]
                         if sub_matches:
-                            if (
-                                len(sub_matches) == 1
-                                and sub_matches[0][0] == sub_prefix
-                            ):
-                                self._hide_completions()
-                                return
                             self._comp_items = sub_matches
                             self._comp_index = -1
                             self._comp_is_subcommand = True
@@ -1047,10 +1044,20 @@ class TestCompletionLogic(unittest.TestCase):
         names = {name for name, _desc in app._comp_items}
         assert names == {"list"}
 
-    def test_input_changed_exact_subcommand_hides(self):
-        """Typing '/mcp list' (exact subcommand match) hides completions."""
+    def test_input_changed_exact_subcommand_shows_confirmation(self):
+        """Typing '/mcp list' (exact subcommand match) shows 'list' as
+        confirmation — the user can TAB to auto-complete."""
         app = self._make_app()
         app.on_input_changed("/mcp list")
+        assert app._fake_completions.display is True
+        assert app._comp_is_subcommand is True
+        names = {name for name, _desc in app._comp_items}
+        assert names == {"list"}
+
+    def test_input_changed_three_parts_hides(self):
+        """Typing '/mcp list a' (3+ parts) hides subcommand completions."""
+        app = self._make_app()
+        app.on_input_changed("/mcp list a")
         assert app._fake_completions.display is False
 
     def test_input_changed_non_subcommand_cmd_hides(self):
