@@ -645,10 +645,14 @@ def _rewrite_quoted_path(
                     return _guard_bare_absolute(shlex.quote("."))
                 break
 
-    # Convert virtual path
+    # Convert virtual path.  Only rewrite paths that are NOT known
+    # system paths — paths like ``/bin/echo`` in ``bash -c "/bin/echo hi"``
+    # must remain visible to ``validate_command``.
     if path == "/":
-        return shlex.quote(".")
-    return _guard_bare_absolute(shlex.quote("." + path))
+        return _guard_bare_absolute(shlex.quote("."))
+    if not any(path.startswith(p) for p in _SYSTEM_PATH_PREFIXES):
+        return _guard_bare_absolute(shlex.quote("." + path))
+    return None
 
 
 def convert_virtual_paths_in_command(

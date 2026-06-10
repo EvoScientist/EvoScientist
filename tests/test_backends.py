@@ -255,6 +255,20 @@ class TestConvertVirtualPaths:
         # the splice chose to quote it (single / double / escaped).
         assert tokens == ["python", "./main file.py"]
 
+    def test_quoted_system_path_left_alone(self):
+        """A quoted path starting with a system prefix (e.g. ``/bin/echo``)
+        must NOT be rewritten — the pre-process excludes known system
+        prefixes so ``validate_command`` can still inspect them."""
+        result = convert_virtual_paths_in_command('python "/bin/echo"')
+        assert result == 'python "/bin/echo"'
+
+    def test_bash_c_with_quoted_system_path_left_alone(self):
+        """``bash -c "/bin/echo hi"`` must NOT be rewritten — the
+        ``/bin/echo`` inside the quoted argument is a shell command body,
+        not a virtual path argument to be rewritten."""
+        result = convert_virtual_paths_in_command('bash -c "/bin/echo hi"')
+        assert result == 'bash -c "/bin/echo hi"'
+
     def test_unresolvable_quoted_skills_path_uses_workspace_relative_form(
         self, monkeypatch, tmp_path
     ):
