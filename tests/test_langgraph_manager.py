@@ -7,6 +7,7 @@ to be available.
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -103,21 +104,31 @@ class TestListPidsOnPort:
 
 
 class TestKillOwnedStaleProcess:
-    def test_returns_false_if_no_pid_file(self, tmp_path):
-        with patch.object(manager, "_PID_FILE", tmp_path / "missing.pid"):
+    def test_returns_false_if_no_pid_file(self, tmp_path, runtime_paths):
+        with patch.object(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(runtime_paths, pid_file=tmp_path / "missing.pid"),
+        ):
             assert manager._kill_owned_stale_process(6174) is False
 
-    def test_returns_false_if_pid_file_unreadable(self, tmp_path):
+    def test_returns_false_if_pid_file_unreadable(self, tmp_path, runtime_paths):
         pid_file = tmp_path / "bad.pid"
         pid_file.write_text("not-a-number")
-        with patch.object(manager, "_PID_FILE", pid_file):
+        with patch.object(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, pid_file=pid_file)
+        ):
             assert manager._kill_owned_stale_process(6174) is False
 
-    def test_returns_false_if_pid_not_in_occupiers(self, tmp_path):
+    def test_returns_false_if_pid_not_in_occupiers(self, tmp_path, runtime_paths):
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
         with (
-            patch.object(manager, "_PID_FILE", pid_file),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[99999]),
         ):
             assert manager._kill_owned_stale_process(6174) is False
@@ -125,14 +136,18 @@ class TestKillOwnedStaleProcess:
             # else, not a stale ours.
             assert pid_file.exists()
 
-    def test_refuses_to_kill_recycled_pid(self, tmp_path):
+    def test_refuses_to_kill_recycled_pid(self, tmp_path, runtime_paths):
         """PID matches but cmdline doesn't contain 'langgraph' → don't kill."""
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
         fake_proc = MagicMock()
         fake_proc.cmdline.return_value = ["bash", "-c", "echo hi"]
         with (
-            patch.object(manager, "_PID_FILE", pid_file),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(manager.psutil, "Process", return_value=fake_proc),
         ):
@@ -142,7 +157,7 @@ class TestKillOwnedStaleProcess:
             # gone, PID was recycled by an unrelated process).
             assert not pid_file.exists()
 
-    def test_kills_when_cmdline_matches_langgraph(self, tmp_path):
+    def test_kills_when_cmdline_matches_langgraph(self, tmp_path, runtime_paths):
         """Owned PID + cmdline contains 'langgraph' → kill + cleanup PID file."""
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
@@ -153,7 +168,11 @@ class TestKillOwnedStaleProcess:
             "dev",
         ]
         with (
-            patch.object(manager, "_PID_FILE", pid_file),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(manager.psutil, "Process", return_value=fake_proc),
         ):
@@ -161,12 +180,16 @@ class TestKillOwnedStaleProcess:
             fake_proc.kill.assert_called_once()
             assert not pid_file.exists()
 
-    def test_handles_dead_pid(self, tmp_path):
+    def test_handles_dead_pid(self, tmp_path, runtime_paths):
         """PID file claims a PID but the process is gone → cleanup PID file, no error."""
         pid_file = tmp_path / "lg.pid"
         pid_file.write_text("12345")
         with (
-            patch.object(manager, "_PID_FILE", pid_file),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(runtime_paths, pid_file=pid_file),
+            ),
             patch.object(manager, "_list_pids_on_port", return_value=[12345]),
             patch.object(
                 manager.psutil,
@@ -184,7 +207,9 @@ class TestKillOwnedStaleProcess:
 
 
 class TestEnsureLanggraphDev:
-    def test_starts_when_async_disabled_but_memory_workers_enabled(self, tmp_path):
+    def test_starts_when_async_disabled_but_memory_workers_enabled(
+        self, tmp_path, runtime_paths
+    ):
         """EvoMemory workers can require langgraph dev even without async subagents."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
@@ -195,8 +220,14 @@ class TestEnsureLanggraphDev:
         with (
             patch.object(manager, "is_langgraph_dev_running", return_value=False),
             patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
-            patch.object(manager, "_FILE_LOCK_PATH", tmp_path / "lg.lock"),
-            patch.object(manager, "_PID_DIR", tmp_path / "pids"),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
+                    lock_file=tmp_path / "lg.lock",
+                ),
+            ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
 
@@ -204,7 +235,9 @@ class TestEnsureLanggraphDev:
         start.assert_called_once()
         assert manager.is_async_subagents_available() is True
 
-    def test_skips_when_async_and_memory_workers_disabled(self, tmp_path):
+    def test_skips_when_async_and_memory_workers_disabled(
+        self, tmp_path, runtime_paths
+    ):
         """No background server is needed without async subagents or workers."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
@@ -214,8 +247,14 @@ class TestEnsureLanggraphDev:
         with (
             patch.object(manager, "is_langgraph_dev_running") as mock_running,
             patch.object(manager, "start_langgraph_dev") as start,
-            patch.object(manager, "_FILE_LOCK_PATH", tmp_path / "lg.lock"),
-            patch.object(manager, "_PID_DIR", tmp_path / "pids"),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
+                    lock_file=tmp_path / "lg.lock",
+                ),
+            ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
 
@@ -224,7 +263,7 @@ class TestEnsureLanggraphDev:
         start.assert_not_called()
         assert manager.is_async_subagents_available() is False
 
-    def test_reuses_existing_healthy_subprocess(self, tmp_path):
+    def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
         """When the subprocess is already running, no new Popen call."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = True
@@ -235,11 +274,14 @@ class TestEnsureLanggraphDev:
                 manager, "is_langgraph_dev_running", return_value=True
             ) as mock_running,
             patch.object(manager, "start_langgraph_dev") as mock_start,
-            patch.object(manager, "_FILE_LOCK_PATH", tmp_path / "lg.lock"),
-            # Isolate from real ``~/.config/evoscientist/`` — without this
-            # patch, the FileLock setup would mkdir the user's actual config
-            # dir as a test side-effect.
-            patch.object(manager, "_PID_DIR", tmp_path / "pids"),
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
+                    lock_file=tmp_path / "lg.lock",
+                ),
+            ),
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
             # We didn't spawn anything — there's already a healthy server.
@@ -266,3 +308,163 @@ class TestIsAsyncSubagentsAvailable:
         assert manager.is_async_subagents_available() is True
         manager._ASYNC_SUBAGENTS_AVAILABLE = False
         assert manager.is_async_subagents_available() is False
+
+
+# =============================================================================
+# _rotate_log_if_needed — log rotation for langgraph_dev.log
+# =============================================================================
+
+
+class TestRotateLogIfNeeded:
+    """``_rotate_log_if_needed`` implements the single-backup rollover
+    policy from #209. When ``RUNTIME.log_file`` exceeds the module's
+    ``_LOG_ROTATION_BYTES`` threshold, rename to ``<log>.1`` (overwriting
+    any existing backup) so the next open() starts fresh. Threshold
+    is patched to a small value per-test to keep the fixtures tiny.
+    """
+
+    def test_no_existing_file_is_noop(self, tmp_path):
+        log = tmp_path / "langgraph_dev.log"
+        manager._rotate_log_if_needed(log)
+        assert not log.exists()
+        assert not (tmp_path / "langgraph_dev.log.1").exists()
+
+    def test_file_smaller_than_threshold_is_not_rotated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 100)
+        manager._rotate_log_if_needed(log)
+        assert log.exists()
+        assert log.stat().st_size == 100
+        assert not (tmp_path / "langgraph_dev.log.1").exists()
+
+    def test_file_exactly_at_threshold_is_not_rotated(self, tmp_path, monkeypatch):
+        """Off-by-one: rotation triggers only on strict greater-than.
+        A log sitting at the threshold size is left alone — the next
+        session that pushes it over triggers the rollover.
+        """
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 1024)
+        manager._rotate_log_if_needed(log)
+        assert log.exists()
+        assert log.stat().st_size == 1024
+        assert not (tmp_path / "langgraph_dev.log.1").exists()
+
+    def test_file_over_threshold_is_rotated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 1025)
+        manager._rotate_log_if_needed(log)
+        # After rotation: the original path was moved to ``<log>.1``.
+        # The next ``open(log, "ab")`` will re-create the active file
+        # at offset 0 (append mode creates if missing). Verify both
+        # halves of the contract: the backup holds the previous content,
+        # and the active log is writable from scratch.
+        assert not log.exists()
+        backup = tmp_path / "langgraph_dev.log.1"
+        assert backup.exists()
+        assert backup.stat().st_size == 1025
+        with open(log, "ab") as fh:
+            fh.write(b"new")
+        assert log.stat().st_size == 3  # just "new", not appended to backup
+
+    def test_rotation_overwrites_existing_backup(self, tmp_path, monkeypatch):
+        """A pre-existing ``<log>.1`` from an earlier rotation must be
+        clobbered by the new rollover — single-backup policy means we
+        never keep more than one historical copy.
+        """
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        log = tmp_path / "langgraph_dev.log"
+        backup = tmp_path / "langgraph_dev.log.1"
+        log.write_bytes(b"x" * 2000)
+        backup.write_bytes(b"OLD_BACKUP_PAYLOAD_THAT_SHOULD_BE_GONE_NOW")
+        original_backup_size = backup.stat().st_size
+        manager._rotate_log_if_needed(log)
+        assert backup.exists()
+        assert backup.stat().st_size != original_backup_size
+        assert backup.stat().st_size == 2000  # now holds the just-rotated log
+
+    def test_failed_rotation_does_not_raise(self, tmp_path, monkeypatch):
+        """If ``os.replace`` fails (e.g. permission denied on Windows
+        when another process holds the backup open), the helper logs a
+        warning and returns — the caller can still open the un-rotated
+        log and proceed. Failing rotation is non-fatal: the next
+        ``start_langgraph_dev`` invocation will try again.
+        """
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 0)  # always rotate
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 10)
+        with patch(
+            "EvoScientist.langgraph_dev.manager.os.replace",
+            side_effect=PermissionError("denied"),
+        ):
+            # Must not raise.
+            manager._rotate_log_if_needed(log)
+        # Original log is left intact (we failed to rotate, didn't corrupt).
+        assert log.exists()
+        assert log.stat().st_size == 10
+
+
+class TestStartLanggraphDevRotatesLog:
+    """``start_langgraph_dev`` must call ``_rotate_log_if_needed`` before
+    opening the log handle, so each session starts with either an
+    existing-but-fresh log or a brand-new file. Verifying the call site
+    directly (vs. mocking the entire subprocess spawn) keeps the test
+    cheap while still guarding the integration point.
+    """
+
+    def test_rotate_called_before_open(self, tmp_path, monkeypatch):
+        log = tmp_path / "langgraph_dev.log"
+        log.write_bytes(b"x" * 2048)  # contents don't matter for the check
+        # Build a fully temp-rooted runtime bundle via
+        # ``for_directory`` so *every* path (pid_dir, pid_file,
+        # workspace_sidecar, lock_file) is rooted under ``tmp_path``.
+        # ``dataclasses.replace(runtime_paths, …)`` would still carry
+        # ``pid_file`` / ``workspace_sidecar`` / ``lock_file`` from the
+        # production object pointing at ``~/.config/evoscientist/``.
+        pid_dir = tmp_path / "pids"
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(
+                manager.LanggraphRuntimePaths.for_directory(pid_dir),
+                log_file=log,
+            ),
+        )
+        monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
+        # This test only verifies log rotation — we must not touch real
+        # sockets.  Patch ``_can_bind_port`` so the bind-poll loop in
+        # ``_wait_for_port_bindable`` passes immediately regardless of
+        # whether port 6174 is in use on the dev machine.
+        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
+        # Make ``_packaged_langgraph_config`` point at a real file so
+        # ``start_langgraph_dev`` doesn't bail at the existence check
+        # before reaching the rotation call.
+        fake_config = tmp_path / "langgraph.json"
+        fake_config.write_text("{}")
+        # Don't actually start a subprocess — just verify the rotation
+        # call happens. We mock the spawn to raise immediately so the
+        # rest of start_langgraph_dev aborts before doing anything else.
+        with (
+            patch.object(manager, "_langgraph_exe", return_value="/fake/langgraph"),
+            patch.object(
+                manager, "_packaged_langgraph_config", return_value=fake_config
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.subprocess.Popen",
+                side_effect=FileNotFoundError("subprocess not available"),
+            ),
+        ):
+            try:
+                manager.start_langgraph_dev(workspace_dir=tmp_path)
+            except FileNotFoundError:
+                pass  # expected — we just need rotation to have happened
+        # After start attempt, the oversize log must have been rotated.
+        assert (tmp_path / "langgraph_dev.log.1").exists()
+        # And the redirect held — nothing leaked into the real
+        # ``~/.config/evoscientist/`` (we'd have observed a
+        # ``langgraph_dev.log.1`` *next* to the user's real log, not
+        # under ``tmp_path``). The ``pid_dir`` we redirected to must
+        # exist, proving the function reached past the mkdir prelude.
+        assert pid_dir.is_dir()

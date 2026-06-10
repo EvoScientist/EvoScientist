@@ -8,6 +8,7 @@ Verifies the single-env-var enum routing:
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from pathlib import Path
 
@@ -21,7 +22,7 @@ class _PopenAbort(Exception):
     after the env dict is constructed but before health-polling runs."""
 
 
-def _patch_start_prereqs(monkeypatch, tmp_path: Path) -> dict:
+def _patch_start_prereqs(monkeypatch, tmp_path: Path, runtime_paths) -> dict:
     """Mock everything ``start_langgraph_dev`` does before ``subprocess.Popen``
     so we can run it end-to-end up to the point where the env dict is captured.
     Returns a ``captured`` dict that the test populates from the fake Popen."""
@@ -42,10 +43,12 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path) -> dict:
         manager, "_wait_for_port_release", lambda _port, timeout=10.0: True
     )
 
-    # _PID_DIR / _LOG_FILE point under user dir — redirect to tmp.
-    pid_dir = tmp_path / "pid_dir"
-    monkeypatch.setattr(manager, "_PID_DIR", pid_dir)
-    monkeypatch.setattr(manager, "_LOG_FILE", tmp_path / "langgraph_dev.log")
+    # Redirect the log file — pid_dir already rooted under tmp via the fixture.
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, log_file=tmp_path / "langgraph_dev.log"),
+    )
 
     def _fake_popen(args, **kwargs):
         captured["args"] = args
@@ -57,8 +60,8 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path) -> dict:
     return captured
 
 
-def test_deploy_mode_true_sets_full(monkeypatch, tmp_path):
-    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+def test_deploy_mode_true_sets_full(monkeypatch, tmp_path, runtime_paths):
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(
@@ -73,8 +76,8 @@ def test_deploy_mode_true_sets_full(monkeypatch, tmp_path):
     )
 
 
-def test_deploy_mode_false_default_sets_stripped(monkeypatch, tmp_path):
-    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+def test_deploy_mode_false_default_sets_stripped(monkeypatch, tmp_path, runtime_paths):
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(_PopenAbort):
         # deploy_mode omitted → defaults to False
@@ -89,9 +92,11 @@ def test_deploy_mode_false_default_sets_stripped(monkeypatch, tmp_path):
     )
 
 
-def test_deploy_mode_explicitly_false_sets_stripped(monkeypatch, tmp_path):
+def test_deploy_mode_explicitly_false_sets_stripped(
+    monkeypatch, tmp_path, runtime_paths
+):
     """Same as default, but with deploy_mode=False stated explicitly."""
-    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(
@@ -104,11 +109,13 @@ def test_deploy_mode_explicitly_false_sets_stripped(monkeypatch, tmp_path):
     assert env.get("EVOSCIENTIST_DEPLOY_MODE") == "stripped"
 
 
-def test_deploy_mode_always_set_to_one_of_full_or_stripped(monkeypatch, tmp_path):
+def test_deploy_mode_always_set_to_one_of_full_or_stripped(
+    monkeypatch, tmp_path, runtime_paths
+):
     """Regression: the subprocess always sees exactly one of the two enum
     values for ``EVOSCIENTIST_DEPLOY_MODE`` — never unset, never garbage."""
     for deploy_mode, expected in ((True, "full"), (False, "stripped")):
-        captured = _patch_start_prereqs(monkeypatch, tmp_path)
+        captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
         with pytest.raises(_PopenAbort):
             manager.start_langgraph_dev(
                 workspace_dir=tmp_path,
@@ -122,12 +129,14 @@ def test_deploy_mode_always_set_to_one_of_full_or_stripped(monkeypatch, tmp_path
         )
 
 
-def test_inherited_stripped_overridden_when_deploy_mode_true(monkeypatch, tmp_path):
+def test_inherited_stripped_overridden_when_deploy_mode_true(
+    monkeypatch, tmp_path, runtime_paths
+):
     """If the parent process exports ``EVOSCIENTIST_DEPLOY_MODE=stripped`` and
     we ask for deploy mode, the subprocess env must see the resolved value
     (``full``), not the stale inherited one."""
     monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
-    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(
@@ -142,12 +151,14 @@ def test_inherited_stripped_overridden_when_deploy_mode_true(monkeypatch, tmp_pa
     )
 
 
-def test_inherited_full_overridden_when_deploy_mode_false(monkeypatch, tmp_path):
+def test_inherited_full_overridden_when_deploy_mode_false(
+    monkeypatch, tmp_path, runtime_paths
+):
     """Symmetric: parent exports ``EVOSCIENTIST_DEPLOY_MODE=full``, CLI/serve
     calls start_langgraph_dev with default (deploy_mode=False), inherited
     value must be overridden to ``stripped``."""
     monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
-    captured = _patch_start_prereqs(monkeypatch, tmp_path)
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(
@@ -161,14 +172,14 @@ def test_inherited_full_overridden_when_deploy_mode_false(monkeypatch, tmp_path)
     )
 
 
-def test_inherited_arbitrary_value_overridden(monkeypatch, tmp_path):
+def test_inherited_arbitrary_value_overridden(monkeypatch, tmp_path, runtime_paths):
     """Defense against an unexpected inherited value (e.g. legacy ``true``
     from before the enum rename, or any user-set garbage). The resolved
     deploy_mode always wins."""
     for inherited in ("true", "garbage", "FULL", ""):
         for deploy_mode, expected in ((True, "full"), (False, "stripped")):
             monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", inherited)
-            captured = _patch_start_prereqs(monkeypatch, tmp_path)
+            captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
             with pytest.raises(_PopenAbort):
                 manager.start_langgraph_dev(
@@ -185,10 +196,12 @@ def test_inherited_arbitrary_value_overridden(monkeypatch, tmp_path):
             )
 
 
-def test_workspace_dir_env_var_set_regardless_of_mode(monkeypatch, tmp_path):
+def test_workspace_dir_env_var_set_regardless_of_mode(
+    monkeypatch, tmp_path, runtime_paths
+):
     """EVOSCIENTIST_WORKSPACE_DIR is independent of deploy_mode."""
     for deploy_mode in (True, False):
-        captured = _patch_start_prereqs(monkeypatch, tmp_path)
+        captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
         with pytest.raises(_PopenAbort):
             manager.start_langgraph_dev(
                 workspace_dir=tmp_path,

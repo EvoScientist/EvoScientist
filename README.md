@@ -90,7 +90,20 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 <table>
   <tr>
-    <th width="75%"><p align="center">🖥️ CLI / TUI / WebUI</p></th>
+    <th><p align="center">🌐 Desktop WebUI</p></th>
+  </tr>
+  <tr>
+    <td align="center">
+      <video src="https://github.com/user-attachments/assets/b977f2d5-488a-428d-9c02-b6b27c1521f8" autoplay loop muted playsinline width="100%">
+        <a href="https://github.com/user-attachments/assets/b977f2d5-488a-428d-9c02-b6b27c1521f8">View WebUI demo</a>
+      </video>
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <th width="75%"><p align="center">🖥️ CLI / TUI</p></th>
     <th width="25%"><p align="center">📱 Mobile</p></th>
   </tr>
   <tr>
@@ -112,7 +125,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - **🧠 Self-Evolving Memory** — User profile and observations auto-distilled each turn, growing across sessions.
 - **🌐 Multi-Provider** — Anthropic, OpenAI, Google, MiniMax, NVIDIA — one config to switch.
 - **📱 Multi-Channel** — CLI as the hub; Telegram, Slack, Feishu, WeChat, and more — one agent session.
-- **🖥️ Browser WebUI (beta)** — Workspace-panel web app, one terminal via `--ui webui`.
+- **🖥️ Desktop WebUI (beta)** — Workspace-panel web app, one terminal via `--ui webui`.
 - **🔬 Scientific Workflow** — Intake → plan → execute → evaluate → write → verify.
 - **🔄 Code Generation Modes** — More Effort (iterative refinement), continuously improving code quality.
 - **⚡ Adaptive Tools** — Per-turn tool selection keeps only relevant tools visible, reducing noise.
@@ -412,7 +425,7 @@ EvoSci deploy                     # standalone LangGraph server for external UIs
 </details>
 
 <details>
-<summary>Browser WebUI (beta)</summary>
+<summary>Desktop WebUI (beta)</summary>
 
 Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal — no second process to manage:
 

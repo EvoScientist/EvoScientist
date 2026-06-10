@@ -61,7 +61,7 @@ def deploy(
     from ..config import apply_config_to_env, get_effective_config
     from ..langgraph_dev.manager import (
         _DEFAULT_PORT,
-        _LOG_FILE,
+        RUNTIME,
         _is_port_occupied,
         is_langgraph_dev_running,
         start_langgraph_dev,
@@ -187,7 +187,7 @@ def deploy(
     console.print("[green]✓[/green] langgraph dev ready")
 
     # 9. Ready banner
-    log_hint = _shorten(str(_LOG_FILE))
+    log_hint = _shorten(str(RUNTIME.log_file))
     console.print(
         Panel(
             Text.from_markup(

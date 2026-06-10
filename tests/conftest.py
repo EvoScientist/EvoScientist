@@ -40,7 +40,12 @@ def sample_tool_call():
 @pytest.fixture
 def sample_tool_result():
     """A minimal tool result dict."""
-    return {"name": "execute", "content": "[OK] file1.py file2.py", "success": True}
+    return {
+        "id": "tc_001",
+        "name": "execute",
+        "content": "[OK] file1.py file2.py",
+        "success": True,
+    }
 
 
 @pytest.fixture
@@ -57,6 +62,7 @@ def sample_events():
         },
         {
             "type": "tool_result",
+            "id": "tc_001",
             "name": "execute",
             "content": "[OK] done",
             "success": True,
@@ -65,10 +71,13 @@ def sample_events():
             "type": "subagent_start",
             "name": "research-agent",
             "description": "Find papers",
+            "instance_id": "task:research",
+            "tool_call_id": "tc_task_001",
         },
         {
             "type": "subagent_tool_call",
             "subagent": "research-agent",
+            "instance_id": "task:research",
             "name": "tavily_search",
             "args": {"query": "test"},
             "id": "tc_sa_001",
@@ -76,11 +85,17 @@ def sample_events():
         {
             "type": "subagent_tool_result",
             "subagent": "research-agent",
+            "instance_id": "task:research",
             "name": "tavily_search",
             "content": "Results...",
             "success": True,
+            "id": "tc_sa_001",
         },
-        {"type": "subagent_end", "name": "research-agent"},
+        {
+            "type": "subagent_end",
+            "name": "research-agent",
+            "instance_id": "task:research",
+        },
         {"type": "done", "response": "Here is the answer."},
     ]
 
@@ -91,6 +106,26 @@ def tmp_workspace(tmp_path):
     ws = tmp_path / "workspace"
     ws.mkdir()
     return str(ws)
+
+
+@pytest.fixture
+def runtime_paths(tmp_path, monkeypatch):
+    """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.
+
+    Replaces the module-level ``RUNTIME`` with a fully temp-rooted bundle
+    so every path (``pid_dir``, ``pid_file``, ``log_file``,
+    ``workspace_sidecar``, ``lock_file``) is contained under ``tmp_path``.
+
+    Tests that need a variant of a single field can still call
+    ``dataclasses.replace(runtime_paths, log_file=…)`` etc. — the
+    baseline is already isolated, so forgetting a field just keeps it
+    under ``tmp_path``, never ``~/.config/evoscientist``.
+    """
+    from EvoScientist.langgraph_dev import manager
+
+    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
+    monkeypatch.setattr(manager, "RUNTIME", runtime)
+    return runtime
 
 
 # Capture deepagents tool factories at conftest load time — BEFORE any test

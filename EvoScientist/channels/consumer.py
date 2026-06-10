@@ -134,14 +134,10 @@ def _should_auto_approve(action_requests: list[dict]) -> bool:
     )
 
     for req in action_requests:
-        name = (
-            req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
-        )
+        name = req.get("name", "")
         if name not in HITL_SHELL_TOOLS:
             continue
-        args = (
-            req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
-        )
+        args = req.get("args", {})
         command = args.get("command", "") if isinstance(args, dict) else ""
         cmd = command.strip()
         if not any(cmd.startswith(prefix) for prefix in shell_allow_list):
@@ -159,12 +155,8 @@ def _format_approval_prompt(
     """
     lines = ["\u26a0\ufe0f Approval Required\n"]
     for i, req in enumerate(action_requests, 1):
-        name = (
-            req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
-        )
-        args = (
-            req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
-        )
+        name = req.get("name", "")
+        args = req.get("args", {})
         if isinstance(args, dict):
             command = args.get("command", args.get("path", ""))
         else:
@@ -555,7 +547,9 @@ class InboundConsumer:
 
                     elif event_type == "subagent_text":
                         sa_name = event.get("subagent", "unknown")
-                        instance_id = event.get("instance_id") or sa_name
+                        instance_id = event.get("instance_id")
+                        if not instance_id:
+                            continue
                         if instance_id not in subagent_text_buffers:
                             subagent_text_buffers[instance_id] = (sa_name, [])
                         subagent_text_buffers[instance_id][1].append(
