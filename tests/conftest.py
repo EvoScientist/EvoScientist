@@ -108,6 +108,26 @@ def tmp_workspace(tmp_path):
     return str(ws)
 
 
+@pytest.fixture
+def runtime_paths(tmp_path, monkeypatch):
+    """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.
+
+    Replaces the module-level ``RUNTIME`` with a fully temp-rooted bundle
+    so every path (``pid_dir``, ``pid_file``, ``log_file``,
+    ``workspace_sidecar``, ``lock_file``) is contained under ``tmp_path``.
+
+    Tests that need a variant of a single field can still call
+    ``dataclasses.replace(runtime_paths, log_file=…)`` etc. — the
+    baseline is already isolated, so forgetting a field just keeps it
+    under ``tmp_path``, never ``~/.config/evoscientist``.
+    """
+    from EvoScientist.langgraph_dev import manager
+
+    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
+    monkeypatch.setattr(manager, "RUNTIME", runtime)
+    return runtime
+
+
 # Capture deepagents tool factories at conftest load time — BEFORE any test
 # imports EvoScientist, which can trigger ``_patch_deepagents_model_passthrough``
 # during agent construction. Once captured here, the ``restore_model_passthrough_patch``

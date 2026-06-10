@@ -81,16 +81,50 @@ _EvoScientist_agent = None
 # =============================================================================
 
 
+def set_active_config(cfg) -> None:
+    """Commit *cfg* as the active module config.
+
+    Public commit path for callers (e.g. ``/model``) that built an agent on
+    the pure ``create_cli_agent(config=..., chat_model=...)`` path and now
+    want it to become the session-wide active config.  This is the write half
+    of ``_ensure_config(cfg)`` extracted so the pure path can defer the commit
+    until the agent has been built successfully.
+    """
+    global _config
+    _config = cfg
+    apply_config_to_env(cfg)
+
+
+def _apply_env_from_config(cfg) -> None:
+    """Apply *cfg*'s API-key env vars without caching it as ``_config``.
+
+    ``apply_config_to_env`` is set-if-unset (guards on ``not
+    os.environ.get(...)``), so this is idempotent and safe to call on the pure
+    path, where no module globals may be written.
+    """
+    apply_config_to_env(cfg)
+
+
 def _ensure_config(config=None):
     """Return cached config.  If *config* is passed, cache and use it."""
-    global _config
     if config is not None:
-        _config = config
-        apply_config_to_env(_config)
+        set_active_config(config)
     if _config is None:
-        _config = get_effective_config()
-        apply_config_to_env(_config)
+        set_active_config(get_effective_config())
     return _config
+
+
+def _build_chat_model(cfg):
+    """Build a chat model from *cfg* without writing any module globals.
+
+    Pure-construction counterpart to ``_ensure_chat_model``: used by ``/model``
+    to verify a switch before committing, and threaded into
+    ``create_cli_agent(chat_model=...)`` so the new agent binds the requested
+    model without touching the cached ``_chat_model``.
+    """
+    from .llm import get_chat_model
+
+    return get_chat_model(model=cfg.model, provider=cfg.provider)
 
 
 def _replace_chat_model(instance, key: tuple[str | None, str | None]) -> None:
@@ -118,15 +152,10 @@ def _ensure_chat_model():
     into the new agent without requiring callers to interleave
     ``set_chat_model()`` calls in any particular order.
     """
-    from .llm import get_chat_model
-
     cfg = _ensure_config()
     key = (cfg.model, cfg.provider)
     if _chat_model is None or _chat_model_key != key:
-        _replace_chat_model(
-            get_chat_model(model=cfg.model, provider=cfg.provider),
-            key,
-        )
+        _replace_chat_model(_build_chat_model(cfg), key)
     return _chat_model
 
 
@@ -178,6 +207,18 @@ def set_chat_model(model: str, provider: str | None = None):
     if _chat_model is None or _chat_model_key != key:
         _replace_chat_model(get_chat_model(model=model, provider=provider), key)
     return _chat_model
+
+
+def set_chat_model_instance(instance, key: tuple[str | None, str | None]) -> None:
+    """Commit an already-built chat model *instance* as the active model.
+
+    Companion to ``set_active_config`` for the pure path: installs a model that
+    ``_build_chat_model`` already constructed (e.g. during a ``/model`` verify)
+    without rebuilding it, keeping ``_chat_model`` / ``_chat_model_key`` /
+    ``_EvoScientist_agent`` in sync via ``_replace_chat_model``.  Unlike
+    ``set_chat_model``, the caller owns the ``(model, provider)`` *key*.
+    """
+    _replace_chat_model(instance, key)
 
 
 # =============================================================================
@@ -245,12 +286,18 @@ def _inject_subagent_middleware(
     subs: list[dict],
     *,
     workspace_dir: str | Path | None = None,
+    cfg=None,
+    chat_model=None,
 ) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
     Without this, subagent tool errors are caught by LangGraph's default
     ToolNode handler which produces terse messages without tracebacks or
     retry guidance — reducing the subagent's ability to self-recover.
+
+    *chat_model*, when provided, is forwarded to the subagents'
+    ``create_context_editing_middleware`` so the pure ``create_cli_agent``
+    path doesn't fall back to the global-writing ``_ensure_chat_model()``.
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
@@ -262,7 +309,7 @@ def _inject_subagent_middleware(
         create_runtime_context_middleware,
     )
 
-    cfg = _ensure_config()
+    cfg = cfg if cfg is not None else _ensure_config()
     memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     for sa in subs:
@@ -280,9 +327,10 @@ def _inject_subagent_middleware(
             ),
         )
         middleware = [
-            # No ``model=`` — subagents share the main agent's model,
-            # so defer to the factory's ``_ensure_chat_model()`` fallback.
-            create_context_editing_middleware(),
+            # Subagents share the main agent's model: use the threaded
+            # ``chat_model`` on the pure path, else defer to the factory's
+            # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
+            create_context_editing_middleware(chat_model),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
             ContextOverflowMapperMiddleware(),
@@ -319,7 +367,9 @@ def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
     )
 
 
-def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> list:
+def _maybe_swap_async_subagents(
+    subs: list, middleware: list | None = None, *, cfg=None
+) -> list:
     """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
 
     Reads the ``_async`` field carried through by ``utils.load_subagents._build_one``
@@ -341,7 +391,7 @@ def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> l
     appends ``AsyncWatcherMiddleware`` so launches spawn an
     ``async_notifier`` watcher.
     """
-    cfg = _ensure_config()
+    cfg = cfg if cfg is not None else _ensure_config()
     if not getattr(cfg, "enable_async_subagents", False):
         # Async fully disabled — strip the internal flag before handoff.
         for s in subs:
@@ -418,11 +468,14 @@ def _maybe_swap_async_subagents(subs: list, middleware: list | None = None) -> l
     return out
 
 
-def _build_base_kwargs(base_backend, base_middleware, *, workspace_dir=None):
+def _build_base_kwargs(
+    base_backend, base_middleware, *, cfg=None, chat_model=None, workspace_dir=None
+):
     """Build agent kwargs *without* MCP (fast, no subprocess spawning)."""
     from .tools import skill_manager, tavily_search, think_tool
     from .utils import load_subagents
 
+    cfg = cfg if cfg is not None else _ensure_config()
     tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
@@ -433,16 +486,18 @@ def _build_base_kwargs(base_backend, base_middleware, *, workspace_dir=None):
         tool_registry=tool_registry,
     )
     _ensure_general_purpose_subagent(subs)
-    _inject_subagent_middleware(subs, workspace_dir=workspace_dir)
-    subs = _maybe_swap_async_subagents(subs, base_middleware)
+    _inject_subagent_middleware(
+        subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+    )
+    subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
     return {
         "name": "EvoScientist",
-        "model": _ensure_chat_model(),
+        "model": chat_model if chat_model is not None else _ensure_chat_model(),
         "tools": list(base_tools),
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": _configured_system_prompt(_ensure_config()),
+        "system_prompt": _configured_system_prompt(cfg),
         "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
@@ -452,6 +507,8 @@ def load_mcp_and_build_kwargs(
     base_middleware,
     *,
     on_mcp_progress=None,
+    cfg=None,
+    chat_model=None,
     workspace_dir=None,
 ):
     """Load MCP tools (cached by config) and build agent kwargs.
@@ -462,15 +519,22 @@ def load_mcp_and_build_kwargs(
     Args:
         on_mcp_progress: Optional per-server progress callback.  Forwarded
             to the MCP loader so UIs can render live status.
+        cfg: Explicit config to thread through instead of reading the cached
+            ``_config``.  Used by the pure ``create_cli_agent`` path.
+        chat_model: Explicit chat model to bind instead of
+            ``_ensure_chat_model()`` (which would write module globals).
     """
     from .tools import skill_manager, tavily_search, think_tool
     from .utils import load_subagents
 
+    cfg = cfg if cfg is not None else _ensure_config()
     mcp_by_agent = _load_mcp_tools_cached(on_progress=on_mcp_progress)
     if not mcp_by_agent:
         return _build_base_kwargs(
             base_backend,
             base_middleware,
+            cfg=cfg,
+            chat_model=chat_model,
             workspace_dir=workspace_dir,
         )
 
@@ -493,7 +557,9 @@ def load_mcp_and_build_kwargs(
     )
 
     _ensure_general_purpose_subagent(subs)
-    _inject_subagent_middleware(subs, workspace_dir=workspace_dir)
+    _inject_subagent_middleware(
+        subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+    )
 
     # Inject MCP tools into subagents by name
     for sa in subs:
@@ -502,16 +568,16 @@ def load_mcp_and_build_kwargs(
 
     # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
     # since async sub-agents are remote graphs that load their own tools).
-    subs = _maybe_swap_async_subagents(subs, base_middleware)
+    subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
 
     return {
         "name": "EvoScientist",
-        "model": _ensure_chat_model(),
+        "model": chat_model if chat_model is not None else _ensure_chat_model(),
         "tools": base_tools + mcp_main,
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": _configured_system_prompt(_ensure_config()),
+        "system_prompt": _configured_system_prompt(cfg),
         "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
@@ -561,6 +627,8 @@ def _get_default_middleware(
     *,
     for_async_subagent: bool = False,
     workspace_dir: str | Path | None = None,
+    cfg=None,
+    chat_model=None,
     memory_source_agent: str = "EvoScientist",
 ):
     """Build the default middleware list.
@@ -576,6 +644,9 @@ def _get_default_middleware(
             ``subagents/_factory.py`` deliberately skips ``interrupt_on=`` on
             the deepagents level. Defaults to False (full middleware list)
             for the CLI's in-process agent.
+        cfg: Explicit config to use instead of the cached ``_config``.
+        chat_model: Explicit model to bind instead of ``_ensure_chat_model()``
+            (avoids writing module globals on the pure path).
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
     """
@@ -594,10 +665,10 @@ def _get_default_middleware(
         load_fallback_chain,
     )
 
-    cfg = _ensure_config()
+    cfg = cfg if cfg is not None else _ensure_config()
     if cfg.model_fallbacks:
         load_fallback_chain(cfg.model_fallbacks)
-    model = _ensure_chat_model()
+    model = chat_model if chat_model is not None else _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     source_type = (
         MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
@@ -627,9 +698,19 @@ def _get_default_middleware(
     # keep the main model (they do real work, not a one-off helper call).
     # context_editing stays on the main model — its model only sizes the
     # context-window trigger for the main agent's own history.
-    tool_selector_model = (
-        model if for_async_subagent else _ensure_auxiliary_chat_model()
-    )
+    if for_async_subagent:
+        tool_selector_model = model
+    elif chat_model is None:
+        tool_selector_model = _ensure_auxiliary_chat_model()
+    else:
+        aux_model = cfg.auxiliary_model or cfg.model
+        aux_provider = cfg.auxiliary_provider or cfg.provider
+        if (aux_model, aux_provider) == (cfg.model, cfg.provider):
+            tool_selector_model = model
+        else:
+            from .llm import get_chat_model
+
+            tool_selector_model = get_chat_model(model=aux_model, provider=aux_provider)
     mw = [
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
@@ -761,6 +842,7 @@ def create_cli_agent(
     workspace_dir: str | None = None,
     checkpointer=None,
     config=None,
+    chat_model=None,
     *,
     on_mcp_progress=None,
 ):
@@ -770,6 +852,14 @@ def create_cli_agent(
     ``paths.WORKSPACE_ROOT`` (or the explicit *workspace_dir*), so
     runtime ``set_workspace_root()`` changes are always respected.
 
+    **Pure path:** when *both* ``config`` and ``chat_model`` are explicit, this
+    writes none of the cached config/model module globals (``_config``,
+    ``_chat_model``, ``_chat_model_key``, ``_EvoScientist_agent``) — the agent
+    is built purely from the passed-in locals.  The caller commits the switch
+    on success via ``set_active_config`` / ``set_chat_model_instance`` (see
+    ``/model``).  Otherwise the existing module-global path runs (langgraph
+    dev, notebooks, and CLI startup, which pass ``config=`` only).
+
     Args:
         workspace_dir: Per-session workspace directory. If ``None``,
             defaults to the current ``paths.WORKSPACE_ROOT``.
@@ -778,6 +868,9 @@ def create_cli_agent(
         config: Optional pre-loaded ``EvoScientistConfig``.  If ``None``,
             loads from file/env/defaults.  Passing this avoids double
             loading when the CLI has already loaded config.
+        chat_model: Optional pre-built chat model.  Only triggers the pure
+            path when ``config`` is also explicit; otherwise it is ignored in
+            favor of the ``_ensure_chat_model()`` fallback.
     """
     import os as _os
 
@@ -787,7 +880,16 @@ def create_cli_agent(
     from . import paths as _paths
     from .backends import CustomSandboxBackend, MergedSkillsBackend
 
-    cfg = _ensure_config(config)
+    # Pure path only when BOTH config and chat_model are explicit: build from
+    # locals and write no module globals. Otherwise keep the legacy
+    # global-writing behavior — callers that pass config= only (CLI startup,
+    # langgraph dev) rely on it to seat the active config/model.
+    if config is not None and chat_model is not None:
+        cfg = config
+        _apply_env_from_config(cfg)
+    else:
+        cfg = _ensure_config(config)
+        chat_model = None
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
@@ -838,7 +940,9 @@ def create_cli_agent(
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain. Anything CLI-specific
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
-    mw: list[AgentMiddleware] = _get_default_middleware(workspace_dir=workspace_dir)
+    mw: list[AgentMiddleware] = _get_default_middleware(
+        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+    )
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
     # would propagate it to every subagent, breaking parallel execute calls
@@ -855,6 +959,8 @@ def create_cli_agent(
         be,
         mw,
         on_mcp_progress=on_mcp_progress,
+        cfg=cfg,
+        chat_model=chat_model,
         workspace_dir=workspace_dir,
     )
 

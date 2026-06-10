@@ -59,7 +59,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     from ..config import apply_config_to_env
     from ..langgraph_dev.manager import (
         _DEFAULT_PORT,
-        _LOG_FILE,
+        RUNTIME,
         _is_port_occupied,
         _read_workspace_sidecar,
         is_langgraph_dev_running,
@@ -210,7 +210,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                 f"[dim](langgraph dev — Assistant: EvoScientist)[/dim]\n"
                 f"[bold]WebUI:[/bold]    http://localhost:{webui_port}  "
                 f"[dim](opens in your browser)[/dim]\n"
-                f"[bold]Logs:[/bold]     {_shorten(str(_LOG_FILE))}\n\n"
+                f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n\n"
                 f"[dim]Fetching {_WEBUI_PACKAGE} via npx (first run may take a "
                 f"moment)…  Press Ctrl+C to stop.[/dim]"
             ),
