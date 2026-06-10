@@ -787,7 +787,10 @@ class TestCompletionLogic(unittest.TestCase):
                 else:
                     current = prompt.value
                     prompt.value = (
-                        current[: candidate.replace_start] + candidate.text + " "
+                        current[: candidate.replace_start]
+                        + candidate.text
+                        + " "
+                        + current[candidate.replace_end :]
                     )
                 prompt.cursor_position = len(prompt.value)
                 self._render_completions()
