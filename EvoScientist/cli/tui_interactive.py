@@ -427,6 +427,7 @@ def run_textual_interactive(
             ] = []  # queued messages to send after current turn
             self._comp_items: list[tuple[str, str, str]] = []
             self._comp_index: int = -1
+            self._comp_base: str = ""
             self._comp_suppress_changes: int = 0
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
@@ -2397,6 +2398,12 @@ def run_textual_interactive(
                 if matches:
                     self._comp_items = matches
                     self._comp_index = -1
+                    if matches[0][0].startswith("/"):
+                        self._comp_base = ""
+                    elif text.endswith(" "):
+                        self._comp_base = text
+                    else:
+                        self._comp_base = text.rsplit(" ", 1)[0] + " "
                     self._render_completions()
                     comp_widget.display = True
                     return
@@ -2407,6 +2414,7 @@ def run_textual_interactive(
                 if candidates:
                     self._comp_items = [(c, d, "") for c, d in candidates]
                     self._comp_index = -1
+                    self._comp_base = ""
                     self._render_completions()
                     comp_widget.display = True
                     return
@@ -2670,6 +2678,14 @@ def run_textual_interactive(
                     return
                 self._comp_items = matches
                 self._comp_index = -1
+                if matches[0][0].startswith("/"):
+                    self._comp_base = ""
+                elif text.startswith("/"):
+                    self._comp_base = (
+                        text if text.endswith(" ") else text.rsplit(" ", 1)[0] + " "
+                    )
+                else:
+                    self._comp_base = ""
                 self._render_completions()
                 comp_widget.display = True
                 return
@@ -2745,8 +2761,7 @@ def run_textual_interactive(
             elif selected.startswith("/"):
                 prompt.value = selected + " "
             else:
-                base = prompt.value.rstrip().rsplit(" ", 1)[0]
-                prompt.value = base + " " + selected + " "
+                prompt.value = self._comp_base + selected + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []
