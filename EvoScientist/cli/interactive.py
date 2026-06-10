@@ -202,38 +202,15 @@ class SlashCommandCompleter(Completer):
         if not text.startswith("/"):
             return
 
-        parts = text.strip().split()
-        has_trailing_space = text.endswith(" ")
+        from ..commands._completion_engine import compute_completions
 
-        # Subcommand completion: user typed "/mcp lis" or "/mcp "
-        if has_trailing_space or len(parts) >= 2:
-            cmd_name = parts[0].lower()
-            if len(parts) >= 3:
-                return  # subcommand already typed — stop completing
-            sub_prefix = parts[1].lower() if len(parts) >= 2 else ""
-            for name, desc in cmd_manager.list_subcommands(cmd_name):
-                if name.startswith(sub_prefix):
-                    if has_trailing_space:
-                        # Replace only the sub-prefix, not the trailing space
-                        start_pos = -len(sub_prefix) - 1 if sub_prefix else 0
-                    else:
-                        start_pos = -len(sub_prefix) if sub_prefix else 0
-                    yield Completion(
-                        name,
-                        start_position=start_pos,
-                        display_meta=desc,
-                    )
+        result = compute_completions(document.text_before_cursor, len(document.text_before_cursor))
+        if result.kind == "empty" or not result.candidates:
             return
 
-        # Top-level command completion
-        for cmd, desc in sorted(cmd_manager.list_commands()):
-            if cmd.startswith(text):
-                yield Completion(
-                    cmd,
-                    start_position=-len(text),
-                    display=f"{cmd:<40}",
-                    display_meta=desc,
-                )
+        for c in result.candidates:
+            start_pos = c.replace_start - len(document.text_before_cursor)
+            yield Completion(c.text, start_position=start_pos, display_meta=c.description)
 
 
 # =============================================================================

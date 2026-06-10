@@ -693,7 +693,7 @@ class TestCompletionLogic(unittest.TestCase):
     # Stub infrastructure
     # ------------------------------------------------------------------
 
-    def _make_app(self, comp_items=None, comp_index=-1, comp_is_subcommand=False):
+    def _make_app(self, comp_items=None, comp_index=-1):
         """Return a stub app-like object with completion state."""
         from rich.text import Text
 
@@ -741,14 +741,23 @@ class TestCompletionLogic(unittest.TestCase):
             """Minimal stub that shares the real completion method bodies."""
 
             def __init__(self):
-                self._comp_items: list = list(comp_items or [])
+                from EvoScientist.commands._completion_engine import CompletionCandidate
+
+                self._comp_items = []
+                for item in comp_items or []:
+                    if hasattr(item, "replace_start"):
+                        self._comp_items.append(item)
+                    else:
+                        text, desc = item[0], item[1]
+                        self._comp_items.append(
+                            CompletionCandidate(
+                                text=text, description=desc,
+                                replace_start=0, replace_end=0,
+                            )
+                        )
                 self._comp_index: int = comp_index
-                self._comp_is_subcommand: bool = comp_is_subcommand or False
-                # Expose fakes for assertions
                 self._fake_input = fake_input
                 self._fake_completions = fake_completions
-                self._SLASH_COMMANDS = _slash_commands
-                self._SUBCS = _subcommands
 
             def query_one(self, selector, widget_type=None):
                 # Match by selector string; widget_type is ignored in stub
@@ -769,29 +778,31 @@ class TestCompletionLogic(unittest.TestCase):
                 self._apply_selected_completion()
 
             def _apply_selected_completion(self):
-                selected_cmd = self._comp_items[self._comp_index][0]
+                candidate = self._comp_items[self._comp_index]
                 prompt = self.query_one("#prompt")
-                if self._comp_is_subcommand:
-                    current = prompt.value
-                    last_space = current.rfind(" ")
-                    prefix = current[: last_space + 1] if last_space >= 0 else ""
-                    prompt.value = prefix + selected_cmd + " "
+                if candidate.text.startswith("@"):
+                    prompt.value = candidate.text + " "
                 else:
-                    prompt.value = selected_cmd + " "
+                    current = prompt.value
+                    prompt.value = (
+                        current[: candidate.replace_start]
+                        + candidate.text
+                        + " "
+                    )
                 prompt.cursor_position = len(prompt.value)
                 self._render_completions()
 
             def _hide_completions(self):
                 self._comp_items = []
                 self._comp_index = -1
-                self._comp_is_subcommand = False
                 comp_widget = self.query_one("#completions")
                 comp_widget.display = False
 
             def _render_completions(self):
                 comp_widget = self.query_one("#completions")
                 comp_text = Text()
-                for i, (cmd, desc) in enumerate(self._comp_items):
+                for i, candidate in enumerate(self._comp_items):
+                    cmd, desc = candidate.text, candidate.description
                     if i == self._comp_index:
                         comp_text.append("\u25b8 ", style="bold")
                         comp_text.append(f"{cmd:<22}", style="bold")
@@ -986,93 +997,79 @@ class TestCompletionLogic(unittest.TestCase):
         assert arrow_in_bold, f"No bold arrow found. Spans: {bold_spans}"
 
     # ------------------------------------------------------------------
-    # on_input_changed
+    # compute_completions (shared engine)
     # ------------------------------------------------------------------
 
-    def test_input_changed_slash_shows_completions(self):
-        """/re prefix should show matching commands."""
-        app = self._make_app()
-        app.on_input_changed("/re")
-        assert app._fake_completions.display is True
-        assert len(app._comp_items) > 0
-        assert all(cmd.startswith("/re") for cmd, _ in app._comp_items)
+    def test_engine_slash_shows_top_level_commands(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-    def test_input_changed_exact_match_hides_completions(self):
-        """An exact match for a command should hide completions."""
-        app = self._make_app()
-        # /help is the only command starting with /help
-        app.on_input_changed("/help")
-        assert app._fake_completions.display is False
+        result = compute_completions("/re", 3)
+        assert result.kind == "commands"
+        assert len(result.candidates) > 0
+        assert all(c.text.startswith("/re") for c in result.candidates)
 
-    def test_input_changed_non_slash_hides_completions(self):
-        """Regular text (no leading slash) should hide completions."""
-        items = [("/resume", "d")]
-        app = self._make_app(comp_items=items)
-        app._fake_completions.display = True
+    def test_engine_exact_match_no_space_hides(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-        app.on_input_changed("hello world")
-        assert app._fake_completions.display is False
+        result = compute_completions("/help", 5)
+        assert result.kind == "empty"
 
-    def test_input_changed_no_match_hides_completions(self):
-        """A /prefix that matches nothing should hide completions."""
-        app = self._make_app()
-        app._fake_completions.display = True
+    def test_engine_non_slash_returns_empty(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-        app.on_input_changed("/zzznomatch")
-        assert app._fake_completions.display is False
+        result = compute_completions("hello", 5)
+        assert result.kind == "empty"
 
-    # ------------------------------------------------------------------
-    # on_input_changed — subcommand completion
-    # ------------------------------------------------------------------
+    def test_engine_trailing_space_shows_subcommands(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-    def test_input_changed_shows_subcommands_on_trailing_space(self):
-        """Typing '/mcp ' (exact match + trailing space) shows subcommands."""
-        app = self._make_app()
-        app.on_input_changed("/mcp ")
-        assert app._fake_completions.display is True
-        assert app._comp_is_subcommand is True
-        names = {name for name, _desc in app._comp_items}
+        result = compute_completions("/mcp ", 5)
+        assert result.kind == "subcommands"
+        names = {c.text for c in result.candidates}
         assert "list" in names
         assert "add" in names
 
-    def test_input_changed_subcommand_prefix_filter(self):
-        """Typing '/mcp lis' filters subcommands by prefix."""
-        app = self._make_app()
-        app.on_input_changed("/mcp lis")
-        assert app._fake_completions.display is True
-        assert app._comp_is_subcommand is True
-        names = {name for name, _desc in app._comp_items}
+    def test_engine_subcommand_prefix_filters(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp lis", 8)
+        assert result.kind == "subcommands"
+        names = {c.text for c in result.candidates}
         assert names == {"list"}
 
-    def test_input_changed_exact_subcommand_shows_confirmation(self):
-        """Typing '/mcp list' (exact subcommand match) shows 'list' as
-        confirmation — the user can TAB to auto-complete."""
-        app = self._make_app()
-        app.on_input_changed("/mcp list")
-        assert app._fake_completions.display is True
-        assert app._comp_is_subcommand is True
-        names = {name for name, _desc in app._comp_items}
-        assert names == {"list"}
+    def test_engine_exact_subcommand_shows_confirmation(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-    def test_input_changed_three_parts_hides(self):
-        """Typing '/mcp list a' (3+ parts) hides subcommand completions."""
-        app = self._make_app()
-        app.on_input_changed("/mcp list a")
-        assert app._fake_completions.display is False
+        result = compute_completions("/mcp list", 9)
+        assert result.kind == "subcommands"
+        assert result.candidates[0].text == "list"
 
-    def test_input_changed_non_subcommand_cmd_hides(self):
-        """Typing '/help ' (command with no subcommands) hides."""
-        app = self._make_app()
-        app.on_input_changed("/help ")
-        assert app._fake_completions.display is False
+    def test_engine_three_parts_hides(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-    def test_apply_selected_subcommand_preserves_prefix(self):
-        """TAB on a subcommand preserves '/mcp ' prefix."""
-        items = [("list", "List servers")]
-        app = self._make_app(comp_items=items, comp_index=0, comp_is_subcommand=True)
-        app._fake_input.value = "/mcp lis"
-        app._apply_selected_completion()
-        assert app._fake_input.value == "/mcp list "
+        result = compute_completions("/mcp list a", 11)
+        assert result.kind == "empty"
+
+    def test_engine_non_subcommand_cmd_hides(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/help ", 6)
+        assert result.kind == "empty"
+
+    def test_engine_subcommand_replace_range(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp lis", 8)
+        assert result.candidates[0].replace_start == 5
+        assert result.candidates[0].replace_end == 8
+
+    def test_engine_trailing_space_replace_range(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp ", 5)
+        assert result.candidates[0].replace_start == 5
+        assert result.candidates[0].replace_end == 5
+
 
     # ------------------------------------------------------------------
     # on_key  (enter only — up/down handled by priority bindings)

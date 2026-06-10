@@ -417,9 +417,8 @@ def run_textual_interactive(
             self._queued_messages: list[
                 str
             ] = []  # queued messages to send after current turn
-            self._comp_items: list[tuple[str, str]] = []
+            self._comp_items: list = []
             self._comp_index: int = -1
-            self._comp_is_subcommand: bool = False
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
@@ -2330,62 +2329,18 @@ def run_textual_interactive(
                     return
 
             if text.startswith("/"):
-                parts = text.split()
-                cmd_name = parts[0].lower()
-                has_trailing_space = text.endswith(" ")
+                from ..commands._completion_engine import compute_completions
 
-                if len(parts) == 1:
-                    # Top-level command completion
-                    prefix = text.lower().rstrip()
-                    matches = [
-                        (cmd, desc)
-                        for cmd, desc in cmd_manager.list_commands()
-                        if cmd.startswith(prefix)
-                    ]
-                    if len(matches) == 1 and matches[0][0] == prefix:
-                        # Exact match — hide UNLESS the command has subcommands
-                        if not cmd_manager.get_subcommands(prefix):
-                            self._hide_completions()
-                            return
-                        # Has subcommands: show them instead of hiding
-                        if not has_trailing_space:
-                            self._hide_completions()
-                            return
-                        sub_matches = cmd_manager.list_subcommands(cmd_name)
-                        if sub_matches:
-                            self._comp_items = sub_matches
-                            self._comp_index = -1
-                            self._comp_is_subcommand = True
-                            self._render_completions()
-                            comp_widget.display = True
-                            return
-                    if matches:
-                        self._comp_items = matches
-                        self._comp_index = -1
-                        self._comp_is_subcommand = False
-                        self._render_completions()
-                        comp_widget.display = True
-                        return
-                else:
-                    # Multi-stage: subcommand completion
-                    if len(parts) >= 3:
-                        self._hide_completions()
-                        return
-                    cmd = cmd_manager.get_command(cmd_name)
-                    if cmd and cmd.subcommands:
-                        sub_prefix = parts[1].lower() if len(parts) > 1 else ""
-                        sub_matches = [
-                            (name, desc)
-                            for name, desc in cmd_manager.list_subcommands(cmd_name)
-                            if name.startswith(sub_prefix)
-                        ]
-                        if sub_matches:
-                            self._comp_items = sub_matches
-                            self._comp_index = -1
-                            self._comp_is_subcommand = True
-                            self._render_completions()
-                            comp_widget.display = True
-                            return
+                result = compute_completions(event.text_area.text, event.cursor_position)
+                if result.kind == "empty" or not result.candidates:
+                    self._hide_completions()
+                    return
+
+                self._comp_items = result.candidates
+                self._comp_index = -1
+                self._render_completions()
+                comp_widget.display = True
+                return
             self._hide_completions()
 
         def _render_queue_indicator(self) -> None:
@@ -2652,45 +2607,40 @@ def run_textual_interactive(
             return True
 
         def _apply_selected_completion(self) -> None:
-            """Apply the currently selected completion to the input field.
-
-            For ``@file`` completions the last ``@token`` is replaced in-place;
-            for slash-command completions the entire input is replaced.
-            """
+            """Apply the currently selected completion to the input field."""
             if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
                 return
-            selected = self._comp_items[self._comp_index][0]
+            candidate = self._comp_items[self._comp_index]
             prompt = self.query_one("#prompt", ChatTextArea)
 
-            if selected.startswith("@"):
+            if candidate.text.startswith("@"):
                 import re as _re
 
                 current = prompt.value
                 m = _re.search(r"@[^\s]*$", current)
                 if m:
-                    new_val = current[: m.start()] + selected + " "
+                    new_val = current[: m.start()] + candidate.text + " "
                 else:
-                    new_val = current + selected + " "
+                    new_val = current + candidate.text + " "
                 prompt.value = new_val
             else:
-                if self._comp_is_subcommand:
-                    current = prompt.value
-                    last_space = current.rfind(" ")
-                    prefix = current[: last_space + 1] if last_space >= 0 else ""
-                    prompt.value = prefix + selected + " "
-                else:
-                    prompt.value = selected + " "
+                current = prompt.value
+                prompt.value = (
+                    current[: candidate.replace_start]
+                    + candidate.text
+                    + " "
+                )
 
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
-            self._comp_is_subcommand = False
             comp_widget = self.query_one("#completions", Static)
             comp_widget.display = False
 
         def _render_completions(self) -> None:
             comp_text = Text()
-            for i, (cmd, desc) in enumerate(self._comp_items):
+            for i, candidate in enumerate(self._comp_items):
+                cmd, desc = candidate.text, candidate.description
                 if i == self._comp_index:
                     comp_text.append("\u25b8 ", style="bold")
                     comp_text.append(f"{cmd:<30}", style="bold")
