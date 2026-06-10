@@ -204,13 +204,17 @@ class SlashCommandCompleter(Completer):
 
         from ..commands._completion_engine import compute_completions
 
-        result = compute_completions(document.text_before_cursor, len(document.text_before_cursor))
+        result = compute_completions(
+            document.text_before_cursor, len(document.text_before_cursor)
+        )
         if result.kind == "empty" or not result.candidates:
             return
 
         for c in result.candidates:
             start_pos = c.replace_start - len(document.text_before_cursor)
-            yield Completion(c.text, start_position=start_pos, display_meta=c.description)
+            yield Completion(
+                c.text, start_position=start_pos, display_meta=c.description
+            )
 
 
 # =============================================================================

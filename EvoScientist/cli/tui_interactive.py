@@ -2331,7 +2331,9 @@ def run_textual_interactive(
             if text.startswith("/"):
                 from ..commands._completion_engine import compute_completions
 
-                result = compute_completions(event.text_area.text, event.cursor_position)
+                result = compute_completions(
+                    event.text_area.text, event.cursor_position
+                )
                 if result.kind == "empty" or not result.candidates:
                     self._hide_completions()
                     return
@@ -2625,11 +2627,7 @@ def run_textual_interactive(
                 prompt.value = new_val
             else:
                 current = prompt.value
-                prompt.value = (
-                    current[: candidate.replace_start]
-                    + candidate.text
-                    + " "
-                )
+                prompt.value = current[: candidate.replace_start] + candidate.text + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []

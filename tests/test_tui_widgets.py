@@ -751,8 +751,10 @@ class TestCompletionLogic(unittest.TestCase):
                         text, desc = item[0], item[1]
                         self._comp_items.append(
                             CompletionCandidate(
-                                text=text, description=desc,
-                                replace_start=0, replace_end=0,
+                                text=text,
+                                description=desc,
+                                replace_start=0,
+                                replace_end=0,
                             )
                         )
                 self._comp_index: int = comp_index
@@ -785,9 +787,7 @@ class TestCompletionLogic(unittest.TestCase):
                 else:
                     current = prompt.value
                     prompt.value = (
-                        current[: candidate.replace_start]
-                        + candidate.text
-                        + " "
+                        current[: candidate.replace_start] + candidate.text + " "
                     )
                 prompt.cursor_position = len(prompt.value)
                 self._render_completions()
@@ -1069,7 +1069,6 @@ class TestCompletionLogic(unittest.TestCase):
         result = compute_completions("/mcp ", 5)
         assert result.candidates[0].replace_start == 5
         assert result.candidates[0].replace_end == 5
-
 
     # ------------------------------------------------------------------
     # on_key  (enter only — up/down handled by priority bindings)
