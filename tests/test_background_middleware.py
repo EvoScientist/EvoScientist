@@ -110,13 +110,12 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
 
 
 def _force_dangerous(monkeypatch, value=True):
-    """Make run_in_background's fresh get_effective_config() report dangerous mode."""
-    from types import SimpleNamespace
+    """Make run_in_background see dangerous mode via the env flag it reads.
 
-    monkeypatch.setattr(
-        "EvoScientist.config.get_effective_config",
-        lambda *a, **k: SimpleNamespace(dangerous_mode=value),
-    )
+    monkeypatch.setenv tracks the change and restores it on teardown, so this
+    cannot leak EVOSCIENTIST_DANGEROUS_MODE into other tests.
+    """
+    monkeypatch.setenv("EVOSCIENTIST_DANGEROUS_MODE", "true" if value else "false")
 
 
 def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):

@@ -544,15 +544,16 @@ def validate_command(
     for pattern in _DESTRUCTIVE_PATTERNS:
         if re.search(pattern, command):
             return (
-                f"Command blocked: contains destructive pattern '{pattern}'. "
-                f"This operation is not permitted."
+                f"Command blocked: contains forbidden pattern '{pattern}'. "
+                f"All commands must operate within the workspace directory. "
+                f"Use relative paths (e.g., './file.py') instead."
             )
 
     # Check for dangerous commands (pipeline-aware) — always enforced.
     for base_cmd in _split_shell_commands(command):
         if base_cmd in BLOCKED_COMMANDS:
             return (
-                f"Command blocked: '{base_cmd}' is not allowed. "
+                f"Command blocked: '{base_cmd}' is not allowed in sandbox mode. "
                 f"Only standard development commands are permitted."
             )
 

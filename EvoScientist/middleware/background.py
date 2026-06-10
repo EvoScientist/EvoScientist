@@ -76,11 +76,13 @@ def run_in_background(
     """
     cwd = str(paths.resolve_virtual_path("/"))
     # Honor dangerous mode so background commands match `execute`'s policy
-    # (real-filesystem access, no virtual-path rewriting). Read fresh, as other
-    # runtime sites do.
-    from ..config import get_effective_config
+    # (real-filesystem access, no virtual-path rewriting). Read the env flag that
+    # apply_config_to_env round-trips at startup (and the subprocess inherits) —
+    # cheaper than reloading the full config from disk on every launch, and uses
+    # the same truthy parsing as every other bool env flag.
+    from ..llm.models import _env_flag_enabled
 
-    dangerous = get_effective_config().dangerous_mode
+    dangerous = _env_flag_enabled("EVOSCIENTIST_DANGEROUS_MODE")
     # Same path-rewriting + validation as execute (shared helper) so virtual paths
     # resolve to the workspace and the command can't bypass the sandbox checks.
     command, error = prepare_sandbox_command(

@@ -28,6 +28,24 @@ from EvoScientist.config import (
 # =============================================================================
 
 
+@pytest.fixture(autouse=True)
+def _restore_dangerous_env():
+    """Snapshot/restore EVOSCIENTIST_DANGEROUS_MODE around every test.
+
+    apply_config_to_env writes this var via direct ``os.environ`` assignment, and
+    monkeypatch's ``delenv`` of an originally-absent key records no undo — so
+    without this, a test that turns dangerous mode on would leak the env var into
+    later tests (an order-dependent landmine, e.g. under pytest-randomly).
+    """
+    _sentinel = object()
+    _prev = os.environ.get("EVOSCIENTIST_DANGEROUS_MODE", _sentinel)
+    yield
+    if _prev is _sentinel:
+        os.environ.pop("EVOSCIENTIST_DANGEROUS_MODE", None)
+    else:
+        os.environ["EVOSCIENTIST_DANGEROUS_MODE"] = _prev
+
+
 @pytest.fixture
 def temp_config_dir(tmp_path, monkeypatch):
     """Use a temporary directory for config during tests."""
