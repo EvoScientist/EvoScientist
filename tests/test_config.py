@@ -53,6 +53,7 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
     return config_dir
@@ -75,6 +76,7 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -647,6 +649,19 @@ class TestApplyConfigToEnv:
         """dangerous_mode=False must not write the env var."""
         monkeypatch.delenv("EVOSCIENTIST_DANGEROUS_MODE", raising=False)
         apply_config_to_env(EvoScientistConfig())
+        assert os.environ.get("EVOSCIENTIST_DANGEROUS_MODE") is None
+
+    def test_dangerous_mode_off_clears_stale_env(self, clean_env, monkeypatch):
+        """Re-applying a non-dangerous config clears a previously-set env var.
+
+        Regression: the round-trip used to be set-only, so once dangerous mode
+        was applied in a process it could never be lowered — leaking unconfined
+        access into later non-dangerous reads.
+        """
+        monkeypatch.delenv("EVOSCIENTIST_DANGEROUS_MODE", raising=False)
+        apply_config_to_env(EvoScientistConfig(dangerous_mode=True))
+        assert os.environ.get("EVOSCIENTIST_DANGEROUS_MODE") == "true"
+        apply_config_to_env(EvoScientistConfig())  # dangerous off
         assert os.environ.get("EVOSCIENTIST_DANGEROUS_MODE") is None
 
     def test_ollama_base_url_applied(self, clean_env, monkeypatch):

@@ -777,8 +777,12 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)
     # is invisible to those consumers while the backend is already unconfined.
+    # Bidirectional: clear it when off so a re-apply with a lower config (or a
+    # stale value) can't leave the process stuck in dangerous mode.
     if config.dangerous_mode:
         os.environ["EVOSCIENTIST_DANGEROUS_MODE"] = "true"
+    else:
+        os.environ.pop("EVOSCIENTIST_DANGEROUS_MODE", None)
     if config.use_responses_api and not os.environ.get(
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):

@@ -763,7 +763,12 @@ class TestResolvePathDangerous:
 
     def test_absolute_path_unmangled(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, dangerous=True)
-        assert str(backend._resolve_path("/etc/hosts")) == "/etc/hosts"
+        # OS-appropriate absolute path (drive-anchored on Windows) outside the ws.
+        target = Path(Path(tmp_workspace).anchor, "etc", "hosts")
+        resolved = Path(backend._resolve_path(str(target)))
+        # Dangerous mode must NOT confine/mangle it into the workspace.
+        assert Path(tmp_workspace) not in resolved.parents
+        assert resolved == target
 
     def test_outside_workspace_not_confined(self, tmp_path):
         ws = tmp_path / "ws"
@@ -1424,6 +1429,17 @@ class TestExecuteTimeoutRecovery:
         resp = backend.execute(cmd)
         assert cmd in resp.output
         assert "> /output.log 2>&1 &" in resp.output
+
+    def test_timeout_recovery_uses_relative_log_in_dangerous(self, tmp_workspace):
+        """Dangerous mode: recovery hint must not point the log at the host root."""
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace, timeout=1, dangerous=True
+        )
+        resp = backend.execute(_sleep_cmd(10))
+        assert resp.exit_code == 124
+        assert "> ./output.log 2>&1 &" in resp.output
+        assert "cat ./output.log" in resp.output
+        assert "> /output.log" not in resp.output
 
     def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)

@@ -1030,7 +1030,10 @@ class CustomSandboxBackend(LocalShellBackend):
         if response.exit_code == 124:
             cmd_words = command.split()
             grep_hint = cmd_words[0] if cmd_words else "process"
-            bg_cmd = f'{command} > /output.log 2>&1 & echo "PID: $!"'
+            # In dangerous mode `/` is the host root; use a workspace-relative
+            # log path so the suggested command doesn't fail or write to `/`.
+            output_log = "./output.log" if self._dangerous else "/output.log"
+            bg_cmd = f'{command} > {output_log} 2>&1 & echo "PID: $!"'
             response = ExecuteResponse(
                 output=(
                     f"{response.output}\n\n"
@@ -1040,7 +1043,7 @@ class CustomSandboxBackend(LocalShellBackend):
                     f"  2. Runs indefinitely? Run it in the background and keep the PID:\n"
                     f"       {bg_cmd}\n"
                     f"     Check: ps -p <PID>  (or: ps aux | grep {grep_hint})  ·  "
-                    f"Read: cat /output.log  ·  Stop: kill <PID>"
+                    f"Read: cat {output_log}  ·  Stop: kill <PID>"
                 ),
                 exit_code=response.exit_code,
                 truncated=response.truncated,
