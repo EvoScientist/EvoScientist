@@ -94,6 +94,52 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     assert captured["command"] == "python ./train.py"
 
 
+def _force_dangerous(monkeypatch, value=True):
+    """Make run_in_background's fresh get_effective_config() report dangerous mode."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "EvoScientist.config.get_effective_config",
+        lambda *a, **k: SimpleNamespace(dangerous_mode=value),
+    )
+
+
+def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
+    """In dangerous mode, background commands keep real absolute paths (parity with execute)."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    _force_dangerous(monkeypatch)
+    captured = {}
+
+    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
+        captured["command"] = command
+        return "pidX"
+
+    monkeypatch.setattr(bg, "launch", _spy)
+    # Absolute path + traversal would be BLOCKED in normal mode; allowed here.
+    out = run_in_background.invoke({"command": "cat /etc/hosts && cat ../x"})
+    assert "blocked" not in out.lower()
+    assert captured["command"] == "cat /etc/hosts && cat ../x"  # no ./ rewrite
+    # Advertised log path is the real path, not the virtual /.bg_processes/.
+    assert f"{tmp_path}/.bg_processes/" in out
+    assert "Output -> /.bg_processes/" not in out
+
+
+def test_run_dangerous_still_blocks_privileged_command(tmp_path, monkeypatch):
+    """Dangerous mode must NOT relax the privileged-command blocklist."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    _force_dangerous(monkeypatch)
+    launched = {"called": False}
+
+    def _spy(*args, **kwargs):
+        launched["called"] = True
+        return "should-not-happen"
+
+    monkeypatch.setattr(bg, "launch", _spy)
+    out = run_in_background.invoke({"command": "sudo rm x"})
+    assert launched["called"] is False
+    assert "blocked" in out.lower()
+
+
 def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
     """A finished background process enqueues a shell completion notification."""
     from EvoScientist.cli import async_notifier

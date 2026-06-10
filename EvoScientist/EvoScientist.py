@@ -274,11 +274,16 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
 
 def _configured_system_prompt(cfg) -> str:
     memory_controls = MemoryControls.from_config(cfg)
+    # In dangerous mode the agent works on the real filesystem; give it the real
+    # cwd so it can use absolute paths instead of the virtual `/` workspace root.
+    real_cwd = str(_paths_mod.resolve_virtual_path("/")) if cfg.dangerous_mode else None
     return get_system_prompt(
         enable_observation_memory=memory_controls.observations_enabled,
         enable_observation_writes=memory_controls.observation_tool_enabled(
             MemoryObservationTarget.AGENT
         ),
+        dangerous=cfg.dangerous_mode,
+        cwd=real_cwd,
     )
 
 
@@ -600,10 +605,13 @@ def _get_default_backend():
     user_skills_dir = str(_paths_mod.USER_SKILLS_DIR)
     global_skills_dir = str(_paths_mod.GLOBAL_SKILLS_DIR)
 
+    # Dangerous mode opens the workspace (`/`) route to the real filesystem;
+    # the /skills/ and /memories/ routes stay confined (virtual_mode=True).
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
+        dangerous=cfg.dangerous_mode,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -919,6 +927,7 @@ def create_cli_agent(
         root_dir=workspace_dir,
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
+        dangerous=cfg.dangerous_mode,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,

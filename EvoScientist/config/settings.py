@@ -332,6 +332,11 @@ class EvoScientistConfig:
     auto_mode: bool = False  # Run unattended: imply auto_approve and disable ask_user
     shell_allow_list: str = ""  # Comma-separated shell command prefixes to auto-approve
 
+    # Dangerous mode: real-filesystem access (no workspace confinement). The agent
+    # operates on real absolute paths anywhere on disk; the privileged-command
+    # blocklist (sudo/chmod/dd/...) still applies. Implies auto_approve.
+    dangerous_mode: bool = False
+
     # Agent features
     enable_ask_user: bool = True  # Enable ask_user tool for agent-initiated questions
 
@@ -385,6 +390,12 @@ class EvoScientistConfig:
                 "Invalid sandbox_execute_timeout %r; falling back to 300.", t
             )
             self.sandbox_execute_timeout = 300
+
+        # Dangerous mode implies auto_approve regardless of source (CLI, env,
+        # config file). Mirrors how auto_mode implies auto_approve — done here so
+        # the coupling holds even when dangerous_mode is set via `config set`.
+        if self.dangerous_mode:
+            self.auto_approve = True
 
         try:
             writer = MemoryObservationWriter(
@@ -636,6 +647,7 @@ _ENV_MAPPINGS = {
     "openrouter_anthropic_prompt_cache": (
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ),
+    "dangerous_mode": "EVOSCIENTIST_DANGEROUS_MODE",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
@@ -761,6 +773,12 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):
         os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "true"
+    # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
+    # (warning banner, run_in_background) and is inherited by the langgraph dev
+    # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)
+    # is invisible to those consumers while the backend is already unconfined.
+    if config.dangerous_mode:
+        os.environ["EVOSCIENTIST_DANGEROUS_MODE"] = "true"
     if config.use_responses_api and not os.environ.get(
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):

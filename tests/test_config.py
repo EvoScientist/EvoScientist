@@ -144,6 +144,18 @@ class TestEvoScientistConfig:
         assert config.model == "gpt-4o"
         assert config.default_mode == "run"
 
+    def test_dangerous_mode_default(self):
+        """dangerous_mode defaults off and does not force auto_approve."""
+        config = EvoScientistConfig()
+        assert config.dangerous_mode is False
+        assert config.auto_approve is False
+
+    def test_dangerous_mode_implies_auto_approve(self):
+        """Enabling dangerous_mode forces auto_approve via __post_init__."""
+        config = EvoScientistConfig(dangerous_mode=True)
+        assert config.dangerous_mode is True
+        assert config.auto_approve is True
+
 
 # =============================================================================
 # Test config path functions
@@ -611,6 +623,31 @@ class TestApplyConfigToEnv:
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") == (
             "true"
         )
+
+    def test_dangerous_mode_round_trips_to_env(self, clean_env, monkeypatch):
+        """dangerous_mode set via CLI override must survive a fresh re-read.
+
+        Regression: a --dangerous CLI flag is never persisted to file/env, so a
+        fresh get_effective_config() (warning banner, run_in_background, the
+        langgraph dev subprocess) would read it back as False while the backend
+        is already unconfined. apply_config_to_env round-trips it to env.
+        """
+        from EvoScientist.config import get_effective_config
+
+        monkeypatch.delenv("EVOSCIENTIST_DANGEROUS_MODE", raising=False)
+        cfg = get_effective_config({"dangerous_mode": True})
+        assert cfg.dangerous_mode is True
+
+        apply_config_to_env(cfg)
+        assert os.environ.get("EVOSCIENTIST_DANGEROUS_MODE") == "true"
+        # The fresh, no-override read now agrees with the backend.
+        assert get_effective_config().dangerous_mode is True
+
+    def test_dangerous_mode_not_applied_when_off(self, clean_env, monkeypatch):
+        """dangerous_mode=False must not write the env var."""
+        monkeypatch.delenv("EVOSCIENTIST_DANGEROUS_MODE", raising=False)
+        apply_config_to_env(EvoScientistConfig())
+        assert os.environ.get("EVOSCIENTIST_DANGEROUS_MODE") is None
 
     def test_ollama_base_url_applied(self, clean_env, monkeypatch):
         """Test that ollama_base_url is applied to OLLAMA_BASE_URL env var."""

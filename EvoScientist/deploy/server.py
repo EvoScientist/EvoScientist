@@ -144,6 +144,16 @@ def deploy(
             border_style="cyan",
         )
     )
+    if config.dangerous_mode:
+        from ..cli._constants import (
+            DANGEROUS_BANNER_LABEL,
+            DANGEROUS_BANNER_MESSAGE,
+        )
+
+        console.print(
+            f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
+            f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
+        )
 
     # 6. ccproxy lifecycle (only if any provider uses OAuth)
     _ccproxy_proc = None

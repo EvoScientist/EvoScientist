@@ -29,6 +29,7 @@ def _make_config(
     log_level: str = "warning",
     langgraph_dev_jobs_per_worker: int = 10,
     langgraph_dev_file_persistence: bool = True,
+    dangerous_mode: bool = False,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -38,6 +39,7 @@ def _make_config(
         log_level=log_level,
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
         langgraph_dev_file_persistence=langgraph_dev_file_persistence,
+        dangerous_mode=dangerous_mode,
     )
 
 

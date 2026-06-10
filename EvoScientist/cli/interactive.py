@@ -44,7 +44,14 @@ from ..sessions import (
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
-from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
+from ._constants import (
+    DANGEROUS_BANNER_LABEL,
+    DANGEROUS_BANNER_MESSAGE,
+    LOGO_GRADIENT,
+    LOGO_LINES,
+    WELCOME_SLOGANS,
+    build_metadata,
+)
 from .agent import _create_session_workspace, _load_agent, _shorten_path
 from .channel import (
     ChannelMessage,
@@ -141,6 +148,22 @@ def print_banner(
     info.append(" \u2022 Ctrl+C ", style="#ffe082")
     info.append("interrupt", style="#ffe082 bold")
     console.print(info)
+    print_dangerous_warning()
+
+
+def print_dangerous_warning() -> None:
+    """Print an unmissable warning when dangerous (real-filesystem) mode is on."""
+    try:
+        from ..config import get_effective_config
+
+        if not get_effective_config().dangerous_mode:
+            return
+    except Exception:
+        return
+    warn = Text()
+    warn.append(f"\n  \u26a0 {DANGEROUS_BANNER_LABEL}", style="bold white on red")
+    warn.append(f"  {DANGEROUS_BANNER_MESSAGE}", style="bold red")
+    console.print(warn)
 
 
 # =============================================================================

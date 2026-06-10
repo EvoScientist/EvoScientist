@@ -43,10 +43,14 @@ _SYSTEM_PATH_PREFIXES = (
     "/root/",
 )
 
-# Dangerous patterns that could escape the workspace
-BLOCKED_PATTERNS = [
+# Path-confinement patterns: keep the agent inside the workspace. These are
+# bypassed in dangerous mode (real-filesystem access).
+_PATH_PATTERNS = [
     r"~/",  # home directory
     r"\bcd\s+/",  # cd to absolute path
+]
+# Destructive patterns: catastrophic regardless of mode — always enforced.
+_DESTRUCTIVE_PATTERNS = [
     r"\brm\s+-rf\s+/",  # rm -rf with absolute path
 ]
 
@@ -499,6 +503,8 @@ def _extract_all_paths(
 def validate_command(
     command: str,
     allow_prefixes: tuple[str, ...] = (),
+    *,
+    dangerous: bool = False,
 ) -> str | None:
     """
     Validate a shell command for safety.
@@ -507,45 +513,60 @@ def validate_command(
         command: Shell command string.
         allow_prefixes: Absolute path prefixes exempt from the system-path
             block list (matching rules in ``_is_under_allowed_prefix``).
+        dangerous: When True (real-filesystem mode), skip the path-confinement
+            checks (``..`` traversal, ``~/``/``cd /`` patterns, absolute system
+            paths). Privileged commands (:data:`BLOCKED_COMMANDS`) and
+            catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
+            enforced.
 
     Returns:
         None if command is safe, error message string if blocked.
     """
-    # Check for '..' path traversal as a path component
-    if _has_traversal_component(command):
-        return (
-            "Command blocked: contains '..' path traversal. "
-            "All commands must operate within the workspace directory. "
-            "Use relative paths (e.g., './file.py') instead."
-        )
-
-    # Check for dangerous patterns
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, command):
+    # Path-confinement checks — skipped in dangerous mode.
+    if not dangerous:
+        # Check for '..' path traversal as a path component
+        if _has_traversal_component(command):
             return (
-                f"Command blocked: contains forbidden pattern '{pattern}'. "
-                f"All commands must operate within the workspace directory. "
-                f"Use relative paths (e.g., './file.py') instead."
+                "Command blocked: contains '..' path traversal. "
+                "All commands must operate within the workspace directory. "
+                "Use relative paths (e.g., './file.py') instead."
             )
 
-    # Check for dangerous commands (pipeline-aware)
+        for pattern in _PATH_PATTERNS:
+            if re.search(pattern, command):
+                return (
+                    f"Command blocked: contains forbidden pattern '{pattern}'. "
+                    f"All commands must operate within the workspace directory. "
+                    f"Use relative paths (e.g., './file.py') instead."
+                )
+
+    # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
+    for pattern in _DESTRUCTIVE_PATTERNS:
+        if re.search(pattern, command):
+            return (
+                f"Command blocked: contains destructive pattern '{pattern}'. "
+                f"This operation is not permitted."
+            )
+
+    # Check for dangerous commands (pipeline-aware) — always enforced.
     for base_cmd in _split_shell_commands(command):
         if base_cmd in BLOCKED_COMMANDS:
             return (
-                f"Command blocked: '{base_cmd}' is not allowed in sandbox mode. "
+                f"Command blocked: '{base_cmd}' is not allowed. "
                 f"Only standard development commands are permitted."
             )
 
-    # Check for absolute system paths (including inside quoted strings).
-    # This catches attacks like: python -c "os.remove('/Users/foo/file')"
-    escaped_paths = _extract_all_paths(command, allow_prefixes=allow_prefixes)
-    if escaped_paths:
-        path_sample = escaped_paths[0]
-        return (
-            f"Command blocked: contains absolute system path '{path_sample}'. "
-            f"All file operations must use relative paths within the workspace. "
-            f"Use relative paths (e.g., './file.py') instead."
-        )
+    # Absolute-system-path check — skipped in dangerous mode.
+    # Catches attacks like: python -c "os.remove('/Users/foo/file')"
+    if not dangerous:
+        escaped_paths = _extract_all_paths(command, allow_prefixes=allow_prefixes)
+        if escaped_paths:
+            path_sample = escaped_paths[0]
+            return (
+                f"Command blocked: contains absolute system path '{path_sample}'. "
+                f"All file operations must use relative paths within the workspace. "
+                f"Use relative paths (e.g., './file.py') instead."
+            )
 
     return None
 
@@ -828,7 +849,7 @@ class MergedSkillsBackend(BackendProtocol):
 
 
 def prepare_sandbox_command(
-    command: str, cwd: str | Path, *, virtual_mode: bool = True
+    command: str, cwd: str | Path, *, virtual_mode: bool = True, dangerous: bool = False
 ) -> tuple[str, str | None]:
     """Normalize workspace paths in ``command`` and validate it for the sandbox.
 
@@ -849,10 +870,13 @@ def prepare_sandbox_command(
     # Replace literal workspace-root absolute paths with ./ after SSH masking so
     # remote paths that happen to contain the local cwd are preserved, and before
     # validation so local workspace paths are sanitized before the system-path
-    # check fires.
-    ws = cwd_str + "/"
-    if ws in command:
-        command = command.replace(ws, "./")
+    # check fires. Skipped in dangerous mode: there is no virtual workspace, the
+    # agent uses real absolute paths, and rewriting would corrupt any argument
+    # (echo text, grep/git pattern) that merely contains the cwd string.
+    if not dangerous:
+        ws = cwd_str + "/"
+        if ws in command:
+            command = command.replace(ws, "./")
     if virtual_mode:
         command = convert_virtual_paths_in_command(
             command=command,
@@ -866,7 +890,9 @@ def prepare_sandbox_command(
         str(paths.MEMORIES_DIR),
         str(_BUILTIN_SKILLS_DIR),
     )
-    error = validate_command(command, allow_prefixes=allow_prefixes)
+    error = validate_command(
+        command, allow_prefixes=allow_prefixes, dangerous=dangerous
+    )
     if error:
         return command, error
     return _restore_spans(command, ssh_replacements), None
@@ -893,6 +919,7 @@ class CustomSandboxBackend(LocalShellBackend):
         max_output_bytes: int = 100_000,
         env: dict[str, str] | None = None,
         inherit_env: bool = True,
+        dangerous: bool = False,
     ):
         """
         Initialize custom sandbox backend.
@@ -904,7 +931,16 @@ class CustomSandboxBackend(LocalShellBackend):
             max_output_bytes: Max output size before truncation (default 100KB)
             env: Extra environment variables for subprocess
             inherit_env: Whether to inherit parent process env (default True)
+            dangerous: Real-filesystem mode — the agent operates on real absolute
+                paths anywhere on disk (no workspace confinement). Forces
+                ``virtual_mode=False`` and relaxes path validation while keeping
+                the privileged-command blocklist. Defaults to False.
         """
+        self._dangerous = dangerous
+        if dangerous:
+            # Real paths require the legacy (non-virtual) resolution path so the
+            # parent backend returns absolute paths as-is.
+            virtual_mode = False
         super().__init__(
             root_dir=root_dir,
             virtual_mode=virtual_mode,
@@ -927,7 +963,13 @@ class CustomSandboxBackend(LocalShellBackend):
           2. /<ws_name>/file.py            → /file.py
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
+
+        In dangerous (real-filesystem) mode, skip all rewriting and let the
+        parent resolve real absolute paths as-is.
         """
+        if self._dangerous:
+            return super()._resolve_path(key)
+
         cwd_str = str(self.cwd).rstrip("/")
         ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
 
@@ -976,7 +1018,7 @@ class CustomSandboxBackend(LocalShellBackend):
         Then delegates to LocalShellBackend.execute() for actual execution.
         """
         command, error = prepare_sandbox_command(
-            command, self.cwd, virtual_mode=self.virtual_mode
+            command, self.cwd, virtual_mode=self.virtual_mode, dangerous=self._dangerous
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)
