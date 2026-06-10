@@ -2637,16 +2637,15 @@ def run_textual_interactive(
             self._render_completions()
             selected = self._comp_items[self._comp_index][0]
             is_dir = selected.startswith("@") and selected.rstrip('"').endswith("/")
-            if not is_dir:
-                # value setter fires 2 Changed events (clear + insert)
-                self._comp_suppress_changes = 2
             self._apply_selected_completion()
-            # After applying a final @file (not dir), hide the popup so
-            # the user doesn't see stale suggestions.
             if is_dir:
                 return
             if selected.startswith("@"):
                 self._hide_completions()
+            # Suppress the 2 Changed events from the value setter
+            # (clear + insert). Must be AFTER _hide_completions which
+            # resets the counter.
+            self._comp_suppress_changes = 2
 
         def _handle_completion_enter(self) -> bool:
             """Called by ChatTextArea before submitting on Enter.
