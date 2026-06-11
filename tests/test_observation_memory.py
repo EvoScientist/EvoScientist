@@ -877,6 +877,10 @@ def test_async_watcher_deletes_worker_thread_on_terminal_status(
 
     class _Threads:
         async def delete(self, thread_id):
+            # Accounting must complete BEFORE the best-effort deletion —
+            # cancellation mid-deletion must never leave the worker
+            # stuck as "running" (CodeRabbit on #279).
+            assert worker_activity.memory_worker_status().is_running is False
             deleted.append(thread_id)
 
     monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)

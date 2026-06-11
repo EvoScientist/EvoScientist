@@ -1037,12 +1037,14 @@ def _watch_memory_worker_run_sync(
             time.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
-            # Only delete once the run is terminal — deleting a thread with a
-            # live run would break it. Crash residue is handled by the
+            # Accounting first, then best-effort deletion (mirrors the
+            # async watcher's cancellation-safe ordering). Only delete
+            # once the run is terminal — deleting a thread with a live
+            # run would break it. Crash residue is handled by the
             # restore whitelist + startup purge in sessions.py.
+            mark_memory_worker_finished(thread_id, run_id)
             if client is not None:
                 _delete_memory_worker_thread(client, thread_id)
-            mark_memory_worker_finished(thread_id, run_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
@@ -1096,8 +1098,13 @@ async def _watch_memory_worker_run_async(
             await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
-            await _adelete_memory_worker_thread(client, thread_id)
+            # Accounting BEFORE the best-effort deletion: if this task is
+            # cancelled mid-finally, only the deletion await is lost
+            # (startup purge covers the residue). The to_thread side
+            # effect completes even if its await is cancelled, so the
+            # worker is never stuck "running".
             await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
+            await _adelete_memory_worker_thread(client, thread_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
