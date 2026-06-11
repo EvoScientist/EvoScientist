@@ -39,6 +39,7 @@ from ..sessions import (
     get_thread_messages,
     get_thread_metadata,
     resolve_thread_id_prefix,
+    short_thread_id,
     thread_exists,
 )
 from ..stream.console import console
@@ -1423,7 +1424,7 @@ def cmd_run(
     console.print(sep)
     console.print(Text(f"> {prompt}"))
     console.print(sep)
-    console.print(f"[dim]Thread: {thread_id}[/dim]")
+    console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
     if workspace_dir:
         console.print(f"[dim]Workspace: {_shorten_path(workspace_dir)}[/dim]")
     console.print()

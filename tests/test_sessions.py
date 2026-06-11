@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+import uuid
 from datetime import UTC
 from unittest.mock import patch
 
@@ -50,13 +51,10 @@ def _mock_path(db_path: str):
 
 
 class TestGenerateThreadId(unittest.TestCase):
-    def test_length(self):
+    def test_uuid_format(self):
+        # Full UUID so langgraph-api can address CLI threads (WebUI interop).
         tid = generate_thread_id()
-        assert len(tid) == 8
-
-    def test_hex(self):
-        tid = generate_thread_id()
-        int(tid, 16)  # Should not raise
+        assert tid == str(uuid.UUID(tid))
 
     def test_uniqueness(self):
         ids = {generate_thread_id() for _ in range(100)}
@@ -2249,9 +2247,11 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         self,
         db_path: str,
         thread_ids: list[str],
-        assistant_id: str = "aaaa-bbbb",
-        graph_id: str = "EvoScientist",
+        assistant_id: str | None = "aaaa-bbbb",
+        graph_id: str | None = "EvoScientist",
         workspace_dir: str | None = _WS,
+        agent_name: str | None = "EvoScientist",
+        ckpt_prefix: str = "ckpt",
     ) -> None:
         """Insert minimal checkpoint rows for the given thread_ids into a fresh DB."""
         import json
@@ -2264,18 +2264,19 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             " parent_checkpoint_id TEXT, type TEXT, checkpoint BLOB, metadata TEXT)"
         )
         for tid in thread_ids:
-            meta_dict = {
-                "updated_at": "2025-01-01T00:00:00+00:00",
-                "agent_name": "EvoScientist",
-                "assistant_id": assistant_id,
-                "graph_id": graph_id,
-            }
+            meta_dict: dict = {"updated_at": "2025-01-01T00:00:00+00:00"}
+            if agent_name is not None:
+                meta_dict["agent_name"] = agent_name
+            if assistant_id is not None:
+                meta_dict["assistant_id"] = assistant_id
+            if graph_id is not None:
+                meta_dict["graph_id"] = graph_id
             if workspace_dir is not None:
                 meta_dict["workspace_dir"] = workspace_dir
             meta = json.dumps(meta_dict)
             con.execute(
                 "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
-                (tid, "", f"ckpt-{tid[:8]}", None, "empty", b"", meta),
+                (tid, "", f"{ckpt_prefix}-{tid[:8]}", None, "empty", b"", meta),
             )
         con.commit()
         con.close()
@@ -2499,6 +2500,173 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             }
             con.close()
         assert remaining == {keep_main, keep_cli}
+
+    def test_restores_cli_rows_and_excludes_worker_residue(self):
+        """CLI rows (agent_name, no graph_id) are restored with graph_id
+        backfilled; crashed-worker residue (agent_name AND graph_id=
+        evomemory-*) stays excluded — graph_id wins over agent_name."""
+        import sys
+        import uuid as _uuid_mod
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        cli_thread = "11111111-1111-1111-1111-111111111111"
+        worker_residue = "22222222-2222-2222-2222-222222222222"
+
+        mock_store: dict = {"threads": []}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
+
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            # CLI row: build_metadata stamps agent_name/workspace_dir but
+            # never graph_id or assistant_id.
+            self._make_db_with_threads(
+                db, [cli_thread], assistant_id=None, graph_id=None
+            )
+            # Crashed memory-worker residue: stamps BOTH.
+            self._make_db_with_threads(
+                db, [worker_residue], graph_id="evomemory-turn-worker"
+            )
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+                self._patch_workspace(),
+            ):
+                _run(_restore_webui_threads_to_global_store())
+
+        added = mock_store["threads"]
+        assert len(added) == 1, f"expected only the CLI thread, got {added}"
+        assert added[0]["thread_id"] == _uuid_mod.UUID(cli_thread)
+        # graph_id backfilled so Threads.State.get works on the stub.
+        assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+
+    def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
+        """Interop thread (CLI rows + WebUI rows under one UUID): bare
+        columns under GROUP BY let SQLite pick an arbitrary row's NULL —
+        all metadata fields must be MAX-aggregated (Codex F2)."""
+        import sys
+        import uuid as _uuid_mod
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        tid = "11111111-1111-1111-1111-111111111111"
+        asst = "a2b49500-c49b-5560-b664-d42ee8b66d3c"
+
+        mock_store: dict = {"threads": []}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
+
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            # Older CLI row: no assistant_id / graph_id. "a-..." checkpoint
+            # id sorts BEFORE the WebUI row's so a bare-column GROUP BY
+            # would tend to surface this row's NULLs.
+            self._make_db_with_threads(
+                db, [tid], assistant_id=None, graph_id=None, ckpt_prefix="a"
+            )
+            # Newer WebUI row on the SAME thread: carries both.
+            self._make_db_with_threads(db, [tid], assistant_id=asst, ckpt_prefix="b")
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+                self._patch_workspace(),
+            ):
+                _run(_restore_webui_threads_to_global_store())
+
+        added = mock_store["threads"]
+        assert len(added) == 1, f"expected 1 thread, got {added}"
+        assert added[0]["thread_id"] == _uuid_mod.UUID(tid)
+        assert added[0]["metadata"].get("assistant_id") == asst
+        assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+
+    def test_restored_stub_gets_title_from_first_human_message(self):
+        """Stubs carry metadata.title derived from the thread's first human
+        message, so the WebUI sidebar doesn't show "Untitled Thread"."""
+        import sys
+        from unittest.mock import MagicMock, patch
+
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.sessions import (
+            AGENT_NAME,
+            _restore_webui_threads_to_global_store,
+            create_checkpointer_for_langgraph_api,
+        )
+
+        thread_id = "33333333-3333-3333-3333-333333333333"
+
+        mock_store: dict = {"threads": []}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
+
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        async def _write_then_restore():
+            async with create_checkpointer_for_langgraph_api() as cp:
+                await cp.aput(
+                    {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+                    {
+                        "v": 1,
+                        "id": "ckpt-title",
+                        "ts": "2024-01-01T00:00:00+00:00",
+                        "channel_values": {
+                            "messages": [HumanMessage(content="hello title test")]
+                        },
+                        "channel_versions": {},
+                        "versions_seen": {},
+                        "pending_sends": [],
+                    },
+                    {"source": "loop", "step": 1, "graph_id": AGENT_NAME},
+                    {},
+                )
+            await _restore_webui_threads_to_global_store()
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+                patch(
+                    "EvoScientist.sessions._api_workspace_dir",
+                    return_value=self._WS,
+                ),
+            ):
+                _run(_write_then_restore())
+
+        added = mock_store["threads"]
+        assert len(added) == 1, f"expected 1 restored thread, got {added}"
+        assert added[0]["metadata"].get("title") == "hello title test"
 
     def test_removes_ghost_entries_absent_from_sqlite(self):
         """Stale .pckl UUID entries with no checkpoint rows are dropped.

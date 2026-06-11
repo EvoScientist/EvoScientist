@@ -14,6 +14,8 @@ def print_resume_hint(
     out = console or Console()
     out.print("[dim]Goodbye![/dim]")
     if thread_id:
+        from ..sessions import short_thread_id
+
         out.print()
         out.print("[dim]Resume this session with:[/dim]")
-        out.print(f"[cyan]EvoSci --resume {escape(thread_id)}[/cyan]")
+        out.print(f"[cyan]EvoSci --resume {escape(short_thread_id(thread_id))}[/cyan]")

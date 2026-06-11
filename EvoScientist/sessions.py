@@ -111,9 +111,25 @@ def get_db_path() -> Path:
     return Path(_to_short_path(str(db_dir))) / "sessions.db"
 
 
+def short_thread_id(thread_id: str) -> str:
+    """First 8 chars for display (git-style); legacy 8-hex ids pass through.
+
+    All lookup commands (``/resume``, ``/delete``) accept prefixes, so the
+    shortened form is always a usable handle.
+    """
+    return thread_id[:8]
+
+
 def generate_thread_id() -> str:
-    """Generate an 8-char hex thread ID."""
-    return uuid.uuid4().hex[:8]
+    """Generate a full-UUID thread ID.
+
+    UUID format (not the legacy 8-char hex) so CLI threads are addressable
+    by langgraph-api — its thread endpoints reject non-UUID ids — which is
+    what lets the WebUI list and resume CLI sessions. UIs display the
+    first 8 chars; ``/resume`` prefix matching is unaffected. Pre-existing
+    8-char hex threads keep working in the CLI but stay CLI-only.
+    """
+    return str(uuid.uuid4())
 
 
 # ---------------------------------------------------------------------------
@@ -1503,39 +1519,14 @@ async def _restore_webui_threads_to_global_store() -> None:
         # langgraph_runtime_inmem not available (unit tests, plain CLI mode).
         return
 
+    def _to_uuid_safe(v: Any) -> uuid.UUID | None:
+        try:
+            return uuid.UUID(str(v))
+        except (ValueError, AttributeError):
+            return None
+
     try:
         rows: list[Any] = []
-        db_path = str(get_db_path())
-        async with aiosqlite.connect(db_path, timeout=30.0) as conn:
-            # No checkpoints table (fresh DB) → rows stays empty, but the
-            # ghost-removal pass below must still run: every UUID entry the
-            # .pckl registry loaded is then stale by definition.
-            if await _table_exists(conn, "checkpoints"):
-                # Fetch all distinct UUID-format thread IDs with their latest
-                # checkpoint timestamp and the assistant_id / graph_id stored
-                # in the checkpoint metadata.  Required by the WebUI's
-                # POST /threads/search filter (e.g. metadata.assistant_id).
-                # UUID regex: 8-4-4-4-12 hex groups.
-                query = """
-                    SELECT thread_id,
-                           MAX(json_extract(metadata, '$.updated_at')) as updated_at,
-                           json_extract(metadata, '$.assistant_id') as assistant_id,
-                           json_extract(metadata, '$.graph_id') as graph_id,
-                           MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir
-                    FROM checkpoints
-                    WHERE thread_id LIKE '________-____-____-____-____________'
-                    GROUP BY thread_id
-                    ORDER BY updated_at DESC
-                """
-                async with conn.execute(query) as cur:
-                    rows = await cur.fetchall()
-
-        def _to_uuid_safe(v: Any) -> uuid.UUID | None:
-            try:
-                return uuid.UUID(str(v))
-            except (ValueError, AttributeError):
-                return None
-
         # All UUID threads that have ANY checkpoint rows — the existence
         # check for ghost removal (deliberately unscoped: a thread whose
         # checkpoints exist but fall outside the restore scope is not a
@@ -1545,23 +1536,78 @@ async def _restore_webui_threads_to_global_store() -> None:
         # workspace. sessions.db is machine-global, so an unscoped restore
         # would resurrect every workspace's history (and internal
         # worker/subagent threads) into this server's thread registry — and
-        # expose it over the unauthenticated API / --tunnel.
-        # workspace_dir/agent_name are stamped at write time by
-        # _ApiPruningCheckpointer; rows that predate stamping have no
+        # expose it over the unauthenticated API / --tunnel. Main-graph =
+        # metadata.graph_id == AGENT_NAME (langgraph-api rows, stamped by
+        # _ApiPruningCheckpointer) OR no graph_id but agent_name ==
+        # AGENT_NAME (CLI rows via build_metadata). Worker residue carries
+        # graph_id='evomemory-*' and is excluded by the first clause even
+        # though it also stamps agent_name. Rows predating stamping have no
         # workspace_dir and are deliberately excluded.
         current_workspace = _api_workspace_dir()
-        sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str | None]] = {}
-        for row in rows:
-            thread_id_str, updated_at, assistant_id, graph_id, workspace_dir = row
-            thread_uuid = _to_uuid_safe(thread_id_str)
-            if thread_uuid is None:
-                continue
-            uuid_threads_in_db.add(thread_uuid)
-            if graph_id != AGENT_NAME:
-                continue
-            if not workspace_dir or workspace_dir != current_workspace:
-                continue
-            sqlite_data[thread_uuid] = (updated_at, assistant_id, graph_id)
+        sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
+        titles: dict[uuid.UUID, str] = {}
+        db_path = str(get_db_path())
+        async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+            # No checkpoints table (fresh DB) → rows stays empty, but the
+            # ghost-removal pass below must still run: every UUID entry the
+            # .pckl registry loaded is then stale by definition.
+            if await _table_exists(conn, "checkpoints"):
+                # UUID regex: 8-4-4-4-12 hex groups. assistant_id/graph_id
+                # are needed by the WebUI's POST /threads/search filters.
+                # Every metadata field is MAX-aggregated: an interop thread
+                # mixes CLI rows (no assistant_id/graph_id) with WebUI rows,
+                # and a bare column under GROUP BY would let SQLite pick an
+                # arbitrary row's NULL.
+                query = """
+                    SELECT thread_id,
+                           MAX(json_extract(metadata, '$.updated_at')) as updated_at,
+                           MAX(json_extract(metadata, '$.assistant_id')) as assistant_id,
+                           MAX(json_extract(metadata, '$.graph_id')) as graph_id,
+                           MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir,
+                           MAX(json_extract(metadata, '$.agent_name')) as agent_name
+                    FROM checkpoints
+                    WHERE thread_id LIKE '________-____-____-____-____________'
+                    GROUP BY thread_id
+                    ORDER BY updated_at DESC
+                """
+                async with conn.execute(query) as cur:
+                    rows = await cur.fetchall()
+
+            for row in rows:
+                (
+                    thread_id_str,
+                    updated_at,
+                    assistant_id,
+                    graph_id,
+                    workspace_dir,
+                    agent_name,
+                ) = row
+                thread_uuid = _to_uuid_safe(thread_id_str)
+                if thread_uuid is None:
+                    continue
+                uuid_threads_in_db.add(thread_uuid)
+                is_main_graph = graph_id == AGENT_NAME or (
+                    graph_id is None and agent_name == AGENT_NAME
+                )
+                if not is_main_graph:
+                    continue
+                if not workspace_dir or workspace_dir != current_workspace:
+                    continue
+                sqlite_data[thread_uuid] = (updated_at, assistant_id, AGENT_NAME)
+
+            # Derive a sidebar title from each scoped thread's first human
+            # message (stubs carry values=None, so the WebUI would otherwise
+            # render every restored thread as "Untitled Thread").
+            if sqlite_data:
+                saver = AsyncSqliteSaver(conn, serde=JsonPlusSerializer())
+                for thread_uuid in sqlite_data:
+                    try:
+                        msgs = await _load_checkpoint_messages(saver, str(thread_uuid))
+                        preview = _extract_preview(msgs)
+                        if preview:
+                            titles[thread_uuid] = preview
+                    except Exception:
+                        continue
 
         def _parse_dt(s: str | None) -> datetime:
             """Parse an ISO timestamp string to datetime, falling back to now."""
@@ -1609,6 +1655,9 @@ async def _restore_webui_threads_to_global_store() -> None:
                 if gid and "graph_id" not in meta:
                     meta["graph_id"] = gid
                     changed = True
+                if "title" not in meta and tid_uuid in titles:
+                    meta["title"] = titles[tid_uuid]
+                    changed = True
             # State.get() KeyErrors without "config".
             if "config" not in entry:
                 entry["config"] = {}
@@ -1626,12 +1675,12 @@ async def _restore_webui_threads_to_global_store() -> None:
         for thread_uuid, (updated_at, assistant_id, graph_id) in sqlite_data.items():
             if thread_uuid in existing_uuids:
                 continue
-            stub_metadata: dict[str, Any] = {}
+            stub_metadata: dict[str, Any] = {"graph_id": graph_id}
             if assistant_id:
                 # str, not uuid.UUID — same convention as above.
                 stub_metadata["assistant_id"] = str(assistant_id)
-            if graph_id:
-                stub_metadata["graph_id"] = graph_id
+            if thread_uuid in titles:
+                stub_metadata["title"] = titles[thread_uuid]
             ts = _parse_dt(updated_at)
             stub: dict[str, Any] = {
                 "thread_id": thread_uuid,
