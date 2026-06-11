@@ -2004,5 +2004,397 @@ class TestReduceMessagesDeltaUpstreamParity:
         assert _signature(out) == [("HumanMessage", "d1", "x")]
 
 
+class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
+    """Tests for ``create_checkpointer_for_langgraph_api`` — the WebUI/deploy
+    SQLite checkpointer factory that replaces the default ``InMemorySaver``."""
+
+    def test_yields_pruning_checkpointer(self):
+        """Factory yields a ``PruningCheckpointer`` instance."""
+        from EvoScientist.sessions import (
+            PruningCheckpointer,
+            create_checkpointer_for_langgraph_api,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with patch(
+                "EvoScientist.sessions.get_db_path",
+                return_value=_mock_path(db),
+            ):
+
+                async def _run_inner():
+                    async with create_checkpointer_for_langgraph_api() as cp:
+                        assert isinstance(cp, PruningCheckpointer)
+
+                _run(_run_inner())
+
+    def test_checkpointer_is_set_up(self):
+        """Factory calls ``setup()`` so tables exist before yielding."""
+        import aiosqlite
+
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with patch(
+                "EvoScientist.sessions.get_db_path",
+                return_value=_mock_path(db),
+            ):
+
+                async def _run_inner():
+                    async with create_checkpointer_for_langgraph_api():
+                        async with aiosqlite.connect(db) as conn:
+                            async with conn.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+                            ) as cur:
+                                row = await cur.fetchone()
+                            assert row is not None, (
+                                "checkpoints table must exist after setup()"
+                            )
+
+                _run(_run_inner())
+
+    def test_checkpointer_persists_across_contexts(self):
+        """Data written in one context manager is readable in a new one.
+
+        This is the core regression test: verifies that session data
+        survives process restarts (simulated as two separate ``async with``
+        blocks sharing the same DB file).
+        """
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        thread_id = "testthread1"
+
+        async def _run_inner():
+            with tempfile.TemporaryDirectory() as td:
+                db = os.path.join(td, "sessions.db")
+
+                def _patch():
+                    return patch(
+                        "EvoScientist.sessions.get_db_path",
+                        return_value=_mock_path(db),
+                    )
+
+                # --- First "process": write a checkpoint ---
+                with _patch():
+                    async with create_checkpointer_for_langgraph_api() as cp:
+                        config = {
+                            "configurable": {
+                                "thread_id": thread_id,
+                                "checkpoint_ns": "",
+                            }
+                        }
+                        checkpoint = {
+                            "v": 1,
+                            "id": "ckpt-001",
+                            "ts": "2024-01-01T00:00:00+00:00",
+                            "channel_values": {"messages": []},
+                            "channel_versions": {},
+                            "versions_seen": {},
+                            "pending_sends": [],
+                        }
+                        metadata = {
+                            "source": "input",
+                            "step": 0,
+                            "writes": {},
+                            "parents": {},
+                            "agent_name": "EvoScientist",
+                        }
+                        await cp.aput(config, checkpoint, metadata, {})
+
+                # --- Second "process": read back the checkpoint ---
+                with _patch():
+                    async with create_checkpointer_for_langgraph_api() as cp2:
+                        result = await cp2.aget_tuple(
+                            {
+                                "configurable": {
+                                    "thread_id": thread_id,
+                                    "checkpoint_ns": "",
+                                }
+                            }
+                        )
+                        assert result is not None, (
+                            "Checkpoint written in first context must be readable in second context "
+                            "(simulates data survival across process restarts)"
+                        )
+                        assert result.config["configurable"]["thread_id"] == thread_id
+
+        _run(_run_inner())
+
+    def test_has_required_extended_methods(self):
+        """Yielded checkpointer exposes the full capability set expected by
+        ``langgraph-api``'s ``_CustomCheckpointerAdapter``."""
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with patch(
+                "EvoScientist.sessions.get_db_path",
+                return_value=_mock_path(db),
+            ):
+
+                async def _run_inner():
+                    async with create_checkpointer_for_langgraph_api() as cp:
+                        for method in (
+                            "adelete_thread",
+                            "adelete_for_runs",
+                            "acopy_thread",
+                            "aprune",
+                            "aget_tuple",
+                            "aput",
+                            "aput_writes",
+                            "alist",
+                        ):
+                            assert callable(getattr(cp, method, None)), (
+                                f"PruningCheckpointer must expose '{method}' for "
+                                "langgraph-api full-capability compliance"
+                            )
+
+                _run(_run_inner())
+
+
+class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
+    """Tests for ``_restore_webui_threads_to_global_store``.
+
+    Verifies that UUID-format threads written to SQLite by ``langgraph dev``
+    runs are re-populated into ``GlobalStore["threads"]`` on server restart,
+    so the WebUI sidebar is not empty after a package upgrade or clean restart.
+    """
+
+    def _make_db_with_threads(
+        self,
+        db_path: str,
+        thread_ids: list[str],
+        assistant_id: str = "aaaa-bbbb",
+        graph_id: str = "EvoScientist",
+    ) -> None:
+        """Insert minimal checkpoint rows for the given thread_ids into a fresh DB."""
+        import json
+        import sqlite3
+
+        con = sqlite3.connect(db_path)
+        con.execute(
+            "CREATE TABLE checkpoints "
+            "(thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT PRIMARY KEY, "
+            " parent_checkpoint_id TEXT, type TEXT, checkpoint BLOB, metadata TEXT)"
+        )
+        for tid in thread_ids:
+            meta = json.dumps(
+                {
+                    "updated_at": "2025-01-01T00:00:00+00:00",
+                    "agent_name": "EvoScientist",
+                    "assistant_id": assistant_id,
+                    "graph_id": graph_id,
+                }
+            )
+            con.execute(
+                "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
+                (tid, "", f"ckpt-{tid[:8]}", None, "empty", b"", meta),
+            )
+        con.commit()
+        con.close()
+
+    def test_restores_uuid_threads_into_global_store(self):
+        """UUID-format thread IDs from SQLite are injected into GlobalStore."""
+        import sys
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        uuid_id = "12345678-1234-1234-1234-123456789abc"
+        asst_uuid_id = "a2b49500-c49b-5560-b664-d42ee8b66d3c"
+        short_id = "abcd1234"  # CLI-style, must be excluded
+
+        mock_store: dict = {"threads": []}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
+
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            self._make_db_with_threads(
+                db, [uuid_id, short_id], assistant_id=asst_uuid_id
+            )
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+            ):
+                _run(_restore_webui_threads_to_global_store())
+
+        # Only the UUID thread should have been added; the short-hex CLI thread
+        # should not appear because it doesn't match the UUID LIKE pattern.
+        added = mock_store["threads"]
+        assert len(added) == 1, f"Expected 1 restored thread, got {len(added)}: {added}"
+        import uuid as _uuid_mod
+
+        # thread_id MUST be stored as a uuid.UUID object, not a plain string.
+        # langgraph_runtime_inmem._get_with_filters compares with == against
+        # _ensure_uuid(thread_id), which returns a UUID object.  A string never
+        # equals a UUID object, causing every Threads.get() call to 404.
+        assert isinstance(added[0]["thread_id"], _uuid_mod.UUID), (
+            f"thread_id must be uuid.UUID, got {type(added[0]['thread_id'])}"
+        )
+        assert added[0]["thread_id"] == _uuid_mod.UUID(uuid_id)
+        assert added[0]["status"] == "idle"
+        # metadata must carry assistant_id (as UUID) and graph_id so
+        # POST /threads/search filters work correctly in the WebUI.
+        assert isinstance(added[0]["metadata"].get("assistant_id"), _uuid_mod.UUID)
+        assert added[0]["metadata"].get("assistant_id") == _uuid_mod.UUID(asst_uuid_id)
+        assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        # created_at / updated_at must be datetime objects, not ISO strings.
+        # Threads.search() sorts by these fields using sorted(); mixing
+        # datetime and str raises TypeError: '<' not supported.
+        from datetime import datetime as _dt
+
+        assert isinstance(added[0]["created_at"], _dt), (
+            f"created_at must be datetime, got {type(added[0]['created_at'])}"
+        )
+        assert isinstance(added[0]["updated_at"], _dt)
+
+    def test_fixes_existing_string_thread_ids_in_place(self):
+        """Threads already in GlobalStore with string thread_id get fixed in-place.
+
+        When .pckl loads successfully, threads are already in the store but
+        thread_id is a plain string (as pickled).  The restore must:
+          1. Convert thread_id to uuid.UUID so Threads.get() comparison works.
+          2. Backfill missing metadata.assistant_id / graph_id from SQLite.
+          3. Not create duplicate entries.
+        """
+        import sys
+        import uuid as _uuid_mod
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        uuid_id = "aaaabbbb-aaaa-bbbb-cccc-ddddeeeeffff"
+        asst_uuid_id = "a2b49500-c49b-5560-b664-d42ee8b66d3c"
+
+        # Simulate .pckl-restored thread: thread_id is a string, metadata empty.
+        existing_stub: dict = {"thread_id": uuid_id, "status": "idle", "metadata": {}}
+        mock_store: dict = {"threads": [existing_stub]}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
+
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            self._make_db_with_threads(db, [uuid_id], assistant_id=asst_uuid_id)
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+            ):
+                _run(_restore_webui_threads_to_global_store())
+
+        # No duplicate: still exactly one entry.
+        assert len(mock_store["threads"]) == 1, (
+            f"Expected 1 thread, got {len(mock_store['threads'])}"
+        )
+        t = mock_store["threads"][0]
+        # thread_id must now be a UUID object, not a string.
+        assert isinstance(t["thread_id"], _uuid_mod.UUID), (
+            f"thread_id must be uuid.UUID after fix, got {type(t['thread_id'])}"
+        )
+        assert t["thread_id"] == _uuid_mod.UUID(uuid_id)
+        # metadata must be backfilled.
+        assert isinstance(t["metadata"].get("assistant_id"), _uuid_mod.UUID)
+        assert t["metadata"].get("graph_id") == "EvoScientist"
+
+    def test_no_op_when_langgraph_runtime_inmem_absent(self):
+        """ImportError for langgraph_runtime_inmem is silently swallowed."""
+        import sys
+        from unittest.mock import patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        with patch.dict(sys.modules, {"langgraph_runtime_inmem.database": None}):
+            # Must not raise.
+            _run(_restore_webui_threads_to_global_store())
+
+    def test_no_op_when_db_has_no_checkpoints_table(self):
+        """Missing checkpoints table is handled gracefully."""
+        import sys
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        mock_store: dict = {"threads": []}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "empty.db")
+            # Create a valid but empty SQLite DB (no checkpoints table).
+            import sqlite3
+
+            sqlite3.connect(db).close()
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+            ):
+                _run(_restore_webui_threads_to_global_store())
+
+        # threads list untouched.
+        assert mock_store["threads"] == []
+
+    def test_create_checkpointer_calls_restore(self):
+        """create_checkpointer_for_langgraph_api calls _restore_webui_threads_to_global_store."""
+        from unittest.mock import patch
+
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        restore_called = []
+
+        async def fake_restore():
+            restore_called.append(True)
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch(
+                    "EvoScientist.sessions._restore_webui_threads_to_global_store",
+                    side_effect=fake_restore,
+                ),
+            ):
+
+                async def _run_inner():
+                    async with create_checkpointer_for_langgraph_api():
+                        pass
+
+                _run(_run_inner())
+
+        assert restore_called, "_restore_webui_threads_to_global_store must be called"
+
+
 if __name__ == "__main__":
     unittest.main()
