@@ -15,54 +15,16 @@ Per-step pruning:
     ``aput()``. The first-run migration sweep cleans up legacy bloat.
 
 WebUI / langgraph-dev checkpointer:
-    When EvoScientist runs in ``EvoSci deploy`` or WebUI mode, the agent
-    graph is served by a ``langgraph dev`` subprocess.  By default that
-    subprocess uses ``langgraph_runtime_inmem``'s ``InMemorySaver``, which
-    serialises state to ``<workspace>/.langgraph_api/*.pckl`` files via a
-    background flush loop.  Two failure modes cause history loss on restart:
-
-    1. **Flush-window data loss** — the background thread flushes every
-       10 seconds.  A SIGKILL (or abrupt container stop) between flushes
-       discards the unflushed checkpoints, making sessions disappear.
-
-    2. **Pickle incompatibility** — a deepagents / langgraph upgrade can
-       change class definitions.  On reload ``PersistentDict.load()``
-       raises ``ModuleNotFoundError``; the error handler calls
-       ``os.remove(self.filename)`` with the *prefix* string rather than
-       the concrete ``*.pckl`` path, so the file is not cleaned up.  The
-       process then starts with an empty in-memory dict while the API
-       thread list still reports the thread id (from memory), producing
-       sessions with a title but empty content.
-
-    Fix: ``create_checkpointer_for_langgraph_api()`` is an async context
-    manager that yields a ``PruningCheckpointer`` backed by the same
-    ``~/.evoscientist/sessions.db`` SQLite file used by the CLI/TUI.
-    Configured via ``langgraph.json`` ``checkpointer.path`` so the
-    ``langgraph dev`` subprocess uses it instead of ``InMemorySaver``.
-    SQLite WAL mode gives transaction-level durability — no flush window,
-    no pickle compatibility issues.
-
-WebUI thread-list restoration:
-    ``langgraph_runtime_inmem``'s ``GlobalStore`` keeps the authoritative
-    thread registry in ``conn.store["threads"]`` (an in-memory list that is
-    optionally pickled to ``.langgraph_api/.langgraph_ops.pckl``).  On every
-    restart ``GlobalStore.__init__`` calls ``clear()`` which resets
-    ``store["threads"] = []``.  If the pickle file is absent or
-    undeserializable (e.g. after a package upgrade), the thread list stays
-    empty even though all checkpoint data is safely stored in SQLite.
-
-    ``create_checkpointer_for_langgraph_api()`` therefore also calls
-    ``_restore_webui_threads_to_global_store()`` before yielding.  This
-    function reads all UUID-format thread IDs from the SQLite ``checkpoints``
-    table (rows written by ``langgraph dev`` runs use standard UUID thread
-    IDs, vs. the 8-char hex IDs used by the CLI/TUI) and re-populates
-    ``conn.store["threads"]`` with minimal stub dicts that satisfy
-    ``POST /threads/search``.  The stub contains ``thread_id``, ``metadata``,
-    ``created_at``, ``updated_at``, ``state_updated_at``, ``status``, and
-    ``values`` — the exact fields expected by the WebUI front-end.
-
-    The restore is best-effort: any error is logged and silently skipped so
-    a broken restore never prevents the checkpointer from starting.
+    ``create_checkpointer_for_langgraph_api()`` — the ``checkpointer.path``
+    target in ``langgraph_dev/langgraph.json`` — backs every ``langgraph
+    dev`` subprocess (deploy / WebUI / CLI-spawned) with this same SQLite
+    file instead of the default pickle-based ``InMemorySaver``, whose flush
+    window and pickle-compatibility failures lose session history on
+    restart (issue #277). On startup it purges leftover evomemory-worker
+    rows and rebuilds the in-memory thread registry from SQLite. See
+    ``_restore_webui_threads_to_global_store`` for the restore scope and
+    ``_ApiPruningCheckpointer`` for the metadata stamping that makes WebUI
+    threads first-class CLI sessions.
 """
 
 import asyncio
@@ -1426,29 +1388,112 @@ async def db_stats(top_n: int = 5) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _api_workspace_dir() -> str:
+    """Resolve the langgraph dev subprocess's workspace directory.
+
+    ``start_langgraph_dev`` injects ``EVOSCIENTIST_WORKSPACE_DIR`` and sets
+    the subprocess cwd to the workspace, so either source identifies the
+    workspace this server instance is serving.
+    """
+    import os
+
+    ws = os.environ.get("EVOSCIENTIST_WORKSPACE_DIR", "").strip()
+    if ws:
+        return str(Path(ws).expanduser().resolve())
+    return str(Path.cwd().resolve())
+
+
+class _ApiPruningCheckpointer(PruningCheckpointer):
+    """``PruningCheckpointer`` that stamps CLI-compatible ownership metadata.
+
+    langgraph-api run metadata carries ``graph_id``/``assistant_id`` but not
+    the ``agent_name`` / ``workspace_dir`` / ``updated_at`` keys that the CLI
+    session surface (``list_threads``, ``/resume``, ``/delete``,
+    ``_prune_after_put``) filters and sorts on. Stamping them at write time
+    — for main-graph runs only — makes WebUI threads first-class CLI
+    sessions in the same workspace, and brings them under the existing
+    pruning/retention machinery. Worker and async-subagent graphs are left
+    unstamped on purpose: they must not surface in CLI listings.
+    """
+
+    async def aput(
+        self,
+        config: Any,
+        checkpoint: Any,
+        metadata: Any,
+        new_versions: Any,
+    ) -> Any:
+        if isinstance(metadata, dict) and metadata.get("graph_id") == AGENT_NAME:
+            metadata = dict(metadata)
+            metadata.setdefault("agent_name", AGENT_NAME)
+            metadata.setdefault("workspace_dir", _api_workspace_dir())
+            metadata["updated_at"] = datetime.now(UTC).isoformat()
+        return await super().aput(config, checkpoint, metadata, new_versions)
+
+
+async def _purge_internal_worker_threads() -> None:
+    """Best-effort removal of evomemory-worker checkpoint residue.
+
+    Finished workers delete their own thread (see
+    ``middleware/memory_lifecycle.py``), but a crash between run completion
+    and deletion leaves rows behind — and rows written before that cleanup
+    existed are still in the DB. Idempotent, runs on every server start,
+    and never blocks startup on failure.
+    """
+    try:
+        db_path = str(get_db_path())
+        async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+            if not await _table_exists(conn, "checkpoints"):
+                return
+            if await _table_exists(conn, "writes"):
+                await conn.execute(
+                    """
+                    DELETE FROM writes WHERE thread_id IN (
+                        SELECT DISTINCT thread_id FROM checkpoints
+                        WHERE json_extract(metadata, '$.graph_id') LIKE 'evomemory-%'
+                    )
+                    """
+                )
+            cur = await conn.execute(
+                """
+                DELETE FROM checkpoints
+                WHERE json_extract(metadata, '$.graph_id') LIKE 'evomemory-%'
+                """
+            )
+            await conn.commit()
+            if cur.rowcount:
+                _logger.info(
+                    "Purged %d leftover evomemory-worker checkpoint row(s).",
+                    cur.rowcount,
+                )
+    except Exception:
+        _logger.warning(
+            "evomemory-worker residue purge failed (non-fatal).", exc_info=True
+        )
+
+
 async def _restore_webui_threads_to_global_store() -> None:
     """Re-populate ``GlobalStore["threads"]`` from SQLite on server startup.
 
-    ``langgraph_runtime_inmem``'s ``GlobalStore`` resets ``store["threads"] = []``
-    on every process start (``GlobalStore.__init__`` calls ``clear()``).  If the
-    ``.pckl`` file is absent or corrupt — which happens after every package
-    upgrade — the WebUI sidebar shows an empty thread list even though all
-    checkpoint data is safely persisted in SQLite.
+    The inmem runtime's thread registry lives in memory (pickled to
+    ``.langgraph_ops.pckl``) and is cleared on every start — if the pickle
+    is absent or corrupt, the WebUI sidebar is empty even though all
+    checkpoint data sits safely in SQLite. This rebuilds it: ghost entries
+    whose threads have no checkpoint rows are dropped, surviving entries
+    are normalized in place, and missing threads are appended as stub
+    dicts that satisfy ``POST /threads/search``.
 
-    This function reads every UUID-format thread ID from the SQLite
-    ``checkpoints`` table and re-inserts minimal stub dicts into
-    ``GLOBAL_STORE["threads"]`` so the ``POST /threads/search`` endpoint
-    can return them.  Existing entries (e.g. restored from a valid ``.pckl``)
-    are not duplicated.
+    Restore scope — only threads that are BOTH main-graph
+    (``metadata.graph_id == AGENT_NAME``) and owned by this server's
+    workspace (``metadata.workspace_dir`` matches): sessions.db is
+    machine-global, and an unscoped restore would expose every workspace's
+    history (and internal worker threads) on the unauthenticated API —
+    worst case ``--tunnel``. CLI/TUI threads (8-char hex IDs, managed by
+    ``list_threads()``) and pre-stamping rows without ``workspace_dir``
+    are excluded.
 
-    UUID-format IDs (``xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx``) are used by
-    ``langgraph dev`` / WebUI runs; the CLI/TUI uses 8-char hex IDs which
-    are intentionally excluded — those are managed by ``list_threads()`` and
-    the CLI commands, not the WebUI.
-
-    The restore is best-effort: any exception is logged and swallowed so a
-    broken restore never prevents the checkpointer (and therefore the whole
-    ``langgraph dev`` server) from starting.
+    Best-effort: any exception is logged and swallowed so a broken restore
+    never prevents the ``langgraph dev`` server from starting.
     """
     try:
         from langgraph_runtime_inmem.database import (  # type: ignore[import-untyped]
@@ -1459,32 +1504,31 @@ async def _restore_webui_threads_to_global_store() -> None:
         return
 
     try:
+        rows: list[Any] = []
         db_path = str(get_db_path())
         async with aiosqlite.connect(db_path, timeout=30.0) as conn:
-            if not await _table_exists(conn, "checkpoints"):
-                return
-
-            # Fetch all distinct UUID-format thread IDs with their latest
-            # checkpoint timestamp and the assistant_id / graph_id stored in
-            # the checkpoint metadata.  These are written by the langgraph-api
-            # adapter (_enrich_metadata) and are required by the WebUI's
-            # POST /threads/search filter (e.g. metadata.assistant_id).
-            # UUID regex: 8-4-4-4-12 hex groups.
-            query = """
-                SELECT thread_id,
-                       MAX(json_extract(metadata, '$.updated_at')) as updated_at,
-                       json_extract(metadata, '$.assistant_id') as assistant_id,
-                       json_extract(metadata, '$.graph_id') as graph_id
-                FROM checkpoints
-                WHERE thread_id LIKE '________-____-____-____-____________'
-                GROUP BY thread_id
-                ORDER BY updated_at DESC
-            """
-            async with conn.execute(query) as cur:
-                rows = await cur.fetchall()
-
-        if not rows:
-            return
+            # No checkpoints table (fresh DB) → rows stays empty, but the
+            # ghost-removal pass below must still run: every UUID entry the
+            # .pckl registry loaded is then stale by definition.
+            if await _table_exists(conn, "checkpoints"):
+                # Fetch all distinct UUID-format thread IDs with their latest
+                # checkpoint timestamp and the assistant_id / graph_id stored
+                # in the checkpoint metadata.  Required by the WebUI's
+                # POST /threads/search filter (e.g. metadata.assistant_id).
+                # UUID regex: 8-4-4-4-12 hex groups.
+                query = """
+                    SELECT thread_id,
+                           MAX(json_extract(metadata, '$.updated_at')) as updated_at,
+                           json_extract(metadata, '$.assistant_id') as assistant_id,
+                           json_extract(metadata, '$.graph_id') as graph_id,
+                           MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir
+                    FROM checkpoints
+                    WHERE thread_id LIKE '________-____-____-____-____________'
+                    GROUP BY thread_id
+                    ORDER BY updated_at DESC
+                """
+                async with conn.execute(query) as cur:
+                    rows = await cur.fetchall()
 
         def _to_uuid_safe(v: Any) -> uuid.UUID | None:
             try:
@@ -1492,13 +1536,32 @@ async def _restore_webui_threads_to_global_store() -> None:
             except (ValueError, AttributeError):
                 return None
 
-        # Build a lookup of SQLite data keyed by UUID object.
+        # All UUID threads that have ANY checkpoint rows — the existence
+        # check for ghost removal (deliberately unscoped: a thread whose
+        # checkpoints exist but fall outside the restore scope is not a
+        # ghost, its state still loads when opened).
+        uuid_threads_in_db: set[uuid.UUID] = set()
+        # Restore scope: ONLY main-graph threads belonging to THIS server's
+        # workspace. sessions.db is machine-global, so an unscoped restore
+        # would resurrect every workspace's history (and internal
+        # worker/subagent threads) into this server's thread registry — and
+        # expose it over the unauthenticated API / --tunnel.
+        # workspace_dir/agent_name are stamped at write time by
+        # _ApiPruningCheckpointer; rows that predate stamping have no
+        # workspace_dir and are deliberately excluded.
+        current_workspace = _api_workspace_dir()
         sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str | None]] = {}
         for row in rows:
-            thread_id_str, updated_at, assistant_id, graph_id = row
+            thread_id_str, updated_at, assistant_id, graph_id, workspace_dir = row
             thread_uuid = _to_uuid_safe(thread_id_str)
-            if thread_uuid is not None:
-                sqlite_data[thread_uuid] = (updated_at, assistant_id, graph_id)
+            if thread_uuid is None:
+                continue
+            uuid_threads_in_db.add(thread_uuid)
+            if graph_id != AGENT_NAME:
+                continue
+            if not workspace_dir or workspace_dir != current_workspace:
+                continue
+            sqlite_data[thread_uuid] = (updated_at, assistant_id, graph_id)
 
         def _parse_dt(s: str | None) -> datetime:
             """Parse an ISO timestamp string to datetime, falling back to now."""
@@ -1509,42 +1572,48 @@ async def _restore_webui_threads_to_global_store() -> None:
                     pass
             return datetime.now(UTC)
 
-        # Pass 1 — fix issues in-place on threads already present in GlobalStore.
-        # Threads loaded from .pckl may have:
-        #   1. thread_id as plain string → needs uuid.UUID for == comparison.
-        #   2. metadata={} missing assistant_id/graph_id → search filters fail.
-        #   3. "config" key absent → State.get() KeyError.
-        #   4. created_at/updated_at as ISO string → Threads.search() sorts with
-        #      sorted(), raising TypeError when mixing datetime and str.
+        # Drop ghost entries: a .pckl-loaded UUID entry with no checkpoint
+        # rows opens as an empty session (the #277 symptom). Slice
+        # assignment mutates the live registry list.
+        store_threads: list[dict[str, Any]] = GLOBAL_STORE.get("threads", [])
+        before = len(store_threads)
+        store_threads[:] = [
+            entry
+            for entry in store_threads
+            if (tid := _to_uuid_safe(entry.get("thread_id"))) is None
+            or tid in uuid_threads_in_db
+        ]
+        removed = before - len(store_threads)
+
+        # Normalize surviving .pckl-loaded entries in place.
         fixed = 0
         existing_uuids: set[uuid.UUID] = set()
-        store_threads: list[dict[str, Any]] = GLOBAL_STORE.get("threads", [])
         for entry in store_threads:
             tid_uuid = _to_uuid_safe(entry.get("thread_id"))
             if tid_uuid is None:
                 continue
             existing_uuids.add(tid_uuid)
             changed = False
-            # Fix 1: string thread_id → UUID object.
+            # Threads.get() compares against _ensure_uuid() — str never matches.
             if not isinstance(entry.get("thread_id"), uuid.UUID):
                 entry["thread_id"] = tid_uuid
                 changed = True
-            # Fix 2: backfill metadata from SQLite.
             if tid_uuid in sqlite_data:
                 _updated_at, asst_id_str, gid = sqlite_data[tid_uuid]
                 meta: dict[str, Any] = entry.setdefault("metadata", {})
                 if asst_id_str and "assistant_id" not in meta:
-                    meta["assistant_id"] = _to_uuid_safe(asst_id_str) or asst_id_str
+                    # str, not uuid.UUID: the runtime stores str and search
+                    # filters compare with raw == against JSON strings.
+                    meta["assistant_id"] = str(asst_id_str)
                     changed = True
                 if gid and "graph_id" not in meta:
                     meta["graph_id"] = gid
                     changed = True
-            # Fix 3: ensure config key exists.
+            # State.get() KeyErrors without "config".
             if "config" not in entry:
                 entry["config"] = {}
                 changed = True
-            # Fix 4: convert ISO string timestamps to datetime objects so that
-            # Threads.search() sorted() doesn't raise TypeError.
+            # Threads.search() sorted() raises on datetime-vs-str mixes.
             for ts_key in ("created_at", "updated_at", "state_updated_at"):
                 if isinstance(entry.get(ts_key), str):
                     entry[ts_key] = _parse_dt(entry[ts_key])
@@ -1552,16 +1621,15 @@ async def _restore_webui_threads_to_global_store() -> None:
             if changed:
                 fixed += 1
 
-        # Pass 2 — append threads that exist in SQLite but are absent entirely.
+        # Append threads present in SQLite but absent from the registry.
         restored = 0
         for thread_uuid, (updated_at, assistant_id, graph_id) in sqlite_data.items():
             if thread_uuid in existing_uuids:
                 continue
             stub_metadata: dict[str, Any] = {}
             if assistant_id:
-                stub_metadata["assistant_id"] = (
-                    _to_uuid_safe(assistant_id) or assistant_id
-                )
+                # str, not uuid.UUID — same convention as above.
+                stub_metadata["assistant_id"] = str(assistant_id)
             if graph_id:
                 stub_metadata["graph_id"] = graph_id
             ts = _parse_dt(updated_at)
@@ -1579,12 +1647,14 @@ async def _restore_webui_threads_to_global_store() -> None:
             existing_uuids.add(thread_uuid)
             restored += 1
 
-        if fixed or restored:
+        if fixed or restored or removed:
             _logger.info(
-                "WebUI thread restore: fixed %d existing + appended %d new thread(s) "
-                "in GlobalStore (langgraph_runtime_inmem).",
+                "WebUI thread restore: fixed %d existing + appended %d new + "
+                "removed %d ghost thread(s) in GlobalStore "
+                "(langgraph_runtime_inmem).",
                 fixed,
                 restored,
+                removed,
             )
     except Exception:
         _logger.warning(
@@ -1596,46 +1666,33 @@ async def _restore_webui_threads_to_global_store() -> None:
 
 @asynccontextmanager
 async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckpointer]:
-    """Async context manager yielding a SQLite-backed ``PruningCheckpointer``.
+    """SQLite-backed checkpointer for the ``langgraph dev`` subprocess.
 
-    Intended as the ``checkpointer.path`` target in
-    ``EvoScientist/langgraph_dev/langgraph.json`` so that the ``langgraph dev``
-    subprocess (used by ``EvoSci deploy`` and WebUI mode) persists session
-    history to ``~/.evoscientist/sessions.db`` rather than the default
-    ``langgraph_runtime_inmem`` ``InMemorySaver``.
+    ``checkpointer.path`` target in ``langgraph_dev/langgraph.json``
+    (applies to every ``langgraph dev`` launch: deploy, WebUI, and the
+    CLI-spawned subprocess). Replaces the default pickle-based
+    ``InMemorySaver``, whose 10s flush window drops recent checkpoints on
+    SIGKILL and whose pickle-incompatible upgrades wipe the whole store
+    (issue #277); here every ``aput()`` commits a WAL transaction and a
+    bad row only loses that row. The langgraph-api adapter detects async
+    context managers and enters them automatically.
 
-    **Why this matters — two failure modes of the default InMemorySaver:**
+    The yielded ``_ApiPruningCheckpointer`` stamps main-graph rows with
+    ``agent_name`` / ``workspace_dir`` / ``updated_at`` so WebUI threads
+    surface in the CLI session commands and participate in
+    ``_prune_after_put`` retention.
 
-    1. *Flush-window data loss.*  ``InMemorySaver`` (aka ``langgraph_runtime_inmem``)
-       serialises checkpoints to ``<workspace>/.langgraph_api/*.pckl`` via a
-       background thread that flushes every 10 seconds.  A SIGKILL or abrupt
-       container stop between flushes silently discards all unflushed
-       checkpoints.  SQLite WAL mode commits every ``aput()`` as a proper
-       transaction — no flush window.
-
-    2. *Pickle incompatibility.*  A deepagents / langgraph upgrade can change
-       class definitions stored inside the pickle files.  On reload the error
-       handler calls ``os.remove(self.filename)`` with the *prefix* string
-       (``".langgraph_api/.langgraph_checkpoint."``) rather than the concrete
-       ``*.pckl`` path, so files are not cleaned up.  The process then starts
-       with an empty in-memory store while the API thread-list still reports
-       the old thread ids — producing sessions whose title exists but whose
-       content is empty.  SQLite stores serialised blobs; any deserialization
-       failure is isolated to the specific checkpoint row, not the entire store.
-
-    The ``langgraph-api`` adapter (``_checkpointer._adapter._yield_checkpointer``)
-    detects async context managers and calls ``__aenter__`` / ``__aexit__``
-    automatically, so yielding here is the correct integration pattern.
-
-    ``PruningCheckpointer`` inherits all of ``AsyncSqliteSaver``'s extended
-    methods (``adelete_thread``, ``adelete_for_runs``, ``acopy_thread``,
-    ``aprune``) so the adapter reports full capability and every langgraph-api
-    feature (thread deletion, rollback pruning, thread copy) works correctly.
+    Capability note: ``adelete_thread`` is real, but ``aprune`` /
+    ``adelete_for_runs`` / ``acopy_thread`` remain ``BaseCheckpointSaver``
+    raising stubs — langgraph-api's probe reports them missing and
+    degrades (``multitask_strategy='rollback'`` cleanup raises; thread
+    copy uses the slow generic fallback).
     """
     keep = _resolve_keep_per_ns()
-    async with PruningCheckpointer.from_conn_string_with_keep(
+    async with _ApiPruningCheckpointer.from_conn_string_with_keep(
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
         await saver.setup()
+        await _purge_internal_worker_threads()
         await _restore_webui_threads_to_global_store()
         yield saver
