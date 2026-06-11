@@ -112,7 +112,8 @@ what happened.
 
 Use procedural/global for general tool or platform behavior that can recur
 outside this workspace; use project scope only for workspace-specific facts,
-commands, datasets, benchmarks, or config. Do not hand-write observation files.
+commands, resources, evaluation setup, or configuration. Do not hand-write
+observation files.
 Do not record routine progress, raw traces, ordinary command output, citation
 lists without synthesis, simple filesystem listings, temporary paths/run ids,
 one-off environment discoveries, or task summaries."""
