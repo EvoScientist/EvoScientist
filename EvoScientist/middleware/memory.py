@@ -30,7 +30,9 @@ from ..memory import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    create_read_memory_tool,
     create_record_observation_tool,
+    create_search_observations_tool,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,27 +80,29 @@ Observation memory lives under `/memories/observations/`:
 - `/memories/observations/global/`: cross-project observations.
 - `/memories/observations/projects/{project_id}/`: observations for this workspace.
 
-Memory preflight:
-- For main-agent and subagent work, before planning, running commands,
-  implementing, debugging, analyzing, or writing reports, run a quick search of
-  observation memory unless the task is clearly trivial or the observation
-  directories are empty.
-- Use file tools, not shell paths: start with `grep` on `/memories/observations/`
-  using task keywords, then `read_file` the relevant hits by id/path. Use
-  `glob` or `ls` only to inspect what exists when grep returns nothing useful.
-- When the task calls for a specific kind of memory, grep frontmatter first:
-  `memory_type: procedural` for reusable commands/workarounds, `memory_type:
-  semantic` for reusable facts/findings, `scope: project` for workspace-local
-  notes, and `scope: global` for cross-project notes.
-- Mention the result briefly in your plan or handoff: which observation mattered,
-  or that no relevant observation was found. Do not let this become a long detour.
+Required memory preflight:
+- For coding, debugging, research, planning, or evaluation tasks, complete this
+  preflight before inspecting workspace/task files, running commands, editing
+  files, delegating, using `code_interpreter`, or making a plan.
+- First use the inlined observation index. If a listed summary clearly matches
+  the task, call `read_memory` with that observation ID.
+- Otherwise, call `search_observations` with a few distinctive words or short
+  phrases that describe the issue, constraint, procedure, or prior result to
+  find. If one query misses, try 1-3 focused variants. Use `mode=regex` only
+  when exact grep-like matching is required. If a result looks promising but
+  the snippet is not enough to act on confidently, call `read_memory` with its
+  observation ID.
+- After this preflight, use direct tools or `code_interpreter` to do or batch
+  the actual workspace work as appropriate.
+- Mention the result briefly before continuing: observation IDs used, or that
+  no relevant observation was found. Keep this preflight short.
 """
 
 OBSERVATION_MEMORY_WRITE_INSTRUCTIONS = """
 Call `record_observation` only for durable, non-obvious, evidence-backed
 information that is not already in memory and is likely to change future behavior:
 recurring constraints, important decisions, failed approaches future agents might
-repeat, verified evaluator outcomes, or tool/workflow workarounds.
+repeat, verified outcomes, or tool/workflow workarounds.
 Provide a one-line `summary` that is specific enough for future agents to decide
 whether to read the full observation.
 
@@ -314,18 +318,29 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._enable_observation_tool = (
             enable_observation_memory and enable_observation_tool
         )
-        self.tools = (
-            [
+        self.tools = []
+        if enable_observation_memory:
+            self.tools.append(
+                create_search_observations_tool(
+                    memory_dir=self._memory_dir,
+                    project_id=self._project_id,
+                )
+            )
+            self.tools.append(
+                create_read_memory_tool(
+                    memory_dir=self._memory_dir,
+                    project_id=self._project_id,
+                )
+            )
+        if self._enable_observation_tool:
+            self.tools.append(
                 create_record_observation_tool(
                     memory_dir=self._memory_dir,
                     project_id=self._project_id,
                     source_type=source_type,
                     source_agent=source_agent,
                 )
-            ]
-            if self._enable_observation_tool
-            else []
-        )
+            )
         self._observation_index_records = []
         self._observation_index_context = ""
         if not enable_observation_memory:
@@ -600,17 +615,27 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return "\n".join(
             [
                 "Search hints:",
-                "- Grep by id when you already know it from the index.",
+                "- Each line gives id, type/scope, path, and summary.",
                 (
-                    "- Grep frontmatter by type when appropriate: "
+                    "- Use `search_observations` for ranked keyword search "
+                    "and `read_memory` for known observation IDs."
+                ),
+                "- Use `mode=regex` only when exact grep-like matching is required.",
+                "- Search by id when you already know it from the index.",
+                (
+                    "- Filter by type when appropriate: "
                     "`memory_type: procedural`, `memory_type: semantic`, or "
                     "`memory_type: episodic`."
                 ),
                 (
-                    "- Grep frontmatter by scope when appropriate: "
+                    "- Filter by scope when appropriate: "
                     "`scope: project` or `scope: global`."
                 ),
-                "- Combine those with task keywords, then read relevant hits.",
+                (
+                    "- Search with a few distinctive words or phrases from "
+                    "the current work that describe the issue, constraint, "
+                    "procedure, or prior result to find."
+                ),
             ]
         )
 

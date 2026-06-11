@@ -52,7 +52,11 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
 
-    assert [tool.name for tool in middleware.tools] == ["record_observation"]
+    assert [tool.name for tool in middleware.tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
     assert (memories / "profile" / "SOUL.md").exists()
     assert (memories / "profile" / "USER_PROFILE.md").exists()
     assert (memories / "profile" / "RESEARCH_TASTE.md").exists()
@@ -73,7 +77,10 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
     )
     middleware.modify_request(_request())
 
-    assert middleware.tools == []
+    assert [tool.name for tool in middleware.tools] == [
+        "search_observations",
+        "read_memory",
+    ]
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
@@ -112,12 +119,16 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     modified = middleware.modify_request(_request())
     content = str(modified.system_message.content)
 
-    assert middleware.tools == []
+    assert [tool.name for tool in middleware.tools] == [
+        "search_observations",
+        "read_memory",
+    ]
     assert not (memories / "profile").exists()
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))
     assert "<observation_memory>" in content
-    assert "Memory preflight:" in content
+    assert "search_observations" in content
+    assert "read_memory" in content
     assert "record_observation" not in content
 
 

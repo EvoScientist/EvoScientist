@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,7 @@ from langchain.agents.middleware.types import AgentState
 from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
@@ -25,7 +27,11 @@ from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    ObservationSearchMode,
+    create_read_memory_tool,
+    read_observation_file,
     record_observation_file,
+    search_observation_files,
 )
 from EvoScientist.middleware import memory_lifecycle
 
@@ -113,6 +119,12 @@ def _record_observation_payload(
     return json.loads(payload)
 
 
+def _tool_by_name(tools: Sequence[BaseTool], name: str) -> BaseTool:
+    matches = [tool for tool in tools if tool.name == name]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     memories = tmp_path / "memories"
     summary = "Focused pytest catches local regressions before broader runs."
@@ -175,6 +187,279 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     }
 
 
+def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="GraphQL resolver aliases preserve userName fields.",
+        observation=(
+            "When GraphQL returns blank camelCase fields, inspect resolver "
+            "aliases before changing the frontend query."
+        ),
+        why_it_matters="Future profile tasks can avoid frontend-only fixes.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="CSV date normalization can change ordering.",
+        observation="Normalize date strings before sorting cross-source reports.",
+        why_it_matters="Future data tasks should avoid lexicographic date sorting.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="GraphQL userName frontend",
+        limit=5,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [first["observation_id"]]
+    assert hits[0]["path"] == first["path"]
+    assert hits[0]["memory_type"] == MemoryType.PROCEDURAL
+    assert hits[0]["scope"] == MemoryScope.GLOBAL
+    assert hits[0]["summary"] == "GraphQL resolver aliases preserve userName fields."
+    assert hits[0]["matches"][0] == "GraphQL resolver aliases preserve userName fields."
+    assert hits[0]["score"] > 0
+    assert hits[0]["match_quality"] == "ranked"
+    assert (
+        search_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            query="date|sorting",
+            scope=MemoryScope.PROJECT,
+            memory_type=MemoryType.SEMANTIC,
+        )[0]["observation_id"]
+        == second["observation_id"]
+    )
+
+
+def test_read_memory_returns_full_observation_by_id(tmp_path):
+    memories = tmp_path / "memories"
+    observation = "Read the full observation before applying a partial snippet."
+    result = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Full memory reads prevent acting on partial snippets.",
+        observation=observation,
+        why_it_matters="Future agents can inspect the full rationale before editing.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        observation_id=result["observation_id"],
+    )
+
+    assert read is not None
+    assert read["observation_id"] == result["observation_id"]
+    assert read["path"] == result["path"]
+    assert read["memory_type"] == MemoryType.PROCEDURAL
+    assert read["scope"] == MemoryScope.PROJECT
+    assert read["summary"] == "Full memory reads prevent acting on partial snippets."
+    assert read["text"].startswith("---\n")
+    assert observation in read["text"]
+
+    tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
+    payload = json.loads(tool.run({"observation_id": result["observation_id"]}))
+    assert payload["found"] is True
+    assert payload["text"] == read["text"]
+
+    missing = json.loads(tool.run({"observation_id": "../not-a-memory"}))
+    assert missing == {
+        "error": "No observation with that ID exists in global or current-project memory.",
+        "found": False,
+        "observation_id": "../not-a-memory",
+    }
+
+
+def test_search_observation_files_supports_keyword_or_regex_queries(tmp_path):
+    memories = tmp_path / "memories"
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Build command exits with a generic error.",
+        observation="The local build can fail with an error after dependency setup.",
+        why_it_matters="Future agents should inspect command output.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="FastAPI version conflicts can block dependency resolution.",
+        observation="FastAPI and pydantic version constraints can make installs fail.",
+        why_it_matters="Future agents should inspect package constraints.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    relevant = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Silent-failure: backend status handling hides API response errors.",
+        observation=(
+            "When HTTP response status handling treats server errors as success, "
+            "frontend error states can collapse into ordinary empty data."
+        ),
+        why_it_matters="Future agents should audit both HTTP status and UI state.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    variant_hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="blank profile silent failure empty data not onboarded",
+    )
+    focused_hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        mode=ObservationSearchMode.REGEX,
+        query="silent[- ]failure|status",
+    )
+
+    assert [hit["observation_id"] for hit in variant_hits] == [
+        relevant["observation_id"]
+    ]
+    assert [hit["observation_id"] for hit in focused_hits] == [
+        relevant["observation_id"]
+    ]
+
+
+def test_search_observation_files_handles_regex_like_literals(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Literal [bracket token appears in build logs.",
+        observation="When logs include [bracket tokens, search should not crash.",
+        why_it_matters="Malformed model regex should still behave like literal grep.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="[bracket",
+    )
+    regex_hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="[bracket",
+        mode=ObservationSearchMode.REGEX,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [
+        relevant["observation_id"]
+    ]
+    assert [hit["observation_id"] for hit in regex_hits] == [
+        relevant["observation_id"]
+    ]
+
+
+def test_search_observation_files_ranks_bag_of_words_queries(tmp_path):
+    memories = tmp_path / "memories"
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="CSV header normalization needs whitespace stripping.",
+        observation="Strip CSV headers before schema matching.",
+        why_it_matters="Future revenue imports may have messy column names.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+    relevant = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary=(
+            "Batch duplicate detection by batch_id grouping misses cross-ID "
+            "imports; content fingerprinting is required."
+        ),
+        observation=(
+            "Compute a stable content-fingerprint per batch from sorted "
+            "(date, amount) pairs before revenue aggregation."
+        ),
+        why_it_matters=(
+            "Future quarterly revenue reports should collapse duplicate import "
+            "batches before totals are computed."
+        ),
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="CSV duplicate batch fingerprint revenue quarterly",
+        limit=2,
+    )
+
+    assert hits[0]["observation_id"] == relevant["observation_id"]
+    assert hits[0]["match_quality"] == "ranked"
+    assert hits[0]["score"] > hits[1]["score"]
+
+
+def test_search_observation_files_returns_low_confidence_fallback(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="CSV header normalization needs whitespace stripping.",
+        observation="Strip CSV headers before schema matching.",
+        why_it_matters="Future imports may have messy column names.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="quantum thermostat",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [first["observation_id"]]
+    assert hits[0]["match_quality"] == "low"
+    assert hits[0]["score"] == 0
+    assert hits[0]["matches"][0].startswith("Low-confidence fallback")
+
+
 def test_record_observation_tool_can_use_worker_config_source(tmp_path):
     from EvoScientist.middleware.memory import create_memory_middleware
 
@@ -186,7 +471,7 @@ def test_record_observation_tool_can_use_worker_config_source(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_agent="evomemory-subagent-worker",
     )
-    tool = middleware.tools[0]
+    tool = _tool_by_name(middleware.tools, "record_observation")
     payload = _record_observation_payload(
         tool,
         runtime=_tool_runtime(
@@ -232,7 +517,7 @@ def test_record_observation_tool_schema_hides_runtime(tmp_path):
         workspace_dir=workspace,
     )
 
-    tool = middleware.tools[0]
+    tool = _tool_by_name(middleware.tools, "record_observation")
     assert "runtime" in tool.get_input_schema().model_fields
     schema = tool.tool_call_schema
     assert isinstance(schema, type)
@@ -258,7 +543,7 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
         source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
     )
-    tool = middleware.tools[0]
+    tool = _tool_by_name(middleware.tools, "record_observation")
     payload = _record_observation_payload(
         tool,
         runtime=_tool_runtime(
