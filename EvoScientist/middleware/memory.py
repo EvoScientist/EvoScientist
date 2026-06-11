@@ -24,6 +24,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.messages import SystemMessage
 
 from .. import paths as _paths
 from ..memory import (
@@ -164,6 +165,23 @@ Notes about this workspace: conventions, commands, tests, and traps.
 ## Known traps
 """,
 }
+
+
+def _prepend_to_system_message(
+    system_message: SystemMessage | None,
+    text: str,
+) -> SystemMessage:
+    """Prepend text to a system message while preserving existing blocks."""
+    existing_blocks = list(system_message.content_blocks) if system_message else []
+    prefix = text
+    if existing_blocks:
+        prefix = f"{text}\n\n"
+    return SystemMessage(
+        content_blocks=[
+            {"type": "text", "text": prefix},
+            *existing_blocks,
+        ]
+    )
 
 
 def _short_hash(text: str, *, n: int = 16) -> str:
@@ -698,9 +716,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
     def _inject_profile_context(
         self, request: ModelRequest, profile_content: str
     ) -> ModelRequest:
-        """Append profile context and editing guidance to the system prompt."""
-        from deepagents.middleware._utils import append_to_system_message
-
+        """Prepend memory context and editing guidance to the system prompt."""
         if not self._enable_profile_memory and not self._enable_observation_memory:
             return request
 
@@ -721,7 +737,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 )
                 if part
             )
-            new_system = append_to_system_message(request.system_message, injection)
+            new_system = _prepend_to_system_message(request.system_message, injection)
             return request.override(system_message=new_system)
 
         injection = PROFILE_INJECTION_TEMPLATE.format(
@@ -730,7 +746,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             project_id=self._project_id,
             observation_instructions=observation_instructions,
         )
-        new_system = append_to_system_message(request.system_message, injection)
+        new_system = _prepend_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
     def _profile_context_for_request(self) -> str:
