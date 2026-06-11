@@ -779,7 +779,7 @@ def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
-def test_all_mode_skips_turn_worker_observation_tool(tmp_path):
+def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
     turn_middleware = memory_lifecycle._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
@@ -793,9 +793,15 @@ def test_all_mode_skips_turn_worker_observation_tool(tmp_path):
         observation_writer=MemoryObservationWriter.ALL,
     )
 
-    assert turn_middleware[0].tools == []
+    assert [tool.name for tool in turn_middleware[0].tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
     assert [tool.name for tool in subagent_middleware[0].tools] == [
-        "record_observation"
+        "search_observations",
+        "read_memory",
+        "record_observation",
     ]
 
 
@@ -819,9 +825,20 @@ def test_memory_worker_observation_writer_modes(tmp_path):
         observation_writer=MemoryObservationWriter.WORKER,
     )
 
-    assert agent_only[0].tools == []
-    assert [tool.name for tool in worker_subagent[0].tools] == ["record_observation"]
-    assert worker_turn[0].tools == []
+    assert [tool.name for tool in agent_only[0].tools] == [
+        "search_observations",
+        "read_memory",
+    ]
+    assert [tool.name for tool in worker_subagent[0].tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
+    assert [tool.name for tool in worker_turn[0].tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
 
 
 def test_memory_worker_prompts_match_observation_tool_availability():
@@ -850,13 +867,20 @@ def test_memory_worker_prompts_match_observation_tool_availability():
         enable_profile_memory=False,
         enable_observation_tool=True,
     )
+    turn_observations_only = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.TURN,
+        enable_profile_memory=False,
+        enable_observation_tool=True,
+    )
 
     assert "record_observation" not in turn_profile_only
-    assert "record_observation" not in turn_with_observation_flag
+    assert "record_observation" in turn_with_observation_flag
     assert "record_observation" not in subagent_profile_only
     assert "record_observation" in subagent_with_observations
     assert "record_observation" in subagent_observations_only
     assert "/memories/profile/" not in subagent_observations_only
+    assert "record_observation" in turn_observations_only
+    assert "/memories/profile/" not in turn_observations_only
 
 
 def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(

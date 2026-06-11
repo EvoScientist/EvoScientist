@@ -47,10 +47,14 @@ class MemoryObservationWriter(StrEnum):
             case MemoryObservationWriter.AGENT:
                 return target == MemoryObservationTarget.AGENT
             case MemoryObservationWriter.WORKER:
-                return target == MemoryObservationTarget.SUBAGENT_WORKER
+                return target in (
+                    MemoryObservationTarget.TURN_WORKER,
+                    MemoryObservationTarget.SUBAGENT_WORKER,
+                )
             case MemoryObservationWriter.ALL:
                 return target in (
                     MemoryObservationTarget.AGENT,
+                    MemoryObservationTarget.TURN_WORKER,
                     MemoryObservationTarget.SUBAGENT_WORKER,
                 )
 
@@ -198,9 +202,9 @@ class EvoScientistConfig:
     # allowed `memory_observation_writer` role below.
     memory_observations_enabled: bool = True
     # Which observation-writing path receives the `record_observation` tool:
-    # "off" disables writes; "agent" means live agents; "worker" means the
-    # subagent memory worker; "all" means live agents and the subagent memory
-    # worker. The turn memory worker remains profile-only.
+    # "off" disables writes; "agent" means live agents; "worker" means
+    # post-run memory workers; "all" means live agents and post-run memory
+    # workers.
     memory_observation_writer: MemoryObservationWriter = (
         DEFAULT_MEMORY_OBSERVATION_WRITER
     )
@@ -441,7 +445,7 @@ class MemoryControls:
             return False
         match target:
             case MemoryObservationTarget.TURN_WORKER:
-                return self.profile_enabled
+                return self.profile_enabled or self.observation_tool_enabled(target)
             case MemoryObservationTarget.SUBAGENT_WORKER:
                 return self.profile_enabled or self.observation_tool_enabled(target)
             case MemoryObservationTarget.AGENT:
