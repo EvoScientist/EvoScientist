@@ -1249,6 +1249,75 @@ def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_pat
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    worker_activity.mark_memory_worker_started(
+        thread_id="active-thread",
+        run_id="active-run",
+        memory_dir=memory_dir,
+        before_outputs=before,
+    )
+    record_observation_file(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Active worker observation.",
+        observation="The active worker has already written an observation.",
+        why_it_matters="One-shot CLI waits can detect persisted worker output.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+
+    try:
+        status = worker_activity.memory_worker_observed_outputs()
+        assert status.is_running is True
+        assert status.observations_recorded == 1
+        assert status.profile_updates == 0
+        assert worker_activity.memory_worker_status().observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_one_shot_cli_wait_exits_after_observed_memory_output(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    now = 0.0
+    printed = []
+
+    def fake_monotonic():
+        return now
+
+    def fake_sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(interactive.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(interactive.time, "sleep", fake_sleep)
+    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
+    monkeypatch.setattr(
+        worker_activity,
+        "memory_worker_status",
+        lambda: worker_activity.MemoryWorkerStatusSnapshot(is_running=True),
+    )
+    monkeypatch.setattr(
+        worker_activity,
+        "memory_worker_observed_outputs",
+        lambda: worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=True,
+            observations_recorded=1,
+        ),
+    )
+
+    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+
+    assert any("EvoMemory saved 1 observation(s)." in str(line) for line in printed)
+    assert not any("still running" in str(line) for line in printed)
+
+
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
