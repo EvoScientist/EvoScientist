@@ -179,9 +179,17 @@ class SlashCommandCompleter(Completer):
         self,
         workspace_getter: Callable[[], str | None] | None = None,
     ) -> None:
+        """Initialise the completer.
+
+        Args:
+            workspace_getter: Callable returning the current workspace
+                directory for ``@file`` completions.  Called on every
+                keystroke so suggestions stay in sync after ``/new``.
+        """
         self._workspace_getter = workspace_getter or (lambda: None)
 
     def get_completions(self, document, complete_event):
+        """Yield prompt_toolkit completions for slash commands and ``@file``."""
         text = document.text_before_cursor
         workspace_dir = self._workspace_getter()
 
