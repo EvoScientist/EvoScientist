@@ -605,9 +605,15 @@ def _cmd_quote(s: str) -> str:
     cmd.exe strips outer double quotes; content between them is taken
     literally. Backslashes are not escape chars inside double quotes, so
     Windows paths pass through unchanged. Embedded ``"`` is escaped as
-    ``\"``. Because ``%VAR%`` expansion happens *before* quote processing,
-    bare ``%`` characters are escaped as ``%%`` (the cmd.exe idiom for a
-    literal percent) regardless of surrounding quotes.
+    ``\"``; bare paths with no shell-special chars need no quoting at all.
+
+    .. note::
+
+       ``%VAR%`` expansion is **not** neutralised here.  Variable expansion
+       happens before quote processing in cmd.exe, and ``%%`` collapsing
+       only occurs inside ``.bat``/``.cmd`` files — not via ``cmd /c``.
+       This is acceptable because virtual-mount paths (skills, memories)
+       should never contain percent signs in practice.
 
     Mirrors the role of :func:`shlex.quote` for the Windows shell so the
     sandbox command can pass a single token through :func:`subprocess.run`
@@ -615,7 +621,6 @@ def _cmd_quote(s: str) -> str:
     """
     if not s:
         return '""'
-    s = s.replace("%", "%%")
     if not any(c in s for c in ' \t\n"&|<>^()'):
         return s
     return '"' + s.replace('"', '\\"') + '"'
