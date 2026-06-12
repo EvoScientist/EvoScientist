@@ -981,6 +981,18 @@ class TestCompletionLogic(unittest.TestCase):
         assert result.kind == "empty"
         assert result.candidates == []
 
+    def test_engine_exact_subcommand_with_trailing_space_hides(self):
+        """When the user has typed the full subcommand plus a trailing
+        space (``/mcp list ``), the engine must also hide.  Without this
+        guard Tab oscillates between adding and removing the trailing
+        whitespace.
+        """
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp list ", 10)
+        assert result.kind == "empty"
+        assert result.candidates == []
+
     def test_engine_three_parts_hides(self):
         from EvoScientist.commands._completion_engine import compute_completions
 
