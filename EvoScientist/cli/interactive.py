@@ -210,7 +210,10 @@ class SlashCommandCompleter(Completer):
         if result.kind == "empty" or not result.candidates:
             return
 
-        for c in result.candidates:
+        # Sort alphabetically by completion text for stable, predictable
+        # ordering in the popup. The engine returns candidates in
+        # manager-registration order, which is not stable across changes.
+        for c in sorted(result.candidates, key=lambda c: c.text):
             start_pos = c.replace_start - len(document.text_before_cursor)
             yield Completion(
                 c.text, start_position=start_pos, display_meta=c.description

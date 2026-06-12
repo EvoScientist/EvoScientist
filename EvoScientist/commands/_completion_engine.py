@@ -107,10 +107,24 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     if not sub_matches:
         return CompletionResult("empty", [])
 
+    # Exact match (sub_prefix == name) with no trailing space → the
+    # subcommand is already complete; mirror the top-level rule and
+    # hide. Without this guard, Tab on e.g. ``/mcp list`` re-inserts
+    # ``list`` and the popup keeps showing confirmation noise.
+    if (
+        not has_trailing_space
+        and len(sub_matches) == 1
+        and sub_matches[0][0] == sub_prefix
+    ):
+        return CompletionResult("empty", [])
+
     sub_start = before.rfind(sub_prefix) if sub_prefix else len(before)
     if sub_start < 0:
         sub_start = len(parts[0]) + 1
-    replace_end = len(before)
+    # When the user has typed a trailing space, exclude it from the
+    # replace range — the apply step preserves it via
+    # ``current[replace_end:]`` so we don't double up the space.
+    replace_end = len(before) - 1 if has_trailing_space else len(before)
 
     return CompletionResult(
         "subcommands",

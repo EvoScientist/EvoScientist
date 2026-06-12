@@ -2331,14 +2331,21 @@ def run_textual_interactive(
             if text.startswith("/"):
                 from ..commands._completion_engine import compute_completions
 
+                # ``ChatTextArea`` (Textual ``TextArea`` subclass) doesn't
+                # expose ``cursor_position`` directly; the public
+                # ``cursor_location`` is a (row, col) namedtuple. For
+                # completion we only need the prefix up to the cursor,
+                # and in practice the user is always typing at the end
+                # of the input — so ``len(text)`` is the correct offset
+                # without needing to walk the document line model.
                 result = compute_completions(
-                    event.text_area.text, event.cursor_position
+                    event.text_area.text, len(event.text_area.text)
                 )
                 if result.kind == "empty" or not result.candidates:
                     self._hide_completions()
                     return
 
-                self._comp_items = result.candidates
+                self._comp_items = sorted(result.candidates, key=lambda c: c.text)
                 self._comp_index = -1
                 self._render_completions()
                 comp_widget.display = True
@@ -2627,11 +2634,13 @@ def run_textual_interactive(
                 prompt.value = new_val
             else:
                 current = prompt.value
+                # If the suffix already starts with a space (e.g. user
+                # typed ``/mcp a `` and the engine excluded the trailing
+                # space from ``replace_end``), don't add another one.
+                suffix = current[candidate.replace_end :]
+                sep = "" if suffix.startswith(" ") else " "
                 prompt.value = (
-                    current[: candidate.replace_start]
-                    + candidate.text
-                    + " "
-                    + current[candidate.replace_end :]
+                    current[: candidate.replace_start] + candidate.text + sep + suffix
                 )
 
         def _hide_completions(self) -> None:
