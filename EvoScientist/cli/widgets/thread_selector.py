@@ -202,9 +202,9 @@ def build_row_text(
     indented: bool = False,
 ) -> Text:
     """Thread row.  *indented* adds extra leading space for L2-grouped rows."""
-    from ...sessions import _format_relative_time
+    from ...sessions import _format_relative_time, short_thread_id
 
-    tid = thread["thread_id"]
+    tid = short_thread_id(thread["thread_id"])
     preview = thread.get("preview", "") or ""
     msgs = thread.get("message_count", 0)
     model = thread.get("model", "") or ""

@@ -98,12 +98,14 @@ class ThreadsCommand(Command):
             table.add_column("Model", style="dim")
         table.add_column("Last Used", style="dim")
 
+        from ...sessions import short_thread_id
+
         for thread in threads:
             thread_id_value = thread["thread_id"]
             marker = " *" if thread_id_value == ctx.thread_id else ""
 
             row = [
-                f"{thread_id_value}{marker}",
+                f"{short_thread_id(thread_id_value)}{marker}",
                 thread.get("preview", "") or "",
                 str(thread.get("message_count", 0)),
             ]
