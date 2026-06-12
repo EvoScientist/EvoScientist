@@ -2322,7 +2322,23 @@ def run_textual_interactive(
             if "@" in text:
                 candidates = complete_file_mention(text, workspace_dir)
                 if candidates:
-                    self._comp_items = candidates
+                    import re as _re
+
+                    from ..commands._completion_engine import CompletionCandidate
+
+                    before = text[: len(event.text_area.text)]
+                    m = _re.search(r"@[^\s]*$", before)
+                    start = m.start() if m else len(event.text_area.text)
+                    end = len(event.text_area.text)
+                    self._comp_items = [
+                        CompletionCandidate(
+                            text=path if path.startswith("@") else f"@{path}",
+                            description=type_hint,
+                            replace_start=start,
+                            replace_end=end,
+                        )
+                        for path, type_hint in candidates
+                    ]
                     self._comp_index = -1
                     self._render_completions()
                     comp_widget.display = True
