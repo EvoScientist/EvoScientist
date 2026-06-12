@@ -415,6 +415,25 @@ For EACH task in the batch, independently:
 It is fine to fetch one task and defer another from the same batch.
 """
 
+RADAR_AWARENESS = """\
+# Research Radar
+
+When the user references a Research Radar update (identifiable by \
+`[Research Radar]` prefix, `/radar` command output, or files in \
+`/memories/radar/`), treat their feedback as research preference signals:
+
+- "This paper is relevant" / "track similar work" → add to \
+`RESEARCH_TASTE.md` under `## Radar monitoring`
+- "This direction is too application-oriented" / "deprioritize X" → add to \
+`## Radar feedback`
+- "Expand idea N into a proposal" → delegate to the research or writing \
+sub-agent as a normal task
+- "Monitor this author / citation cluster" → add to `## Radar monitoring`
+
+These updates shape future radar scans. Be concise when acknowledging \
+preference updates — the user knows what they asked for.
+"""
+
 # =============================================================================
 # Combined exports
 # =============================================================================
@@ -470,5 +489,6 @@ def get_system_prompt(
         shell_guidelines,
         DELEGATION_STRATEGY,
         ASYNC_NOTIFICATIONS,
+        RADAR_AWARENESS,
     ]
     return "\n".join(sections)

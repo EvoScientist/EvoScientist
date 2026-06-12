@@ -18,7 +18,15 @@ from ..commands.base import Command, CommandContext
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
-from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
+from ._app import (
+    app,
+    channel_app,
+    config_app,
+    configure_app,
+    mcp_app,
+    radar_app,
+    sessions_app,
+)
 from ._constants import build_metadata
 from .agent import (
     _create_session_workspace,
@@ -1509,6 +1517,26 @@ def serve(
                     workspace_dir=ws,
                     show_thinking=effective_channel_thinking,
                 )
+
+            # Radar pending check — push update to channels when a scan completes
+            try:
+                from ..radar import (
+                    check_radar_pending,
+                    clear_radar_pending,
+                    load_latest_radar,
+                )
+
+                pending_date = check_radar_pending()
+                if pending_date and config.radar_channel_delivery:
+                    result = load_latest_radar()
+                    if result:
+                        _, update = result
+                        clear_radar_pending()
+                        publish_to_channel_origin(
+                            f"[Research Radar] {pending_date}\n\n{update.summary_text}"
+                        )
+            except Exception:
+                pass
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
@@ -2300,3 +2328,143 @@ def _configure_logging():
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")
     logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
+
+
+# ---------------------------------------------------------------------------
+# Research Radar CLI commands
+# ---------------------------------------------------------------------------
+
+
+@radar_app.command("enable")
+def radar_enable():
+    """Enable scheduled Research Radar scans."""
+    from ..config.settings import get_effective_config, load_config, save_config
+
+    config = load_config()
+    config.radar_enabled = True
+    save_config(config)
+
+    effective = get_effective_config()
+    console.print(
+        f"[green]Research Radar enabled. Schedule: {effective.radar_schedule}[/green]"
+    )
+    console.print("[dim]Scheduler starts when EvoScientist TUI is running.[/dim]")
+
+
+@radar_app.command("disable")
+def radar_disable():
+    """Disable scheduled Research Radar scans."""
+    from ..config.settings import load_config, save_config
+
+    config = load_config()
+    config.radar_enabled = False
+    save_config(config)
+    console.print("[green]Research Radar disabled.[/green]")
+
+
+@radar_app.command("run")
+def radar_run():
+    """Trigger an immediate Research Radar scan."""
+    import asyncio
+
+    from ..radar import run_radar_now
+
+    console.print("Running Research Radar scan (3-5 arXiv searches, ~30s)...")
+    try:
+        result = asyncio.run(run_radar_now())
+    except Exception as exc:
+        console.print(f"[red]Radar scan failed: {exc}[/red]")
+        return
+    if result:
+        ts, update = result
+        from rich.markdown import Markdown
+        from rich.panel import Panel
+
+        console.print(
+            Panel(
+                Markdown(update.summary_text) if update.summary_text else "No summary",
+                title=f"[Research Radar] {ts}",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+        if update.papers:
+            console.print(f"[green]Found {len(update.papers)} papers.[/green]")
+            for p in update.papers:
+                console.print(f"  [bold]{p.title}[/bold]")
+                console.print(f"  [dim]{p.url}[/dim]")
+                console.print(f"  {p.relevance}\n")
+    else:
+        console.print(
+            "[yellow]Radar scan produced no results. Check that RESEARCH_TASTE.md "
+            "has research interests populated.[/yellow]"
+        )
+
+
+@radar_app.command("show")
+def radar_show():
+    """Display the latest Research Radar report."""
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    from ..radar import load_latest_radar
+
+    result = load_latest_radar()
+    if result is None:
+        console.print(
+            "[yellow]No radar reports yet. "
+            "Run 'EvoSci radar run' to trigger a scan.[/yellow]"
+        )
+        return
+
+    date_str, update = result
+    console.print(
+        Panel(
+            Markdown(update.summary_text),
+            title=f"[Research Radar] {date_str}",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+    if update.papers:
+        console.print(f"\n[bold]{len(update.papers)} papers found[/bold]")
+    if update.ideas:
+        for idea in update.ideas:
+            console.print(f"  [green]{idea.title}[/green]: {idea.motivation}")
+
+
+@radar_app.command("history")
+def radar_history():
+    """List past Research Radar reports."""
+    from ..radar import list_radar_history
+
+    entries = list_radar_history()
+    if not entries:
+        console.print("[yellow]No radar reports found.[/yellow]")
+        return
+
+    table = Table(title="Radar History", show_header=True)
+    table.add_column("Date", style="bold")
+    table.add_column("Papers", justify="right")
+    table.add_column("Summary", style="dim", max_width=60)
+    for e in entries:
+        table.add_row(e["date"], str(e["paper_count"]), e["summary"])
+    console.print(table)
+
+
+@radar_app.command("schedule")
+def radar_schedule(
+    cron: Annotated[str, typer.Argument(help="Cron expression (e.g. '0 9 * * 1')")],
+    tz: Annotated[str, typer.Option("--tz", help="IANA timezone")] = "",
+):
+    """Update the Research Radar schedule."""
+    from ..config.settings import load_config, save_config
+
+    config = load_config()
+    config.radar_schedule = cron
+    if tz:
+        config.radar_timezone = tz
+    save_config(config)
+
+    tz_str = f" (timezone: {tz})" if tz else ""
+    console.print(f"[green]Radar schedule updated: {cron}{tz_str}[/green]")

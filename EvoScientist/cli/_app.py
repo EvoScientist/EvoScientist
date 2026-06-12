@@ -67,3 +67,7 @@ configure_app = typer.Typer(
     ),
 )
 app.add_typer(configure_app, name="configure")
+
+# Radar subcommand group — Research Radar paper monitoring
+radar_app = typer.Typer(help="Research Radar — scheduled paper monitoring and updates")
+app.add_typer(radar_app, name="radar")

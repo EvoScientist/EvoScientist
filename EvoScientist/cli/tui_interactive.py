@@ -576,6 +576,19 @@ def run_textual_interactive(
 
             return await self._wait_for_thread_pick(picker)
 
+        async def wait_for_radar_pick(
+            self, entries: list[dict], title: str
+        ) -> str | None:
+            from .widgets.radar_picker import RadarPickerWidget
+
+            container = self.query_one("#chat", VerticalScroll)
+            picker = RadarPickerWidget(entries, title=title)
+            await container.mount(picker)
+            self._anchor_chat(container)
+            picker.focus()
+
+            return await self._wait_for_radar_pick(picker)
+
         async def wait_for_skill_browse(
             self, index: list[dict], installed_names: set[str], pre_filter_tag: str
         ) -> list[str] | None:
@@ -824,6 +837,8 @@ def run_textual_interactive(
             self._background_tasks.add(ch_task)
             ch_task.add_done_callback(self._background_tasks.discard)
 
+            self._start_radar_scheduler()
+
         # ── Update check ──────────────────────────────────────
 
         async def _check_for_updates(self) -> None:
@@ -844,6 +859,18 @@ def run_textual_interactive(
                 _channel_logger.debug("Background update check failed", exc_info=True)
 
         # ── Channel integration ────────────────────────────────
+
+        def _start_radar_scheduler(self) -> None:
+            """Auto-start radar scheduler if enabled in config."""
+            try:
+                from ..config import load_config
+                from ..radar import start_radar_scheduler
+
+                cfg = load_config()
+                if cfg and cfg.radar_enabled:
+                    start_radar_scheduler(cfg)
+            except Exception:
+                pass
 
         def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
@@ -900,6 +927,25 @@ def run_textual_interactive(
                 self.call_later(
                     lambda: asyncio.ensure_future(self._consume_notifications_tui())
                 )
+
+            # Radar pending check — show a banner when a scheduled scan completes
+            if not self._busy:
+                try:
+                    from EvoScientist.radar import (
+                        check_radar_pending,
+                        clear_radar_pending,
+                    )
+
+                    pending_date = check_radar_pending()
+                    if pending_date:
+                        clear_radar_pending()
+                        self._append_system(
+                            f"Research Radar update available ({pending_date}). "
+                            "Type /radar to view.",
+                            style="bold cyan",
+                        )
+                except Exception:
+                    pass
 
         async def _consume_notifications_tui(self) -> None:
             """Drain the notification queue and inject a synthetic agent turn.
@@ -1137,6 +1183,31 @@ def run_textual_interactive(
 
         def on_thread_picker_widget_cancelled(self, event) -> None:  # type: ignore[override]
             """Handle ThreadPickerWidget.Cancelled message."""
+            if self._picker_future and not self._picker_future.done():
+                self._picker_future.set_result(None)
+
+        async def _wait_for_radar_pick(self, picker_widget) -> str | None:
+            """Wait for user to pick a radar report from RadarPickerWidget."""
+            self._picker_future = asyncio.get_event_loop().create_future()
+            try:
+                return await asyncio.wait_for(self._picker_future, timeout=120)
+            except (TimeoutError, asyncio.CancelledError):
+                return None
+            finally:
+                self._picker_future = None
+                try:
+                    picker_widget.remove()
+                except Exception:
+                    pass
+                self.query_one("#prompt", ChatTextArea).focus()
+
+        def on_radar_picker_widget_picked(self, event) -> None:  # type: ignore[override]
+            """Handle RadarPickerWidget.Picked message."""
+            if self._picker_future and not self._picker_future.done():
+                self._picker_future.set_result(event.date_str)
+
+        def on_radar_picker_widget_cancelled(self, event) -> None:  # type: ignore[override]
+            """Handle RadarPickerWidget.Cancelled message."""
             if self._picker_future and not self._picker_future.done():
                 self._picker_future.set_result(None)
 
@@ -2401,6 +2472,7 @@ def run_textual_interactive(
                 from .widgets.approval_widget import ApprovalWidget
                 from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.model_picker import ModelPickerWidget
+                from .widgets.radar_picker import RadarPickerWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -2408,6 +2480,9 @@ def run_textual_interactive(
                     focused.action_select_reject()
                     return
                 if isinstance(focused, ThreadPickerWidget):
+                    focused.action_cancel()
+                    return
+                if isinstance(focused, RadarPickerWidget):
                     focused.action_cancel()
                     return
                 if isinstance(focused, SkillBrowserWidget):
@@ -2463,6 +2538,7 @@ def run_textual_interactive(
                 from .widgets.ask_user_widget import AskUserWidget
                 from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.model_picker import ModelPickerWidget
+                from .widgets.radar_picker import RadarPickerWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -2473,6 +2549,9 @@ def run_textual_interactive(
                     focused.action_move_up()
                     return
                 if isinstance(focused, ThreadPickerWidget):
+                    focused.action_move_up()
+                    return
+                if isinstance(focused, RadarPickerWidget):
                     focused.action_move_up()
                     return
                 if isinstance(focused, SkillBrowserWidget):
@@ -2531,6 +2610,7 @@ def run_textual_interactive(
                 from .widgets.ask_user_widget import AskUserWidget
                 from .widgets.mcp_browser import MCPBrowserWidget
                 from .widgets.model_picker import ModelPickerWidget
+                from .widgets.radar_picker import RadarPickerWidget
                 from .widgets.skill_browser import SkillBrowserWidget
                 from .widgets.thread_selector import ThreadPickerWidget
 
@@ -2541,6 +2621,9 @@ def run_textual_interactive(
                     focused.action_move_down()
                     return
                 if isinstance(focused, ThreadPickerWidget):
+                    focused.action_move_down()
+                    return
+                if isinstance(focused, RadarPickerWidget):
                     focused.action_move_down()
                     return
                 if isinstance(focused, SkillBrowserWidget):
@@ -2824,8 +2907,10 @@ def run_textual_interactive(
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
             from ..middleware.model_fallback import set_ui_emit
+            from ..radar import stop_radar_scheduler
 
             set_ui_emit(None)
+            stop_radar_scheduler()
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None

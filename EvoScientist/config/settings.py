@@ -208,6 +208,12 @@ class EvoScientistConfig:
     # controls while still allowing live agents to read configured memory.
     memory_workers_enabled: bool = True
 
+    # Research Radar Settings
+    radar_enabled: bool = False
+    radar_schedule: str = "0 9 * * 1"  # weekly Monday 9am UTC
+    radar_timezone: str = ""  # IANA timezone (e.g. "America/New_York"), empty = UTC
+    radar_channel_delivery: bool = True
+
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
     default_workdir: str = ""
@@ -665,6 +671,10 @@ _ENV_MAPPINGS = {
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
     "memory_observation_writer": "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
     "memory_workers_enabled": "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
+    "radar_enabled": "EVOSCIENTIST_RADAR_ENABLED",
+    "radar_schedule": "EVOSCIENTIST_RADAR_SCHEDULE",
+    "radar_timezone": "EVOSCIENTIST_RADAR_TIMEZONE",
+    "radar_channel_delivery": "EVOSCIENTIST_RADAR_CHANNEL_DELIVERY",
 }
 
 

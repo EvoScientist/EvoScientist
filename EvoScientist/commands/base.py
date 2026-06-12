@@ -35,6 +35,9 @@ class CommandUI(Protocol):
     async def wait_for_mcp_browse(
         self, servers: list, installed_names: set[str], pre_filter_tag: str
     ) -> list | None: ...
+    async def wait_for_radar_pick(
+        self, entries: list[dict], title: str
+    ) -> str | None: ...
     async def wait_for_model_pick(
         self,
         entries: list[tuple[str, str, str]],

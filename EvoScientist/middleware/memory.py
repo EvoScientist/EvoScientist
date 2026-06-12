@@ -146,6 +146,10 @@ Research taste to keep in mind: interests, standards, methods that tend to fit, 
 ## Methods that fit
 
 ## Things to avoid
+
+## Radar monitoring
+
+## Radar feedback
 """,
     "/profile/projects/{project_id}/PROJECT_PROFILE.md": """# Project profile
 
