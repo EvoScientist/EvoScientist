@@ -184,20 +184,14 @@ class TestConvertVirtualPaths:
         result = convert_virtual_paths_in_command(command)
         assert result == "ssh host 'ls ./home/username/project'"
 
-    def test_quoted_virtual_path_with_whitespace_is_rewritten(self):
-        """A virtual path quoted to keep its whitespace must still be
-        recognised as one path token and rewritten (was: the regex's
-        ``(?<=\\s)`` lookbehind failed after the opening ``"``, so the
-        whole quoted path was left as-is and the shell broke it at the
-        embedded space).
+    def test_bare_quoted_path_left_alone(self):
+        """A quoted bare ``/...`` path that is not a virtual mount
+        (``/skills/...``, ``/memories/...``) or workspace path must
+        NOT be rewritten — we cannot textually distinguish a path
+        argument from a literal string without command semantics.
         """
         result = convert_virtual_paths_in_command('python "/main file.py"')
-        tokens = shlex.split(result)
-        assert tokens == ["python", "./main file.py"]
-        # Defence-in-depth: the original quoted form must NOT survive
-        # — otherwise the shell still receives the inner unquoted string
-        # and breaks at the space.
-        assert '"/main file.py"' not in result
+        assert result == 'python "/main file.py"'
 
     def test_quoted_skills_path_with_whitespace_in_skill_name_resolved(
         self, monkeypatch, tmp_path
@@ -243,17 +237,16 @@ class TestConvertVirtualPaths:
         assert tokens == ["python", "./src/main.py"]
 
     def test_quoted_path_with_whitespace_round_trip_safe(self):
-        """Whatever quote style the splice picks, ``shlex.split`` of the
-        result must round-trip back to a single token equal to the
-        intended replacement — quote-style agnostic. Specifically the
-        embedded space must NOT cause the shell to see the path as
-        two arguments.
+        """A quoted ``/skills/...`` path with whitespace must round-trip
+        through ``shlex.split`` as a single token.
         """
-        result = convert_virtual_paths_in_command('python "/main file.py"')
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
         tokens = shlex.split(result)
-        # The path must remain a single argument regardless of how
-        # the splice chose to quote it (single / double / escaped).
-        assert tokens == ["python", "./main file.py"]
+        assert tokens[0] == "python"
+        assert len(tokens) == 2
+        assert "find skills" in tokens[1]
 
     def test_quoted_system_path_left_alone(self):
         """A quoted path starting with a system prefix (e.g. ``/bin/echo``)
@@ -296,6 +289,12 @@ class TestConvertVirtualPaths:
             'python "/skills/never-installed/foo.py"'
         )
         assert result == "python ./skills/never-installed/foo.py"
+
+    def test_echo_bare_quoted_path_left_alone(self):
+        """``echo "/hi"`` must NOT be rewritten — a bare ``/hi`` is not a
+        virtual mount, so the pre-process must leave it alone."""
+        result = convert_virtual_paths_in_command('echo "/hi"')
+        assert result == 'echo "/hi"'
 
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
