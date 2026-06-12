@@ -143,71 +143,50 @@ class ModelCommand(Command):
     ) -> None:
         import copy
 
-        from ... import EvoScientist as _mod
         from ...cli.agent import _load_agent
-        from ...EvoScientist import _ensure_config, set_chat_model
+        from ...EvoScientist import (
+            _build_chat_model,
+            _ensure_config,
+            set_active_config,
+            set_chat_model_instance,
+        )
 
         cfg = _ensure_config()
 
-        # Build a temporary config to verify the agent can be created
-        # before mutating any global state.
+        # Build a temporary config + its chat model and verify the agent can be
+        # built before committing anything. ``create_cli_agent(config=...,
+        # chat_model=...)`` is pure (issue #183) — it writes none of the cached
+        # config/model module globals — so a failure below leaves the session
+        # on the original model with no snapshot/restore needed.
         temp_cfg = copy.copy(cfg)
         temp_cfg.model = model_name
         temp_cfg.provider = provider
 
-        # create_cli_agent(config=temp_cfg) calls _ensure_config and
-        # _ensure_chat_model before finishing, so a failure further
-        # down (middleware build, MCP reconnect, deepagents wiring)
-        # would leave the session pointing at the new model. Snapshot
-        # the four globals those helpers write so we can restore on
-        # error. Best-effort: references already captured by concurrent
-        # readers (e.g. a channel thread mid-turn) are not retroactively
-        # patched, but /model is user-initiated from an idle prompt in
-        # practice.
-        snap = (
-            _mod._config,
-            _mod._chat_model,
-            _mod._chat_model_key,
-            _mod._EvoScientist_agent,
-        )
-
-        def _restore_globals() -> None:
-            """Roll back the four module globals to their pre-call values.
-
-            Keeps the two failure sites (``_load_agent`` and
-            ``set_chat_model``) in sync — adding a new snapshotted global
-            only requires updating ``snap`` and this helper.
-            """
-            (
-                _mod._config,
-                _mod._chat_model,
-                _mod._chat_model_key,
-                _mod._EvoScientist_agent,
-            ) = snap
-
         try:
+            new_chat_model = _build_chat_model(temp_cfg)
             new_agent = _load_agent(
                 workspace_dir=ctx.workspace_dir,
                 checkpointer=ctx.checkpointer,
                 config=temp_cfg,
+                chat_model=new_chat_model,
             )
         except Exception as e:
-            _restore_globals()
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return
 
-        # Agent built successfully — now commit the change globally.
-        try:
-            set_chat_model(model_name, provider=provider)
-        except Exception as e:
-            # _load_agent already mutated the four globals; restore them so a
-            # failure here doesn't leave the session half-switched.
-            _restore_globals()
-            ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
-            return
-
+        # Agent built with no global mutation — commit the switch atomically.
+        # These are pure assignments and cannot fail, so the session can never
+        # be left half-switched. Apply the switch to the LIVE ``cfg`` in place
+        # (the active config object) instead of rebinding ``_config`` to the
+        # fresh ``temp_cfg`` — callers that hold the active config by reference
+        # (e.g. serve's ``agent_holder["config"]`` and its workspace-changing
+        # ``/resume`` reload) must observe the new model/provider. The verify
+        # build above used the ``temp_cfg`` copy, so a failed build never reaches
+        # here and the live ``cfg`` stays untouched (failure still no-ops).
         cfg.model = model_name
         cfg.provider = provider
+        set_active_config(cfg)
+        set_chat_model_instance(new_chat_model, (model_name, provider))
         ctx.agent = new_agent
 
         # Persist to config file if --save was given

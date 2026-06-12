@@ -1,5 +1,6 @@
 """Tests for BackgroundExecutionMiddleware and its tools."""
 
+import sys
 import time
 
 import pytest
@@ -12,6 +13,20 @@ from EvoScientist.middleware.background import (
     run_in_background,
     stop_process,
 )
+
+
+def _sleep_cmd(seconds: int) -> str:
+    """Cross-platform command that sleeps for *seconds* and exits 0."""
+    if sys.platform == "win32":
+        return f"ping -n {seconds + 1} 127.0.0.1 > nul"
+    return f"sleep {seconds}"
+
+
+def _true_cmd() -> str:
+    """Cross-platform command that exits 0 immediately."""
+    if sys.platform == "win32":
+        return "cmd /c exit /b 0"
+    return "true"
 
 
 def _wait_until(predicate, timeout=4.0, interval=0.05):
@@ -94,12 +109,57 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     assert captured["command"] == "python ./train.py"
 
 
+def _force_dangerous(monkeypatch, value=True):
+    """Make run_in_background see dangerous mode via the env flag it reads.
+
+    monkeypatch.setenv tracks the change and restores it on teardown, so this
+    cannot leak EVOSCIENTIST_DANGEROUS_MODE into other tests.
+    """
+    monkeypatch.setenv("EVOSCIENTIST_DANGEROUS_MODE", "true" if value else "false")
+
+
+def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
+    """In dangerous mode, background commands keep real absolute paths (parity with execute)."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    _force_dangerous(monkeypatch)
+    captured = {}
+
+    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
+        captured["command"] = command
+        return "pidX"
+
+    monkeypatch.setattr(bg, "launch", _spy)
+    # Absolute path + traversal would be BLOCKED in normal mode; allowed here.
+    out = run_in_background.invoke({"command": "cat /etc/hosts && cat ../x"})
+    assert "blocked" not in out.lower()
+    assert captured["command"] == "cat /etc/hosts && cat ../x"  # no ./ rewrite
+    # Advertised log path is the real path, not the virtual /.bg_processes/.
+    assert f"{tmp_path}/.bg_processes/" in out
+    assert "Output -> /.bg_processes/" not in out
+
+
+def test_run_dangerous_still_blocks_privileged_command(tmp_path, monkeypatch):
+    """Dangerous mode must NOT relax the privileged-command blocklist."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    _force_dangerous(monkeypatch)
+    launched = {"called": False}
+
+    def _spy(*args, **kwargs):
+        launched["called"] = True
+        return "should-not-happen"
+
+    monkeypatch.setattr(bg, "launch", _spy)
+    out = run_in_background.invoke({"command": "sudo rm x"})
+    assert launched["called"] is False
+    assert "blocked" in out.lower()
+
+
 def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
     """A finished background process enqueues a shell completion notification."""
     from EvoScientist.cli import async_notifier
 
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    run_in_background.invoke({"command": "true", "name": "quick"})
+    run_in_background.invoke({"command": _true_cmd(), "name": "quick"})
     # drain consumes, so accumulate across polls until the watcher's on_exit enqueues.
     notifs = []
     deadline = time.time() + 4.0
@@ -127,7 +187,7 @@ def test_notify_done_routes_to_origin_thread(tmp_path):
     from EvoScientist.cli import async_notifier
     from EvoScientist.middleware.background import _notify_done
 
-    pid = bg.launch("true", str(tmp_path))  # no on_exit -> no auto-notify here
+    pid = bg.launch(_true_cmd(), str(tmp_path))  # no on_exit -> no auto-notify here
     assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     _notify_done(bg._PROCESSES[pid], "T-123")
     routed = async_notifier.drain_notifications("T-123")
@@ -139,7 +199,7 @@ def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
     from EvoScientist.cli import async_notifier
 
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    run_in_background.invoke({"command": "sleep 600"})
+    run_in_background.invoke({"command": _sleep_cmd(600)})
     (pid,) = list(bg._PROCESSES.keys())
     stop_process.invoke({"process_id": pid})
     # Wait until the watcher observed the exit — it would have enqueued here if the
@@ -156,7 +216,7 @@ def test_checked_after_exit_dedups_notification(tmp_path):
         dedup_notifications,
     )
 
-    pid = bg.launch("true", str(tmp_path))
+    pid = bg.launch(_true_cmd(), str(tmp_path))
     assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
     bg.status(pid)  # agent checks AFTER exit
     assert bg.was_observed_done(pid) is True
@@ -177,7 +237,7 @@ def test_not_checked_after_exit_keeps_notification(tmp_path):
         dedup_notifications,
     )
 
-    pid = bg.launch("true", str(tmp_path))
+    pid = bg.launch(_true_cmd(), str(tmp_path))
     assert _wait_until(
         lambda: bg._PROCESSES[pid].finished_ts is not None
     )  # exit, but do NOT check
@@ -250,7 +310,7 @@ def test_shell_notification_hints_check_process():
 
 def test_check_and_list_route_to_manager(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    run_in_background.invoke({"command": "sleep 1"})
+    run_in_background.invoke({"command": _sleep_cmd(1)})
     (pid,) = bg._PROCESSES.keys()
     assert pid in check_process.invoke({"process_id": pid})
     assert pid in list_processes.invoke({})

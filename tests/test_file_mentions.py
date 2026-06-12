@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from EvoScientist.cli.file_mentions import (
@@ -60,6 +61,12 @@ class TestParseFileMentions:
 
     def test_tilde_expansion(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        if sys.platform == "win32":
+            # ``ntpath.expanduser()`` falls back to ``USERPROFILE`` (and then
+            # ``HOMEDRIVE``+``HOMEPATH``) when ``HOME`` is absent.  On some CI
+            # runners ``HOME`` is unset while ``USERPROFILE`` holds the real
+            # profile; patching both ensures ``~`` resolves to ``tmp_path``.
+            monkeypatch.setenv("USERPROFILE", str(tmp_path))
         f = tmp_path / "file.txt"
         f.write_text("x")
         files, _ = parse_file_mentions("@~/file.txt", cwd=tmp_path)

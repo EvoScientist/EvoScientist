@@ -12,6 +12,7 @@ from EvoScientist.backends import (
     CustomSandboxBackend,
     MergedSkillsBackend,
     convert_virtual_paths_in_command,
+    prepare_sandbox_command,
     validate_command,
 )
 
@@ -76,6 +77,34 @@ class TestValidateCommand:
         result = validate_command("ssh host 'ls /home/username/project'")
         assert result is not None
         assert "/home/username/project" in result
+
+
+class TestValidateCommandDangerous:
+    """dangerous=True drops path confinement but keeps the command blocklist."""
+
+    def test_absolute_path_allowed(self):
+        assert validate_command("cat /etc/passwd", dangerous=True) is None
+
+    def test_traversal_allowed(self):
+        assert validate_command("cat ../../x", dangerous=True) is None
+
+    def test_home_tilde_allowed(self):
+        assert validate_command("cat ~/secrets.txt", dangerous=True) is None
+
+    def test_cd_absolute_allowed(self):
+        assert validate_command("cd /etc && ls", dangerous=True) is None
+
+    def test_sudo_still_blocked(self):
+        assert validate_command("sudo rm x", dangerous=True) is not None
+
+    def test_chmod_still_blocked(self):
+        assert validate_command("chmod 777 /tmp/x", dangerous=True) is not None
+
+    def test_dd_still_blocked(self):
+        assert validate_command("dd if=/dev/zero of=/x", dangerous=True) is not None
+
+    def test_rm_rf_root_still_blocked(self):
+        assert validate_command("rm -rf /", dangerous=True) is not None
 
 
 # === convert_virtual_paths_in_command ===
@@ -332,8 +361,10 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert str(user_dir / "hello" / "main.py") in result
-        assert result.startswith("python ")
+        # ``shlex.split`` round-trip is quote-style agnostic — the prior
+        # direct string compare broke on Windows where ``shlex.quote``
+        # adds single quotes around backslash paths.
+        assert shlex.split(result) == ["python", str(user_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
@@ -342,8 +373,7 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert str(global_dir / "hello" / "main.py") in result
-        assert result.startswith("python ")
+        assert shlex.split(result) == ["python", str(global_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
@@ -352,8 +382,10 @@ class TestVirtualMountResolution:
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
         result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
-        assert str(builtin_dir / "find-skills" / "tool.py") in result
-        assert result.startswith("python ")
+        assert shlex.split(result) == [
+            "python",
+            str(builtin_dir / "find-skills" / "tool.py"),
+        ]
 
     def test_skills_path_unresolvable_falls_back_to_workspace_relative(
         self, monkeypatch, tmp_path
@@ -374,16 +406,21 @@ class TestVirtualMountResolution:
     ):
         _, _, _, memories_dir = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command("cat /memories/note.md")
-        assert str(memories_dir / "note.md") in result
-        assert result.startswith("cat ")
+        assert shlex.split(result) == ["cat", str(memories_dir / "note.md")]
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
         """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
         mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert str(user_dir) in convert_virtual_paths_in_command("ls /skills")
-        assert str(user_dir) in convert_virtual_paths_in_command("ls /skills/")
+        assert shlex.split(convert_virtual_paths_in_command("ls /skills")) == [
+            "ls",
+            str(user_dir),
+        ]
+        assert shlex.split(convert_virtual_paths_in_command("ls /skills/")) == [
+            "ls",
+            str(user_dir),
+        ]
 
     def test_skills_prefix_not_overmatched(self, monkeypatch, tmp_path):
         """Paths starting with /skills but not /skills/ (e.g. /skillset/foo)
@@ -623,7 +660,12 @@ class TestVirtualMountResolution:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="shlex.quote produces POSIX quoting incompatible with cmd.exe",
+        reason=(
+            "convert_virtual_paths_in_command wraps resolved paths in single "
+            "quotes via shlex.quote, which cmd.exe does not strip — the "
+            "literal ' chars end up in the subprocess argv. Tracked as a "
+            "follow-up to #207 (Windows-aware quoting in the convert fn)."
+        ),
     )
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
@@ -662,7 +704,7 @@ class TestVirtualMountResolution:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="shlex.quote produces POSIX quoting incompatible with cmd.exe",
+        reason="see test_execute_e2e_workspace_tier_skill",
     )
     def test_execute_e2e_workspace_tier_shadows_global(self, monkeypatch, tmp_path):
         """End-to-end: when the same skill exists in BOTH workspace and global
@@ -703,7 +745,7 @@ class TestVirtualMountResolution:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="shlex.quote produces POSIX quoting incompatible with cmd.exe",
+        reason="see test_execute_e2e_workspace_tier_skill",
     )
     def test_execute_e2e_global_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill that exists ONLY in the global tier (workspace
@@ -779,6 +821,8 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/experiment-1/data/out.csv")
+        # Cross-platform suffix check: ``str(Path)`` uses backslashes on
+        # Windows, so testing for the literal POSIX suffix is brittle.
         assert Path(resolved).parts[-2:] == ("data", "out.csv")
 
     def test_normal_virtual_path(self, tmp_workspace):
@@ -824,6 +868,55 @@ class TestResolvePath:
         """
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         assert backend._resolve_path(tmp_workspace) == backend._resolve_path("/")
+
+
+class TestResolvePathDangerous:
+    """Dangerous mode passes real absolute paths through unmangled."""
+
+    def test_absolute_path_unmangled(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, dangerous=True)
+        # OS-appropriate absolute path (drive-anchored on Windows) outside the ws.
+        target = Path(Path(tmp_workspace).anchor, "etc", "hosts")
+        resolved = Path(backend._resolve_path(str(target)))
+        # Dangerous mode must NOT confine/mangle it into the workspace.
+        assert Path(tmp_workspace) not in resolved.parents
+        assert resolved == target
+
+    def test_outside_workspace_not_confined(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside = tmp_path / "elsewhere" / "data.csv"
+        backend = CustomSandboxBackend(root_dir=str(ws), dangerous=True)
+        resolved = Path(backend._resolve_path(str(outside)))
+        assert resolved == outside  # real path, not pulled into the workspace
+
+    def test_dangerous_forces_virtual_mode_off(self, tmp_workspace):
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace, virtual_mode=True, dangerous=True
+        )
+        assert backend.virtual_mode is False
+
+    def test_dangerous_skips_cwd_literal_rewrite(self, tmp_workspace):
+        """In dangerous mode the cwd->'./' rewrite must NOT mangle real args.
+
+        Regression: a non-path argument that merely contains the cwd string
+        (echo text, grep/git pattern) was being corrupted to './'.
+        """
+        cmd = f'echo "backup of {tmp_workspace}/data"'
+        prepared, error = prepare_sandbox_command(
+            cmd, tmp_workspace, virtual_mode=False, dangerous=True
+        )
+        assert error is None
+        assert prepared == cmd  # unchanged — no './' substitution
+
+    def test_non_dangerous_still_rewrites_cwd_literal(self, tmp_workspace):
+        """Default mode keeps the workspace-literal -> './' rewrite."""
+        cmd = f"cat {tmp_workspace}/file.txt"
+        prepared, error = prepare_sandbox_command(
+            cmd, tmp_workspace, virtual_mode=True, dangerous=False
+        )
+        assert error is None
+        assert prepared == "cat ./file.txt"
 
 
 # === CustomSandboxBackend.id ===
@@ -1448,6 +1541,17 @@ class TestExecuteTimeoutRecovery:
         resp = backend.execute(cmd)
         assert cmd in resp.output
         assert "> /output.log 2>&1 &" in resp.output
+
+    def test_timeout_recovery_uses_relative_log_in_dangerous(self, tmp_workspace):
+        """Dangerous mode: recovery hint must not point the log at the host root."""
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace, timeout=1, dangerous=True
+        )
+        resp = backend.execute(_sleep_cmd(10))
+        assert resp.exit_code == 124
+        assert "> ./output.log 2>&1 &" in resp.output
+        assert "cat ./output.log" in resp.output
+        assert "> /output.log" not in resp.output
 
     def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)

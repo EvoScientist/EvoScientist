@@ -754,6 +754,151 @@ def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeypatch):
+    """Finished workers leave no checkpoint residue: thread is deleted."""
+    worker_activity.reset_memory_worker_status_for_tests()
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
+    )
+    deleted: list[str] = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        def delete(self, thread_id):
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+        )
+        assert deleted == ["worker-thread"]
+        assert worker_activity.memory_worker_status().is_running is False
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch):
+    """Thread deletion is best-effort: a failure must not break accounting."""
+    worker_activity.reset_memory_worker_status_for_tests()
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
+    )
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        def delete(self, thread_id):
+            raise RuntimeError("delete failed")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+        )
+        assert worker_activity.memory_worker_status().is_running is False
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch):
+    """A run we lost track of may still be live — never delete its thread."""
+    worker_activity.reset_memory_worker_status_for_tests()
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
+    )
+    deleted: list[str] = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            raise RuntimeError("poll failed")
+
+    class _Threads:
+        def delete(self, thread_id):
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+        )
+        assert deleted == []
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_async_watcher_deletes_worker_thread_on_terminal_status(
+    tmp_path, monkeypatch, run_async
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
+    )
+    deleted: list[str] = []
+
+    class _Runs:
+        async def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        async def delete(self, thread_id):
+            # Accounting must complete BEFORE the best-effort deletion —
+            # cancellation mid-deletion must never leave the worker
+            # stuck as "running" (CodeRabbit on #279).
+            assert worker_activity.memory_worker_status().is_running is False
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+
+    try:
+        run_async(
+            memory_lifecycle._watch_memory_worker_run_async(
+                SimpleNamespace(runs=_Runs(), threads=_Threads()),
+                thread_id="worker-thread",
+                run_id="run-1",
+            )
+        )
+        assert deleted == ["worker-thread"]
+        assert worker_activity.memory_worker_status().is_running is False
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
     monkeypatch.setattr(

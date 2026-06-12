@@ -105,11 +105,7 @@ class ApprovalWidget(Widget):
         self._option_widgets = []
         count = len(self._action_requests)
         if count == 1:
-            name = (
-                self._action_requests[0].get("name", "")
-                if isinstance(self._action_requests[0], dict)
-                else getattr(self._action_requests[0], "name", "")
-            )
+            name = self._action_requests[0].get("name", "")
             title = f">>> {name} Requires Approval <<<"
         else:
             title = f">>> {count} Tool Calls Require Approval <<<"
@@ -117,16 +113,8 @@ class ApprovalWidget(Widget):
 
         # Show each action request as a compact line
         for req in self._action_requests:
-            name = (
-                req.get("name", "")
-                if isinstance(req, dict)
-                else getattr(req, "name", "")
-            )
-            args = (
-                req.get("args", {})
-                if isinstance(req, dict)
-                else getattr(req, "args", {})
-            )
+            name = req.get("name", "")
+            args = req.get("args", {})
             if isinstance(args, dict):
                 command = args.get("command", args.get("path", ""))
             else:

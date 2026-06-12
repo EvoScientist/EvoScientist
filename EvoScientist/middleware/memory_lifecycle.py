@@ -958,6 +958,32 @@ def _status_from_run_response(run: object) -> str:
     return str(value or "").strip().lower()
 
 
+def _delete_memory_worker_thread(client: Any, thread_id: str) -> None:
+    """Best-effort delete of a finished worker thread.
+
+    Worker conversations have no value after the run: the durable artifact
+    is the memory files they write, and worker threads are never resumed.
+    Deleting the thread drops its checkpoints from the shared sessions.db
+    so short-lived workers leave no per-turn residue behind.
+    """
+    try:
+        client.threads.delete(thread_id)
+    except Exception:
+        logger.debug(
+            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
+        )
+
+
+async def _adelete_memory_worker_thread(client: Any, thread_id: str) -> None:
+    """Async variant of :func:`_delete_memory_worker_thread`."""
+    try:
+        await client.threads.delete(thread_id)
+    except Exception:
+        logger.debug(
+            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
+        )
+
+
 def _spawn_memory_worker_status_thread(
     *,
     url: str,
@@ -984,6 +1010,7 @@ def _watch_memory_worker_run_sync(
 
     failures = 0
     worker_confirmed_finished = False
+    client = None
     try:
         client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
         while True:
@@ -1010,7 +1037,14 @@ def _watch_memory_worker_run_sync(
             time.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
+            # Accounting first, then best-effort deletion (mirrors the
+            # async watcher's cancellation-safe ordering). Only delete
+            # once the run is terminal — deleting a thread with a live
+            # run would break it. Crash residue is handled by the
+            # restore whitelist + startup purge in sessions.py.
             mark_memory_worker_finished(thread_id, run_id)
+            if client is not None:
+                _delete_memory_worker_thread(client, thread_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
@@ -1064,7 +1098,13 @@ async def _watch_memory_worker_run_async(
             await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
+            # Accounting BEFORE the best-effort deletion: if this task is
+            # cancelled mid-finally, only the deletion await is lost
+            # (startup purge covers the residue). The to_thread side
+            # effect completes even if its await is cancelled, so the
+            # worker is never stuck "running".
             await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
+            await _adelete_memory_worker_thread(client, thread_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
