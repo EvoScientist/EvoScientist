@@ -657,10 +657,13 @@ def convert_virtual_paths_in_command(
     Also auto-corrects hallucinated system absolute paths that reference the
     workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
 
-    Pre-process: quoted arguments whose content starts with ``/`` are
-    rewritten as a single shell token — this fixes #237 where
-    ``python "/skills/my skill/main.py"`` was truncated at the embedded
-    space.  After pre-processing, the original regex handles unquoted
+    Pre-process: quoted arguments whose content resolves to a virtual
+    mount (``/skills/...``, ``/memories/...``) or a workspace-prefixed
+    system path are rewritten as a single shell token — this fixes #237
+    where ``python "/skills/my skill/main.py"`` was truncated at the
+    embedded space.  Bare quoted ``/...`` paths (e.g. ``echo "/hi"``)
+    are left untouched since their semantics are ambiguous.
+    After pre-processing, the original regex handles unquoted
     paths and workspace-name correction as before.
     """
     # Pre-process: rewrite quoted paths whose decoded content starts with /
