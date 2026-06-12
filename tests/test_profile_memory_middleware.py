@@ -43,8 +43,8 @@ def _profile_texts(memories):
     ]
 
 
-def _tool_names(middleware) -> set[str]:
-    return {tool.name for tool in middleware.tools}
+def _sorted_tool_names(middleware) -> list[str]:
+    return sorted(tool.name for tool in middleware.tools)
 
 
 def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypatch):
@@ -56,11 +56,11 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
 
-    assert _tool_names(middleware) == {
-        "search_observations",
+    assert _sorted_tool_names(middleware) == [
         "read_memory",
         "record_observation",
-    }
+        "search_observations",
+    ]
     assert (memories / "profile" / "SOUL.md").exists()
     assert (memories / "profile" / "USER_PROFILE.md").exists()
     assert (memories / "profile" / "RESEARCH_TASTE.md").exists()
@@ -105,10 +105,10 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
     )
     middleware.modify_request(_request())
 
-    assert _tool_names(middleware) == {
-        "search_observations",
+    assert _sorted_tool_names(middleware) == [
         "read_memory",
-    }
+        "search_observations",
+    ]
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
@@ -147,10 +147,10 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     modified = middleware.modify_request(_request())
     content = str(modified.system_message.content)
 
-    assert _tool_names(middleware) == {
-        "search_observations",
+    assert _sorted_tool_names(middleware) == [
         "read_memory",
-    }
+        "search_observations",
+    ]
     assert not (memories / "profile").exists()
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))

@@ -40,9 +40,9 @@ _MEMORY_FIRST_INTERPRETER_PROMPT = """
 Memory-first workflow when observation memory is available:
 - Search/read observation memory before using `code_interpreter` to inspect
   workspace files or perform implementation work.
-- If `tools.searchObservations` is exposed in the REPL, call it before
+- If `tools.search_observations` is exposed in the REPL, call it before
   file-inspection calls. If a returned observation looks promising, call
-  `tools.readMemory` with its observation ID before acting on it. Then use
+  `tools.read_memory` with its observation ID before acting on it. Then use
   `code_interpreter` to do or batch the work.
 """
 
