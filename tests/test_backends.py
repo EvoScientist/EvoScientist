@@ -24,6 +24,47 @@ def _sleep_cmd(seconds: int) -> str:
     return f"sleep {seconds}"
 
 
+def _split_cmd(s: str) -> list[str]:
+    """Cross-platform tokenizer for shell command assertions.
+
+    POSIX (``shlex.split`` default ``posix=True``) handles single/double
+    quotes and backslash escapes produced by :func:`shlex.quote`. But
+    ``posix=True`` also treats ``\\`` as an escape char on input, which
+    would strip the backslashes from a bare Windows path like
+    ``C:\\Users\\foo`` — turning it into ``C:Usersfoo`` and breaking the
+    token comparison.
+
+    On Windows, the resolved paths from :func:`backends._platform_quote`
+    are bare (no shell-special chars) or double-quoted (when the path
+    has spaces). ``shlex.split(s, posix=False)`` is a simple whitespace
+    splitter that preserves backslashes verbatim; we then strip a
+    single layer of matching outer ``"``/``'`` and unescape ``\\"``
+    to mimic what cmd.exe does at parse time.
+
+    Examples (on Windows):
+
+    >>> _split_cmd('python C:\\\\Users\\\\foo\\\\bar.py')
+    ['python', 'C:\\\\Users\\\\foo\\\\bar.py']
+    >>> _split_cmd('python "C:\\\\Users\\\\John Smith\\\\bar.py"')
+    ['python', 'C:\\\\Users\\\\John Smith\\\\bar.py']
+    >>> _split_cmd('python "C:\\\\path\\\\a\\\\"b"')
+    ['python', 'C:\\\\path\\\\a"b']
+    """
+    if sys.platform == "win32":
+        tokens = shlex.split(s, posix=False)
+        # posix=False doesn't process quotes; mimic cmd.exe: strip a
+        # single layer of matching outer quotes per token, then
+        # unescape embedded \" → ".
+        result = []
+        for tok in tokens:
+            if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+                tok = tok[1:-1]
+            tok = tok.replace('\\"', '"')
+            result.append(tok)
+        return result
+    return shlex.split(s)
+
+
 # === validate_command ===
 
 
@@ -249,10 +290,11 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        # ``shlex.split`` round-trip is quote-style agnostic — the prior
-        # direct string compare broke on Windows where ``shlex.quote``
-        # adds single quotes around backslash paths.
-        assert shlex.split(result) == ["python", str(user_dir / "hello" / "main.py")]
+        # ``_split_cmd`` round-trip is cross-platform: on POSIX it parses
+        # shlex.quote-style output; on Windows it preserves the backslashes
+        # in bare paths (POSIX shlex would treat ``\`` as an escape char
+        # and strip them). See the helper docstring for details.
+        assert _split_cmd(result) == ["python", str(user_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
@@ -261,7 +303,7 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert shlex.split(result) == ["python", str(global_dir / "hello" / "main.py")]
+        assert _split_cmd(result) == ["python", str(global_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
@@ -270,7 +312,7 @@ class TestVirtualMountResolution:
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
         result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
-        assert shlex.split(result) == [
+        assert _split_cmd(result) == [
             "python",
             str(builtin_dir / "find-skills" / "tool.py"),
         ]
@@ -294,18 +336,18 @@ class TestVirtualMountResolution:
     ):
         _, _, _, memories_dir = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command("cat /memories/note.md")
-        assert shlex.split(result) == ["cat", str(memories_dir / "note.md")]
+        assert _split_cmd(result) == ["cat", str(memories_dir / "note.md")]
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
         """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
         mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert shlex.split(convert_virtual_paths_in_command("ls /skills")) == [
+        assert _split_cmd(convert_virtual_paths_in_command("ls /skills")) == [
             "ls",
             str(user_dir),
         ]
-        assert shlex.split(convert_virtual_paths_in_command("ls /skills/")) == [
+        assert _split_cmd(convert_virtual_paths_in_command("ls /skills/")) == [
             "ls",
             str(user_dir),
         ]
@@ -461,7 +503,7 @@ class TestVirtualMountResolution:
 
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
 
-        tokens = shlex.split(result)
+        tokens = _split_cmd(result)
         assert tokens[0] == "python"
         assert tokens[1] == str(user_dir / "hello" / "main.py")
 
@@ -478,7 +520,7 @@ class TestVirtualMountResolution:
 
         result = convert_virtual_paths_in_command("cat /memories/note.md")
 
-        tokens = shlex.split(result)
+        tokens = _split_cmd(result)
         assert tokens[0] == "cat"
         assert tokens[1] == str(spacey / "note.md")
 
@@ -546,15 +588,6 @@ class TestVirtualMountResolution:
         assert result[1] == paths.GLOBAL_SKILLS_DIR
         assert result[2] == backends._BUILTIN_SKILLS_DIR
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason=(
-            "convert_virtual_paths_in_command wraps resolved paths in single "
-            "quotes via shlex.quote, which cmd.exe does not strip — the "
-            "literal ' chars end up in the subprocess argv. Tracked as a "
-            "follow-up to #207 (Windows-aware quoting in the convert fn)."
-        ),
-    )
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
         execute successfully. Regression guard: USER_SKILLS_DIR must be in
@@ -590,10 +623,6 @@ class TestVirtualMountResolution:
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="see test_execute_e2e_workspace_tier_skill",
-    )
     def test_execute_e2e_workspace_tier_shadows_global(self, monkeypatch, tmp_path):
         """End-to-end: when the same skill exists in BOTH workspace and global
         tiers, the workspace version must shadow the global one when invoked
@@ -631,10 +660,6 @@ class TestVirtualMountResolution:
         assert "WORKSPACE_TIER_WINS" in resp.output
         assert "GLOBAL_TIER_LOST" not in resp.output
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="see test_execute_e2e_workspace_tier_skill",
-    )
     def test_execute_e2e_global_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill that exists ONLY in the global tier (workspace
         does not have a copy) must execute successfully via
@@ -1459,3 +1484,56 @@ class TestExecuteTimeoutRecovery:
         resp = backend.execute('python -c "raise SystemExit(1)"')
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
+
+
+class TestPlatformQuote:
+    """Unit tests for :func:`backends._platform_quote` / :func:`backends._cmd_quote`.
+
+    The platform check is read at call time via :func:`backends._is_windows`,
+    so we monkeypatch that function (not the ``sys`` module) to exercise the
+    Windows branch on a POSIX runner without mutating global state.
+    """
+
+    def test_posix_no_special_chars_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        # Forward slashes and alphanumerics are safe in POSIX shells.
+        assert backends._platform_quote("/Users/foo/file.py") == "/Users/foo/file.py"
+
+    def test_posix_path_with_space_is_single_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        # shlex.quote wraps the whole token in single quotes.
+        assert (
+            backends._platform_quote("/Users/foo/file bar.py")
+            == "'/Users/foo/file bar.py'"
+        )
+
+    def test_windows_no_special_chars_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Backslashes are NOT escape chars inside cmd.exe double quotes, and
+        # outside quotes they only appear in paths — so a bare path is fine.
+        assert (
+            backends._platform_quote(r"C:\Users\foo\file.py") == r"C:\Users\foo\file.py"
+        )
+
+    def test_windows_path_with_space_is_double_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # cmd.exe strips outer double quotes; the space is preserved literally.
+        assert (
+            backends._platform_quote(r"C:\Users\John Smith\file.py")
+            == r'"C:\Users\John Smith\file.py"'
+        )
+
+    def test_windows_embedded_double_quote_is_escaped(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Embedded " is escaped as \" so cmd.exe keeps the literal quote inside
+        # the token rather than terminating the quoted region.
+        assert backends._platform_quote(r'C:\path\a"b') == r'"C:\path\a\"b"'
+
+    def test_windows_percent_sign_is_double_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Bare % would trigger %VAR% expansion in cmd.exe; quoting the whole
+        # token neutralises that.
+        assert (
+            backends._platform_quote(r"C:\path\%TEMP%\file.py")
+            == r'"C:\path\%TEMP%\file.py"'
+        )
