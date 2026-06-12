@@ -269,7 +269,12 @@ def _candidate_observation_documents(
         summary = str(metadata.get("summary") or "").strip()
         memory_type_value = str(metadata.get("memory_type") or "").strip()
         scope_value = str(metadata.get("scope") or "").strip()
-        if not observation_id or not summary or not memory_type_value or not scope_value:
+        if (
+            not observation_id
+            or not summary
+            or not memory_type_value
+            or not scope_value
+        ):
             continue
         try:
             record_type = MemoryType(memory_type_value)
@@ -280,7 +285,9 @@ def _candidate_observation_documents(
             continue
 
         try:
-            memory_path = "/" + path.relative_to(Path(memory_dir).expanduser()).as_posix()
+            memory_path = (
+                "/" + path.relative_to(Path(memory_dir).expanduser()).as_posix()
+            )
         except ValueError:
             continue
         documents.append(

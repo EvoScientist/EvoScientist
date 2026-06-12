@@ -39,7 +39,9 @@ def _compile_query_pattern(query: str) -> re.Pattern[str]:
 def _tokens(text: str) -> list[str]:
     """Return simple lowercase search tokens."""
     return [
-        token for token in _TOKEN_RE.findall(text.casefold()) if len(token) >= MIN_TOKEN_CHARS
+        token
+        for token in _TOKEN_RE.findall(text.casefold())
+        if len(token) >= MIN_TOKEN_CHARS
     ]
 
 

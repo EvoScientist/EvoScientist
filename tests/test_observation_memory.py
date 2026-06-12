@@ -377,12 +377,8 @@ def test_search_observation_files_handles_regex_like_literals(tmp_path):
         mode=ObservationSearchMode.REGEX,
     )
 
-    assert [hit["observation_id"] for hit in hits] == [
-        relevant["observation_id"]
-    ]
-    assert [hit["observation_id"] for hit in regex_hits] == [
-        relevant["observation_id"]
-    ]
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert [hit["observation_id"] for hit in regex_hits] == [relevant["observation_id"]]
 
 
 def test_search_observation_files_ranks_bag_of_words_queries(tmp_path):
