@@ -457,6 +457,24 @@ def _task_tool_call_ids(messages: list[BaseMessage]) -> set[str]:
     return ids
 
 
+def _source_agent_direct_tool_call_ids(
+    messages: Sequence[BaseMessage],
+    *,
+    source_agent: str,
+) -> set[str]:
+    """Return non-delegation tool call ids made by the source agent."""
+    ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        if message.name and message.name != source_agent:
+            continue
+        for call in message.tool_calls:
+            if call["name"] != "task" and call["id"]:
+                ids.add(call["id"])
+    return ids
+
+
 def _compact_message(
     message: BaseMessage,
     *,
@@ -524,10 +542,17 @@ def _compact_turn_messages(
 
     turn_messages = _latest_user_turn_messages(messages)
     task_ids = _task_tool_call_ids(turn_messages)
+    direct_tool_ids = _source_agent_direct_tool_call_ids(
+        turn_messages,
+        source_agent=source_agent,
+    )
     items: list[CompactMessage] = []
     filtered = filter_messages(turn_messages, exclude_tool_calls=task_ids)
     for message in filtered:
-        if message.name and message.name != source_agent:
+        if isinstance(message, ToolMessage):
+            if message.tool_call_id not in direct_tool_ids:
+                continue
+        elif message.name and message.name != source_agent:
             continue
 
         items.append(

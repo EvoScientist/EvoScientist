@@ -605,6 +605,61 @@ def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
     ]
 
 
+def test_turn_compaction_keeps_direct_tool_results_with_tool_names():
+    messages = [
+        HumanMessage("run a check"),
+        AIMessage(
+            content="",
+            name="EvoScientist",
+            tool_calls=[
+                {
+                    "name": "execute",
+                    "id": "exec-1",
+                    "args": {"command": "pytest -q"},
+                },
+                {
+                    "name": "task",
+                    "id": "task-1",
+                    "args": {"subagent_type": "code-agent", "description": "debug"},
+                },
+            ],
+        ),
+        ToolMessage("pytest passed", tool_call_id="exec-1", name="execute"),
+        ToolMessage("raw subagent result body", tool_call_id="task-1", name="task"),
+        AIMessage("final answer", name="EvoScientist"),
+    ]
+
+    compact = memory_lifecycle._compact_turn_messages(
+        messages,
+        source_agent="EvoScientist",
+    )
+
+    assert compact == [
+        {"role": "human", "content": "run a check"},
+        {
+            "role": "ai",
+            "content": "",
+            "name": "EvoScientist",
+            "tool_calls": [
+                {
+                    "name": "execute",
+                    "id": "exec-1",
+                    "args": {"command": "pytest -q"},
+                    "type": "tool_call",
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "pytest passed",
+            "name": "execute",
+            "tool_call_id": "exec-1",
+            "status": "success",
+        },
+        {"role": "ai", "content": "final answer", "name": "EvoScientist"},
+    ]
+
+
 def test_turn_compaction_uses_latest_user_turn_only():
     messages = [
         HumanMessage("old request"),
