@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class CompletionKind(StrEnum):
+    """Discriminator for the kind of completion result."""
+
+    COMMANDS = "commands"
+    SUBCOMMANDS = "subcommands"
+    EMPTY = "empty"
 
 
 @dataclass(frozen=True)
@@ -17,7 +26,7 @@ class CompletionCandidate:
 class CompletionResult:
     """The result of parsing a slash command input for completions."""
 
-    kind: str  # "commands" | "subcommands" | "empty"
+    kind: CompletionKind
     candidates: list[CompletionCandidate]
 
 
@@ -34,11 +43,11 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     before = text[:cursor_pos]
 
     if not before.startswith("/"):
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     parts = before.split()
     if not parts:
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     cmd_name = parts[0].lower()
     has_trailing_space = before.endswith(" ")
@@ -51,17 +60,17 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
 
         # Exact match with no trailing space → hide
         if len(matches) == 1 and matches[0][0] == prefix and not has_trailing_space:
-            return CompletionResult("empty", [])
+            return CompletionResult(CompletionKind.EMPTY, [])
 
         # Exact match + trailing space + has subcommands → show subcommands
         if len(matches) == 1 and matches[0][0] == prefix and has_trailing_space:
             if not cmd_manager.get_subcommands(prefix):
-                return CompletionResult("empty", [])
+                return CompletionResult(CompletionKind.EMPTY, [])
             sub_items = cmd_manager.list_subcommands(cmd_name)
             if sub_items:
                 insert_pos = len(before)
                 return CompletionResult(
-                    "subcommands",
+                    CompletionKind.SUBCOMMANDS,
                     [
                         CompletionCandidate(
                             text=name,
@@ -75,7 +84,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
 
         if matches:
             return CompletionResult(
-                "commands",
+                CompletionKind.COMMANDS,
                 [
                     CompletionCandidate(
                         text=cmd,
@@ -87,15 +96,15 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
                 ],
             )
 
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     # --- Subcommand completion (len(parts) >= 2) ---
     if len(parts) >= 3:
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     cmd = cmd_manager.get_command(cmd_name)
     if cmd is None or not cmd.subcommands:
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     sub_prefix = parts[1].lower()
     sub_matches = [
@@ -105,7 +114,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     ]
 
     if not sub_matches:
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     # Exact match (sub_prefix == name) → the subcommand is already
     # complete.  Hide regardless of trailing space — the user is done
@@ -113,7 +122,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     # guard, Tab on ``/mcp list`` re-inserts ``list`` and ``/mcp list ``
     # oscillates between adding and removing the trailing space.
     if len(sub_matches) == 1 and sub_matches[0][0] == sub_prefix:
-        return CompletionResult("empty", [])
+        return CompletionResult(CompletionKind.EMPTY, [])
 
     sub_start = before.rfind(sub_prefix) if sub_prefix else len(before)
     if sub_start < 0:
@@ -124,7 +133,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     replace_end = len(before) - 1 if has_trailing_space else len(before)
 
     return CompletionResult(
-        "subcommands",
+        CompletionKind.SUBCOMMANDS,
         [
             CompletionCandidate(
                 text=name,
