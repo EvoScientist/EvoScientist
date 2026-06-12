@@ -1529,11 +1529,21 @@ class TestPlatformQuote:
         # the token rather than terminating the quoted region.
         assert backends._platform_quote(r'C:\path\a"b') == r'"C:\path\a\"b"'
 
-    def test_windows_percent_sign_is_double_quoted(self, monkeypatch):
+    def test_windows_percent_sign_is_escaped(self, monkeypatch):
         monkeypatch.setattr(backends, "_is_windows", lambda: True)
-        # Bare % would trigger %VAR% expansion in cmd.exe; quoting the whole
-        # token neutralises that.
+        # %VAR% expansion happens before quote processing in cmd.exe, so
+        # double-quoting alone cannot neutralise it.  We escape bare % as
+        # %% (the cmd.exe idiom for a literal percent).
         assert (
             backends._platform_quote(r"C:\path\%TEMP%\file.py")
-            == r'"C:\path\%TEMP%\file.py"'
+            == r"C:\path\%%TEMP%%\file.py"
+        )
+
+    def test_windows_percent_sign_with_space_is_quoted_and_escaped(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # When a path has both % and spaces, both transformations apply:
+        # %% escaping first, then double-quoting for the space.
+        assert (
+            backends._platform_quote(r"C:\path\%TEMP%\file name.py")
+            == r'"C:\path\%%TEMP%%\file name.py"'
         )

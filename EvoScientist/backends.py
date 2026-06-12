@@ -605,7 +605,9 @@ def _cmd_quote(s: str) -> str:
     cmd.exe strips outer double quotes; content between them is taken
     literally. Backslashes are not escape chars inside double quotes, so
     Windows paths pass through unchanged. Embedded ``"`` is escaped as
-    ``\"``; bare paths with no shell-special chars need no quoting at all.
+    ``\"``. Because ``%VAR%`` expansion happens *before* quote processing,
+    bare ``%`` characters are escaped as ``%%`` (the cmd.exe idiom for a
+    literal percent) regardless of surrounding quotes.
 
     Mirrors the role of :func:`shlex.quote` for the Windows shell so the
     sandbox command can pass a single token through :func:`subprocess.run`
@@ -613,7 +615,8 @@ def _cmd_quote(s: str) -> str:
     """
     if not s:
         return '""'
-    if not any(c in s for c in ' \t\n"&|<>^()%'):
+    s = s.replace('%', '%%')
+    if not any(c in s for c in ' \t\n"&|<>^()'):
         return s
     return '"' + s.replace('"', '\\"') + '"'
 
@@ -637,15 +640,15 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
     *token* is not a registered virtual mount.
 
     For ``/skills/...``: walks ``_skills_tier_paths()`` priority (USER →
-    GLOBAL → BUILTIN), returning ``shlex.quote`` of the first tier where the
-    path exists. On miss, returns a workspace-relative ``./skills/<rel>``
-    form — agent typed a virtual path, so the shell error should reference a
-    location they recognise (`USER_SKILLS_DIR` defaults to
+    GLOBAL → BUILTIN), returning :func:`_platform_quote` of the first tier
+    where the path exists. On miss, returns a workspace-relative
+    ``./skills/<rel>`` form — agent typed a virtual path, so the shell error
+    should reference a location they recognise (`USER_SKILLS_DIR` defaults to
     ``WORKSPACE_ROOT / "skills"``, which is also where ``MergedSkillsBackend``
     would write a new skill).
 
     For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
-    absolute and ``shlex.quote``-wrapped. Memories live outside the
+    absolute and :func:`_platform_quote`-wrapped. Memories live outside the
     workspace, so a relative form would point at an unrelated location.
     """
     rel = _subpath_under_mount(token, "/skills")
