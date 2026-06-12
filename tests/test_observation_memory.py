@@ -1478,11 +1478,12 @@ def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_one_shot_cli_wait_exits_after_observed_memory_output(monkeypatch):
+def test_one_shot_cli_wait_keeps_polling_after_observed_memory_output(monkeypatch):
     from EvoScientist.cli import interactive
 
     now = 0.0
     printed = []
+    observed_calls = 0
 
     def fake_monotonic():
         return now
@@ -1491,27 +1492,58 @@ def test_one_shot_cli_wait_exits_after_observed_memory_output(monkeypatch):
         nonlocal now
         now += seconds
 
+    def fake_observed_outputs():
+        nonlocal observed_calls
+        observed_calls += 1
+        if observed_calls < 8:
+            return worker_activity.MemoryWorkerStatusSnapshot(
+                is_running=True,
+                observations_recorded=1,
+            )
+        return worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False,
+            observations_recorded=1,
+            profile_updates=1,
+        )
+
     monkeypatch.setattr(interactive.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(interactive.time, "sleep", fake_sleep)
     monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
     monkeypatch.setattr(
         worker_activity,
-        "memory_worker_status",
-        lambda: worker_activity.MemoryWorkerStatusSnapshot(is_running=True),
+        "memory_worker_observed_outputs",
+        fake_observed_outputs,
     )
+
+    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+
+    assert observed_calls == 8
+    assert any("EvoMemory saved 1 observation(s)." in str(line) for line in printed)
+    assert any(
+        "EvoMemory saved 1 observation(s), 1 profile update(s)." in str(line)
+        for line in printed
+    )
+    assert not any("still running" in str(line) for line in printed)
+
+
+def test_one_shot_cli_wait_reports_fast_worker_output(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    printed = []
+
+    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
     monkeypatch.setattr(
         worker_activity,
         "memory_worker_observed_outputs",
         lambda: worker_activity.MemoryWorkerStatusSnapshot(
-            is_running=True,
+            is_running=False,
             observations_recorded=1,
         ),
     )
 
     interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
 
-    assert any("EvoMemory saved 1 observation(s)." in str(line) for line in printed)
-    assert not any("still running" in str(line) for line in printed)
+    assert printed == ["[dim]EvoMemory saved 1 observation(s).[/dim]"]
 
 
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
