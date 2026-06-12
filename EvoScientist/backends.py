@@ -615,7 +615,7 @@ def _cmd_quote(s: str) -> str:
     """
     if not s:
         return '""'
-    s = s.replace('%', '%%')
+    s = s.replace("%", "%%")
     if not any(c in s for c in ' \t\n"&|<>^()'):
         return s
     return '"' + s.replace('"', '\\"') + '"'
