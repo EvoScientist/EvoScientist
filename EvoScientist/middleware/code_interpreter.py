@@ -26,6 +26,7 @@ Usage::
 
 from __future__ import annotations
 
+from langchain.agents.middleware.types import ModelRequest
 from langchain_quickjs import CodeInterpreterMiddleware
 
 # Defaults match the historical hardcoded values. Callers (the agent
@@ -44,6 +45,14 @@ Memory-first workflow when observation memory is available:
   `tools.readMemory` with its observation ID before acting on it. Then use
   `code_interpreter` to do or batch the work.
 """
+
+
+class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
+    """Code interpreter middleware with EvoScientist's memory preflight hint."""
+
+    def _prepare_for_call(self, request: ModelRequest) -> str:
+        return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
+
 
 # Read-only, batchable tools that benefit from being callable inside JS.
 # Multi-agent orchestration is the killer use case: ``Promise.all`` over
@@ -90,11 +99,9 @@ def create_code_interpreter_middleware(
         Configured ``CodeInterpreterMiddleware`` ready to append to an agent's
         middleware stack.
     """
-    middleware = CodeInterpreterMiddleware(
+    return EvoCodeInterpreterMiddleware(
         ptc=_DEFAULT_PTC_ALLOWLIST,
         timeout=timeout,
         max_result_chars=max_result_chars,
         tool_name="code_interpreter",
     )
-    middleware._base_system_prompt += _MEMORY_FIRST_INTERPRETER_PROMPT
-    return middleware

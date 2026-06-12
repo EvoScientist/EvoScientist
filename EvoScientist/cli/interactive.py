@@ -1464,10 +1464,7 @@ def _wait_for_memory_workers_before_exit(
 ) -> None:
     """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
     try:
-        from ..memory.worker_activity import (
-            memory_worker_observed_outputs,
-            memory_worker_status,
-        )
+        from ..memory.worker_activity import memory_worker_observed_outputs
     except Exception:
         return
 
@@ -1478,18 +1475,17 @@ def _wait_for_memory_workers_before_exit(
     while True:
         now = time.monotonic()
         try:
-            status = memory_worker_status()
             observed = memory_worker_observed_outputs()
         except Exception:
             return
 
-        if not status.is_running:
+        if not observed.is_running:
             if announced:
                 saved = []
-                if status.observations_recorded:
-                    saved.append(f"{status.observations_recorded} observation(s)")
-                if status.profile_updates:
-                    saved.append(f"{status.profile_updates} profile update(s)")
+                if observed.observations_recorded:
+                    saved.append(f"{observed.observations_recorded} observation(s)")
+                if observed.profile_updates:
+                    saved.append(f"{observed.profile_updates} profile update(s)")
                 if saved:
                     console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
             return

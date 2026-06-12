@@ -83,7 +83,7 @@ def _build_intake_scope() -> str:
     bullets = [
         "- Read the proposal and extract goals, datasets, constraints, and evaluation metrics.",
         "- Capture key assumptions and open questions.",
-        "- Save the original proposal to `/research_request.md`.",
+        "- Save the original proposal to `research_request.md`.",
     ]
     return "\n".join(["## Step 1: Intake & Scope", *bullets])
 
@@ -94,13 +94,13 @@ _EXPERIMENT_WORKFLOW_EXECUTION = """## Step 2: Plan (Recommended Structure)
 - Use `write_todos` to track the execution plan and updates.
 - If delegating planning to planner-agent, start your message with: `MODE: PLAN`.
 - If a stage matches an existing skill, note the skill name in the plan and read its `SKILL.md` before implementation.
-- Save the plan to `/todos.md` (recommended). Include per-stage:
+- Save the plan to `todos.md` (recommended). Include per-stage:
   - objective and success signals
   - what to run (commands/scripts)
   - expected artifacts (tables/plots/logs)
 - Optionally save:
-  - `/plan.md` for stages
-  - `/success_criteria.md` for success signals
+  - `plan.md` for stages
+  - `success_criteria.md` for success signals
 
 ## Step 3: Execute & Debug
 Before any code delegation, you MUST complete the Code Generation Mode Selection below.
@@ -124,8 +124,8 @@ Before delegating code tasks to code-agent, ask the user which code generation m
 - Prefer the research-agent for web search; avoid searching directly.
 - Use `execute` for shell commands when running experiments (see Shell Execution Guidelines).
 - When a task matches an existing skill, read its `SKILL.md` and follow it rather than reinventing the workflow.
-- Keep outputs organized under `/artifacts/` (recommended).
-- Optionally log runs to `/experiment_log.md` (params, seeds, env, outputs).
+- Keep outputs organized under `artifacts/` (recommended).
+- Optionally log runs to `experiment_log.md` (params, seeds, env, outputs).
 
 ## Step 4: Evaluate & Iterate
 - Compare results against success signals.
@@ -134,7 +134,7 @@ Before delegating code tasks to code-agent, ask the user which code generation m
   - propose new methods/data
   - re-run and re-evaluate
 - Prefer evidence-driven iteration: error analysis, sanity checks, and minimal ablations.
-- Update `/todos.md` to reflect new iterations.
+- Update `todos.md` to reflect new iterations.
 - Stop iterating when evidence is sufficient or diminishing returns appear.
 """
 
@@ -178,16 +178,16 @@ Ask the planner-agent to output a **Plan Update JSON** with this schema:
   "todo_updates": ["..."]
 }
 ```
-Empty arrays are valid. If no changes are needed, return the JSON with empty arrays. Then revise `/todos.md` accordingly.
+Empty arrays are valid. If no changes are needed, return the JSON with empty arrays. Then revise `todos.md` accordingly.
 
 ## Step 5: Write Report
-- Write the final report to `/final_report.md` (Markdown), following the structure in **Experiment Report Template** below.
+- Write the final report to `final_report.md` (Markdown), following the structure in **Experiment Report Template** below.
 - If web research was used, include a Sources section with real URLs (no fabricated citations).
 - When applicable, include effect sizes, uncertainty, and notes on statistical corrections.
 - Follow the rules in **Writing Guidelines** below.
 
 ## Step 6: Verify
-- Re-read `/research_request.md` to ensure coverage.
+- Re-read `research_request.md` to ensure coverage.
 - Confirm the report answers the proposal and documents key settings/results.
 """
 
@@ -215,7 +215,7 @@ EXPERIMENT_WORKFLOW = _build_experiment_workflow()
 
 REPORT_TEMPLATE = """# Experiment Report Template (Recommended)
 
-When writing a final report (e.g. `/final_report.md`), use this six-section structure unless the user requests a different format:
+When writing a final report (e.g. `final_report.md`), use this six-section structure unless the user requests a different format:
 
 1. **Summary & goals** — problem statement and what success looks like
 2. **Experiment plan** — stages with their success signals

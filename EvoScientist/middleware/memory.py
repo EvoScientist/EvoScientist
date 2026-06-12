@@ -177,12 +177,13 @@ def _prepend_to_system_message(
     prefix = text
     if existing_blocks:
         prefix = f"{text}\n\n"
-    return SystemMessage(
-        content_blocks=[
-            {"type": "text", "text": prefix},
-            *existing_blocks,
-        ]
-    )
+    new_blocks = [
+        {"type": "text", "text": prefix},
+        *existing_blocks,
+    ]
+    if system_message is None:
+        return SystemMessage(content=new_blocks)
+    return system_message.model_copy(update={"content": new_blocks})
 
 
 def _short_hash(text: str, *, n: int = 16) -> str:

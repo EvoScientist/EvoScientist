@@ -43,6 +43,10 @@ def _profile_texts(memories):
     ]
 
 
+def _tool_names(middleware) -> set[str]:
+    return {tool.name for tool in middleware.tools}
+
+
 def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
@@ -52,17 +56,41 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     middleware = memory_module.create_memory_middleware(str(memories))
     middleware.modify_request(_request())
 
-    assert [tool.name for tool in middleware.tools] == [
+    assert _tool_names(middleware) == {
         "search_observations",
         "read_memory",
         "record_observation",
-    ]
+    }
     assert (memories / "profile" / "SOUL.md").exists()
     assert (memories / "profile" / "USER_PROFILE.md").exists()
     assert (memories / "profile" / "RESEARCH_TASTE.md").exists()
     assert list((memories / "profile" / "projects").glob("*/PROJECT_PROFILE.md"))
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))
+
+
+def test_prepend_to_system_message_preserves_metadata():
+    system_message = SystemMessage(
+        content="base system",
+        id="system-1",
+        name="root-system",
+        additional_kwargs={"cache_control": {"type": "ephemeral"}},
+        response_metadata={"provider": "test"},
+    )
+
+    updated = memory_module._prepend_to_system_message(
+        system_message,
+        "memory context",
+    )
+
+    assert updated.id == "system-1"
+    assert updated.name == "root-system"
+    assert updated.additional_kwargs == {"cache_control": {"type": "ephemeral"}}
+    assert updated.response_metadata == {"provider": "test"}
+    assert updated.content_blocks == [
+        {"type": "text", "text": "memory context\n\n"},
+        {"type": "text", "text": "base system"},
+    ]
 
 
 def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
@@ -77,10 +105,10 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
     )
     middleware.modify_request(_request())
 
-    assert [tool.name for tool in middleware.tools] == [
+    assert _tool_names(middleware) == {
         "search_observations",
         "read_memory",
-    ]
+    }
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
@@ -119,10 +147,10 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     modified = middleware.modify_request(_request())
     content = str(modified.system_message.content)
 
-    assert [tool.name for tool in middleware.tools] == [
+    assert _tool_names(middleware) == {
         "search_observations",
         "read_memory",
-    ]
+    }
     assert not (memories / "profile").exists()
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))
