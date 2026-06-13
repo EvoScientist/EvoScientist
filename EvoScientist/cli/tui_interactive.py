@@ -36,7 +36,14 @@ from ..sessions import (
 from ..stream.events import stream_agent_events
 from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
-from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
+from ._constants import (
+    DANGEROUS_BANNER_LABEL,
+    DANGEROUS_BANNER_MESSAGE,
+    LOGO_GRADIENT,
+    LOGO_LINES,
+    WELCOME_SLOGANS,
+    build_metadata,
+)
 from .channel import (
     ChannelMessage,
     _auto_start_channel,
@@ -139,6 +146,16 @@ def _build_welcome_banner(
     info.append("@ files", style="#ffe082 bold")
     info.append(" \u2022 Ctrl+C ", style="#ffe082")
     info.append("interrupt", style="#ffe082 bold")
+    try:
+        from ..config import get_effective_config
+
+        if get_effective_config().dangerous_mode:
+            info.append(
+                f"\n  \u26a0 {DANGEROUS_BANNER_LABEL}", style="bold white on red"
+            )
+            info.append(f"  {DANGEROUS_BANNER_MESSAGE}", style="bold red")
+    except Exception:
+        pass
     banner.append_text(info)
 
     slogan = Text(f"\n  {random.choice(WELCOME_SLOGANS)}", style="dim italic")

@@ -1322,6 +1322,11 @@ def serve(
         "--ask-user",
         help="Enable agent to ask clarifying questions about your research preferences",
     ),
+    dangerous: bool = typer.Option(
+        False,
+        "--dangerous",
+        help="DANGEROUS: real-filesystem access (no workspace confinement); implies --auto-approve",
+    ),
     debug: bool = typer.Option(
         False,
         "--debug",
@@ -1344,6 +1349,8 @@ def serve(
         cli_overrides["enable_ask_user"] = False
     elif ask_user:
         cli_overrides["enable_ask_user"] = True
+    if dangerous:
+        cli_overrides["dangerous_mode"] = True
     if debug:
         cli_overrides["log_level"] = "DEBUG"
         cli_overrides["channel_debug_tracing"] = True
@@ -1390,6 +1397,13 @@ def serve(
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
     _ensure_async_subagent_server(config, workspace_dir=ws)
 
+    if config.dangerous_mode:
+        from ._constants import DANGEROUS_BANNER_LABEL, DANGEROUS_BANNER_MESSAGE
+
+        console.print(
+            f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
+            f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
+        )
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
     from ..sessions import generate_thread_id
@@ -1964,6 +1978,11 @@ def _main_callback(
         "--ask-user",
         help="Enable agent to ask clarifying questions about your research preferences",
     ),
+    dangerous: bool = typer.Option(
+        False,
+        "--dangerous",
+        help="DANGEROUS: real-filesystem access (no workspace confinement); implies --auto-approve",
+    ),
     auth_mode: str | None = typer.Option(
         None,
         "--auth-mode",
@@ -2001,6 +2020,8 @@ def _main_callback(
         cli_overrides["enable_ask_user"] = False
     elif ask_user:
         cli_overrides["enable_ask_user"] = True
+    if dangerous:
+        cli_overrides["dangerous_mode"] = True
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):
             raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")

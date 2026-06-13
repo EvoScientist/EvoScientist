@@ -43,10 +43,14 @@ _SYSTEM_PATH_PREFIXES = (
     "/root/",
 )
 
-# Dangerous patterns that could escape the workspace
-BLOCKED_PATTERNS = [
+# Path-confinement patterns: keep the agent inside the workspace. These are
+# bypassed in dangerous mode (real-filesystem access).
+_PATH_PATTERNS = [
     r"~/",  # home directory
     r"\bcd\s+/",  # cd to absolute path
+]
+# Destructive patterns: catastrophic regardless of mode — always enforced.
+_DESTRUCTIVE_PATTERNS = [
     r"\brm\s+-rf\s+/",  # rm -rf with absolute path
 ]
 
@@ -499,6 +503,8 @@ def _extract_all_paths(
 def validate_command(
     command: str,
     allow_prefixes: tuple[str, ...] = (),
+    *,
+    dangerous: bool = False,
 ) -> str | None:
     """
     Validate a shell command for safety.
@@ -507,20 +513,35 @@ def validate_command(
         command: Shell command string.
         allow_prefixes: Absolute path prefixes exempt from the system-path
             block list (matching rules in ``_is_under_allowed_prefix``).
+        dangerous: When True (real-filesystem mode), skip the path-confinement
+            checks (``..`` traversal, ``~/``/``cd /`` patterns, absolute system
+            paths). Privileged commands (:data:`BLOCKED_COMMANDS`) and
+            catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
+            enforced.
 
     Returns:
         None if command is safe, error message string if blocked.
     """
-    # Check for '..' path traversal as a path component
-    if _has_traversal_component(command):
-        return (
-            "Command blocked: contains '..' path traversal. "
-            "All commands must operate within the workspace directory. "
-            "Use relative paths (e.g., './file.py') instead."
-        )
+    # Path-confinement checks — skipped in dangerous mode.
+    if not dangerous:
+        # Check for '..' path traversal as a path component
+        if _has_traversal_component(command):
+            return (
+                "Command blocked: contains '..' path traversal. "
+                "All commands must operate within the workspace directory. "
+                "Use relative paths (e.g., './file.py') instead."
+            )
 
-    # Check for dangerous patterns
-    for pattern in BLOCKED_PATTERNS:
+        for pattern in _PATH_PATTERNS:
+            if re.search(pattern, command):
+                return (
+                    f"Command blocked: contains forbidden pattern '{pattern}'. "
+                    f"All commands must operate within the workspace directory. "
+                    f"Use relative paths (e.g., './file.py') instead."
+                )
+
+    # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
+    for pattern in _DESTRUCTIVE_PATTERNS:
         if re.search(pattern, command):
             return (
                 f"Command blocked: contains forbidden pattern '{pattern}'. "
@@ -528,7 +549,7 @@ def validate_command(
                 f"Use relative paths (e.g., './file.py') instead."
             )
 
-    # Check for dangerous commands (pipeline-aware)
+    # Check for dangerous commands (pipeline-aware) — always enforced.
     for base_cmd in _split_shell_commands(command):
         if base_cmd in BLOCKED_COMMANDS:
             return (
@@ -536,16 +557,17 @@ def validate_command(
                 f"Only standard development commands are permitted."
             )
 
-    # Check for absolute system paths (including inside quoted strings).
-    # This catches attacks like: python -c "os.remove('/Users/foo/file')"
-    escaped_paths = _extract_all_paths(command, allow_prefixes=allow_prefixes)
-    if escaped_paths:
-        path_sample = escaped_paths[0]
-        return (
-            f"Command blocked: contains absolute system path '{path_sample}'. "
-            f"All file operations must use relative paths within the workspace. "
-            f"Use relative paths (e.g., './file.py') instead."
-        )
+    # Absolute-system-path check — skipped in dangerous mode.
+    # Catches attacks like: python -c "os.remove('/Users/foo/file')"
+    if not dangerous:
+        escaped_paths = _extract_all_paths(command, allow_prefixes=allow_prefixes)
+        if escaped_paths:
+            path_sample = escaped_paths[0]
+            return (
+                f"Command blocked: contains absolute system path '{path_sample}'. "
+                f"All file operations must use relative paths within the workspace. "
+                f"Use relative paths (e.g., './file.py') instead."
+            )
 
     return None
 
@@ -605,36 +627,79 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
     return None
 
 
+def _guard_bare_absolute(result: str | None) -> str | None:
+    """If *result* is a bare absolute path (no surrounding quotes),
+    single-quote it so the post-process regex won't re-rewrite it."""
+    if result and result.startswith("/") and result == result.strip("'\""):
+        return "'" + result + "'"
+    return result
+
+
+def _rewrite_quoted_path(
+    path: str,
+    workspace_name: str | None,
+) -> str | None:
+    """Return the shell-quoted replacement for *path* (the decoded
+    content of a quoted ``"..."`` or ``'...'`` argument),
+    or ``None`` if no rewrite applies.
+    """
+    if not path or "://" in path[max(0, len(path) - 10) :]:
+        return None
+    if not path.startswith("/"):
+        return None
+
+    resolved = _resolve_virtual_mount_path(path)
+    if resolved is not None:
+        return _guard_bare_absolute(resolved)  # already shlex.quoted
+
+    # Fix hallucinated system absolute paths that reference the workspace.
+    if workspace_name:
+        for prefix in _SYSTEM_PATH_PREFIXES:
+            if path.startswith(prefix):
+                marker = f"/{workspace_name}/"
+                idx = path.rfind(marker)
+                if idx != -1:
+                    relative = path[idx + len(marker) :]
+                    return _guard_bare_absolute(
+                        shlex.quote("./" + relative if relative else ".")
+                    )
+                if path.endswith(f"/{workspace_name}"):
+                    return _guard_bare_absolute(shlex.quote("."))
+                break
+
+    return None
+
+
 def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
 ) -> str:
-    """
-    Convert virtual paths (starting with /) in commands to relative paths.
+    """Convert virtual paths (starting with ``/``) in commands to relative paths.
 
     Also auto-corrects hallucinated system absolute paths that reference the
     workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
 
-    Tier-aware mounts (``/skills/...``, ``/memories/...``) are expanded to
-    absolute paths via ``_resolve_virtual_mount_path``. Callers that pass
-    the result through ``validate_command`` MUST whitelist the tier roots
-    via ``allow_prefixes`` to avoid false-positive system-path blocks.
-
-    Args:
-        command: Original command.
-        workspace_name: Basename of the workspace directory (e.g. ``"workspace"``,
-            ``"my-project"``).  When provided, system paths containing
-            ``/<workspace_name>/`` are auto-corrected.
-
-    Examples:
-        >>> convert_virtual_paths_in_command("python /main.py")
-        'python ./main.py'
-        >>> convert_virtual_paths_in_command("ls /")
-        'ls .'
-        >>> convert_virtual_paths_in_command(
-        ...     "mkdir -p /Users/u/proj/dir", workspace_name="proj")
-        'mkdir -p ./dir'
+    Pre-process: quoted arguments whose content resolves to a virtual
+    mount (``/skills/...``, ``/memories/...``) or a workspace-prefixed
+    system path are rewritten as a single shell token — this fixes #237
+    where ``python "/skills/my skill/main.py"`` was truncated at the
+    embedded space.  Bare quoted ``/...`` paths (e.g. ``echo "/hi"``)
+    are left untouched since their semantics are ambiguous.
+    After pre-processing, the original regex handles unquoted
+    paths and workspace-name correction as before.
     """
+    # Pre-process: rewrite quoted paths whose decoded content starts with /
+    command = re.sub(
+        r'(["\'])((?:\\.|(?!\1).)*?)\1',
+        lambda m: (
+            _rewrite_quoted_path(
+                re.sub(r"\\(.)", r"\1", m.group(2)),
+                workspace_name,
+            )
+            or m.group(0)
+        ),
+        command,
+    )
 
     def replace_virtual_path(match: re.Match[str]) -> str:
         path = match.group(0)
@@ -648,16 +713,10 @@ def convert_virtual_paths_in_command(
             return resolved
 
         # Fix hallucinated system absolute paths that reference the workspace.
-        # E.g. /Users/user/.../myproject/file.py → ./file.py
-        # This mirrors _resolve_path() logic but for shell command strings.
         if workspace_name:
             for prefix in _SYSTEM_PATH_PREFIXES:
                 if path.startswith(prefix):
                     marker = f"/{workspace_name}/"
-                    # rfind, not find: the workspace's parent path may itself
-                    # contain "/<workspace_name>/" (e.g. dev tree under
-                    # ~/workspace/.../workspace). Last occurrence is the
-                    # boundary closest to the file.
                     idx = path.rfind(marker)
                     if idx != -1:
                         relative = path[idx + len(marker) :]
@@ -669,8 +728,7 @@ def convert_virtual_paths_in_command(
         # Convert virtual path
         if path == "/":
             return "."
-        else:
-            return "." + path
+        return "." + path
 
     # Match pattern: paths starting with / (but not URLs)
     pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'
@@ -828,7 +886,7 @@ class MergedSkillsBackend(BackendProtocol):
 
 
 def prepare_sandbox_command(
-    command: str, cwd: str | Path, *, virtual_mode: bool = True
+    command: str, cwd: str | Path, *, virtual_mode: bool = True, dangerous: bool = False
 ) -> tuple[str, str | None]:
     """Normalize workspace paths in ``command`` and validate it for the sandbox.
 
@@ -849,10 +907,13 @@ def prepare_sandbox_command(
     # Replace literal workspace-root absolute paths with ./ after SSH masking so
     # remote paths that happen to contain the local cwd are preserved, and before
     # validation so local workspace paths are sanitized before the system-path
-    # check fires.
-    ws = cwd_str + "/"
-    if ws in command:
-        command = command.replace(ws, "./")
+    # check fires. Skipped in dangerous mode: there is no virtual workspace, the
+    # agent uses real absolute paths, and rewriting would corrupt any argument
+    # (echo text, grep/git pattern) that merely contains the cwd string.
+    if not dangerous:
+        ws = cwd_str + "/"
+        if ws in command:
+            command = command.replace(ws, "./")
     if virtual_mode:
         command = convert_virtual_paths_in_command(
             command=command,
@@ -866,7 +927,9 @@ def prepare_sandbox_command(
         str(paths.MEMORIES_DIR),
         str(_BUILTIN_SKILLS_DIR),
     )
-    error = validate_command(command, allow_prefixes=allow_prefixes)
+    error = validate_command(
+        command, allow_prefixes=allow_prefixes, dangerous=dangerous
+    )
     if error:
         return command, error
     return _restore_spans(command, ssh_replacements), None
@@ -893,6 +956,7 @@ class CustomSandboxBackend(LocalShellBackend):
         max_output_bytes: int = 100_000,
         env: dict[str, str] | None = None,
         inherit_env: bool = True,
+        dangerous: bool = False,
     ):
         """
         Initialize custom sandbox backend.
@@ -904,7 +968,16 @@ class CustomSandboxBackend(LocalShellBackend):
             max_output_bytes: Max output size before truncation (default 100KB)
             env: Extra environment variables for subprocess
             inherit_env: Whether to inherit parent process env (default True)
+            dangerous: Real-filesystem mode — the agent operates on real absolute
+                paths anywhere on disk (no workspace confinement). Forces
+                ``virtual_mode=False`` and relaxes path validation while keeping
+                the privileged-command blocklist. Defaults to False.
         """
+        self._dangerous = dangerous
+        if dangerous:
+            # Real paths require the legacy (non-virtual) resolution path so the
+            # parent backend returns absolute paths as-is.
+            virtual_mode = False
         super().__init__(
             root_dir=root_dir,
             virtual_mode=virtual_mode,
@@ -927,7 +1000,13 @@ class CustomSandboxBackend(LocalShellBackend):
           2. /<ws_name>/file.py            → /file.py
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
+
+        In dangerous (real-filesystem) mode, skip all rewriting and let the
+        parent resolve real absolute paths as-is.
         """
+        if self._dangerous:
+            return super()._resolve_path(key)
+
         cwd_str = str(self.cwd).rstrip("/")
         ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
 
@@ -976,7 +1055,7 @@ class CustomSandboxBackend(LocalShellBackend):
         Then delegates to LocalShellBackend.execute() for actual execution.
         """
         command, error = prepare_sandbox_command(
-            command, self.cwd, virtual_mode=self.virtual_mode
+            command, self.cwd, virtual_mode=self.virtual_mode, dangerous=self._dangerous
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)
@@ -988,7 +1067,10 @@ class CustomSandboxBackend(LocalShellBackend):
         if response.exit_code == 124:
             cmd_words = command.split()
             grep_hint = cmd_words[0] if cmd_words else "process"
-            bg_cmd = f'{command} > /output.log 2>&1 & echo "PID: $!"'
+            # In dangerous mode `/` is the host root; use a workspace-relative
+            # log path so the suggested command doesn't fail or write to `/`.
+            output_log = "./output.log" if self._dangerous else "/output.log"
+            bg_cmd = f'{command} > {output_log} 2>&1 & echo "PID: $!"'
             response = ExecuteResponse(
                 output=(
                     f"{response.output}\n\n"
@@ -998,7 +1080,7 @@ class CustomSandboxBackend(LocalShellBackend):
                     f"  2. Runs indefinitely? Run it in the background and keep the PID:\n"
                     f"       {bg_cmd}\n"
                     f"     Check: ps -p <PID>  (or: ps aux | grep {grep_hint})  ·  "
-                    f"Read: cat /output.log  ·  Stop: kill <PID>"
+                    f"Read: cat {output_log}  ·  Stop: kill <PID>"
                 ),
                 exit_code=response.exit_code,
                 truncated=response.truncated,

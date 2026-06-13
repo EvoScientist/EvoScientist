@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.1.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.1.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -97,7 +97,20 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 
 <table>
   <tr>
-    <th width="75%"><p align="center">🖥️ CLI / TUI / WebUI</p></th>
+    <th><p align="center">🌐 Desktop WebUI</p></th>
+  </tr>
+  <tr>
+    <td align="center">
+      <video src="https://github.com/user-attachments/assets/b977f2d5-488a-428d-9c02-b6b27c1521f8" autoplay loop muted playsinline width="100%">
+        <a href="https://github.com/user-attachments/assets/b977f2d5-488a-428d-9c02-b6b27c1521f8">观看 WebUI 演示</a>
+      </video>
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <th width="75%"><p align="center">🖥️ CLI / TUI</p></th>
     <th width="25%"><p align="center">📱 移动端</p></th>
   </tr>
   <tr>
@@ -120,7 +133,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 - **🧠 自进化记忆** — 用户画像与观察记录每轮自动提炼，跨会话持续进化。
 - **🌐 多模型供应商** — Anthropic、OpenAI、Google、MiniMax、NVIDIA——一处配置，随时切换。
 - **📱 多渠道接入** — CLI 为中心；Telegram、Slack、飞书、微信等——共享同一智能体会话。
-- **🖥️ 浏览器 WebUI（beta）** — 单终端 `--ui webui` 启动带工作区面板的 Web 应用。
+- **🖥️ Desktop WebUI** — 单终端 `--ui webui` 启动带工作区面板的 Web 应用。
 - **🔬 科学工作流** — 需求采集 → 规划 → 执行 → 评估 → 撰写 → 验证。
 - **🔄 代码生成模式** — More Effort（迭代精修），持续迭代提升代码生成质量。
 - **⚡ 自适应工具** — 每轮对话智能筛选相关工具，减少干扰提升效率。
@@ -145,6 +158,8 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 6 月 11 日]** **[v0.1.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.6)** — 会话持久化修复：重启后 WebUI / `langgraph dev` 线程不再丢失（SQLite checkpoint + 线程恢复作用域控制）、memory worker checkpoint 自动清理（完成即删 + 启动时清扫残留）、`/threads` 与 resume 提示改用短线程 ID。
+- **[2026 年 6 月 11 日]** **[v0.1.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.5)** — Dangerous 模式（带安全检查的真实文件系统访问）、LangGraph streaming v3 流水线、OpenRouter Anthropic prompt caching（可选启用）、claude-fable-5、TUI 自由滚动、Windows CI 支持，以及 `EvoSci deploy` 公网 Cloudflare 隧道（`--tunnel`）。
 - **[2026 年 6 月 7 日]** **[v0.1.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.4)** — 辅助模型（后台任务与工具选择）、observation 记忆生命周期、Qwen3.7-Max/Plus（DashScope）、UI 后端选择，以及 OpenRouter 多轮推理修复。
 - **[2026 年 6 月 3 日]** **[v0.1.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.3)** — 多模态处理（图片 + PDF/文档 flatten/hoisting、纯文本模型回退）、runtime-context 中间件、memory 中间件迁移至 profile 文件 + stream 时间线叙述、textual 中文输入修复。
 - **[2026 年 6 月 2 日]** **[v0.1.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.2)** — 浏览器 WebUI 模式（beta）、`EvoSci deploy` 独立 LangGraph 服务器、默认模型 → claude-sonnet-4-6、MiniMax M3，以及 sandbox 超时与 async-notifier 渠道路由修复。
@@ -402,7 +417,7 @@ EvoSci  # 或 EvoScientist — 交互模式（默认 TUI）
 ![cli help](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli_help.png)
 
 > [!TIP]
-> 想用浏览器？运行 `EvoSci --ui webui` 打开 Web 工作区界面（beta）。需要复制长输出？使用 `--ui cli` 切换到经典模式，即可使用终端原生复制。macOS [iTerm2](https://iterm2.com/) 用户也可以按住 `⌥ Option` 拖选文字，再 `⌘+C` 复制。
+> 想用浏览器？运行 `EvoSci --ui webui` 打开 Web 工作区界面。需要复制长输出？使用 `--ui cli` 切换到经典模式，即可使用终端原生复制。macOS [iTerm2](https://iterm2.com/) 用户也可以按住 `⌥ Option` 拖选文字，再 `⌘+C` 复制。
 
 <details>
 <summary>常用示例</summary>
@@ -413,7 +428,7 @@ EvoSci -p "你的问题"              # 单次查询模式
 EvoSci --workdir /path/to/project # 在指定目录下启动
 EvoSci -m run                     # 隔离的会话级工作区
 EvoSci --ui cli                   # 经典 CLI（轻量）
-EvoSci --ui webui                 # 浏览器工作区界面（beta，需 Node/npx）
+EvoSci --ui webui                 # 浏览器工作区界面（需 Node/npx）
 EvoSci serve                      # 无头模式——仅渠道，无交互提示符
 EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
 ```
@@ -421,7 +436,7 @@ EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI
 </details>
 
 <details>
-<summary>浏览器 WebUI（beta）</summary>
+<summary>Desktop WebUI</summary>
 
 将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端，无需管理第二个进程：
 
@@ -431,7 +446,7 @@ EvoSci                               # 打开 http://localhost:4716
 EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev 端口不同）
 ```
 
-需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。Beta：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
+需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。注意：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
 
 </details>
 
@@ -453,6 +468,14 @@ EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"
 ```
 
 会话中也可以在审批提示时回复 **3**（Approve all），仅对当次会话自动审批后续所有操作。
+
+> [!CAUTION]
+> **危险模式（Dangerous mode）** 会完全解除工作区沙箱——智能体可以读写、删除**真实文件系统上任意位置**的文件（`sudo`/`rm -rf /` 等高危命令仍被拦截）。它隐含 `--auto-approve`（不再提示审批）。请仅在你完全信任该任务时使用。
+>
+> ```bash
+> EvoSci --dangerous                       # 单次会话
+> EvoSci config set dangerous_mode true    # 持久化
+> ```
 
 </details>
 

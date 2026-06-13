@@ -268,13 +268,11 @@ WRITING_GUIDELINES = """# Writing Guidelines
 # cfg.sandbox_execute_timeout (CustomSandboxBackend); this number is just the
 # documented default, and the per-command `timeout` override is the mechanism
 # that matters to the agent.
-SHELL_GUIDELINES = """# Shell Execution Guidelines
 
-When using the `execute` tool for shell commands:
-
-**Sandbox limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below).
-
-**Short commands** (< 30 seconds): Run directly
+# Mode-independent core of the shell guidelines. ``{log_path}`` is the manual-
+# background redirect target: virtual ``/output.log`` (sandbox) or real
+# ``./output.log`` (dangerous mode, where ``/`` is the host root).
+_SHELL_GUIDELINES_CORE = """**Short commands** (< 30 seconds): Run directly
 ```bash
 python script.py
 pip install pandas
@@ -284,14 +282,48 @@ pip install pandas
 
 If you must background manually instead, you MUST redirect output to a file (otherwise the call blocks) and capture the PID:
 ```bash
-python long_task.py > /output.log 2>&1 &
-echo "PID: $!"          # check: ps -p <PID>   ·   stop: kill <PID>   ·   read: cat /output.log
+python long_task.py > {log_path} 2>&1 &
+echo "PID: $!"          # check: ps -p <PID>   ·   stop: kill <PID>   ·   read: cat {log_path}
 ```
 
 **Before heavy compute**: Estimate runtime. If likely > 5 minutes, use background execution from the start. If GPU memory is uncertain, start with a small test run (1 epoch, small batch) before the full run.
 
-This prevents blocking the conversation during long operations.
-"""
+This prevents blocking the conversation during long operations."""
+
+# Sandbox (default) header: virtual `/` workspace.
+_SHELL_GUIDELINES_SANDBOX_HEADER = """# Shell Execution Guidelines
+
+When using the `execute` tool for shell commands:
+
+**Sandbox limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below)."""
+
+# Dangerous header: real filesystem, no virtual `/`. ``{cwd}`` = real working dir.
+_SHELL_GUIDELINES_DANGEROUS_HEADER = """# Shell Execution Guidelines (DANGEROUS MODE)
+
+You operate on the **host filesystem with real absolute paths** — there is no virtual workspace sandbox. Your current working directory is `{cwd}`. Use real absolute paths (e.g. `/Users/you/Documents/file.txt`) or paths relative to the cwd; `..` and `~` work normally. Run `pwd` any time you are unsure where you are.
+
+⚠ You can read, write, move, copy, and delete files **anywhere on this machine**. There is no workspace confinement and no approval prompt. Be deliberate: double-check destination paths before writing or deleting, and never operate on a path you have not confirmed.
+
+When using the `execute` tool for shell commands:
+
+**Limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below)."""
+
+_SHELL_GUIDELINES_DANGEROUS_FOOTER = """
+
+**Still blocked even here**: privileged/system commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`) and `rm -rf /` are rejected regardless of mode."""
+
+
+def _build_shell_guidelines(*, dangerous: bool = False, cwd: str | None = None) -> str:
+    """Assemble the shell guidelines from the shared core + per-mode header/footer."""
+    if dangerous:
+        header = _SHELL_GUIDELINES_DANGEROUS_HEADER.format(cwd=cwd or ".")
+        body = _SHELL_GUIDELINES_CORE.format(log_path="./output.log")
+        return f"{header}\n\n{body}{_SHELL_GUIDELINES_DANGEROUS_FOOTER}\n"
+    body = _SHELL_GUIDELINES_CORE.format(log_path="/output.log")
+    return f"{_SHELL_GUIDELINES_SANDBOX_HEADER}\n\n{body}\n"
+
+
+SHELL_GUIDELINES = _build_shell_guidelines()
 
 # =============================================================================
 # Sub-agent delegation strategy
@@ -392,6 +424,8 @@ def get_system_prompt(
     *,
     enable_observation_memory: bool = True,
     enable_observation_writes: bool = True,
+    dangerous: bool = False,
+    cwd: str | None = None,
 ) -> str:
     """Generate the complete static system prompt.
 
@@ -401,7 +435,7 @@ def get_system_prompt(
     2. :data:`EXPERIMENT_WORKFLOW`
     3. :data:`REPORT_TEMPLATE`
     4. :data:`WRITING_GUIDELINES`
-    5. :data:`SHELL_GUIDELINES`
+    5. :data:`SHELL_GUIDELINES` (or :data:`SHELL_GUIDELINES_DANGEROUS`)
     6. :data:`DELEGATION_STRATEGY`
     7. :data:`ASYNC_NOTIFICATIONS`
 
@@ -410,6 +444,12 @@ def get_system_prompt(
     similar per-turn values are not baked into this prompt. Memory-related
     workflow sections can vary with the configured memory controls.
 
+    Args:
+        dangerous: When True, use the real-filesystem shell guidance
+            (no virtual workspace) instead of the sandboxed default.
+        cwd: Real absolute working directory shown to the agent in
+            dangerous mode. Falls back to ``.`` when not provided.
+
     Returns:
         Combined static system prompt string.
     """
@@ -417,12 +457,17 @@ def get_system_prompt(
         enable_observation_memory=enable_observation_memory,
         enable_observation_writes=enable_observation_writes,
     )
+    shell_guidelines = (
+        _build_shell_guidelines(dangerous=True, cwd=cwd)
+        if dangerous
+        else SHELL_GUIDELINES
+    )
     sections = [
         EVOSCIENTIST_IDENTITY,
         workflow,
         REPORT_TEMPLATE,
         WRITING_GUIDELINES,
-        SHELL_GUIDELINES,
+        shell_guidelines,
         DELEGATION_STRATEGY,
         ASYNC_NOTIFICATIONS,
     ]

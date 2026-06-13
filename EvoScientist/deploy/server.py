@@ -46,6 +46,12 @@ def deploy(
         "--port",
         help="Port for langgraph dev (default: config.langgraph_dev_port = 6174)",
     ),
+    tunnel: bool = typer.Option(
+        False,
+        "--tunnel",
+        help="Expose the server over a public Cloudflare tunnel (no auth — "
+        "anyone with the URL can drive the agent; trusted use only)",
+    ),
     debug: bool = typer.Option(
         False,
         "--debug",
@@ -61,9 +67,10 @@ def deploy(
     from ..config import apply_config_to_env, get_effective_config
     from ..langgraph_dev.manager import (
         _DEFAULT_PORT,
-        _LOG_FILE,
+        RUNTIME,
         _is_port_occupied,
         is_langgraph_dev_running,
+        read_tunnel_url,
         start_langgraph_dev,
         stop_langgraph_dev,
     )
@@ -144,6 +151,23 @@ def deploy(
             border_style="cyan",
         )
     )
+    if config.dangerous_mode:
+        from ..cli._constants import (
+            DANGEROUS_BANNER_LABEL,
+            DANGEROUS_BANNER_MESSAGE,
+        )
+
+        console.print(
+            f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
+            f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
+        )
+
+    if tunnel:
+        console.print(
+            "[bold white on red] ⚠ PUBLIC TUNNEL [/bold white on red] "
+            "[bold red]Public URL, no auth — share only with people you "
+            "trust.[/bold red]"
+        )
 
     # 6. ccproxy lifecycle (only if any provider uses OAuth)
     _ccproxy_proc = None
@@ -176,6 +200,7 @@ def deploy(
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
                 deploy_mode=True,
+                tunnel=tunnel,
             )
         atexit.register(stop_langgraph_dev, proc)
     except Exception as exc:
@@ -186,13 +211,33 @@ def deploy(
     # here, the subprocess is up.
     console.print("[green]✓[/green] langgraph dev ready")
 
+    # 8b. Cloudflare tunnel URL — the local server is healthy, but cloudflared
+    # establishes the public tunnel a few seconds later and prints the random
+    # URL into the log. Poll for it so we can surface it in the ready banner.
+    public_url: str | None = None
+    if tunnel:
+        with console.status(
+            "[dim]Waiting for Cloudflare tunnel URL...[/dim]", spinner="dots"
+        ):
+            public_url = read_tunnel_url()
+        if public_url:
+            console.print("[green]✓[/green] tunnel up")
+        else:
+            console.print(
+                "[yellow]⚠ Tunnel URL not detected within the wait window. "
+                f"Check the log ({_shorten(str(RUNTIME.log_file))}) for a "
+                "trycloudflare.com URL.[/yellow]"
+            )
+
     # 9. Ready banner
-    log_hint = _shorten(str(_LOG_FILE))
+    log_hint = _shorten(str(RUNTIME.log_file))
+    public_line = f"[bold]Public URL:[/bold]   {public_url}\n" if public_url else ""
     console.print(
         Panel(
             Text.from_markup(
                 f"[bold]Endpoint:[/bold]     "
                 f"http://localhost:{effective_port}\n"
+                f"{public_line}"
                 f"[bold]Assistant ID:[/bold] EvoScientist\n"
                 f"[bold]Connect via:[/bold]  any LangChain SDK / "
                 f"LangGraph-compatible UI\n"

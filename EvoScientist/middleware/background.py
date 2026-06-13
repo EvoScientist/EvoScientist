@@ -75,9 +75,19 @@ def run_in_background(
         name: Optional short label to recognize the process later.
     """
     cwd = str(paths.resolve_virtual_path("/"))
+    # Honor dangerous mode so background commands match `execute`'s policy
+    # (real-filesystem access, no virtual-path rewriting). Read the env flag that
+    # apply_config_to_env round-trips at startup (and the subprocess inherits) —
+    # cheaper than reloading the full config from disk on every launch, and uses
+    # the same truthy parsing as every other bool env flag.
+    from ..llm.models import _env_flag_enabled
+
+    dangerous = _env_flag_enabled("EVOSCIENTIST_DANGEROUS_MODE")
     # Same path-rewriting + validation as execute (shared helper) so virtual paths
     # resolve to the workspace and the command can't bypass the sandbox checks.
-    command, error = prepare_sandbox_command(command, cwd)
+    command, error = prepare_sandbox_command(
+        command, cwd, virtual_mode=not dangerous, dangerous=dangerous
+    )
     if error:
         return error
     tid = _origin_thread_id(runtime)
@@ -85,9 +95,16 @@ def run_in_background(
         command, cwd, name, origin_thread_id=tid, on_exit=lambda p: _notify_done(p, tid)
     )
     label = f" (name={name!r})" if name else ""
+    # In dangerous mode `/` is the real root, so advertise the real log path;
+    # in virtual mode `/.bg_processes/...` correctly maps to the workspace.
+    log_path = (
+        f"{cwd}/.bg_processes/{process_id}.log"
+        if dangerous
+        else f"/.bg_processes/{process_id}.log"
+    )
     return (
         f"Started background process {process_id}{label}. "
-        f"Output -> /.bg_processes/{process_id}.log. "
+        f"Output -> {log_path}. "
         f"Poll with check_process('{process_id}'), stop with stop_process('{process_id}')."
     )
 
