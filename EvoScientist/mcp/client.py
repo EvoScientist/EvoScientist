@@ -13,13 +13,76 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Windows MCP SDK patch — eliminate blocking os.access from async tool calls
+# =============================================================================
+#
+# On Windows, mcp.client.stdio._get_executable_command() calls
+# mcp.os.win32.utilities.get_windows_executable_command() on *every* tool
+# invocation (a new stdio session is opened per call by default).
+# get_windows_executable_command() calls shutil.which(), which internally
+# calls os.access() — a blocking syscall that LangGraph's blockbuster
+# detector flags as an illegal blocking call in the async event loop.
+#
+# EvoScientist's _resolve_command() already resolves bare command names to
+# their full absolute paths (e.g. "npx" → "C:\...\npx.cmd") at
+# connection-build time.  When the command is already absolute there is
+# nothing left to resolve, so we patch get_windows_executable_command to
+# return absolute paths immediately without calling shutil.which / os.access.
+#
+# The patch is applied once at import time and is safe to apply on all
+# platforms (the "win32" guard inside the original function is still hit
+# before our patch can even be called, so non-Windows paths are unchanged).
+
+
+def _patch_mcp_windows_command_resolver() -> None:
+    """Patch MCP SDK's get_windows_executable_command to skip shutil.which
+    for absolute paths, eliminating the blocking os.access call.
+    """
+    try:
+        import mcp.os.win32.utilities as _win32_utils
+    except ImportError:
+        return  # MCP SDK not installed or non-Windows stub — nothing to patch
+
+    _original_gwec = _win32_utils.get_windows_executable_command
+
+    def _patched_get_windows_executable_command(command: str) -> str:
+        # Fast path: command is already an absolute path — no filesystem
+        # probe needed, return immediately with no os.access() call.
+        if os.path.isabs(command):
+            return command
+        return _original_gwec(command)
+
+    _win32_utils.get_windows_executable_command = (
+        _patched_get_windows_executable_command
+    )
+
+    # Also patch the reference imported into mcp.client.stdio so both call
+    # sites are covered (Python caches the imported name in that module's
+    # namespace at import time).
+    try:
+        import mcp.client.stdio as _stdio_mod
+
+        _stdio_mod.get_windows_executable_command = (
+            _patched_get_windows_executable_command
+        )
+    except Exception:
+        pass  # best-effort; the win32.utilities patch already covers most cases
+
+    logger.debug("Applied MCP Windows command resolver patch (absolute-path fast-path)")
+
+
+_patch_mcp_windows_command_resolver()
 
 # =============================================================================
 # Constants
@@ -664,14 +727,134 @@ ProgressCallback = Callable[[str, str, str], None]
 """
 
 
+@asynccontextmanager
+async def _open_mcp_sessions(
+    config: dict[str, Any],
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> AsyncGenerator[dict[str, list], None]:
+    """Open persistent MCP sessions and yield tools bound to them.
+
+    Each stdio MCP server gets one long-lived subprocess and ``ClientSession``.
+    Tools returned by this context manager call through the shared session on
+    every invocation — no per-call ``shutil.which``, no per-call subprocess
+    spawn, no blocking ``os.access`` in the event loop.
+
+    The sessions remain open for the lifetime of the ``async with`` block and
+    are closed cleanly on exit.
+
+    Yields:
+        Dict mapping server name -> list of LangChain tools (session-bound).
+
+    Raises:
+        ImportError: if ``langchain-mcp-adapters`` is not installed.
+    """
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools as _lma_load_tools
+    except ImportError:
+        raise ImportError(
+            "MCP servers are configured but langchain-mcp-adapters is not installed.\n"
+            "Install with: pip install langchain-mcp-adapters"
+        ) from None
+
+    connections = _build_connections(config)
+    if not connections:
+        yield {}
+        return
+
+    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
+
+    def _report(event: str, name: str, detail: str = "") -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(event, name, detail)
+        except Exception:
+            logger.debug("MCP progress callback raised", exc_info=True)
+
+    # We open all sessions concurrently inside a TaskGroup so that:
+    # 1. Each stdio server's subprocess is spawned asynchronously (no blocking).
+    # 2. All sessions stay open for the lifetime of the context manager.
+    # 3. Errors in individual servers are isolated — they contribute an empty
+    #    tool list rather than aborting the whole group.
+    #
+    # Implementation: use anyio memory channels as rendezvous points.
+    # Each server's session task sends its tools into a channel once ready,
+    # then parks on a shutdown event.  The outer scope reads all channels,
+    # yields tools, then signals shutdown.
+    sem = asyncio.Semaphore(_MAX_CONCURRENT_CONNECTIONS)
+    server_names = list(connections)
+    # One Future per server — set to the tool list (or []) when ready.
+    ready: dict[str, asyncio.Future[list]] = {
+        name: asyncio.get_event_loop().create_future() for name in server_names
+    }
+    # Shutdown event signals session tasks to close their sessions.
+    shutdown = asyncio.Event()
+
+    async def _run_session(name: str) -> None:
+        """Open a persistent session for *name*, load tools, park until shutdown."""
+        async with sem:
+            _report("start", name)
+            try:
+                async with client.session(name) as session:
+                    tools = await _lma_load_tools(
+                        session,
+                        server_name=name,
+                    )
+                    logger.info(
+                        "MCP server %r: loaded %d tool(s) (persistent session)",
+                        name,
+                        len(tools),
+                    )
+                    _report("success", name, str(len(tools)))
+                    ready[name].set_result(tools)
+                    # Keep the session (and the subprocess) alive until shutdown.
+                    await shutdown.wait()
+            except Exception as exc:
+                if on_progress is None:
+                    logger.warning(
+                        "MCP server %r: failed to open session: %s", name, exc
+                    )
+                else:
+                    logger.debug("MCP server %r: failed to open session: %s", name, exc)
+                _report("error", name, str(exc))
+                if not ready[name].done():
+                    ready[name].set_result([])
+
+    # Launch all session tasks concurrently and wait for them all to be ready
+    # (or failed) before yielding tools to the caller.
+    async with anyio.create_task_group() as tg:
+        for name in server_names:
+            tg.start_soon(_run_session, name)
+
+        # Wait until every server has either produced tools or reported failure.
+        server_tools = dict(zip(server_names, await asyncio.gather(*ready.values())))
+
+        try:
+            yield server_tools
+        finally:
+            # Signal all session tasks to exit their `await shutdown.wait()`.
+            shutdown.set()
+
+
 async def _load_tools(
     config: dict[str, Any],
     *,
     on_progress: ProgressCallback | None = None,
 ) -> dict[str, list]:
-    """Connect to MCP servers and retrieve tools.
+    """Connect to MCP servers and retrieve tools (connection-based).
 
     Returns a dict of server name -> list of LangChain tools.
+
+    Tools are created with the connection dict so that each tool invocation
+    opens a fresh session.  On Windows this is safe because
+    ``_patch_mcp_windows_command_resolver`` ensures that ``get_windows_
+    executable_command`` returns absolute paths immediately without calling
+    ``shutil.which`` / ``os.access`` (eliminating the blocking syscall).
+
+    For long-lived agents where you want to avoid per-call subprocess spawning
+    entirely, use :func:`aopen_mcp_tools` which opens persistent sessions.
 
     Raises:
         ImportError: if ``langchain-mcp-adapters`` is not installed.
@@ -740,6 +923,12 @@ async def aload_mcp_tools(
 
     Prefer this when already inside an async context (e.g. Jupyter, async CLI).
 
+    .. note::
+        Tools returned by this function are bound to sessions that are opened
+        and immediately closed inside this call.  For an agent that makes
+        repeated tool calls, use :func:`aopen_mcp_tools` so the sessions (and
+        the underlying subprocesses) stay alive across calls.
+
     Args:
         config: Optional pre-loaded MCP config dict.  When ``None``,
             loads from ``~/.config/evoscientist/mcp.yaml``.
@@ -756,6 +945,49 @@ async def aload_mcp_tools(
         logger.warning("MCP tool loading failed: %s", exc)
         return {}
     return _route_tools(config, server_tools)
+
+
+@asynccontextmanager
+async def aopen_mcp_tools(
+    config: dict[str, Any] | None = None,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> AsyncGenerator[dict[str, list], None]:
+    """Async context manager that opens persistent MCP sessions.
+
+    Opens one subprocess / ``ClientSession`` per configured stdio server and
+    keeps them alive for the lifetime of the ``async with`` block.  Tools
+    yielded by this manager call through the shared sessions — no per-call
+    ``shutil.which``, no per-call subprocess spawn.
+
+    Use this in long-lived async agents so that MCP tool calls are non-blocking
+    and efficient.  Example::
+
+        async with aopen_mcp_tools() as tools_by_agent:
+            main_tools = tools_by_agent.get("main", [])
+            # build and run agent with main_tools ...
+
+    Args:
+        config: Optional pre-loaded MCP config dict.  When ``None``,
+            loads from ``~/.config/evoscientist/mcp.yaml``.
+        on_progress: Optional callback invoked per server with
+            ``(event, server_name, detail)``.  See :data:`ProgressCallback`.
+
+    Yields:
+        Dict mapping agent name -> list of LangChain ``BaseTool`` objects.
+        Key ``"main"`` = main agent. Other keys = subagent names.
+    """
+    if config is None:
+        config = load_mcp_config()
+    if not config:
+        yield {}
+        return
+    try:
+        async with _open_mcp_sessions(config, on_progress=on_progress) as server_tools:
+            yield _route_tools(config, server_tools)
+    except Exception as exc:
+        logger.warning("MCP persistent session setup failed: %s", exc)
+        yield {}
 
 
 def load_mcp_tools(

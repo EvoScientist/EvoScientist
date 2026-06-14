@@ -1410,6 +1410,10 @@ def _api_workspace_dir() -> str:
     ``start_langgraph_dev`` injects ``EVOSCIENTIST_WORKSPACE_DIR`` and sets
     the subprocess cwd to the workspace, so either source identifies the
     workspace this server instance is serving.
+
+    NOTE: must only be called from a sync context or via
+    ``asyncio.to_thread``.  ``Path.resolve()`` / ``Path.cwd()`` call
+    ``os.getcwd()`` which is a blocking syscall.
     """
     import os
 
@@ -1442,7 +1446,13 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
         if isinstance(metadata, dict) and metadata.get("graph_id") == AGENT_NAME:
             metadata = dict(metadata)
             metadata.setdefault("agent_name", AGENT_NAME)
-            metadata.setdefault("workspace_dir", _api_workspace_dir())
+            # _api_workspace_dir calls Path.resolve()/Path.cwd() which invoke
+            # the blocking os.getcwd() syscall.  Run it in a thread to keep
+            # the event loop unblocked (LangGraph blockbuster guard).
+            metadata.setdefault(
+                "workspace_dir",
+                await asyncio.to_thread(_api_workspace_dir),
+            )
             metadata["updated_at"] = datetime.now(UTC).isoformat()
         return await super().aput(config, checkpoint, metadata, new_versions)
 

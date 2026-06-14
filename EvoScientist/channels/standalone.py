@@ -180,4 +180,14 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
+    import sys
+
+    # On Windows, Python defaults to SelectorEventLoop which does NOT support
+    # async subprocess creation. The MCP SDK stdio transport then falls back to
+    # a blocking subprocess.Popen call inside an async function, triggering
+    # LangGraph's blocking-call detector. ProactorEventLoop supports async
+    # subprocesses natively, eliminating the fallback.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
     asyncio.run(_async_main(channel, bus, use_agent, send_thinking))

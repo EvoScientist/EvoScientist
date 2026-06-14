@@ -66,8 +66,18 @@ def __getattr__(name: str):
 
 def main():
     """CLI entry point."""
+    import asyncio
     import os
+    import sys
     import warnings
+
+    # On Windows, Python defaults to SelectorEventLoop which does NOT support
+    # async subprocess creation (anyio.open_process raises NotImplementedError).
+    # The MCP SDK's stdio transport then falls back to a blocking subprocess.Popen
+    # call inside an async function, triggering LangGraph's blocking-call detector.
+    # ProactorEventLoop supports async subprocesses natively, eliminating the fallback.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
     warnings.filterwarnings("ignore", message=".*not known to support tools.*")
     warnings.filterwarnings(
