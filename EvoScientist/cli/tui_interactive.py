@@ -434,7 +434,7 @@ def run_textual_interactive(
             self._queued_messages: list[
                 str
             ] = []  # queued messages to send after current turn
-            self._comp_items: list[tuple[str, str]] = []
+            self._comp_items: list = []
             self._comp_index: int = -1
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
@@ -2339,28 +2339,50 @@ def run_textual_interactive(
             if "@" in text:
                 candidates = complete_file_mention(text, workspace_dir)
                 if candidates:
-                    self._comp_items = candidates
+                    import re as _re
+
+                    from ..commands._completion_engine import CompletionCandidate
+
+                    before = text[: len(event.text_area.text)]
+                    m = _re.search(r"@[^\s]*$", before)
+                    start = m.start() if m else len(event.text_area.text)
+                    end = len(event.text_area.text)
+                    self._comp_items = [
+                        CompletionCandidate(
+                            text=path if path.startswith("@") else f"@{path}",
+                            description=type_hint,
+                            replace_start=start,
+                            replace_end=end,
+                        )
+                        for path, type_hint in candidates
+                    ]
                     self._comp_index = -1
                     self._render_completions()
                     comp_widget.display = True
                     return
 
             if text.startswith("/"):
-                prefix = text.lower()
-                matches = [
-                    (cmd, desc)
-                    for cmd, desc in cmd_manager.list_commands()
-                    if cmd.startswith(prefix)
-                ]
-                if len(matches) == 1 and matches[0][0] == prefix:
+                from ..commands._completion_engine import compute_completions
+
+                # ``ChatTextArea`` (Textual ``TextArea`` subclass) doesn't
+                # expose ``cursor_position`` directly; the public
+                # ``cursor_location`` is a (row, col) namedtuple. For
+                # completion we only need the prefix up to the cursor,
+                # and in practice the user is always typing at the end
+                # of the input — so ``len(text)`` is the correct offset
+                # without needing to walk the document line model.
+                result = compute_completions(
+                    event.text_area.text, len(event.text_area.text)
+                )
+                if result.kind == "empty" or not result.candidates:
                     self._hide_completions()
                     return
-                if matches:
-                    self._comp_items = matches
-                    self._comp_index = -1
-                    self._render_completions()
-                    comp_widget.display = True
-                    return
+
+                self._comp_items = sorted(result.candidates, key=lambda c: c.text)
+                self._comp_index = -1
+                self._render_completions()
+                comp_widget.display = True
+                return
             self._hide_completions()
 
         def _render_queue_indicator(self) -> None:
@@ -2627,28 +2649,32 @@ def run_textual_interactive(
             return True
 
         def _apply_selected_completion(self) -> None:
-            """Apply the currently selected completion to the input field.
-
-            For ``@file`` completions the last ``@token`` is replaced in-place;
-            for slash-command completions the entire input is replaced.
-            """
+            """Apply the currently selected completion to the input field."""
             if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
                 return
-            selected = self._comp_items[self._comp_index][0]
+            candidate = self._comp_items[self._comp_index]
             prompt = self.query_one("#prompt", ChatTextArea)
 
-            if selected.startswith("@"):
+            if candidate.text.startswith("@"):
                 import re as _re
 
                 current = prompt.value
                 m = _re.search(r"@[^\s]*$", current)
                 if m:
-                    new_val = current[: m.start()] + selected + " "
+                    new_val = current[: m.start()] + candidate.text + " "
                 else:
-                    new_val = current + selected + " "
+                    new_val = current + candidate.text + " "
                 prompt.value = new_val
             else:
-                prompt.value = selected + " "
+                current = prompt.value
+                # If the suffix already starts with a space (e.g. user
+                # typed ``/mcp a `` and the engine excluded the trailing
+                # space from ``replace_end``), don't add another one.
+                suffix = current[candidate.replace_end :]
+                sep = "" if suffix.startswith(" ") else " "
+                prompt.value = (
+                    current[: candidate.replace_start] + candidate.text + sep + suffix
+                )
 
         def _hide_completions(self) -> None:
             self._comp_items = []
@@ -2658,7 +2684,8 @@ def run_textual_interactive(
 
         def _render_completions(self) -> None:
             comp_text = Text()
-            for i, (cmd, desc) in enumerate(self._comp_items):
+            for i, candidate in enumerate(self._comp_items):
+                cmd, desc = candidate.text, candidate.description
                 if i == self._comp_index:
                     comp_text.append("\u25b8 ", style="bold")
                     comp_text.append(f"{cmd:<30}", style="bold")

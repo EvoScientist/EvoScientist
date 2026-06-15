@@ -724,21 +724,30 @@ class TestCompletionLogic(unittest.TestCase):
             ("#completions", None): fake_completions,
         }
 
-        from EvoScientist.commands import manager as cmd_manager
-
-        _slash_commands = cmd_manager.list_commands()
-
         # Build stub --------------------------------------------------------
         class _StubApp:
             """Minimal stub that shares the real completion method bodies."""
 
             def __init__(self):
-                self._comp_items: list = list(comp_items or [])
+                from EvoScientist.commands._completion_engine import CompletionCandidate
+
+                self._comp_items = []
+                for item in comp_items or []:
+                    if hasattr(item, "replace_start"):
+                        self._comp_items.append(item)
+                    else:
+                        text, desc = item[0], item[1]
+                        self._comp_items.append(
+                            CompletionCandidate(
+                                text=text,
+                                description=desc,
+                                replace_start=0,
+                                replace_end=0,
+                            )
+                        )
                 self._comp_index: int = comp_index
-                # Expose fakes for assertions
                 self._fake_input = fake_input
                 self._fake_completions = fake_completions
-                self._SLASH_COMMANDS = _slash_commands
 
             def query_one(self, selector, widget_type=None):
                 # Match by selector string; widget_type is ignored in stub
@@ -759,9 +768,20 @@ class TestCompletionLogic(unittest.TestCase):
                 self._apply_selected_completion()
 
             def _apply_selected_completion(self):
-                selected_cmd = self._comp_items[self._comp_index][0]
+                candidate = self._comp_items[self._comp_index]
                 prompt = self.query_one("#prompt")
-                prompt.value = selected_cmd + " "
+                if candidate.text.startswith("@"):
+                    prompt.value = candidate.text + " "
+                else:
+                    current = prompt.value
+                    suffix = current[candidate.replace_end :]
+                    sep = "" if suffix.startswith(" ") else " "
+                    prompt.value = (
+                        current[: candidate.replace_start]
+                        + candidate.text
+                        + sep
+                        + suffix
+                    )
                 prompt.cursor_position = len(prompt.value)
                 self._render_completions()
 
@@ -774,7 +794,8 @@ class TestCompletionLogic(unittest.TestCase):
             def _render_completions(self):
                 comp_widget = self.query_one("#completions")
                 comp_text = Text()
-                for i, (cmd, desc) in enumerate(self._comp_items):
+                for i, candidate in enumerate(self._comp_items):
+                    cmd, desc = candidate.text, candidate.description
                     if i == self._comp_index:
                         comp_text.append("\u25b8 ", style="bold")
                         comp_text.append(f"{cmd:<22}", style="bold")
@@ -786,27 +807,6 @@ class TestCompletionLogic(unittest.TestCase):
                     if i < len(self._comp_items) - 1:
                         comp_text.append("\n")
                 comp_widget.update(comp_text)
-
-            def on_input_changed(self, text: str):
-                """Simplified version matching the real on_input_changed logic."""
-                comp_widget = self.query_one("#completions")
-                if text.startswith("/"):
-                    prefix = text.lower()
-                    matches = [
-                        (cmd, desc)
-                        for cmd, desc in self._SLASH_COMMANDS
-                        if cmd.startswith(prefix)
-                    ]
-                    if len(matches) == 1 and matches[0][0] == prefix:
-                        self._hide_completions()
-                        return
-                    if matches:
-                        self._comp_items = matches
-                        self._comp_index = -1
-                        self._render_completions()
-                        comp_widget.display = True
-                        return
-                self._hide_completions()
 
             def on_key(self, key: str):
                 """Simplified version matching the real on_key logic.
@@ -930,40 +930,134 @@ class TestCompletionLogic(unittest.TestCase):
         assert arrow_in_bold, f"No bold arrow found. Spans: {bold_spans}"
 
     # ------------------------------------------------------------------
-    # on_input_changed
+    # compute_completions (shared engine)
     # ------------------------------------------------------------------
 
-    def test_input_changed_slash_shows_completions(self):
-        """/re prefix should show matching commands."""
-        app = self._make_app()
-        app.on_input_changed("/re")
-        assert app._fake_completions.display is True
-        assert len(app._comp_items) > 0
-        assert all(cmd.startswith("/re") for cmd, _ in app._comp_items)
+    def test_engine_slash_shows_top_level_commands(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-    def test_input_changed_exact_match_hides_completions(self):
-        """An exact match for a command should hide completions."""
-        app = self._make_app()
-        # /help is the only command starting with /help
-        app.on_input_changed("/help")
-        assert app._fake_completions.display is False
+        result = compute_completions("/re", 3)
+        assert result.kind == "commands"
+        assert len(result.candidates) > 0
+        assert all(c.text.startswith("/re") for c in result.candidates)
 
-    def test_input_changed_non_slash_hides_completions(self):
-        """Regular text (no leading slash) should hide completions."""
-        items = [("/resume", "d")]
-        app = self._make_app(comp_items=items)
-        app._fake_completions.display = True
+    def test_engine_exact_match_no_space_hides(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-        app.on_input_changed("hello world")
-        assert app._fake_completions.display is False
+        result = compute_completions("/help", 5)
+        assert result.kind == "empty"
 
-    def test_input_changed_no_match_hides_completions(self):
-        """A /prefix that matches nothing should hide completions."""
-        app = self._make_app()
-        app._fake_completions.display = True
+    def test_engine_non_slash_returns_empty(self):
+        from EvoScientist.commands._completion_engine import compute_completions
 
-        app.on_input_changed("/zzznomatch")
-        assert app._fake_completions.display is False
+        result = compute_completions("hello", 5)
+        assert result.kind == "empty"
+
+    def test_engine_trailing_space_shows_subcommands(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp ", 5)
+        assert result.kind == "subcommands"
+        names = {c.text for c in result.candidates}
+        assert "list" in names
+        assert "add" in names
+
+    def test_engine_subcommand_prefix_filters(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp lis", 8)
+        assert result.kind == "subcommands"
+        names = {c.text for c in result.candidates}
+        assert names == {"list"}
+
+    def test_engine_exact_subcommand_hides(self):
+        """When the user has already typed the full subcommand (no
+        trailing space), the engine should hide — Tab shouldn't re-insert
+        the same subcommand. Mirrors the top-level exact-match rule.
+        """
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp list", 9)
+        assert result.kind == "empty"
+        assert result.candidates == []
+
+    def test_engine_exact_subcommand_with_trailing_space_hides(self):
+        """When the user has typed the full subcommand plus a trailing
+        space (``/mcp list ``), the engine must also hide.  Without this
+        guard Tab oscillates between adding and removing the trailing
+        whitespace.
+        """
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp list ", 10)
+        assert result.kind == "empty"
+        assert result.candidates == []
+
+    def test_engine_three_parts_hides(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp list a", 11)
+        assert result.kind == "empty"
+
+    def test_engine_non_subcommand_cmd_hides(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/help ", 6)
+        assert result.kind == "empty"
+
+    def test_engine_subcommand_replace_range(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp lis", 8)
+        assert result.candidates[0].replace_start == 5
+        assert result.candidates[0].replace_end == 8
+
+    def test_engine_subcommand_trailing_space_excludes_space_from_range(self):
+        """When the user has typed a partial subcommand prefix + a
+        trailing space (e.g. ``/mcp a ``), the engine's replace range
+        must exclude the trailing space — otherwise the apply step
+        would produce a double space (``/mcp add  ``).
+        """
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        text = "/mcp a "
+        result = compute_completions(text, len(text))  # cursor at end
+        assert result.candidates
+        for c in result.candidates:
+            # ``a`` is at position 5; trailing space at position 6.
+            # ``replace_start=5`` (start of the partial prefix),
+            # ``replace_end=6`` (right after the prefix, before the
+            # trailing space — so the trailing space is preserved in
+            # the suffix during apply).
+            assert c.replace_start == 5
+            assert c.replace_end == 6
+
+    def test_engine_subcommand_trailing_space_apply_does_not_double_space(self):
+        """Applying the completion for ``/mcp a `` + accept 'add' must
+        not produce ``/mcp add  `` (double space). The engine's
+        replace range excludes the trailing space; the apply step
+        must skip the separator when the suffix already starts with one.
+        """
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        text = "/mcp a "
+        result = compute_completions(text, len(text))
+        c = result.candidates[0]
+        current = text
+        # Apply logic that mirrors the TUI ``_apply_selected_completion``.
+        suffix = current[c.replace_end :]
+        sep = "" if suffix.startswith(" ") else " "
+        new_value = current[: c.replace_start] + c.text + sep + suffix
+        # Expected: ``/mcp add `` — the ``a`` is replaced with ``add``,
+        # the trailing space is preserved via the suffix. No double space.
+        assert new_value == f"/mcp {c.text} "
+
+    def test_engine_trailing_space_replace_range(self):
+        from EvoScientist.commands._completion_engine import compute_completions
+
+        result = compute_completions("/mcp ", 5)
+        assert result.candidates[0].replace_start == 5
+        assert result.candidates[0].replace_end == 5
 
     # ------------------------------------------------------------------
     # on_key  (enter only — up/down handled by priority bindings)

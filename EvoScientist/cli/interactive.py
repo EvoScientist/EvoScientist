@@ -208,9 +208,17 @@ class SlashCommandCompleter(Completer):
         self,
         workspace_getter: Callable[[], str | None] | None = None,
     ) -> None:
+        """Initialise the completer.
+
+        Args:
+            workspace_getter: Callable returning the current workspace
+                directory for ``@file`` completions.  Called on every
+                keystroke so suggestions stay in sync after ``/new``.
+        """
         self._workspace_getter = workspace_getter or (lambda: None)
 
     def get_completions(self, document, complete_event):
+        """Yield prompt_toolkit completions for slash commands and ``@file``."""
         text = document.text_before_cursor
         workspace_dir = self._workspace_getter()
 
@@ -230,16 +238,23 @@ class SlashCommandCompleter(Completer):
         # Slash command completion
         if not text.startswith("/"):
             return
-        # ``list_commands`` is dedup'd on the Command instance so aliases
-        # (e.g. /quit, /q for /exit) don't appear as separate rows.
-        for cmd, desc in sorted(cmd_manager.list_commands()):
-            if cmd.startswith(text):
-                yield Completion(
-                    cmd,
-                    start_position=-len(text),
-                    display=f"{cmd:<40}",
-                    display_meta=desc,
-                )
+
+        from ..commands._completion_engine import compute_completions
+
+        result = compute_completions(
+            document.text_before_cursor, len(document.text_before_cursor)
+        )
+        if result.kind == "empty" or not result.candidates:
+            return
+
+        # Sort alphabetically by completion text for stable, predictable
+        # ordering in the popup. The engine returns candidates in
+        # manager-registration order, which is not stable across changes.
+        for c in sorted(result.candidates, key=lambda c: c.text):
+            start_pos = c.replace_start - len(document.text_before_cursor)
+            yield Completion(
+                c.text, start_position=start_pos, display_meta=c.description
+            )
 
 
 # =============================================================================

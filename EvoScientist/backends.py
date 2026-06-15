@@ -3,6 +3,7 @@
 import os
 import re
 import shlex
+import sys
 import uuid
 from pathlib import Path
 
@@ -594,20 +595,65 @@ def _skills_tier_paths() -> tuple[Path, Path | None, Path]:
     return (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR, _BUILTIN_SKILLS_DIR)
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _cmd_quote(s: str) -> str:
+    """Quote *s* for cmd.exe using double-quote wrapping.
+
+    cmd.exe strips outer double quotes; content between them is taken
+    literally. Backslashes are not escape chars inside double quotes, so
+    Windows paths pass through unchanged. Embedded ``"`` is escaped as
+    ``\"``; bare paths with no shell-special chars need no quoting at all.
+
+    .. note::
+
+       ``%VAR%`` expansion is **not** neutralised here.  Variable expansion
+       happens before quote processing in cmd.exe, and ``%%`` collapsing
+       only occurs inside ``.bat``/``.cmd`` files — not via ``cmd /c``.
+       This is acceptable because virtual-mount paths (skills, memories)
+       should never contain percent signs in practice.
+
+    Mirrors the role of :func:`shlex.quote` for the Windows shell so the
+    sandbox command can pass a single token through :func:`subprocess.run`
+    with ``shell=True`` (which on Windows invokes cmd.exe, not /bin/sh).
+    """
+    if not s:
+        return '""'
+    if not any(c in s for c in ' \t\n"&|<>^()'):
+        return s
+    return '"' + s.replace('"', '\\"') + '"'
+
+
+def _platform_quote(s: str) -> str:
+    """Quote *s* for the host's default shell.
+
+    On POSIX, delegates to :func:`shlex.quote` (single-quote wrapping).
+    On Windows, uses double-quote wrapping compatible with cmd.exe —
+    see :func:`_cmd_quote`. The platform check is read at call time, so
+    tests can swap it via ``monkeypatch.setattr(backends, "_is_windows", ...)``
+    without mutating :mod:`sys` module state.
+    """
+    if _is_windows():
+        return _cmd_quote(s)
+    return shlex.quote(s)
+
+
 def _resolve_virtual_mount_path(token: str) -> str | None:
     """Resolve a virtual mount token to a shell-safe token, or ``None`` when
     *token* is not a registered virtual mount.
 
     For ``/skills/...``: walks ``_skills_tier_paths()`` priority (USER →
-    GLOBAL → BUILTIN), returning ``shlex.quote`` of the first tier where the
-    path exists. On miss, returns a workspace-relative ``./skills/<rel>``
-    form — agent typed a virtual path, so the shell error should reference a
-    location they recognise (`USER_SKILLS_DIR` defaults to
+    GLOBAL → BUILTIN), returning :func:`_platform_quote` of the first tier
+    where the path exists. On miss, returns a workspace-relative
+    ``./skills/<rel>`` form — agent typed a virtual path, so the shell error
+    should reference a location they recognise (`USER_SKILLS_DIR` defaults to
     ``WORKSPACE_ROOT / "skills"``, which is also where ``MergedSkillsBackend``
     would write a new skill).
 
     For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
-    absolute and ``shlex.quote``-wrapped. Memories live outside the
+    absolute and :func:`_platform_quote`-wrapped. Memories live outside the
     workspace, so a relative form would point at an unrelated location.
     """
     rel = _subpath_under_mount(token, "/skills")
@@ -617,12 +663,55 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
                 continue
             candidate = Path(tier) / rel
             if candidate.exists():
-                return shlex.quote(str(candidate))
-        return shlex.quote("./skills/" + rel if rel else "./skills")
+                return _platform_quote(str(candidate))
+        return _platform_quote("./skills/" + rel if rel else "./skills")
 
     rel = _subpath_under_mount(token, "/memories")
     if rel is not None:
-        return shlex.quote(str(Path(paths.MEMORIES_DIR) / rel))
+        return _platform_quote(str(Path(paths.MEMORIES_DIR) / rel))
+
+    return None
+
+
+def _guard_bare_absolute(result: str | None) -> str | None:
+    """If *result* is a bare absolute path (no surrounding quotes),
+    single-quote it so the post-process regex won't re-rewrite it."""
+    if result and result.startswith("/") and result == result.strip("'\""):
+        return "'" + result + "'"
+    return result
+
+
+def _rewrite_quoted_path(
+    path: str,
+    workspace_name: str | None,
+) -> str | None:
+    """Return the shell-quoted replacement for *path* (the decoded
+    content of a quoted ``"..."`` or ``'...'`` argument),
+    or ``None`` if no rewrite applies.
+    """
+    if not path or "://" in path[max(0, len(path) - 10) :]:
+        return None
+    if not path.startswith("/"):
+        return None
+
+    resolved = _resolve_virtual_mount_path(path)
+    if resolved is not None:
+        return _guard_bare_absolute(resolved)  # already shlex.quoted
+
+    # Fix hallucinated system absolute paths that reference the workspace.
+    if workspace_name:
+        for prefix in _SYSTEM_PATH_PREFIXES:
+            if path.startswith(prefix):
+                marker = f"/{workspace_name}/"
+                idx = path.rfind(marker)
+                if idx != -1:
+                    relative = path[idx + len(marker) :]
+                    return _guard_bare_absolute(
+                        shlex.quote("./" + relative if relative else ".")
+                    )
+                if path.endswith(f"/{workspace_name}"):
+                    return _guard_bare_absolute(shlex.quote("."))
+                break
 
     return None
 
@@ -631,32 +720,32 @@ def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
 ) -> str:
-    """
-    Convert virtual paths (starting with /) in commands to relative paths.
+    """Convert virtual paths (starting with ``/``) in commands to relative paths.
 
     Also auto-corrects hallucinated system absolute paths that reference the
     workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
 
-    Tier-aware mounts (``/skills/...``, ``/memories/...``) are expanded to
-    absolute paths via ``_resolve_virtual_mount_path``. Callers that pass
-    the result through ``validate_command`` MUST whitelist the tier roots
-    via ``allow_prefixes`` to avoid false-positive system-path blocks.
-
-    Args:
-        command: Original command.
-        workspace_name: Basename of the workspace directory (e.g. ``"workspace"``,
-            ``"my-project"``).  When provided, system paths containing
-            ``/<workspace_name>/`` are auto-corrected.
-
-    Examples:
-        >>> convert_virtual_paths_in_command("python /main.py")
-        'python ./main.py'
-        >>> convert_virtual_paths_in_command("ls /")
-        'ls .'
-        >>> convert_virtual_paths_in_command(
-        ...     "mkdir -p /Users/u/proj/dir", workspace_name="proj")
-        'mkdir -p ./dir'
+    Pre-process: quoted arguments whose content resolves to a virtual
+    mount (``/skills/...``, ``/memories/...``) or a workspace-prefixed
+    system path are rewritten as a single shell token — this fixes #237
+    where ``python "/skills/my skill/main.py"`` was truncated at the
+    embedded space.  Bare quoted ``/...`` paths (e.g. ``echo "/hi"``)
+    are left untouched since their semantics are ambiguous.
+    After pre-processing, the original regex handles unquoted
+    paths and workspace-name correction as before.
     """
+    # Pre-process: rewrite quoted paths whose decoded content starts with /
+    command = re.sub(
+        r'(["\'])((?:\\.|(?!\1).)*?)\1',
+        lambda m: (
+            _rewrite_quoted_path(
+                re.sub(r"\\(.)", r"\1", m.group(2)),
+                workspace_name,
+            )
+            or m.group(0)
+        ),
+        command,
+    )
 
     def replace_virtual_path(match: re.Match[str]) -> str:
         path = match.group(0)
@@ -670,16 +759,10 @@ def convert_virtual_paths_in_command(
             return resolved
 
         # Fix hallucinated system absolute paths that reference the workspace.
-        # E.g. /Users/user/.../myproject/file.py → ./file.py
-        # This mirrors _resolve_path() logic but for shell command strings.
         if workspace_name:
             for prefix in _SYSTEM_PATH_PREFIXES:
                 if path.startswith(prefix):
                     marker = f"/{workspace_name}/"
-                    # rfind, not find: the workspace's parent path may itself
-                    # contain "/<workspace_name>/" (e.g. dev tree under
-                    # ~/workspace/.../workspace). Last occurrence is the
-                    # boundary closest to the file.
                     idx = path.rfind(marker)
                     if idx != -1:
                         relative = path[idx + len(marker) :]
@@ -691,8 +774,7 @@ def convert_virtual_paths_in_command(
         # Convert virtual path
         if path == "/":
             return "."
-        else:
-            return "." + path
+        return "." + path
 
     # Match pattern: paths starting with / (but not URLs)
     pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'

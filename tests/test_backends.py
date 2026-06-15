@@ -24,6 +24,47 @@ def _sleep_cmd(seconds: int) -> str:
     return f"sleep {seconds}"
 
 
+def _split_cmd(s: str) -> list[str]:
+    """Cross-platform tokenizer for shell command assertions.
+
+    POSIX (``shlex.split`` default ``posix=True``) handles single/double
+    quotes and backslash escapes produced by :func:`shlex.quote`. But
+    ``posix=True`` also treats ``\\`` as an escape char on input, which
+    would strip the backslashes from a bare Windows path like
+    ``C:\\Users\\foo`` — turning it into ``C:Usersfoo`` and breaking the
+    token comparison.
+
+    On Windows, the resolved paths from :func:`backends._platform_quote`
+    are bare (no shell-special chars) or double-quoted (when the path
+    has spaces). ``shlex.split(s, posix=False)`` is a simple whitespace
+    splitter that preserves backslashes verbatim; we then strip a
+    single layer of matching outer ``"``/``'`` and unescape ``\\"``
+    to mimic what cmd.exe does at parse time.
+
+    Examples (on Windows):
+
+    >>> _split_cmd('python C:\\\\Users\\\\foo\\\\bar.py')
+    ['python', 'C:\\\\Users\\\\foo\\\\bar.py']
+    >>> _split_cmd('python "C:\\\\Users\\\\John Smith\\\\bar.py"')
+    ['python', 'C:\\\\Users\\\\John Smith\\\\bar.py']
+    >>> _split_cmd('python "C:\\\\path\\\\a\\\\"b"')
+    ['python', 'C:\\\\path\\\\a"b']
+    """
+    if sys.platform == "win32":
+        tokens = shlex.split(s, posix=False)
+        # posix=False doesn't process quotes; mimic cmd.exe: strip a
+        # single layer of matching outer quotes per token, then
+        # unescape embedded \" → ".
+        result = []
+        for tok in tokens:
+            if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+                tok = tok[1:-1]
+            tok = tok.replace('\\"', '"')
+            result.append(tok)
+        return result
+    return shlex.split(s)
+
+
 # === validate_command ===
 
 
@@ -213,6 +254,118 @@ class TestConvertVirtualPaths:
         result = convert_virtual_paths_in_command(command)
         assert result == "ssh host 'ls ./home/username/project'"
 
+    def test_bare_quoted_path_left_alone(self):
+        """A quoted bare ``/...`` path that is not a virtual mount
+        (``/skills/...``, ``/memories/...``) or workspace path must
+        NOT be rewritten — we cannot textually distinguish a path
+        argument from a literal string without command semantics.
+        """
+        result = convert_virtual_paths_in_command('python "/main file.py"')
+        assert result == 'python "/main file.py"'
+
+    def test_quoted_skills_path_with_whitespace_in_skill_name_resolved(
+        self, monkeypatch, tmp_path
+    ):
+        """A quoted ``/skills/<name with space>/...`` path must be
+        resolved as a single token, not truncated at the space (was:
+        the regex stopped at the first whitespace, so the resolver
+        received ``/skills/<word>`` and the suffix landed as a separate
+        argument).
+        """
+        # Tier setup identical to TestVirtualMountResolution._setup_tiers
+        user_dir = tmp_path / "ws_skills"
+        global_dir = tmp_path / "global_skills"
+        builtin_dir = tmp_path / "builtin_skills"
+        memories_dir = tmp_path / "memories"
+        for d in (user_dir, global_dir, builtin_dir, memories_dir):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+        (builtin_dir / "find skills").mkdir()
+        (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
+
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
+
+        tokens = shlex.split(result)
+        assert tokens[0] == "python"
+        assert tokens[1] == str(builtin_dir / "find skills" / "tool.py")
+
+    def test_quoted_system_path_with_workspace_and_whitespace_corrected(self):
+        """A quoted system path that references the workspace dir name
+        (which itself contains a space) must be auto-corrected to the
+        workspace-relative form, not left as the original quoted string.
+        """
+        result = convert_virtual_paths_in_command(
+            'python "/Users/user/my project/src/main.py"',
+            workspace_name="my project",
+        )
+        tokens = shlex.split(result)
+        assert tokens == ["python", "./src/main.py"]
+
+    def test_quoted_path_with_whitespace_round_trip_safe(self):
+        """A quoted ``/skills/...`` path with whitespace must round-trip
+        through ``shlex.split`` as a single token.
+        """
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
+        tokens = shlex.split(result)
+        assert tokens[0] == "python"
+        assert len(tokens) == 2
+        assert "find skills" in tokens[1]
+
+    def test_quoted_system_path_left_alone(self):
+        """A quoted path starting with a system prefix (e.g. ``/bin/echo``)
+        must NOT be rewritten — the pre-process excludes known system
+        prefixes so ``validate_command`` can still inspect them."""
+        result = convert_virtual_paths_in_command('python "/bin/echo"')
+        assert result == 'python "/bin/echo"'
+
+    def test_bash_c_with_quoted_system_path_left_alone(self):
+        """``bash -c "/bin/echo hi"`` must NOT be rewritten — the
+        ``/bin/echo`` inside the quoted argument is a shell command body,
+        not a virtual path argument to be rewritten."""
+        result = convert_virtual_paths_in_command('bash -c "/bin/echo hi"')
+        assert result == 'bash -c "/bin/echo hi"'
+
+    def test_unresolvable_quoted_skills_path_uses_workspace_relative_form(
+        self, monkeypatch, tmp_path
+    ):
+        """A quoted ``/skills/...`` path that no tier contains falls
+        through to the workspace-relative ``./skills/<rel>`` form. The
+        splice re-quotes the result; if the new path has no
+        whitespace, ``shlex.quote`` is a no-op and the surrounding
+        quote chars are dropped cleanly.
+        """
+        # Tier setup so the resolver is in a known empty state.
+        for d in (
+            tmp_path / "ws_skills",
+            tmp_path / "global_skills",
+            tmp_path / "builtin_skills",
+            tmp_path / "memories",
+        ):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(
+            backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
+        )
+        result = convert_virtual_paths_in_command(
+            'python "/skills/never-installed/foo.py"'
+        )
+        assert result == "python ./skills/never-installed/foo.py"
+
+    def test_echo_bare_quoted_path_left_alone(self):
+        """``echo "/hi"`` must NOT be rewritten — a bare ``/hi`` is not a
+        virtual mount, so the pre-process must leave it alone."""
+        result = convert_virtual_paths_in_command('echo "/hi"')
+        assert result == 'echo "/hi"'
+
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
 
@@ -249,10 +402,11 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        # ``shlex.split`` round-trip is quote-style agnostic — the prior
-        # direct string compare broke on Windows where ``shlex.quote``
-        # adds single quotes around backslash paths.
-        assert shlex.split(result) == ["python", str(user_dir / "hello" / "main.py")]
+        # ``_split_cmd`` round-trip is cross-platform: on POSIX it parses
+        # shlex.quote-style output; on Windows it preserves the backslashes
+        # in bare paths (POSIX shlex would treat ``\`` as an escape char
+        # and strip them). See the helper docstring for details.
+        assert _split_cmd(result) == ["python", str(user_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
@@ -261,7 +415,7 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert shlex.split(result) == ["python", str(global_dir / "hello" / "main.py")]
+        assert _split_cmd(result) == ["python", str(global_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
@@ -270,7 +424,7 @@ class TestVirtualMountResolution:
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
         result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
-        assert shlex.split(result) == [
+        assert _split_cmd(result) == [
             "python",
             str(builtin_dir / "find-skills" / "tool.py"),
         ]
@@ -294,18 +448,18 @@ class TestVirtualMountResolution:
     ):
         _, _, _, memories_dir = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command("cat /memories/note.md")
-        assert shlex.split(result) == ["cat", str(memories_dir / "note.md")]
+        assert _split_cmd(result) == ["cat", str(memories_dir / "note.md")]
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
         """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
         mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert shlex.split(convert_virtual_paths_in_command("ls /skills")) == [
+        assert _split_cmd(convert_virtual_paths_in_command("ls /skills")) == [
             "ls",
             str(user_dir),
         ]
-        assert shlex.split(convert_virtual_paths_in_command("ls /skills/")) == [
+        assert _split_cmd(convert_virtual_paths_in_command("ls /skills/")) == [
             "ls",
             str(user_dir),
         ]
@@ -461,7 +615,7 @@ class TestVirtualMountResolution:
 
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
 
-        tokens = shlex.split(result)
+        tokens = _split_cmd(result)
         assert tokens[0] == "python"
         assert tokens[1] == str(user_dir / "hello" / "main.py")
 
@@ -478,7 +632,7 @@ class TestVirtualMountResolution:
 
         result = convert_virtual_paths_in_command("cat /memories/note.md")
 
-        tokens = shlex.split(result)
+        tokens = _split_cmd(result)
         assert tokens[0] == "cat"
         assert tokens[1] == str(spacey / "note.md")
 
@@ -546,15 +700,6 @@ class TestVirtualMountResolution:
         assert result[1] == paths.GLOBAL_SKILLS_DIR
         assert result[2] == backends._BUILTIN_SKILLS_DIR
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason=(
-            "convert_virtual_paths_in_command wraps resolved paths in single "
-            "quotes via shlex.quote, which cmd.exe does not strip — the "
-            "literal ' chars end up in the subprocess argv. Tracked as a "
-            "follow-up to #207 (Windows-aware quoting in the convert fn)."
-        ),
-    )
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
         execute successfully. Regression guard: USER_SKILLS_DIR must be in
@@ -590,10 +735,6 @@ class TestVirtualMountResolution:
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="see test_execute_e2e_workspace_tier_skill",
-    )
     def test_execute_e2e_workspace_tier_shadows_global(self, monkeypatch, tmp_path):
         """End-to-end: when the same skill exists in BOTH workspace and global
         tiers, the workspace version must shadow the global one when invoked
@@ -631,10 +772,6 @@ class TestVirtualMountResolution:
         assert "WORKSPACE_TIER_WINS" in resp.output
         assert "GLOBAL_TIER_LOST" not in resp.output
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="see test_execute_e2e_workspace_tier_skill",
-    )
     def test_execute_e2e_global_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill that exists ONLY in the global tier (workspace
         does not have a copy) must execute successfully via
@@ -675,7 +812,7 @@ class TestResolvePath:
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         # /workspace/main.py should resolve to root/main.py
         resolved = backend._resolve_path("/workspace/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
         assert "workspace/workspace" not in str(resolved)
 
     def test_workspace_root(self, tmp_workspace):
@@ -687,13 +824,13 @@ class TestResolvePath:
     def test_system_path_with_workspace_marker(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/project/workspace/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
 
     def test_system_path_without_workspace(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/file.py")
         # Falls back to basename
-        assert str(resolved).endswith("file.py")
+        assert Path(resolved).parts[-1] == "file.py"
 
     def test_custom_workspace_name_prefix_stripped(self, tmp_path):
         """_resolve_path uses the actual dir name, not hardcoded 'workspace'."""
@@ -701,7 +838,7 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/my-project/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
         assert "my-project/my-project" not in str(resolved)
 
     def test_custom_workspace_name_system_path(self, tmp_path):
@@ -1459,3 +1596,56 @@ class TestExecuteTimeoutRecovery:
         resp = backend.execute('python -c "raise SystemExit(1)"')
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
+
+
+class TestPlatformQuote:
+    """Unit tests for :func:`backends._platform_quote` / :func:`backends._cmd_quote`.
+
+    The platform check is read at call time via :func:`backends._is_windows`,
+    so we monkeypatch that function (not the ``sys`` module) to exercise the
+    Windows branch on a POSIX runner without mutating global state.
+    """
+
+    def test_posix_no_special_chars_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        # Forward slashes and alphanumerics are safe in POSIX shells.
+        assert backends._platform_quote("/Users/foo/file.py") == "/Users/foo/file.py"
+
+    def test_posix_path_with_space_is_single_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        # shlex.quote wraps the whole token in single quotes.
+        assert (
+            backends._platform_quote("/Users/foo/file bar.py")
+            == "'/Users/foo/file bar.py'"
+        )
+
+    def test_windows_no_special_chars_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Backslashes are NOT escape chars inside cmd.exe double quotes, and
+        # outside quotes they only appear in paths — so a bare path is fine.
+        assert (
+            backends._platform_quote(r"C:\Users\foo\file.py") == r"C:\Users\foo\file.py"
+        )
+
+    def test_windows_path_with_space_is_double_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # cmd.exe strips outer double quotes; the space is preserved literally.
+        assert (
+            backends._platform_quote(r"C:\Users\John Smith\file.py")
+            == r'"C:\Users\John Smith\file.py"'
+        )
+
+    def test_windows_embedded_double_quote_is_escaped(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Embedded " is escaped as \" so cmd.exe keeps the literal quote inside
+        # the token rather than terminating the quoted region.
+        assert backends._platform_quote(r'C:\path\a"b') == r'"C:\path\a\"b"'
+
+    def test_windows_percent_sign_treated_as_regular_char(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # %VAR% expansion is not neutralised — %% escaping only works in
+        # .bat/.cmd files, not via cmd /c.  We treat % as a regular char.
+        assert (
+            backends._platform_quote(r"C:\path\%TEMP%\file.py")
+            == r"C:\path\%TEMP%\file.py"
+        )

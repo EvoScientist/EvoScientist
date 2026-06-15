@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.table import Table
 
-from ..base import Command, CommandContext
+from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 
@@ -11,8 +13,17 @@ class MCPCommand(Command):
 
     name = "/mcp"
     description = "Manage MCP servers"
+    subcommands: ClassVar[list[SubCommand]] = [
+        SubCommand("list", "List configured MCP servers"),
+        SubCommand("config", "Show server configuration details"),
+        SubCommand("add", "Add a new MCP server"),
+        SubCommand("edit", "Edit an MCP server configuration"),
+        SubCommand("remove", "Remove an MCP server"),
+        SubCommand("install", "Browse and install MCP servers"),
+    ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        """Dispatch to the appropriate MCP subcommand."""
         if not args or args[0] == "list":
             await self._mcp_list(ctx)
             return
@@ -34,25 +45,13 @@ class MCPCommand(Command):
             await InstallMCPCommand().execute(ctx, subargs)
         else:
             ctx.ui.append_system("MCP commands:", style="bold")
-            ctx.ui.append_system(
-                "  /mcp              List configured servers", style="dim"
-            )
-            ctx.ui.append_system(
-                "  /mcp list         List configured servers", style="dim"
-            )
-            ctx.ui.append_system(
-                "  /mcp config       Show detailed server config", style="dim"
-            )
-            ctx.ui.append_system("  /mcp add ...      Add a server", style="dim")
-            ctx.ui.append_system(
-                "  /mcp edit ...     Edit an existing server", style="dim"
-            )
-            ctx.ui.append_system("  /mcp remove ...   Remove a server", style="dim")
-            ctx.ui.append_system(
-                "  /mcp install ...  Browse and install servers", style="dim"
-            )
+            for sub in self.subcommands:
+                ctx.ui.append_system(
+                    f"  /mcp {sub.name:<12} {sub.description}", style="dim"
+                )
 
     async def _mcp_list(self, ctx: CommandContext) -> None:
+        """Display a table of all configured MCP servers."""
         from ...mcp import load_mcp_config
         from ...mcp.client import USER_MCP_CONFIG
 
@@ -85,6 +84,7 @@ class MCPCommand(Command):
         ctx.ui.append_system(f"Config file: {USER_MCP_CONFIG}", style="dim")
 
     async def _mcp_config(self, ctx: CommandContext, name: str) -> None:
+        """Show detailed configuration for one or all MCP servers."""
         from ...mcp import load_mcp_config
         from ...mcp.client import USER_MCP_CONFIG
 
@@ -133,6 +133,7 @@ class MCPCommand(Command):
         ctx.ui.append_system(f"Config file: {USER_MCP_CONFIG}", style="dim")
 
     async def _mcp_add(self, ctx: CommandContext, tokens: list[str]) -> None:
+        """Add a new MCP server from parsed arguments."""
         from ...mcp import add_mcp_server, parse_mcp_add_args
 
         if not tokens:
@@ -153,6 +154,7 @@ class MCPCommand(Command):
             ctx.ui.append_system(f"Error: {exc}", style="red")
 
     async def _mcp_edit(self, ctx: CommandContext, tokens: list[str]) -> None:
+        """Edit fields of an existing MCP server configuration."""
         from ...mcp import edit_mcp_server, parse_mcp_edit_args
 
         if not tokens:
@@ -170,6 +172,7 @@ class MCPCommand(Command):
             ctx.ui.append_system(f"Error: {exc}", style="red")
 
     async def _mcp_remove(self, ctx: CommandContext, name: str) -> None:
+        """Remove an MCP server by name."""
         from ...mcp import remove_mcp_server
 
         if not name:
