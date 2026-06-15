@@ -698,6 +698,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
             self._ensure_observation_dirs()
             records = self._read_observation_index_records()
             context = self._observation_index_context_from_records(records)
+        except OSError as e:
+            logger.warning("Failed to refresh observation memory index: %s", e)
+            return self._observation_index_context
         except Exception as e:
             logger.debug("Failed to refresh observation memory index: %s", e)
             return self._observation_index_context

@@ -149,7 +149,7 @@ def _ranked_matching_lines(
     matches: list[str] = []
 
     scored_lines: list[tuple[int, int, str]] = []
-    for index, line in enumerate(line.strip() for line in body.splitlines()):
+    for index, line in enumerate(raw_line.strip() for raw_line in body.splitlines()):
         if not line:
             continue
         overlap = len(query_tokens & set(_tokens(line)))
