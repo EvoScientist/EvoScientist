@@ -21,9 +21,6 @@ IDF_SMOOTHING = 0.5
 IDF_OFFSET = 1.0
 DEFAULT_MATCH_LINES = 3
 DEFAULT_MATCH_CHARS = 240
-LOW_CONFIDENCE_MESSAGE = (
-    "Low-confidence fallback: no observation matched the query terms exactly."
-)
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
@@ -144,15 +141,12 @@ def _regex_matching_lines(
 def _ranked_matching_lines(
     *,
     body: str,
-    summary: str,
     query_tokens: set[str],
     max_lines: int = DEFAULT_MATCH_LINES,
     max_chars: int = DEFAULT_MATCH_CHARS,
 ) -> list[str]:
     """Return compact lines that explain a ranked match."""
     matches: list[str] = []
-    if summary:
-        matches.append(summary[:max_chars])
 
     scored_lines: list[tuple[int, int, str]] = []
     for index, line in enumerate(line.strip() for line in body.splitlines()):
@@ -167,20 +161,7 @@ def _ranked_matching_lines(
         if len(matches) >= max_lines:
             return matches
 
-    if matches:
-        return matches[:max_lines]
-    candidates = [line.strip() for line in body.splitlines() if line.strip()]
-    return [(candidates[0] if candidates else "")[:max_chars]]
-
-
-def _low_confidence_matches(summary: str) -> list[str]:
-    """Return a snippet for fallback candidates without token overlap."""
-    if summary:
-        return [
-            LOW_CONFIDENCE_MESSAGE,
-            summary[:DEFAULT_MATCH_CHARS],
-        ]
-    return [LOW_CONFIDENCE_MESSAGE]
+    return matches[:max_lines]
 
 
 def _observation_haystack(document: ObservationSearchDocument) -> str:
@@ -219,7 +200,6 @@ def _regex_search_documents(
                 summary=document.summary,
                 pattern=pattern,
             ),
-            "match_quality": "regex",
         }
         hits.append(hit)
         if len(hits) >= limit:
@@ -255,7 +235,9 @@ def _ranked_search_documents(
     ]
     ranked = sorted(scored, key=lambda item: (-item[0], item[1]))
     positive_ranked = [item for item in ranked if item[0] > 0]
-    selected = positive_ranked[:limit] if positive_ranked else ranked[:limit]
+    if not positive_ranked:
+        return []
+    selected = positive_ranked[:limit]
 
     hits: list[ObservationSearchHit] = []
     for score, _, document in selected:
@@ -265,17 +247,11 @@ def _ranked_search_documents(
             "memory_type": document.memory_type,
             "scope": document.scope,
             "summary": document.summary,
-            "matches": (
-                _ranked_matching_lines(
-                    body=document.body,
-                    summary=document.summary,
-                    query_tokens=query_tokens,
-                )
-                if score > 0
-                else _low_confidence_matches(document.summary)
+            "matches": _ranked_matching_lines(
+                body=document.body,
+                query_tokens=query_tokens,
             ),
-            "score": round(score, 6),
-            "match_quality": "ranked" if score > 0 else "low",
+            "score": round(score, 2),
         }
         hits.append(hit)
     return hits

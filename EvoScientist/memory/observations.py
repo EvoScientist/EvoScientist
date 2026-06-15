@@ -613,11 +613,7 @@ def create_search_observations_tool(
             mode=search_mode,
         )
         return json.dumps(
-            {
-                "query": query.strip(),
-                "mode": search_mode.value,
-                "results": results,
-            },
+            {"results": results},
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -657,18 +653,13 @@ def create_read_memory_tool(
         if result is None:
             return json.dumps(
                 {
-                    "found": False,
-                    "observation_id": requested_id,
                     "error": "No observation with that ID exists in global or current-project memory.",
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             )
         return json.dumps(
-            {
-                "found": True,
-                **result,
-            },
+            {"text": result["text"]},
             ensure_ascii=False,
             sort_keys=True,
         )

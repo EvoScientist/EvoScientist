@@ -29,6 +29,7 @@ from EvoScientist.memory.observations import (
     MemoryType,
     ObservationSearchMode,
     create_read_memory_tool,
+    create_search_observations_tool,
     read_observation_file,
     record_observation_file,
     search_observation_files,
@@ -229,9 +230,14 @@ def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
     assert hits[0]["memory_type"] == MemoryType.PROCEDURAL
     assert hits[0]["scope"] == MemoryScope.GLOBAL
     assert hits[0]["summary"] == "GraphQL resolver aliases preserve userName fields."
-    assert hits[0]["matches"][0] == "GraphQL resolver aliases preserve userName fields."
+    assert hits[0]["matches"] == [
+        (
+            "When GraphQL returns blank camelCase fields, inspect resolver aliases "
+            "before changing the frontend query."
+        ),
+        "Future profile tasks can avoid frontend-only fixes.",
+    ]
     assert hits[0]["score"] > 0
-    assert hits[0]["match_quality"] == "ranked"
     assert (
         search_observation_files(
             memory_dir=memories,
@@ -242,6 +248,14 @@ def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
         )[0]["observation_id"]
         == second["observation_id"]
     )
+
+    tool = create_search_observations_tool(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    payload = json.loads(tool.run({"query": "GraphQL userName frontend", "limit": 5}))
+    assert list(payload) == ["results"]
+    assert payload["results"][0]["observation_id"] == first["observation_id"]
 
 
 def test_read_memory_returns_full_observation_by_id(tmp_path):
@@ -277,14 +291,11 @@ def test_read_memory_returns_full_observation_by_id(tmp_path):
 
     tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
     payload = json.loads(tool.run({"observation_id": result["observation_id"]}))
-    assert payload["found"] is True
-    assert payload["text"] == read["text"]
+    assert payload == {"text": read["text"]}
 
     missing = json.loads(tool.run({"observation_id": "../not-a-memory"}))
     assert missing == {
         "error": "No observation with that ID exists in global or current-project memory.",
-        "found": False,
-        "observation_id": "../not-a-memory",
     }
 
 
@@ -425,13 +436,12 @@ def test_search_observation_files_ranks_bag_of_words_queries(tmp_path):
     )
 
     assert hits[0]["observation_id"] == relevant["observation_id"]
-    assert hits[0]["match_quality"] == "ranked"
     assert hits[0]["score"] > hits[1]["score"]
 
 
-def test_search_observation_files_returns_low_confidence_fallback(tmp_path):
+def test_search_observation_files_returns_no_low_confidence_fallback(tmp_path):
     memories = tmp_path / "memories"
-    first = record_observation_file(
+    record_observation_file(
         memory_dir=memories,
         project_id="P-project",
         memory_type=MemoryType.SEMANTIC,
@@ -450,10 +460,7 @@ def test_search_observation_files_returns_low_confidence_fallback(tmp_path):
         query="quantum thermostat",
     )
 
-    assert [hit["observation_id"] for hit in hits] == [first["observation_id"]]
-    assert hits[0]["match_quality"] == "low"
-    assert hits[0]["score"] == 0
-    assert hits[0]["matches"][0].startswith("Low-confidence fallback")
+    assert hits == []
 
 
 def test_record_observation_tool_can_use_worker_config_source(tmp_path):

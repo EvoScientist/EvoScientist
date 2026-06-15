@@ -69,7 +69,6 @@ class ObservationSearchHit(TypedDict):
     summary: str
     matches: list[str]
     score: NotRequired[float]
-    match_quality: NotRequired[str]
 
 
 class ObservationReadResult(TypedDict):
