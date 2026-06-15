@@ -3,11 +3,11 @@
 Builds a background LangGraph agent that periodically searches for
 papers matching the user's research interests, compares them against
 observation memory, and writes structured updates to
-``/memories/radar/YYYY-MM-DD.md``.
+``/memories/radar/YYYY-MM-DD_HHMMSS.md``.
 
-Scheduling is handled entirely by LangGraph's built-in cron scheduler
-(cross-platform, no OS dependencies). Missed runs are caught up
-automatically when ``langgraph dev`` restarts.
+Scheduling uses an in-process ``asyncio.Task`` driven by ``croniter``
+(cross-platform, no OS dependencies).  The scheduler lives inside the
+CLI / TUI process — scans will not run while the process is stopped.
 """
 
 from __future__ import annotations
@@ -404,7 +404,7 @@ def list_radar_history(memory_dir: Path | None = None) -> list[dict]:
 def load_radar_update(
     date_str: str, memory_dir: Path | None = None
 ) -> RadarUpdate | None:
-    """Load a radar update by date string (YYYY-MM-DD)."""
+    """Load a radar update by date string (YYYY-MM-DD_HHMMSS)."""
     radar_dir = _radar_dir(memory_dir)
     json_path = radar_dir / f"{date_str}.json"
     if not json_path.exists():
@@ -537,7 +537,7 @@ def _compute_lookback_days(schedule: str) -> int:
     t1 = cron.get_next(datetime)
     t2 = cron.get_next(datetime)
     interval_days = (t2 - t1).total_seconds() / 86400
-    return min(2, int(interval_days + 1))
+    return max(1, min(31, int(interval_days + 1)))
 
 
 async def run_radar_now() -> tuple[str, RadarUpdate] | None:

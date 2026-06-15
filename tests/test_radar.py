@@ -217,10 +217,16 @@ class TestFileRoundTrip:
         assert len(history) == 2
         assert history[0]["date"] > history[1]["date"]  # newest first
 
-    def test_malformed_json_skipped(self, tmp_path):
+    def test_non_matching_filename_skipped(self, tmp_path):
         radar_dir = tmp_path / "radar"
         radar_dir.mkdir()
         (radar_dir / "bad.json").write_text("not json", encoding="utf-8")
+        assert list_radar_history(memory_dir=tmp_path) == []
+
+    def test_malformed_json_skipped(self, tmp_path):
+        radar_dir = tmp_path / "radar"
+        radar_dir.mkdir()
+        (radar_dir / "2026-06-10_120000.json").write_text("{invalid", encoding="utf-8")
         assert list_radar_history(memory_dir=tmp_path) == []
 
 
