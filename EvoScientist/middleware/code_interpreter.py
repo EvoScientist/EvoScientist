@@ -35,16 +35,10 @@ from langchain_quickjs import CodeInterpreterMiddleware
 _DEFAULT_TIMEOUT_SECONDS: float = 60.0
 _DEFAULT_MAX_RESULT_CHARS: int = 10000
 
-_MEMORY_FIRST_INTERPRETER_PROMPT = """
-
-Memory-first workflow when observation memory is available:
-- Search/read observation memory before using `code_interpreter` to inspect
-  workspace files or perform implementation work.
-- If `tools.search_observations` is exposed in the REPL, call it before
-  file-inspection calls. If a returned observation looks promising, call
-  `tools.read_memory` with its observation ID before acting on it. Then use
-  `code_interpreter` to do or batch the work.
-"""
+_MEMORY_FIRST_INTERPRETER_PROMPT = (
+    "\n\nWhen memory tools (search_observations, read_memory) are available, use "
+    "them before `code_interpreter` for workspace inspection or implementation work."
+)
 
 
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
