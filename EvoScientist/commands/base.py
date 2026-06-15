@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from ..gateway import ThreadStore
 
 
 @dataclass
@@ -87,6 +90,7 @@ class CommandContext:
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
+    thread_store: ThreadStore | None = None
     command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.

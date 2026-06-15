@@ -21,6 +21,7 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
+from ..gateway import GraphGateway, LocalGraphGateway, RunRequest
 from ..paths import resolve_virtual_path
 from .console import console
 from .diff_format import build_edit_diff
@@ -1279,6 +1280,7 @@ def _run_streaming(
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
     cancel_scope: str | None = None,
     *,
+    gateway: GraphGateway | None = None,
     _state: StreamState | None = None,
     _hitl_depth: int = 0,
     _media_sent: set[str] | None = None,
@@ -1305,6 +1307,8 @@ def _run_streaming(
             when the agent writes a media file (image/pdf) via write_file.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
+        gateway: Optional graph/thread gateway. Defaults to the local in-process
+            gateway used by the current CLI runtime.
 
     Returns:
         The final response text.
@@ -1320,6 +1324,7 @@ def _run_streaming(
     if _media_sent is None:
         _media_sent = set()
     _MIN_THINKING_LEN = 200
+    graph_gateway = gateway or LocalGraphGateway(agent)
 
     def _stopped_response() -> str:
         _, final_text = build_stopped_response_text(state.response_text)
@@ -1328,8 +1333,8 @@ def _run_streaming(
 
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
-        async for event in stream_agent_events(
-            agent, message, thread_id, metadata=metadata
+        async for event in graph_gateway.stream_events(
+            RunRequest(message=message, thread_id=thread_id, metadata=metadata)
         ):
             if is_stream_cancel_requested(cancel_scope):
                 _stopped_response()
@@ -1568,6 +1573,7 @@ def _run_streaming(
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,
                 cancel_scope=cancel_scope,
+                gateway=graph_gateway,
                 _state=state,
                 _hitl_depth=_hitl_depth + 1,
                 _media_sent=_media_sent,
@@ -1606,6 +1612,7 @@ def _run_streaming(
                     hitl_prompt_fn=hitl_prompt_fn,
                     ask_user_prompt_fn=ask_user_prompt_fn,
                     cancel_scope=cancel_scope,
+                    gateway=graph_gateway,
                     _state=state,
                     _hitl_depth=_hitl_depth + 1,
                     _media_sent=_media_sent,
