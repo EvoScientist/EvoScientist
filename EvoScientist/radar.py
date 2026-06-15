@@ -78,8 +78,9 @@ paying special attention to the **Interests**, **Radar monitoring**, and \
 2. Use arxiv_search to find recently published papers and preprints that \
 match the user's interests. Run 3-5 targeted searches covering different \
 facets of the user's interests. Use specific keywords and relevant arXiv \
-categories (e.g. cs.AI, cs.CL, cs.LG) for each search. Search with \
-days=14 to catch recent work.
+categories (e.g. cs.AI, cs.CL, cs.LG) for each search. Use the days \
+parameter from the input message — it tells you how far back to search \
+based on the scan schedule.
 3. Cross-reference findings against the user's observation memory to \
 understand how papers relate to their ongoing work.
 4. After completing ALL searches, produce your final answer as a single \
@@ -465,6 +466,9 @@ async def _radar_loop(schedule: str, tz_name: str) -> None:
         now = datetime.now(tz=tz)
         cron = croniter(schedule, now)
         next_run = cron.get_next(datetime)
+        # If we land exactly on (or just past) a boundary, skip to the one after
+        if (next_run - now).total_seconds() < 1:
+            next_run = cron.get_next(datetime)
         _scheduler_next_run = next_run
         delay = (next_run - now).total_seconds()
         logger.info("Radar scheduler: next run at %s (in %.0fs)", next_run, delay)
@@ -524,10 +528,26 @@ def get_scheduler_next_run() -> datetime | None:
     return _scheduler_next_run
 
 
+def _compute_lookback_days(schedule: str) -> int:
+    """Compute how many days to look back based on the cron interval + 1 day buffer."""
+    from croniter import croniter
+
+    now = datetime.now(UTC)
+    cron = croniter(schedule, now)
+    t1 = cron.get_next(datetime)
+    t2 = cron.get_next(datetime)
+    interval_days = (t2 - t1).total_seconds() / 86400
+    return min(2, int(interval_days + 1))
+
+
 async def run_radar_now() -> tuple[str, RadarUpdate] | None:
     """Run a radar scan in-process. Returns (timestamp, update) or None."""
+    from .config.settings import get_effective_config
+
+    cfg = get_effective_config()
+    days = _compute_lookback_days(cfg.radar_schedule)
     graph = build_radar_graph()
-    inp = {"messages": [("user", "Run radar scan now.")]}
+    inp = {"messages": [("user", f"Run radar scan now. Search with days={days}.")]}
     result = await graph.ainvoke(inp)
 
     update = _extract_radar_update(result)
