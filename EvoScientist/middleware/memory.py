@@ -44,12 +44,7 @@ _LEGACY_MEMORY_FILENAME = "MEMORY.md"
 _LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
 
-PROFILE_INJECTION_TEMPLATE = """<profile_memory>
-{profile_content}
-</profile_memory>
-{observation_memory}
-
-<memory_instructions>
+PROFILE_MEMORY_INSTRUCTIONS = """
 These profile notes live under `/memories/profile/`.
 Every agent can read and update them with normal file tools.
 
@@ -63,7 +58,7 @@ Read the relevant file before editing it. Add small bullets under existing
 headings, skip duplicates, and leave out temporary task state.
 
 Profile update scope:
-- Review the profile context above and the latest trajectory for stable changes
+- Review the profile context below and the latest trajectory for stable changes
   to user preferences, research taste, collaboration style, or project
   conventions.
 - Do not infer profile facts from task content alone. Profile updates need
@@ -73,8 +68,7 @@ Profile update scope:
   existing heading.
 - When the turn only contains task progress, subagent findings, search results,
   command output, or temporary run context, leave profile files unchanged.
-{observation_instructions}
-</memory_instructions>"""
+"""
 
 OBSERVATION_MEMORY_READ_INSTRUCTIONS = """
 Observation memory lives under `/memories/observations/`:
@@ -168,18 +162,15 @@ Notes about this workspace: conventions, commands, tests, and traps.
 }
 
 
-def _prepend_to_system_message(
+def _append_to_system_message(
     system_message: SystemMessage | None,
     text: str,
 ) -> SystemMessage:
-    """Prepend text to a system message while preserving existing blocks."""
+    """Append text to a system message while preserving existing metadata."""
     existing_blocks = list(system_message.content_blocks) if system_message else []
-    prefix = text
-    if existing_blocks:
-        prefix = f"{text}\n\n"
     new_blocks = [
-        {"type": "text", "text": prefix},
         *existing_blocks,
+        {"type": "text", "text": text},
     ]
     if system_message is None:
         return SystemMessage(content=new_blocks)
@@ -366,11 +357,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         if not enable_observation_memory:
             return
 
-        self._ensure_observation_dirs()
-        self._observation_index_records = self._read_observation_index_records()
-        self._observation_index_context = self._observation_index_context_from_records(
-            self._observation_index_records
-        )
+        self._refresh_observation_index_context()
 
     @property
     def project_id(self) -> str:
@@ -665,11 +652,10 @@ class EvoMemoryMiddleware(AgentMiddleware):
         *,
         max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
     ) -> str:
-        """Build the static observation index injected into the system prompt."""
+        """Build the observation index injected into the system prompt."""
         header = "\n".join(
             [
                 "<observation_memory>",
-                "Observation index loaded at agent start.",
                 self._observation_index_count_line(records),
             ]
         )
@@ -704,6 +690,21 @@ class EvoMemoryMiddleware(AgentMiddleware):
             ]
         )
 
+    def _refresh_observation_index_context(self) -> str:
+        """Refresh the prompt observation index from current memory files."""
+        if not self._enable_observation_memory:
+            return ""
+        try:
+            self._ensure_observation_dirs()
+            records = self._read_observation_index_records()
+            context = self._observation_index_context_from_records(records)
+        except Exception as e:
+            logger.debug("Failed to refresh observation memory index: %s", e)
+            return self._observation_index_context
+        self._observation_index_records = records
+        self._observation_index_context = context
+        return context
+
     def _observation_memory_instructions(self) -> str:
         if not self._enable_observation_memory:
             return ""
@@ -715,40 +716,70 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return instructions
         return instructions + OBSERVATION_MEMORY_WRITE_INSTRUCTIONS
 
-    def _inject_profile_context(
-        self, request: ModelRequest, profile_content: str
+    def _memory_instructions_context(self) -> str:
+        """Return static memory instructions for enabled memory features."""
+        instructions = []
+        if self._enable_profile_memory:
+            instructions.append(
+                PROFILE_MEMORY_INSTRUCTIONS.format(project_id=self._project_id)
+            )
+        if observation_instructions := self._observation_memory_instructions():
+            instructions.append(observation_instructions)
+        if not instructions:
+            return ""
+        return "\n".join(
+            [
+                "<memory_instructions>",
+                "\n\n".join(part.strip() for part in instructions if part.strip()),
+                "</memory_instructions>",
+            ]
+        )
+
+    def _profile_memory_context(self, profile_content: str) -> str:
+        """Return profile memory context for prompt injection."""
+        if not self._enable_profile_memory:
+            return ""
+        return "\n".join(
+            [
+                "<profile_memory>",
+                profile_content,
+                "</profile_memory>",
+            ]
+        )
+
+    def _memory_context_for_request(
+        self,
+        *,
+        observation_index_context: str,
+        profile_content: str,
+    ) -> str:
+        """Build request memory context ordered from static to dynamic."""
+        return "\n\n".join(
+            part
+            for part in (
+                self._memory_instructions_context(),
+                observation_index_context,
+                self._profile_memory_context(profile_content),
+            )
+            if part
+        )
+
+    def _inject_memory_context(
+        self,
+        request: ModelRequest,
+        *,
+        observation_index_context: str,
+        profile_content: str,
     ) -> ModelRequest:
-        """Prepend memory context and editing guidance to the system prompt."""
+        """Append memory context and editing guidance to the system prompt."""
         if not self._enable_profile_memory and not self._enable_observation_memory:
             return request
 
-        observation_instructions = self._observation_memory_instructions()
-
-        if not self._enable_profile_memory:
-            injection = "\n\n".join(
-                part
-                for part in (
-                    self._observation_index_context,
-                    (
-                        "<memory_instructions>\n"
-                        f"{observation_instructions.strip()}\n"
-                        "</memory_instructions>"
-                    )
-                    if observation_instructions.strip()
-                    else "",
-                )
-                if part
-            )
-            new_system = _prepend_to_system_message(request.system_message, injection)
-            return request.override(system_message=new_system)
-
-        injection = PROFILE_INJECTION_TEMPLATE.format(
+        injection = self._memory_context_for_request(
+            observation_index_context=observation_index_context,
             profile_content=profile_content,
-            observation_memory=self._observation_index_context,
-            project_id=self._project_id,
-            observation_instructions=observation_instructions,
         )
-        new_system = _prepend_to_system_message(request.system_message, injection)
+        new_system = _append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
     def _profile_context_for_request(self) -> str:
@@ -758,16 +789,34 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for synchronous model calls."""
-        return self._inject_profile_context(
-            request, self._profile_context_for_request()
+        return self._inject_memory_context(
+            request,
+            observation_index_context=self._refresh_observation_index_context(),
+            profile_content=self._profile_context_for_request(),
         )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for asynchronous model calls."""
+        observation_index_context = ""
         profile_context = ""
-        if self._enable_profile_memory:
+
+        if self._enable_observation_memory and self._enable_profile_memory:
+            observation_index_context, profile_context = await asyncio.gather(
+                asyncio.to_thread(self._refresh_observation_index_context),
+                asyncio.to_thread(self._read_profile_memory),
+            )
+        elif self._enable_observation_memory:
+            observation_index_context = await asyncio.to_thread(
+                self._refresh_observation_index_context
+            )
+        elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
-        return self._inject_profile_context(request, profile_context)
+
+        return self._inject_memory_context(
+            request,
+            observation_index_context=observation_index_context,
+            profile_content=profile_context,
+        )
 
     def wrap_model_call(
         self,

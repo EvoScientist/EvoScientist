@@ -54,7 +54,8 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(str(memories))
-    middleware.modify_request(_request())
+    modified = middleware.modify_request(_request())
+    content = str(modified.system_message.content)
 
     assert _sorted_tool_names(middleware) == [
         "read_memory",
@@ -67,9 +68,14 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     assert list((memories / "profile" / "projects").glob("*/PROJECT_PROFILE.md"))
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))
+    assert content.index("base system") < content.index("<memory_instructions>")
+    assert content.index("<memory_instructions>") < content.index(
+        "<observation_memory>"
+    )
+    assert content.index("<observation_memory>") < content.index("<profile_memory>")
 
 
-def test_prepend_to_system_message_preserves_metadata():
+def test_append_to_system_message_preserves_metadata():
     system_message = SystemMessage(
         content="base system",
         id="system-1",
@@ -78,7 +84,7 @@ def test_prepend_to_system_message_preserves_metadata():
         response_metadata={"provider": "test"},
     )
 
-    updated = memory_module._prepend_to_system_message(
+    updated = memory_module._append_to_system_message(
         system_message,
         "memory context",
     )
@@ -88,8 +94,8 @@ def test_prepend_to_system_message_preserves_metadata():
     assert updated.additional_kwargs == {"cache_control": {"type": "ephemeral"}}
     assert updated.response_metadata == {"provider": "test"}
     assert updated.content_blocks == [
-        {"type": "text", "text": "memory context\n\n"},
         {"type": "text", "text": "base system"},
+        {"type": "text", "text": "memory context"},
     ]
 
 
@@ -160,7 +166,7 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     assert "record_observation" not in content
 
 
-def test_observation_index_loads_summary_frontmatter_once(tmp_path, monkeypatch):
+def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -212,18 +218,22 @@ def test_observation_index_loads_summary_frontmatter_once(tmp_path, monkeypatch)
         record.observation_id: (record.memory_type, record.scope, record.summary)
         for record in middleware._observation_index_records
     }
-    record_observation_file(
+    later_result = record_observation_file(
         memory_dir=memories,
         project_id=project_id,
         memory_type=MemoryType.SEMANTIC,
-        summary="This later observation is not in the cached index.",
+        summary="This later observation is refreshed into the index.",
         observation="Observation written after middleware construction.",
-        why_it_matters="Prompt memory should stay stable during the agent run.",
+        why_it_matters="Prompt memory should reflect worker writes during the session.",
         scope=MemoryScope.GLOBAL,
         source_type=MemorySourceType.SUBAGENT,
         source_session_id="thread-2",
         source_agent="research-agent",
     )
+    modified = middleware.modify_request(_request())
+    refreshed_ids = {
+        record.observation_id for record in middleware._observation_index_records
+    }
 
     assert indexed == {
         global_result["observation_id"]: (
@@ -237,9 +247,10 @@ def test_observation_index_loads_summary_frontmatter_once(tmp_path, monkeypatch)
             "A project recipe is available for future lookup.",
         ),
     }
-    assert {
-        record.observation_id for record in middleware._observation_index_records
-    } == set(indexed)
+    assert refreshed_ids == {*indexed, later_result["observation_id"]}
+    assert "This later observation is refreshed into the index." in str(
+        modified.system_message.content
+    )
 
 
 def test_observation_index_omits_summaries_when_budget_exceeded(tmp_path, monkeypatch):
