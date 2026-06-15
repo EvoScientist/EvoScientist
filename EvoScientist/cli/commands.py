@@ -1531,10 +1531,12 @@ def serve(
                     result = load_latest_radar()
                     if result:
                         _, update = result
-                        clear_radar_pending()
-                        publish_to_channel_origin(
-                            f"[Research Radar] {pending_date}\n\n{update.summary_text}"
+                        published = publish_to_channel_origin(
+                            agent_holder.get("thread_id"),
+                            f"[Research Radar] {pending_date}\n\n{update.summary_text}",
                         )
+                        if published:
+                            clear_radar_pending()
             except Exception:
                 pass
     except KeyboardInterrupt:

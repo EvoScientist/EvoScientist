@@ -464,8 +464,15 @@ async def _radar_loop(schedule: str, tz_name: str) -> None:
 
     while True:
         now = datetime.now(tz=tz)
-        cron = croniter(schedule, now)
-        next_run = cron.get_next(datetime)
+        try:
+            cron = croniter(schedule, now)
+            next_run = cron.get_next(datetime)
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.error(
+                "Radar scheduler: invalid cron expression %r: %s", schedule, exc
+            )
+            return
+
         # If we land exactly on (or just past) a boundary, skip to the one after
         if (next_run - now).total_seconds() < 1:
             next_run = cron.get_next(datetime)
@@ -513,9 +520,10 @@ def _on_scheduler_done(task: asyncio.Task) -> None:
 
 def stop_radar_scheduler() -> None:
     """Stop the in-process radar scheduler."""
-    global _scheduler_next_run
+    global _scheduler_task, _scheduler_next_run
     if _scheduler_task and not _scheduler_task.done():
         _scheduler_task.cancel()
+    _scheduler_task = None
     _scheduler_next_run = None
     logger.info("Radar scheduler stopped")
 
@@ -532,12 +540,18 @@ def _compute_lookback_days(schedule: str) -> int:
     """Compute how many days to look back based on the cron interval + 1 day buffer."""
     from croniter import croniter
 
-    now = datetime.now(UTC)
-    cron = croniter(schedule, now)
-    t1 = cron.get_next(datetime)
-    t2 = cron.get_next(datetime)
-    interval_days = (t2 - t1).total_seconds() / 86400
-    return max(1, min(31, int(interval_days + 1)))
+    try:
+        now = datetime.now(UTC)
+        cron = croniter(schedule, now)
+        t1 = cron.get_next(datetime)
+        t2 = cron.get_next(datetime)
+        interval_days = (t2 - t1).total_seconds() / 86400
+        return max(1, min(31, int(interval_days + 1)))
+    except (ValueError, KeyError, TypeError):
+        logger.warning(
+            "Invalid cron expression %r, defaulting to 7 day lookback", schedule
+        )
+        return 7
 
 
 async def run_radar_now() -> tuple[str, RadarUpdate] | None:
