@@ -206,17 +206,21 @@ class FakeGraphGateway(GraphGateway):
         stream: FakeStreamFactory | None = None,
         state_values: GraphStateValues | None = None,
         state_error: BaseException | None = None,
+        generated_thread_ids: Iterable[str] | None = None,
         thread_store: ThreadStore | None = None,
     ) -> None:
         self.events = list(events or [])
         self.stream = stream
         self.state_values = state_values or {}
         self.state_error = state_error
+        self.generated_thread_ids = list(generated_thread_ids or [])
         self.thread_store = thread_store or FakeThreadStore()
         self.requests: list[RunRequest] = []
         self.updated_states: list[tuple[GraphTarget, str, dict[str, object]]] = []
 
     async def create_thread(self, target: GraphTarget | None = None) -> str:
+        if self.generated_thread_ids:
+            return self.generated_thread_ids.pop(0)
         return self.thread_store.generate_thread_id()
 
     async def list_threads(

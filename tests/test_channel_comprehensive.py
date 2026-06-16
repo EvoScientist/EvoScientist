@@ -46,7 +46,7 @@ from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
 # ═══════════════════════════════════════════════════════════════════
 from tests.conftest import run_async as _run
 from tests.fakes import FakeChannelConfig as _FakeConfig
-from tests.fakes import StubChannel
+from tests.fakes import FakeGraphGateway, StubChannel
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. DedupCache
@@ -1361,6 +1361,7 @@ class TestInboundConsumer:
             mgr.register(StubChannel())
         if agent is None:
             agent = MagicMock()
+        kw.setdefault("graph_gateway", FakeGraphGateway())
         return InboundConsumer(
             bus=bus,
             manager=mgr,
@@ -1378,15 +1379,21 @@ class TestInboundConsumer:
         assert msg.session_key == "tg:c1"
 
     def test_get_thread_id_creates_unique(self):
-        consumer = self._make_consumer()
-        tid1 = consumer._get_thread_id("user_a")
-        tid2 = consumer._get_thread_id("user_b")
+        consumer = self._make_consumer(
+            graph_gateway=FakeGraphGateway(
+                generated_thread_ids=["thread-a", "thread-b"]
+            )
+        )
+        tid1 = _run(consumer._get_thread_id("user_a"))
+        tid2 = _run(consumer._get_thread_id("user_b"))
         assert tid1 != tid2
 
     def test_get_thread_id_returns_same_for_same_sender(self):
-        consumer = self._make_consumer()
-        tid1 = consumer._get_thread_id("user_a")
-        tid2 = consumer._get_thread_id("user_a")
+        consumer = self._make_consumer(
+            graph_gateway=FakeGraphGateway(generated_thread_ids=["thread-a"])
+        )
+        tid1 = _run(consumer._get_thread_id("user_a"))
+        tid2 = _run(consumer._get_thread_id("user_a"))
         assert tid1 == tid2
 
     def test_shared_thread_id_bug(self):
@@ -1399,9 +1406,10 @@ class TestInboundConsumer:
             manager=mgr,
             agent=MagicMock(),
             thread_id="shared_thread",  # Non-empty!
+            graph_gateway=FakeGraphGateway(),
         )
-        tid1 = consumer._get_thread_id("alice")
-        tid2 = consumer._get_thread_id("bob")
+        tid1 = _run(consumer._get_thread_id("alice"))
+        tid2 = _run(consumer._get_thread_id("bob"))
         # Fixed: Each sender gets a unique thread_id using thread_id as prefix
         assert tid1 != tid2
         assert tid1 == "shared_thread:alice"
@@ -1417,7 +1425,7 @@ class TestInboundConsumer:
             consumer._sessions[f"user_{i}"] = f"thread_{i}"
 
         # Access "user_0" via _get_thread_id (triggers LRU move_to_end)
-        consumer._get_thread_id("user_0")
+        _run(consumer._get_thread_id("user_0"))
 
         # "user_0" should now be at the end (most recently used)
         oldest = next(iter(consumer._sessions))
@@ -1460,6 +1468,7 @@ class TestInboundConsumerErrorHandling:
                 manager=mgr,
                 agent=MagicMock(),
                 thread_id="",
+                graph_gateway=FakeGraphGateway(),
             )
 
             # The error message format includes the raw exception

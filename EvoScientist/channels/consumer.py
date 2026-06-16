@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from ..gateway import GraphRunInput
+from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import InboundMessage, OutboundMessage
@@ -235,9 +234,11 @@ class InboundConsumer:
     manager:
         The ChannelManager (used to look up channel instances).
     agent:
-        The agent object (must support ``stream_agent_events``).
+        The local agent object used by local graph gateway targets.
     thread_id:
         Default thread ID for agent conversations.
+    graph_gateway:
+        Gateway used for thread creation and graph streaming.
     send_thinking:
         Whether to forward thinking messages to the channel.
     on_message_received:
@@ -268,6 +269,7 @@ class InboundConsumer:
         agent: Any,
         thread_id: str,
         *,
+        graph_gateway: GraphGateway,
         send_thinking: bool = False,
         on_message_received: Callable[[InboundMessage], None] | None = None,
         on_streaming_event: Callable[[dict], None] | None = None,
@@ -281,6 +283,7 @@ class InboundConsumer:
         self.manager = manager
         self.agent = agent
         self.thread_id = thread_id
+        self.graph_gateway = graph_gateway
         self.send_thinking = send_thinking
         self._on_message_received = on_message_received
         self._on_streaming_event = on_streaming_event
@@ -314,7 +317,7 @@ class InboundConsumer:
         # ask_user: pending reply per session_key
         self._pending_ask_user_replies: dict[str, _PendingAskUserReply] = {}
 
-    def _get_thread_id(self, sender_id: str) -> str:
+    async def _get_thread_id(self, sender_id: str) -> str:
         """Get or create a thread ID for the given sender.
 
         Uses LRU ordering: recently accessed senders are moved to the
@@ -330,7 +333,9 @@ class InboundConsumer:
         if self.thread_id:
             self._sessions[sender_id] = f"{self.thread_id}:{sender_id}"
         else:
-            self._sessions[sender_id] = str(uuid.uuid4())
+            self._sessions[sender_id] = await self.graph_gateway.create_thread(
+                GraphTarget(local_graph=self.agent)
+            )
         return self._sessions[sender_id]
 
     def _get_channel(self, channel_name: str) -> Channel | None:
@@ -424,7 +429,7 @@ class InboundConsumer:
                 pass
 
         channel = self._get_channel(msg.channel)
-        thread_id = self._get_thread_id(msg.sender_id)
+        thread_id = await self._get_thread_id(msg.sender_id)
         session_key = msg.session_key  # "channel:chat_id"
 
         # Lazily create per-chat lock; evict stale locks when too many
@@ -467,8 +472,6 @@ class InboundConsumer:
         session_key: str,
     ) -> None:
         """Stream agent events with HITL interrupt handling."""
-        from ..stream.events import stream_agent_events
-
         stream_input: GraphRunInput = msg.content
 
         try:
@@ -508,14 +511,15 @@ class InboundConsumer:
                     return True
 
                 async for event in _timeout_aiter(
-                    stream_agent_events(
-                        self.agent,
-                        stream_input,
-                        thread_id,
-                        media=msg.media or None
-                        if isinstance(stream_input, str)
-                        else None,
-                        existing_summarization_event=None,
+                    self.graph_gateway.stream_events(
+                        RunRequest(
+                            message=stream_input,
+                            thread_id=thread_id,
+                            media=msg.media or None
+                            if isinstance(stream_input, str)
+                            else None,
+                            target=GraphTarget(local_graph=self.agent),
+                        )
                     ),
                     self._inference_timeout,
                 ):
@@ -599,7 +603,7 @@ class InboundConsumer:
                         interrupt_data,
                         session_key,
                     )
-                    from langgraph.types import Command  # type: ignore[import-untyped]
+                    from langgraph.types import Command
 
                     stream_input = Command(resume=result)
                     continue
@@ -610,7 +614,7 @@ class InboundConsumer:
 
                 # Session auto-approve (user previously chose "Approve all")
                 if session_key in self._auto_approve_sessions:
-                    from langgraph.types import Command  # type: ignore[import-untyped]
+                    from langgraph.types import Command
 
                     stream_input = Command(
                         resume={"decisions": [{"type": "approve"} for _ in range(n)]}
@@ -619,7 +623,7 @@ class InboundConsumer:
 
                 # Config auto-approve (auto_approve, non-execute, allow_list)
                 if _should_auto_approve(action_reqs):
-                    from langgraph.types import Command  # type: ignore[import-untyped]
+                    from langgraph.types import Command
 
                     stream_input = Command(
                         resume={"decisions": [{"type": "approve"} for _ in range(n)]}
@@ -708,7 +712,7 @@ class InboundConsumer:
                 if decision == "auto":
                     self._auto_approve_sessions.add(session_key)
 
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                from langgraph.types import Command
 
                 stream_input = Command(
                     resume={"decisions": [{"type": "approve"} for _ in range(n)]}
