@@ -12,6 +12,7 @@ from EvoScientist.cli.async_notifier import (
     format_batch_message,
     format_notification_lines,
 )
+from EvoScientist.gateway import GraphTarget
 from tests.fakes import FakeGraphGateway
 
 
@@ -60,7 +61,13 @@ def test_read_async_tasks_from_gateway_filters_state_values(run_async):
         }
     )
 
-    tasks = run_async(async_notifier.read_async_tasks_from_gateway(gateway, "tid"))
+    tasks = run_async(
+        async_notifier.read_async_tasks_from_gateway(
+            gateway,
+            GraphTarget(local_graph=MagicMock()),
+            "tid",
+        )
+    )
 
     assert tasks == {"task-1": {"status": "success"}}
 

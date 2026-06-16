@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal
 
 from .local import LocalGraphGateway, LocalThreadStore
 from .server import (
@@ -13,11 +12,7 @@ from .server import (
 )
 from .types import GraphGateway, ThreadStore
 
-if TYPE_CHECKING:
-    from langgraph.graph.state import CompiledStateGraph
-
 RuntimeGatewayBackend = Literal["local", "langgraph_server"]
-GraphGatewayFactory: TypeAlias = Callable[["CompiledStateGraph"], GraphGateway]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,10 +20,7 @@ class RuntimeGateways:
     """Gateway handles for one CLI/TUI/serve runtime."""
 
     thread_store: ThreadStore
-    graph_gateway_factory: GraphGatewayFactory
-
-    def graph_gateway(self, agent: CompiledStateGraph) -> GraphGateway:
-        return self.graph_gateway_factory(agent)
+    graph_gateway: GraphGateway
 
 
 def create_runtime_gateways(
@@ -57,12 +49,12 @@ def create_runtime_gateways(
                 headers=headers,
             )
 
-        def _server_gateway_factory(_agent: CompiledStateGraph) -> GraphGateway:
-            return LangGraphServerGateway(server_thread_store, graph_id=graph_id)
-
         return RuntimeGateways(
             thread_store=server_thread_store,
-            graph_gateway_factory=_server_gateway_factory,
+            graph_gateway=LangGraphServerGateway(
+                server_thread_store,
+                graph_id=graph_id,
+            ),
         )
 
     if backend != "local":
@@ -70,13 +62,7 @@ def create_runtime_gateways(
 
     local_thread_store = LocalThreadStore()
 
-    def _local_gateway_factory(agent: CompiledStateGraph) -> GraphGateway:
-        return LocalGraphGateway(
-            agent,
-            thread_store=local_thread_store,
-        )
-
     return RuntimeGateways(
         thread_store=local_thread_store,
-        graph_gateway_factory=_local_gateway_factory,
+        graph_gateway=LocalGraphGateway(thread_store=local_thread_store),
     )

@@ -28,14 +28,15 @@ from ..stream.summarization import (
 )
 from ..stream.v3_payloads import _as_raw_map, _event_namespace
 from .types import (
+    DEFAULT_GRAPH_ID,
     GraphEvent,
     GraphStateValues,
+    GraphTarget,
     RunRequest,
     ThreadResolution,
     ThreadStore,
 )
 
-DEFAULT_GRAPH_ID = "EvoScientist"
 _THREAD_SEARCH_LIMIT = 1000
 _RUN_SUBSCRIBE_CHANNELS = [
     "messages",
@@ -133,14 +134,23 @@ class LangGraphServerThreadStore(ThreadStore):
     def generate_thread_id(self) -> str:
         return str(uuid.uuid4())
 
-    async def create_thread(self) -> str:
-        thread = await self.client.threads.create(graph_id=self.graph_id)
+    def _target_graph_id(self, graph_id: str | None = None) -> str:
+        return graph_id or self.graph_id
+
+    async def create_thread(self, graph_id: str | None = None) -> str:
+        thread = await self.client.threads.create(
+            graph_id=self._target_graph_id(graph_id)
+        )
         return thread["thread_id"]
 
-    async def ensure_thread_exists(self, thread_id: str) -> None:
+    async def ensure_thread_exists(
+        self,
+        thread_id: str,
+        graph_id: str | None = None,
+    ) -> None:
         await self.client.threads.create(
             thread_id=thread_id,
-            graph_id=self.graph_id,
+            graph_id=self._target_graph_id(graph_id),
             if_exists="do_nothing",
         )
 
@@ -150,9 +160,10 @@ class LangGraphServerThreadStore(ThreadStore):
         limit: int = 20,
         include_message_count: bool = False,
         include_preview: bool = False,
+        graph_id: str | None = None,
     ) -> list[dict[str, Any]]:
         threads = await self.client.threads.search(
-            metadata={"graph_id": self.graph_id},
+            metadata={"graph_id": self._target_graph_id(graph_id)},
             limit=limit,
             sort_by="updated_at",
             sort_order="desc",
@@ -178,6 +189,7 @@ class LangGraphServerThreadStore(ThreadStore):
     async def resolve_thread_id_prefix(
         self,
         thread_id_or_prefix: str,
+        graph_id: str | None = None,
     ) -> tuple[str | None, list[str]]:
         try:
             thread = await self.client.threads.get(thread_id_or_prefix)
@@ -186,7 +198,7 @@ class LangGraphServerThreadStore(ThreadStore):
             pass
 
         threads = await self.client.threads.search(
-            metadata={"graph_id": self.graph_id},
+            metadata={"graph_id": self._target_graph_id(graph_id)},
             limit=_THREAD_SEARCH_LIMIT,
         )
         matches = sorted(
@@ -325,8 +337,13 @@ class LangGraphServerGateway:
     graph_id: str = DEFAULT_GRAPH_ID
     interrupt_wait_seconds: float = 5.0
 
-    async def create_thread(self) -> str:
-        return await self.thread_store.create_thread()
+    def _target_graph_id(self, target: GraphTarget | None = None) -> str:
+        return target.graph_id if target is not None else self.graph_id
+
+    async def create_thread(self, target: GraphTarget | None = None) -> str:
+        return await self.thread_store.create_thread(
+            graph_id=self._target_graph_id(target)
+        )
 
     async def list_threads(
         self,
@@ -334,29 +351,52 @@ class LangGraphServerGateway:
         limit: int = 20,
         include_message_count: bool = False,
         include_preview: bool = False,
+        target: GraphTarget | None = None,
     ) -> list[dict[str, Any]]:
         return await self.thread_store.list_threads(
             limit=limit,
             include_message_count=include_message_count,
             include_preview=include_preview,
+            graph_id=self._target_graph_id(target),
         )
 
-    async def resolve_thread(self, thread_id_or_prefix: str) -> ThreadResolution:
+    async def resolve_thread(
+        self,
+        thread_id_or_prefix: str,
+        target: GraphTarget | None = None,
+    ) -> ThreadResolution:
         resolved, matches = await self.thread_store.resolve_thread_id_prefix(
-            thread_id_or_prefix
+            thread_id_or_prefix,
+            graph_id=self._target_graph_id(target),
         )
         return ThreadResolution(resolved, tuple(matches))
 
-    async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
+    async def get_thread_metadata(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> dict[str, Any] | None:
         return await self.thread_store.get_thread_metadata(thread_id)
 
-    async def get_thread_messages(self, thread_id: str) -> list[BaseMessage]:
+    async def get_thread_messages(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> list[BaseMessage]:
         return await self.thread_store.get_thread_messages(thread_id)
 
-    async def thread_exists(self, thread_id: str) -> bool:
+    async def thread_exists(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> bool:
         return await self.thread_store.thread_exists(thread_id)
 
-    async def delete_thread(self, thread_id: str) -> bool:
+    async def delete_thread(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> bool:
         return await self.thread_store.delete_thread(thread_id)
 
     async def _start_or_resume(
@@ -365,7 +405,10 @@ class LangGraphServerGateway:
         request: RunRequest,
     ) -> None:
         config: dict[str, Any] = {"configurable": {"thread_id": request.thread_id}}
-        await self.thread_store.ensure_thread_exists(request.thread_id)
+        await self.thread_store.ensure_thread_exists(
+            request.thread_id,
+            graph_id=self._target_graph_id(request.target),
+        )
         if _command_has_resume(request.message):
             await self._respond_to_interrupt(
                 stream,
@@ -405,7 +448,14 @@ class LangGraphServerGateway:
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         return self._stream_events(request)
 
-    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+    async def get_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> GraphStateValues:
+        return await self._get_state_values(thread_id)
+
+    async def _get_state_values(self, thread_id: str) -> GraphStateValues:
         state = await self.thread_store.client.threads.get_state(thread_id)
         values = state.get("values")
         if not isinstance(values, dict):
@@ -416,7 +466,7 @@ class LangGraphServerGateway:
         emitter = StreamEventEmitter()
         baseline_summarization_signature: tuple[object, ...] | None = None
         try:
-            values = await self.get_state_values(request.thread_id)
+            values = await self._get_state_values(request.thread_id)
             baseline_event = _find_summarization_event_payload(values)
             baseline_summarization_signature = _summarization_event_signature(
                 baseline_event
@@ -433,7 +483,7 @@ class LangGraphServerGateway:
         tracker = _ServerSubagentTracker(emitter, subagents)
         stream = self.thread_store.client.threads.stream(
             request.thread_id,
-            assistant_id=self.graph_id,
+            assistant_id=self._target_graph_id(request.target),
         )
 
         try:

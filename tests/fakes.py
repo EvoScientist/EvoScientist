@@ -16,6 +16,7 @@ from EvoScientist.gateway import (
     GraphEvent,
     GraphGateway,
     GraphStateValues,
+    GraphTarget,
     RunRequest,
     ThreadResolution,
     ThreadStore,
@@ -212,7 +213,7 @@ class FakeGraphGateway(GraphGateway):
         self.thread_store = thread_store or FakeThreadStore()
         self.requests: list[RunRequest] = []
 
-    async def create_thread(self) -> str:
+    async def create_thread(self, target: GraphTarget | None = None) -> str:
         return self.thread_store.generate_thread_id()
 
     async def list_threads(
@@ -221,6 +222,7 @@ class FakeGraphGateway(GraphGateway):
         limit: int = 20,
         include_message_count: bool = False,
         include_preview: bool = False,
+        target: GraphTarget | None = None,
     ) -> list[dict[str, Any]]:
         return await self.thread_store.list_threads(
             limit=limit,
@@ -228,22 +230,42 @@ class FakeGraphGateway(GraphGateway):
             include_preview=include_preview,
         )
 
-    async def resolve_thread(self, thread_id_or_prefix: str) -> ThreadResolution:
+    async def resolve_thread(
+        self,
+        thread_id_or_prefix: str,
+        target: GraphTarget | None = None,
+    ) -> ThreadResolution:
         resolved, matches = await self.thread_store.resolve_thread_id_prefix(
             thread_id_or_prefix
         )
         return ThreadResolution(resolved, tuple(matches))
 
-    async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
+    async def get_thread_metadata(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> dict[str, Any] | None:
         return await self.thread_store.get_thread_metadata(thread_id)
 
-    async def get_thread_messages(self, thread_id: str) -> list[Any]:
+    async def get_thread_messages(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> list[Any]:
         return await self.thread_store.get_thread_messages(thread_id)
 
-    async def thread_exists(self, thread_id: str) -> bool:
+    async def thread_exists(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> bool:
         return await self.thread_store.thread_exists(thread_id)
 
-    async def delete_thread(self, thread_id: str) -> bool:
+    async def delete_thread(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> bool:
         return await self.thread_store.delete_thread(thread_id)
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
@@ -257,7 +279,11 @@ class FakeGraphGateway(GraphGateway):
 
         return _events()
 
-    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+    async def get_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> GraphStateValues:
         return self.state_values
 
 
@@ -349,6 +375,7 @@ class FakeLangGraphThreadsClient:
         self.created: list[dict[str, Any]] = []
         self.deleted: list[str] = []
         self.searches: list[dict[str, Any]] = []
+        self.stream_calls: list[tuple[str, str]] = []
 
     async def create(
         self,
@@ -431,8 +458,8 @@ class FakeLangGraphThreadsClient:
         *,
         assistant_id: str,
     ) -> FakeLangGraphThreadStream:
-        del assistant_id
         assert thread_id is not None
+        self.stream_calls.append((thread_id, assistant_id))
         return self.streams[thread_id]
 
 

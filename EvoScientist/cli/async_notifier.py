@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 if TYPE_CHECKING:
-    from ..gateway import GraphGateway
+    from ..gateway import GraphGateway, GraphTarget
 
 TERMINAL_STATUSES: Final = frozenset({"success", "error", "timeout", "interrupted"})
 """Aligned with langgraph_sdk.schema.RunStatus terminal values.
@@ -133,13 +133,14 @@ def pending_thread_ids() -> set[str]:
 
 async def read_async_tasks_from_gateway(
     gateway: GraphGateway,
+    target: GraphTarget,
     thread_id: str | None,
 ) -> AsyncTasksState:
     """Read async_tasks state through the active graph gateway."""
     if not thread_id:
         return {}
     try:
-        values = await gateway.get_state_values(thread_id)
+        values = await gateway.get_state_values(target, thread_id)
     except Exception:
         return {}
     raw_tasks = values.get("async_tasks")

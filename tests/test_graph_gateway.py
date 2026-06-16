@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import (
-    GraphGateway,
+    GraphTarget,
     LangGraphServerGateway,
     LangGraphServerThreadStore,
     LocalGraphGateway,
@@ -24,9 +24,6 @@ from tests.fakes import (
     FakeLangGraphThreadStream,
     FakeThreadStore,
 )
-
-if TYPE_CHECKING:
-    from langgraph.graph.state import CompiledStateGraph
 
 
 def test_local_gateway_streams_from_injected_streamer():
@@ -46,7 +43,7 @@ def test_local_gateway_streams_from_injected_streamer():
         yield {"type": "done", "response": "hi"}
 
     agent = MagicMock()
-    gateway = LocalGraphGateway(agent)
+    gateway = LocalGraphGateway()
 
     async def _collect():
         request = RunRequest(
@@ -54,6 +51,7 @@ def test_local_gateway_streams_from_injected_streamer():
             thread_id="t1",
             metadata={"workspace_dir": "/tmp/ws"},
             media=["plot.png"],
+            target=GraphTarget(local_graph=agent, workspace_dir="/tmp/ws"),
         )
         return [event async for event in gateway.stream_events(request)]
 
@@ -83,10 +81,9 @@ def test_local_graph_gateway_delegates_thread_operations():
         exists=True,
         deleted=True,
     )
-    agent = MagicMock()
 
     async def _run():
-        gateway = LocalGraphGateway(agent, thread_store=thread_store)
+        gateway = LocalGraphGateway(thread_store=thread_store)
         resolution = await gateway.resolve_thread("abc")
         return {
             "created": await gateway.create_thread(),
@@ -136,9 +133,11 @@ def test_local_graph_gateway_reads_state_values():
     agent.aget_state = AsyncMock(
         return_value=SimpleNamespace(values={"async_tasks": {"task-1": {}}})
     )
-    gateway = LocalGraphGateway(agent)
+    gateway = LocalGraphGateway()
 
-    values = run_async(gateway.get_state_values("abc12345"))
+    values = run_async(
+        gateway.get_state_values(GraphTarget(local_graph=agent), "abc12345")
+    )
 
     assert values == {"async_tasks": {"task-1": {}}}
     agent.aget_state.assert_awaited_once_with(
@@ -147,6 +146,7 @@ def test_local_graph_gateway_reads_state_values():
 
 
 def test_run_streaming_can_consume_injected_gateway():
+    agent = MagicMock()
     gateway = FakeGraphGateway(
         events=[
             {"type": "text", "content": "gateway-ok"},
@@ -156,7 +156,7 @@ def test_run_streaming_can_consume_injected_gateway():
 
     with patch("EvoScientist.stream.display.Live"):
         result = display_mod._run_streaming(
-            agent=MagicMock(),
+            agent=agent,
             message="hello",
             thread_id="t1",
             show_thinking=False,
@@ -171,6 +171,7 @@ def test_run_streaming_can_consume_injected_gateway():
             message="hello",
             thread_id="t1",
             metadata={"workspace_dir": "/tmp/ws"},
+            target=GraphTarget(local_graph=agent, workspace_dir="/tmp/ws"),
         )
     ]
 
@@ -190,6 +191,7 @@ def test_resume_command_consumes_context_gateway():
         thread_id="current",
         ui=ui,
         workspace_dir="/old",
+        graph_gateway=FakeGraphGateway(thread_store=thread_store),
         thread_store=thread_store,
     )
 
@@ -205,15 +207,9 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
 
     thread_store = FakeThreadStore(generated_thread_id="generated-thread")
 
-    def _graph_gateway_factory(agent: CompiledStateGraph) -> GraphGateway:
-        return LocalGraphGateway(
-            agent,
-            thread_store=thread_store,
-        )
-
     runtime_gateways = RuntimeGateways(
         thread_store=thread_store,
-        graph_gateway_factory=_graph_gateway_factory,
+        graph_gateway=LocalGraphGateway(thread_store=thread_store),
     )
     seen: dict[str, Any] = {}
 
@@ -236,7 +232,6 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     assert seen["agent"] is agent
     assert seen["thread_id"] == "generated-thread"
     assert isinstance(seen["gateway"], LocalGraphGateway)
-    assert seen["gateway"].agent is agent
     assert seen["gateway"].thread_store is thread_store
 
 
@@ -340,7 +335,7 @@ def test_runtime_gateways_can_use_langgraph_server_backend():
         client_factory=_client_factory,
     )
 
-    gateway = runtime_gateways.graph_gateway(MagicMock())
+    gateway = runtime_gateways.graph_gateway
 
     assert isinstance(runtime_gateways.thread_store, LangGraphServerThreadStore)
     assert isinstance(gateway, LangGraphServerGateway)
@@ -359,7 +354,7 @@ def test_langgraph_server_gateway_reads_state_values():
         )
     )
 
-    values = run_async(gateway.get_state_values("abc12345"))
+    values = run_async(gateway.get_state_values(GraphTarget(), "abc12345"))
 
     assert values == {"async_tasks": {"task-1": {}}}
 
@@ -388,7 +383,7 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
         ],
     )
     threads = FakeLangGraphThreadsClient(
-        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        threads=[],
         states={"abc12345": {"values": {}}},
         streams={"abc12345": stream},
     )
@@ -407,12 +402,20 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
                     message="hi",
                     thread_id="abc12345",
                     metadata={"workspace_dir": "/tmp/ws"},
+                    target=GraphTarget(graph_id="writing-agent"),
                 )
             )
         ]
 
     events = run_async(_collect())
 
+    assert threads.created == [
+        {
+            "thread_id": "abc12345",
+            "metadata": {"graph_id": "writing-agent"},
+        }
+    ]
+    assert threads.stream_calls == [("abc12345", "writing-agent")]
     assert stream.run.starts == [
         {
             "input": {"messages": [{"role": "user", "content": "hi"}]},

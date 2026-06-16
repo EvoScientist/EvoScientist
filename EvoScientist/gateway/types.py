@@ -4,13 +4,30 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 from langgraph.types import Command
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 GraphEvent: TypeAlias = dict[str, Any]
 GraphRunInput: TypeAlias = str | Command
 GraphStateValues: TypeAlias = dict[str, object]
+DEFAULT_GRAPH_ID = "EvoScientist"
+
+
+@dataclass(frozen=True, slots=True)
+class GraphTarget:
+    """Identifies the graph/workspace a thread operation targets.
+
+    ``local_graph`` is the in-process execution handle required only by the
+    local backend. Server backends select execution via ``graph_id``.
+    """
+
+    graph_id: str = DEFAULT_GRAPH_ID
+    workspace_dir: str | None = None
+    local_graph: CompiledStateGraph | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +38,7 @@ class RunRequest:
     thread_id: str
     metadata: dict[str, Any] | None = None
     media: list[str] | None = None
+    target: GraphTarget | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +94,7 @@ class ThreadStore(Protocol):
 class GraphGateway(Protocol):
     """One authority for graph runs and thread lifecycle operations."""
 
-    async def create_thread(self) -> str:
+    async def create_thread(self, target: GraphTarget | None = None) -> str:
         """Create or reserve a new thread id."""
 
     async def list_threads(
@@ -85,26 +103,51 @@ class GraphGateway(Protocol):
         limit: int = 20,
         include_message_count: bool = False,
         include_preview: bool = False,
+        target: GraphTarget | None = None,
     ) -> list[dict[str, Any]]:
         """Return user-facing threads for the active backend."""
 
-    async def resolve_thread(self, thread_id_or_prefix: str) -> ThreadResolution:
+    async def resolve_thread(
+        self,
+        thread_id_or_prefix: str,
+        target: GraphTarget | None = None,
+    ) -> ThreadResolution:
         """Resolve a thread id or prefix."""
 
-    async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
+    async def get_thread_metadata(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> dict[str, Any] | None:
         """Return persisted metadata for a thread, if available."""
 
-    async def get_thread_messages(self, thread_id: str) -> list[Any]:
+    async def get_thread_messages(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> list[Any]:
         """Return persisted messages for a thread."""
 
-    async def thread_exists(self, thread_id: str) -> bool:
+    async def thread_exists(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> bool:
         """Return whether a thread exists in the active backend."""
 
-    async def delete_thread(self, thread_id: str) -> bool:
+    async def delete_thread(
+        self,
+        thread_id: str,
+        target: GraphTarget | None = None,
+    ) -> bool:
         """Delete a thread and its persisted state."""
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
-        """Stream normalized EvoScientist graph events for a run."""
+        """Stream normalized graph events for the request target."""
 
-    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+    async def get_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> GraphStateValues:
         """Return the graph state values for a thread."""

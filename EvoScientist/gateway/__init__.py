@@ -8,21 +8,21 @@ package for thread/run operations instead of reaching directly into
 
 from .local import LocalGraphGateway, LocalThreadStore
 from .runtime import (
-    GraphGatewayFactory,
     RuntimeGatewayBackend,
     RuntimeGateways,
     create_runtime_gateways,
 )
 from .server import (
-    DEFAULT_GRAPH_ID,
     LangGraphServerGateway,
     LangGraphServerThreadStore,
 )
 from .types import (
+    DEFAULT_GRAPH_ID,
     GraphEvent,
     GraphGateway,
     GraphRunInput,
     GraphStateValues,
+    GraphTarget,
     RunRequest,
     ThreadResolution,
     ThreadStore,
@@ -32,9 +32,9 @@ __all__ = [
     "DEFAULT_GRAPH_ID",
     "GraphEvent",
     "GraphGateway",
-    "GraphGatewayFactory",
     "GraphRunInput",
     "GraphStateValues",
+    "GraphTarget",
     "LangGraphServerGateway",
     "LangGraphServerThreadStore",
     "LocalGraphGateway",

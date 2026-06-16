@@ -12,7 +12,7 @@ import os
 import re
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -21,7 +21,7 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
-from ..gateway import GraphGateway, GraphRunInput, RunRequest
+from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
 from .console import console
 from .diff_format import build_edit_diff
@@ -40,12 +40,28 @@ from .utils import (
     is_success,
 )
 
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
 # ---------------------------------------------------------------------------
 # Shared globals
 # ---------------------------------------------------------------------------
 
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+
+
+def _graph_target_for_local_agent(
+    agent: "CompiledStateGraph",
+    metadata: dict[str, object] | None = None,
+) -> GraphTarget:
+    workspace = None
+    if metadata is not None:
+        raw_workspace = metadata.get("workspace_dir")
+        if isinstance(raw_workspace, str) and raw_workspace:
+            workspace = raw_workspace
+    return GraphTarget(local_graph=agent, workspace_dir=workspace)
+
 
 # LLM output sometimes omits the CommonMark-required space after `#` (e.g.
 # "###文件系统"), which makes Rich render the line as raw text. The lookahead
@@ -1264,7 +1280,7 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
 
 
 def _run_streaming(
-    agent: Any,
+    agent: "CompiledStateGraph",
     message: GraphRunInput,
     thread_id: str,
     show_thinking: bool,
@@ -1274,7 +1290,7 @@ def _run_streaming(
     on_file_write: Callable[[str], None] | None = None,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
-    metadata: dict | None = None,
+    metadata: dict[str, object] | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
     cancel_scope: str | None = None,
@@ -1331,7 +1347,12 @@ def _run_streaming(
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
         async for event in gateway.stream_events(
-            RunRequest(message=message, thread_id=thread_id, metadata=metadata)
+            RunRequest(
+                message=message,
+                thread_id=thread_id,
+                metadata=metadata,
+                target=_graph_target_for_local_agent(agent, metadata),
+            )
         ):
             if is_stream_cancel_requested(cancel_scope):
                 _stopped_response()
@@ -1635,7 +1656,7 @@ def _run_streaming(
 
 
 async def _astream_to_console(
-    agent: Any,
+    agent: "CompiledStateGraph",
     message: str,
     thread_id: str,
     show_thinking: bool = True,
@@ -1661,7 +1682,11 @@ async def _astream_to_console(
     state = StreamState()
 
     async for event in gateway.stream_events(
-        RunRequest(message=message, thread_id=thread_id)
+        RunRequest(
+            message=message,
+            thread_id=thread_id,
+            target=_graph_target_for_local_agent(agent),
+        )
     ):
         etype = state.handle_event(event)
 
