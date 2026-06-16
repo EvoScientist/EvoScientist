@@ -142,6 +142,15 @@ class GraphGateway(Protocol):
     ) -> bool:
         """Delete a thread and its persisted state."""
 
+    async def clone_thread(
+        self,
+        source_thread_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        target: GraphTarget | None = None,
+    ) -> str:
+        """Clone a thread and return the cloned thread id."""
+
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         """Stream normalized graph events for the request target."""
 

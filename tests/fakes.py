@@ -22,6 +22,8 @@ from EvoScientist.gateway import (
     ThreadStore,
 )
 
+_DEFAULT_COPY_RESPONSE = object()
+
 
 @dataclass
 class FakeChannelConfig:
@@ -216,6 +218,9 @@ class FakeGraphGateway(GraphGateway):
         self.generated_thread_ids = list(generated_thread_ids or [])
         self.thread_store = thread_store or FakeThreadStore()
         self.requests: list[RunRequest] = []
+        self.clone_calls: list[
+            tuple[str, dict[str, Any] | None, GraphTarget | None]
+        ] = []
         self.updated_states: list[tuple[GraphTarget, str, dict[str, object]]] = []
 
     async def create_thread(self, target: GraphTarget | None = None) -> str:
@@ -274,6 +279,18 @@ class FakeGraphGateway(GraphGateway):
         target: GraphTarget | None = None,
     ) -> bool:
         return await self.thread_store.delete_thread(thread_id)
+
+    async def clone_thread(
+        self,
+        source_thread_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        target: GraphTarget | None = None,
+    ) -> str:
+        self.clone_calls.append((source_thread_id, metadata, target))
+        if self.generated_thread_ids:
+            return self.generated_thread_ids.pop(0)
+        return f"{source_thread_id}-clone"
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         self.requests.append(request)
@@ -385,11 +402,15 @@ class FakeLangGraphThreadsClient:
         threads: list[dict[str, Any]] | None = None,
         states: dict[str, dict[str, Any]] | None = None,
         streams: dict[str, FakeLangGraphThreadStream] | None = None,
+        copy_response: object = _DEFAULT_COPY_RESPONSE,
     ) -> None:
         self.threads = threads or []
         self.states = states or {}
         self.streams = streams or {}
+        self.copy_response = copy_response
         self.created: list[dict[str, Any]] = []
+        self.copied: list[str] = []
+        self.metadata_updates: list[tuple[str, dict[str, Any]]] = []
         self.deleted: list[str] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
@@ -455,6 +476,34 @@ class FakeLangGraphThreadsClient:
             if thread.get("thread_id") == thread_id:
                 return thread
         raise NotFoundError("not found", response=_not_found_response(), body=None)
+
+    async def copy(self, thread_id: str) -> object:
+        source = await self.get(thread_id)
+        self.copied.append(thread_id)
+        if self.copy_response is not _DEFAULT_COPY_RESPONSE:
+            return self.copy_response
+        copied = {
+            "thread_id": f"{thread_id}-copy",
+            "metadata": dict(source.get("metadata") or {}),
+        }
+        self.threads.append(copied)
+        return copied
+
+    async def update(
+        self,
+        thread_id: str,
+        *,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        thread = await self.get(thread_id)
+        existing_metadata = thread.get("metadata")
+        merged = {
+            **(existing_metadata if isinstance(existing_metadata, dict) else {}),
+            **metadata,
+        }
+        thread["metadata"] = merged
+        self.metadata_updates.append((thread_id, metadata))
+        return thread
 
     async def get_state(self, thread_id: str) -> dict[str, Any]:
         from langgraph_sdk.errors import NotFoundError

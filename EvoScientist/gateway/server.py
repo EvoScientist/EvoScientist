@@ -235,6 +235,29 @@ class LangGraphServerThreadStore(ThreadStore):
             return False
         return True
 
+    async def clone_thread(
+        self,
+        source_thread_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        copy_response: object = await self.client.threads.copy(source_thread_id)
+        if not isinstance(copy_response, dict):
+            raise RuntimeError(
+                "LangGraph thread copy did not return a cloned thread id"
+            )
+        cloned_thread_id = copy_response.get("thread_id")
+        if not isinstance(cloned_thread_id, str) or not cloned_thread_id:
+            raise RuntimeError(
+                "LangGraph thread copy did not return a cloned thread id"
+            )
+        if metadata:
+            await self.client.threads.update(
+                cloned_thread_id,
+                metadata=metadata,
+            )
+        return cloned_thread_id
+
 
 @dataclass(slots=True)
 class _ServerSubagentTracker:
@@ -395,6 +418,18 @@ class LangGraphServerGateway:
         target: GraphTarget | None = None,
     ) -> bool:
         return await self.thread_store.delete_thread(thread_id)
+
+    async def clone_thread(
+        self,
+        source_thread_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        target: GraphTarget | None = None,
+    ) -> str:
+        return await self.thread_store.clone_thread(
+            source_thread_id,
+            metadata=metadata,
+        )
 
     async def _start_or_resume(
         self,

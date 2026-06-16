@@ -120,6 +120,15 @@ class LocalGraphGateway:
     ) -> bool:
         return await self.thread_store.delete_thread(thread_id)
 
+    async def clone_thread(
+        self,
+        source_thread_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        target: GraphTarget | None = None,
+    ) -> str:
+        raise NotImplementedError("LocalGraphGateway does not support thread cloning.")
+
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         target = request.target
         local_graph = self._require_local_graph(target)

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from EvoScientist.gateway import (
     GraphTarget,
     LangGraphServerGateway,
@@ -339,6 +341,92 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     assert result["exists"] is True
     assert result["deleted"] is True
     assert threads.deleted == ["abc12345"]
+
+
+def test_langgraph_server_thread_store_clones_thread_with_metadata():
+    clone_metadata = {
+        "clone_purpose": "memory_extraction",
+        "source_thread_id": "source-thread",
+    }
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "source-thread",
+                "metadata": {"graph_id": "writing-agent", "workspace_dir": "/tmp/ws"},
+            }
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    cloned_thread_id = run_async(
+        store.clone_thread("source-thread", metadata=clone_metadata)
+    )
+
+    assert cloned_thread_id == "source-thread-copy"
+    assert threads.copied == ["source-thread"]
+    assert threads.metadata_updates == [("source-thread-copy", clone_metadata)]
+    assert threads.threads[-1] == {
+        "thread_id": "source-thread-copy",
+        "metadata": {
+            "graph_id": "writing-agent",
+            "workspace_dir": "/tmp/ws",
+            "clone_purpose": "memory_extraction",
+            "source_thread_id": "source-thread",
+        },
+    }
+
+
+def test_langgraph_server_thread_store_rejects_copy_without_thread_id():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "source-thread", "metadata": {"graph_id": "agent"}}],
+        copy_response=None,
+    )
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    async def _run():
+        await store.clone_thread("source-thread")
+
+    with pytest.raises(RuntimeError, match="did not return a cloned thread id"):
+        run_async(_run())
+
+
+def test_langgraph_server_gateway_clones_thread():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "source-thread", "metadata": {"graph_id": "agent"}}]
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    cloned_thread_id = run_async(
+        gateway.clone_thread(
+            "source-thread",
+            metadata={"clone_purpose": "manual"},
+            target=GraphTarget(graph_id="agent"),
+        )
+    )
+
+    assert cloned_thread_id == "source-thread-copy"
+    assert threads.metadata_updates == [
+        ("source-thread-copy", {"clone_purpose": "manual"})
+    ]
+
+
+def test_local_graph_gateway_clone_thread_is_explicitly_unsupported():
+    async def _run():
+        await LocalGraphGateway().clone_thread("source-thread")
+
+    with pytest.raises(NotImplementedError, match="does not support thread cloning"):
+        run_async(_run())
 
 
 def test_runtime_gateways_can_use_langgraph_server_backend():
