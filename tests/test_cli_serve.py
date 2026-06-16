@@ -36,6 +36,7 @@ def _make_config(
         memory_observation_writer=MemoryObservationWriter.ALL,
         memory_workers_enabled=False,
         memory_synthesis_enabled=True,
+        memory_worker_thread_cleanup_enabled=True,
         provider="anthropic",
         anthropic_auth_mode="api_key",
         openai_auth_mode="api_key",
