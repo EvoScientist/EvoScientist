@@ -21,6 +21,81 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Windows MCP SDK patch — drop the blocking os.access from stdio command resolution
+# =============================================================================
+#
+# On Windows, ``mcp.client.stdio`` resolves the server command on every stdio
+# session open via ``get_windows_executable_command()``, which calls
+# ``shutil.which()`` → ``os.access()`` — a blocking syscall. ``langgraph dev``
+# enables ``blockbuster`` by default, which flags that ``os.access()`` as an
+# illegal blocking call inside the event loop (one of the two root causes of
+# issue #283; the other is the Selector-loop subprocess fallback handled by
+# ``EvoScientist._winloop``).
+#
+# ``_resolve_command()`` (below) already resolves bare command names to their
+# absolute paths at connection-build time — a sync context where blocking is
+# fine. So by the time the stdio transport asks for the executable, the command
+# is already absolute and there is nothing left to look up. We short-circuit the
+# SDK's resolver for absolute paths, avoiding the ``os.access()`` entirely; bare
+# commands (which shouldn't reach here, but might via a transport we don't build)
+# still fall through to the original SDK behaviour.
+
+
+def _patch_mcp_windows_command_resolver() -> None:
+    """Make the MCP SDK's stdio command resolver skip ``os.access`` for absolute
+    paths.
+
+    Idempotent. A no-op when the MCP SDK is absent (it is an optional
+    dependency). If the SDK is present but its resolver can't be located, we log
+    a warning rather than failing silently — a silent no-op here would let the
+    blocking ``os.access`` quietly return after an SDK refactor.
+    """
+    try:
+        import mcp.client.stdio as _stdio_mod
+    except ImportError:
+        return  # MCP SDK not installed — nothing to patch.
+
+    original = getattr(_stdio_mod, "get_windows_executable_command", None)
+    if not callable(original):
+        logger.warning(
+            "MCP SDK layout changed: mcp.client.stdio.get_windows_executable_command "
+            "is missing; the Windows os.access fast-path was NOT applied. MCP stdio "
+            "tool calls may trip blocking-call detection (blockbuster) on Windows."
+        )
+        return
+
+    if getattr(original, "_evosci_absolute_fast_path", False):
+        return  # Already patched.
+
+    def _patched_get_windows_executable_command(command: str) -> str:
+        # Absolute path → already resolved, no filesystem probe needed.
+        if os.path.isabs(command):
+            return command
+        return original(command)
+
+    _patched_get_windows_executable_command._evosci_absolute_fast_path = True  # type: ignore[attr-defined]
+
+    # Patch the name in the stdio module (the call site resolves it from this
+    # module's globals) and, best-effort, the origin module in case anything
+    # imports it from there directly.
+    _stdio_mod.get_windows_executable_command = _patched_get_windows_executable_command
+    try:
+        import mcp.os.win32.utilities as _win32_utils
+
+        _win32_utils.get_windows_executable_command = (
+            _patched_get_windows_executable_command
+        )
+    except ImportError:
+        pass  # Origin module path differs in this SDK version; stdio patch suffices.
+
+    logger.debug("Applied MCP Windows command-resolver os.access fast-path patch")
+
+
+_patch_mcp_windows_command_resolver()
+
+
 # =============================================================================
 # Constants
 # =============================================================================

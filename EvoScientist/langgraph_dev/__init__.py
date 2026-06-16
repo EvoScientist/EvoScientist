@@ -15,3 +15,15 @@ package only owns the *deployment* concern. Adding a new async sub-agent
 takes three steps: flip the yaml flag, add a one-line binding in
 ``graphs.py``, and register it in ``langgraph.json``.
 """
+
+# ``langgraph dev`` imports this package (to resolve the graphs listed in
+# ``langgraph.json``) inside its own subprocess, before it creates the event
+# loop that serves runs. Forcing the Proactor loop policy here — at import,
+# ahead of loop creation — keeps MCP stdio subprocess spawning async on
+# Windows so it isn't flagged as a blocking call by the dev runtime's
+# ``blockbuster`` guard (see #283). This is the entrypoint where that error
+# actually surfaces; the CLI entrypoint sets the same policy for its own
+# process.
+from .._winloop import ensure_proactor_event_loop_policy
+
+ensure_proactor_event_loop_policy()
