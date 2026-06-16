@@ -1047,12 +1047,30 @@ def _delete_memory_worker_thread(client: Any, thread_id: str) -> None:
     Deleting the thread drops its checkpoints from the shared sessions.db
     so short-lived workers leave no per-turn residue behind.
     """
+    if not _memory_worker_thread_cleanup_enabled():
+        logger.debug(
+            "Preserving EvoMemory worker thread %s because cleanup is disabled",
+            thread_id,
+        )
+        return
     try:
         client.threads.delete(thread_id)
     except Exception:
         logger.debug(
             "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
         )
+
+
+def _memory_worker_thread_cleanup_enabled() -> bool:
+    try:
+        return bool(get_effective_config().memory_worker_thread_cleanup_enabled)
+    except Exception:
+        logger.debug(
+            "Failed to resolve EvoMemory worker thread cleanup config; "
+            "defaulting to enabled",
+            exc_info=True,
+        )
+        return True
 
 
 def _spawn_memory_worker_status_thread(

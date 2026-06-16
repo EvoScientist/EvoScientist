@@ -2489,6 +2489,9 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             with patch(
                 "EvoScientist.sessions.get_db_path",
                 return_value=_mock_path(db),
+            ), patch(
+                "EvoScientist.sessions._internal_worker_thread_cleanup_enabled",
+                return_value=True,
             ):
                 _run(_purge_internal_worker_threads())
                 # Idempotent: second run is a no-op, not an error.
@@ -2500,6 +2503,38 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             }
             con.close()
         assert remaining == {keep_main, keep_cli}
+
+    def test_purge_preserves_evomemory_rows_when_cleanup_disabled(self):
+        """Startup purge is skipped when worker thread cleanup is disabled."""
+        import sqlite3
+        from unittest.mock import patch
+
+        from EvoScientist.sessions import _purge_internal_worker_threads
+
+        keep_main = "11111111-1111-1111-1111-111111111111"
+        keep_worker = "33333333-3333-3333-3333-333333333333"
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            self._make_db_with_threads(db, [keep_main])
+            self._make_db_with_threads(
+                db, [keep_worker], graph_id="evomemory-turn-worker"
+            )
+            with patch(
+                "EvoScientist.sessions.get_db_path",
+                return_value=_mock_path(db),
+            ), patch(
+                "EvoScientist.sessions._internal_worker_thread_cleanup_enabled",
+                return_value=False,
+            ):
+                _run(_purge_internal_worker_threads())
+
+            con = sqlite3.connect(db)
+            remaining = {
+                r[0] for r in con.execute("SELECT DISTINCT thread_id FROM checkpoints")
+            }
+            con.close()
+        assert remaining == {keep_main, keep_worker}
 
     def test_restores_cli_rows_and_excludes_worker_residue(self):
         """CLI rows (agent_name, no graph_id) are restored with graph_id

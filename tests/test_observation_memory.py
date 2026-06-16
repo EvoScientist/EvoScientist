@@ -1371,6 +1371,9 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
         lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
     )
     monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        memory_lifecycle, "_memory_worker_thread_cleanup_enabled", lambda: True
+    )
 
     try:
         memory_lifecycle._watch_memory_worker_run_sync(
@@ -1379,6 +1382,46 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
             run_id="run-1",
         )
         assert deleted == ["worker-thread"]
+        assert worker_activity.memory_worker_status().is_running is False
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_sync_watcher_preserves_worker_thread_when_cleanup_disabled(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
+    )
+    deleted: list[str] = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        def delete(self, thread_id):
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        memory_lifecycle, "_memory_worker_thread_cleanup_enabled", lambda: False
+    )
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+        )
+        assert deleted == []
         assert worker_activity.memory_worker_status().is_running is False
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
@@ -1504,6 +1547,35 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
         assert deleted == []
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_synthesis_watcher_preserves_thread_when_cleanup_disabled(monkeypatch):
+    deleted: list[str] = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "error"}
+
+    class _Threads:
+        def delete(self, thread_id):
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        memory_synthesis, "_memory_worker_thread_cleanup_enabled", lambda: False
+    )
+
+    memory_synthesis._watch_synthesis_run_sync(
+        url="http://x",
+        thread_id="synthesis-thread",
+        run_id="run-1",
+    )
+
+    assert deleted == []
 
 
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):

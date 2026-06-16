@@ -453,6 +453,20 @@ def _resolve_keep_per_ns() -> int:
         return _DEFAULT_KEEP_PER_NS
 
 
+def _internal_worker_thread_cleanup_enabled() -> bool:
+    """Resolve whether langgraph-dev should purge internal worker residue."""
+    try:
+        from .config import get_effective_config
+
+        return bool(get_effective_config().memory_worker_thread_cleanup_enabled)
+    except Exception:  # pragma: no cover - defensive (config import errors)
+        _logger.debug(
+            "Failed to resolve EvoMemory worker cleanup config; defaulting to enabled",
+            exc_info=True,
+        )
+        return True
+
+
 @asynccontextmanager
 async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
     """Yield a pruning-enabled checkpointer connected to the sessions DB.
@@ -1456,6 +1470,11 @@ async def _purge_internal_worker_threads() -> None:
     existed are still in the DB. Idempotent, runs on every server start,
     and never blocks startup on failure.
     """
+    if not _internal_worker_thread_cleanup_enabled():
+        _logger.info(
+            "Skipping evomemory-worker residue purge because cleanup is disabled."
+        )
+        return
     try:
         db_path = str(get_db_path())
         async with aiosqlite.connect(db_path, timeout=30.0) as conn:

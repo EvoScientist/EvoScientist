@@ -69,6 +69,7 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
         "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
         "EVOSCIENTIST_MEMORY_SYNTHESIS_ENABLED",
+        "EVOSCIENTIST_MEMORY_WORKER_THREAD_CLEANUP_ENABLED",
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
@@ -93,6 +94,7 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
         "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
         "EVOSCIENTIST_MEMORY_SYNTHESIS_ENABLED",
+        "EVOSCIENTIST_MEMORY_WORKER_THREAD_CLEANUP_ENABLED",
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
@@ -128,6 +130,7 @@ class TestEvoScientistConfig:
         assert config.memory_observation_writer == MemoryObservationWriter.ALL
         assert config.memory_workers_enabled is True
         assert config.memory_synthesis_enabled is True
+        assert config.memory_worker_thread_cleanup_enabled is True
         assert config.ollama_base_url == ""
         assert config.channel_debug_tracing is False
         assert config.imessage_enabled is False
@@ -391,6 +394,9 @@ class TestGetSetValues:
                 memory_synthesis_enabled=True,
             )
         )
+        debug_controls = MemoryControls.from_config(
+            EvoScientistConfig(memory_worker_thread_cleanup_enabled=False)
+        )
 
         assert worker_controls.observation_tool_enabled(
             MemoryObservationTarget.TURN_WORKER
@@ -432,6 +438,7 @@ class TestGetSetValues:
                 memory_synthesis_enabled=False,
             )
         ).synthesis_worker_needed
+        assert not debug_controls.worker_thread_cleanup_enabled
 
     def test_list_config(self, temp_config_dir, clean_env):
         """Test listing all config values."""
@@ -531,6 +538,7 @@ class TestPriorityChain:
                 memory_observations_enabled=True,
                 memory_observation_writer=MemoryObservationWriter.ALL,
                 memory_workers_enabled=True,
+                memory_worker_thread_cleanup_enabled=True,
             )
         )
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_PROFILE_ENABLED", "false")
@@ -538,6 +546,9 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_OBSERVATION_WRITER", "worker")
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_WORKERS_ENABLED", "false")
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_SYNTHESIS_ENABLED", "false")
+        monkeypatch.setenv(
+            "EVOSCIENTIST_MEMORY_WORKER_THREAD_CLEANUP_ENABLED", "false"
+        )
 
         config = get_effective_config()
         assert config.memory_profile_enabled is False
@@ -545,6 +556,7 @@ class TestPriorityChain:
         assert config.memory_observation_writer == MemoryObservationWriter.WORKER
         assert config.memory_workers_enabled is False
         assert config.memory_synthesis_enabled is False
+        assert config.memory_worker_thread_cleanup_enabled is False
 
     def test_sandbox_execute_timeout_default(self, temp_config_dir, clean_env):
         """Sandbox execute timeout defaults to 300 seconds."""

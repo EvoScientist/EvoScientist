@@ -214,6 +214,9 @@ class EvoScientistConfig:
     # Dedicated background agent that synthesizes observations into knowledge.
     # Requires observation memory and memory workers.
     memory_synthesis_enabled: bool = True
+    # Delete finished internal EvoMemory worker/synthesis threads. Disable while
+    # debugging to inspect failed worker state/checkpoints in LangGraph.
+    memory_worker_thread_cleanup_enabled: bool = True
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -427,6 +430,7 @@ class MemoryControls:
     observation_writer: MemoryObservationWriter
     workers_enabled: bool
     synthesis_enabled: bool = True
+    worker_thread_cleanup_enabled: bool = True
 
     @classmethod
     def from_config(cls, config: EvoScientistConfig) -> MemoryControls:
@@ -436,6 +440,9 @@ class MemoryControls:
             observation_writer=config.memory_observation_writer,
             workers_enabled=config.memory_workers_enabled,
             synthesis_enabled=config.memory_synthesis_enabled,
+            worker_thread_cleanup_enabled=(
+                config.memory_worker_thread_cleanup_enabled
+            ),
         )
 
     @property
@@ -683,6 +690,9 @@ _ENV_MAPPINGS = {
     "memory_observation_writer": "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
     "memory_workers_enabled": "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
     "memory_synthesis_enabled": "EVOSCIENTIST_MEMORY_SYNTHESIS_ENABLED",
+    "memory_worker_thread_cleanup_enabled": (
+        "EVOSCIENTIST_MEMORY_WORKER_THREAD_CLEANUP_ENABLED"
+    ),
 }
 
 

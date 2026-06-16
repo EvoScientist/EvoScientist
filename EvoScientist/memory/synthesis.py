@@ -638,6 +638,12 @@ def _status_from_run_response(run: Run) -> str:
 
 
 def _delete_synthesis_thread(client: Any, thread_id: str) -> None:
+    if not _memory_worker_thread_cleanup_enabled():
+        logger.debug(
+            "Preserving EvoMemory synthesis thread %s because cleanup is disabled",
+            thread_id,
+        )
+        return
     try:
         client.threads.delete(thread_id)
     except Exception:
@@ -646,6 +652,20 @@ def _delete_synthesis_thread(client: Any, thread_id: str) -> None:
             thread_id,
             exc_info=True,
         )
+
+
+def _memory_worker_thread_cleanup_enabled() -> bool:
+    try:
+        from ..config import get_effective_config
+
+        return bool(get_effective_config().memory_worker_thread_cleanup_enabled)
+    except Exception:
+        logger.debug(
+            "Failed to resolve EvoMemory worker thread cleanup config; "
+            "defaulting to enabled",
+            exc_info=True,
+        )
+        return True
 
 
 def _watch_synthesis_run_sync(
