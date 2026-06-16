@@ -1285,8 +1285,8 @@ async def _alaunch_memory_worker(
             before_outputs=before_outputs,
         )
         try:
-            _spawn_memory_worker_status_task(
-                client,
+            _spawn_memory_worker_status_thread(
+                url=url,
                 thread_id=worker_thread_id,
                 run_id=run_id,
             )

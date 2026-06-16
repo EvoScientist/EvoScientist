@@ -1385,8 +1385,8 @@ def test_async_memory_worker_launch_offloads_blocking_work(
     spawned = []
     monkeypatch.setattr(
         memory_lifecycle,
-        "_spawn_memory_worker_status_task",
-        lambda *args, **kwargs: spawned.append((args, kwargs)),
+        "_spawn_memory_worker_status_thread",
+        lambda **kwargs: spawned.append(kwargs),
     )
 
     async def run():
@@ -1407,10 +1407,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
         assert worker_activity.memory_worker_status().is_running is True
         assert spawned == [
-            (
-                (fake_client,),
-                {"thread_id": "worker-thread", "run_id": "run-1"},
-            )
+            {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
         ]
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
