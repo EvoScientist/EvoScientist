@@ -1423,6 +1423,16 @@ def _api_workspace_dir() -> str:
     return str(Path.cwd().resolve())
 
 
+async def _api_workspace_dir_async() -> str:
+    """Async wrapper for :func:`_api_workspace_dir`.
+
+    Offloads the blocking ``os.getcwd()`` (via ``Path.cwd()/resolve()``) to a
+    thread so it never runs on the event loop — the dev runtime's blockbuster
+    guard flags it otherwise. Use this from any async call site.
+    """
+    return await asyncio.to_thread(_api_workspace_dir)
+
+
 class _ApiPruningCheckpointer(PruningCheckpointer):
     """``PruningCheckpointer`` that stamps CLI-compatible ownership metadata.
 
@@ -1452,7 +1462,7 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
             # would evaluate the argument eagerly on every write even when the
             # key is already present.
             if "workspace_dir" not in metadata:
-                metadata["workspace_dir"] = await asyncio.to_thread(_api_workspace_dir)
+                metadata["workspace_dir"] = await _api_workspace_dir_async()
             metadata["updated_at"] = datetime.now(UTC).isoformat()
         return await super().aput(config, checkpoint, metadata, new_versions)
 
@@ -1553,7 +1563,7 @@ async def _restore_webui_threads_to_global_store() -> None:
         # graph_id='evomemory-*' and is excluded by the first clause even
         # though it also stamps agent_name. Rows predating stamping have no
         # workspace_dir and are deliberately excluded.
-        current_workspace = _api_workspace_dir()
+        current_workspace = await _api_workspace_dir_async()
         sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
         titles: dict[uuid.UUID, str] = {}
         db_path = str(get_db_path())
