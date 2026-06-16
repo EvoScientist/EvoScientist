@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langgraph.graph import END
 from langgraph.types import Command, Interrupt
 
 from ..memory.worker_activity import clear_memory_worker_saved_counts
@@ -43,6 +44,83 @@ def _is_interrupt_error_message(message: object) -> bool:
         return False
     stripped = message.strip()
     return stripped.startswith("(Interrupt(value=")
+
+
+def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
+    """True if the graph is parked at a genuine human-in-the-loop interrupt.
+
+    A non-empty ``next`` alone can't distinguish "crashed mid-node" from
+    "legitimately waiting at ``interrupt()`` for a ``Command(resume=...)``".
+    The presence of pending interrupts — surfaced both on the snapshot and on
+    its tasks — is what tells them apart.
+    """
+    if getattr(snapshot, "interrupts", None):
+        return True
+    for task in getattr(snapshot, "tasks", None) or ():
+        if getattr(task, "interrupts", None):
+            return True
+    return False
+
+
+async def _clear_interrupted_graph_state(
+    agent: Any,
+    config: dict[str, Any],
+) -> None:
+    """Force the graph back to a clean (non-interrupted) state after an error.
+
+    When an exception occurs mid-run the LangGraph checkpoint can be left with a
+    non-empty ``next`` tuple — the graph is stuck waiting to resume at a specific
+    node. On the next invocation with a fresh user message LangGraph tries to
+    **resume** that interrupted step rather than starting a new turn: it ignores
+    the new human message and replays the broken step, which typically produces
+    no output and leaves the messages channel unchanged. From the user's side the
+    conversation looks like it lost all history because the agent stops responding.
+
+    The fix: ``aupdate_state(config, None, as_node=END)`` clears all pending tasks
+    and writes a checkpoint whose ``next`` is the empty tuple, without touching
+    any channel values (message history is preserved).
+
+    Critically, this only runs when the stuck state is *not* a legitimate
+    human-in-the-loop interrupt. The agent pauses via ``interrupt()`` /
+    ``Command(resume=...)`` for ask-user flows, which also leaves ``next``
+    non-empty; clearing those would silently discard a pending question the user
+    still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
+    two.
+
+    Best-effort: any failure is logged at DEBUG and swallowed so it never shadows
+    the original exception that triggered recovery.
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
+    try:
+        snapshot = await agent.aget_state(config)
+        # Only act when the graph is genuinely stuck (non-empty next tuple)...
+        if not snapshot or not getattr(snapshot, "next", None):
+            return
+        # ...and not parked at a real human-in-the-loop interrupt.
+        if _snapshot_has_pending_interrupt(snapshot):
+            _log.debug(
+                "Leaving interrupted graph state intact for thread %s: "
+                "pending human-in-the-loop interrupt (next=%s)",
+                config.get("configurable", {}).get("thread_id", "?"),
+                snapshot.next,
+            )
+            return
+
+        stuck_at = snapshot.next
+        await agent.aupdate_state(config, None, as_node=END)
+        _log.debug(
+            "Cleared interrupted graph state for thread %s (was stuck at: %s)",
+            config.get("configurable", {}).get("thread_id", "?"),
+            stuck_at,
+        )
+    except Exception as exc:  # pragma: no cover — best-effort recovery
+        _log.debug(
+            "Could not clear interrupted graph state: %s",
+            exc,
+            exc_info=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -654,6 +732,7 @@ async def stream_agent_events(
 
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
+    _run_raised: bool = False
     try:
         from langgraph.stream.transformers import UpdatesTransformer
 
@@ -765,6 +844,7 @@ async def stream_agent_events(
                 raise item
             yield item
     except Exception as e:
+        _run_raised = True
         yield emitter.error(str(e)).data
         raise
     finally:
@@ -780,5 +860,11 @@ async def stream_agent_events(
                 task.cancel()
         if producers:
             await asyncio.gather(*producers, return_exceptions=True)
+        # When the run ended with an exception the LangGraph checkpoint may be
+        # left interrupted (``next`` non-empty). Clear it — unless it's a real
+        # human-in-the-loop pause — so the next user message starts a fresh turn
+        # instead of replaying the broken step (which would look like lost history).
+        if _run_raised:
+            await _clear_interrupted_graph_state(agent, config)
 
     yield emitter.done(processor.full_response).data
