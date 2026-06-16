@@ -26,6 +26,7 @@ Usage::
 
 from __future__ import annotations
 
+from langchain.agents.middleware.types import ModelRequest
 from langchain_quickjs import CodeInterpreterMiddleware
 
 # Defaults match the historical hardcoded values. Callers (the agent
@@ -34,6 +35,19 @@ from langchain_quickjs import CodeInterpreterMiddleware
 _DEFAULT_TIMEOUT_SECONDS: float = 60.0
 _DEFAULT_MAX_RESULT_CHARS: int = 10000
 
+_MEMORY_FIRST_INTERPRETER_PROMPT = (
+    "\n\nWhen memory tools (search_observations, read_memory) are available, use "
+    "them before `code_interpreter` for workspace inspection or implementation work."
+)
+
+
+class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
+    """Code interpreter middleware with EvoScientist's memory preflight hint."""
+
+    def _prepare_for_call(self, request: ModelRequest) -> str:
+        return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
+
+
 # Read-only, batchable tools that benefit from being callable inside JS.
 # Multi-agent orchestration is the killer use case: ``Promise.all`` over
 # ``start_async_task`` fans out experiments / writing / data-analysis in
@@ -41,6 +55,9 @@ _DEFAULT_MAX_RESULT_CHARS: int = 10000
 # that don't exist at runtime (e.g. async tools when langgraph dev isn't
 # reachable) are silently skipped by ``filter_tools_for_ptc``.
 _DEFAULT_PTC_ALLOWLIST: list[str] = [
+    # Memory lookup (read-only, should precede workspace inspection)
+    "search_observations",
+    "read_memory",
     # Sub-agent dispatch — sync (deepagents) + async (langgraph dev)
     "task",
     "start_async_task",
@@ -76,7 +93,7 @@ def create_code_interpreter_middleware(
         Configured ``CodeInterpreterMiddleware`` ready to append to an agent's
         middleware stack.
     """
-    return CodeInterpreterMiddleware(
+    return EvoCodeInterpreterMiddleware(
         ptc=_DEFAULT_PTC_ALLOWLIST,
         timeout=timeout,
         max_result_chars=max_result_chars,

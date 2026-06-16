@@ -379,18 +379,21 @@ class TestGetSetValues:
             )
         )
 
-        assert not worker_controls.observation_tool_enabled(
+        assert worker_controls.observation_tool_enabled(
             MemoryObservationTarget.TURN_WORKER
         )
-        assert not worker_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
+        assert worker_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
         assert worker_controls.observation_tool_enabled(
             MemoryObservationTarget.SUBAGENT_WORKER
         )
         assert not worker_controls.observation_tool_enabled(
             MemoryObservationTarget.AGENT
         )
-        assert not all_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
+        assert all_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
         assert all_controls.observation_tool_enabled(MemoryObservationTarget.AGENT)
+        assert all_controls.observation_tool_enabled(
+            MemoryObservationTarget.TURN_WORKER
+        )
         assert all_controls.observation_tool_enabled(
             MemoryObservationTarget.SUBAGENT_WORKER
         )

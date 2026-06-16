@@ -5,6 +5,7 @@ import logging
 import queue
 import random
 import sys
+import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -84,6 +85,10 @@ from .status_bar import (
 )
 from .tui_interactive import run_textual_interactive
 from .tui_runtime import resolve_ui_backend, run_streaming
+
+_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 90.0
+_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
+_MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -1455,6 +1460,7 @@ def cmd_run(
             interactive=False,
             metadata=meta,
         )
+        _wait_for_memory_workers_before_exit()
     except Exception as e:
         error_msg = str(e)
         if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
@@ -1466,3 +1472,73 @@ def cmd_run(
         else:
             console.print(f"[red]Error: {e}[/red]")
             raise
+
+
+def _wait_for_memory_workers_before_exit(
+    *,
+    timeout_seconds: float = _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS,
+) -> None:
+    """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
+    try:
+        from ..memory.worker_activity import memory_worker_observed_outputs
+    except Exception:
+        return
+
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    saved_announced = False
+    announced_saved_counts: tuple[int, int] | None = None
+    output_seen_at: float | None = None
+    observed_status = None
+    while True:
+        now = time.monotonic()
+        try:
+            observed = memory_worker_observed_outputs()
+        except Exception:
+            return
+
+        if not observed.is_running:
+            saved_counts = (observed.observations_recorded, observed.profile_updates)
+            if saved_counts != (0, 0) and saved_counts != announced_saved_counts:
+                saved = []
+                if observed.observations_recorded:
+                    saved.append(f"{observed.observations_recorded} observation(s)")
+                if observed.profile_updates:
+                    saved.append(f"{observed.profile_updates} profile update(s)")
+                if saved:
+                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
+            return
+
+        if observed.observations_recorded or observed.profile_updates:
+            if output_seen_at is None:
+                output_seen_at = now
+            observed_status = observed
+            if (
+                now - output_seen_at >= _MEMORY_WORKER_OUTPUT_GRACE_SECONDS
+                and not saved_announced
+            ):
+                saved = []
+                if observed_status and observed_status.observations_recorded:
+                    saved.append(
+                        f"{observed_status.observations_recorded} observation(s)"
+                    )
+                if observed_status and observed_status.profile_updates:
+                    saved.append(f"{observed_status.profile_updates} profile update(s)")
+                if saved:
+                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
+                    saved_announced = True
+                    announced_saved_counts = (
+                        observed_status.observations_recorded,
+                        observed_status.profile_updates,
+                    )
+
+        if now >= deadline:
+            console.print(
+                "[dim]EvoMemory worker is still running; shutting down.[/dim]"
+            )
+            return
+
+        if not announced:
+            console.print("[dim]Waiting for EvoMemory worker...[/dim]")
+            announced = True
+        time.sleep(_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS)
