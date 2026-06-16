@@ -1380,11 +1380,18 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         project_id: str,
         role: MemoryLifecycleRole,
         source_agent: str,
+        launch_memory_worker: bool = True,
+        launch_synthesis: bool = False,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         self._project_id = project_id
         self._role = role
         self._source_agent = source_agent
+        self._launch_memory_worker = launch_memory_worker
+        self._launch_synthesis = launch_synthesis
+
+    def _synthesis_trigger(self) -> str:
+        return f"{self._role.value}_lifecycle"
 
     def _worker_args(
         self, state: AgentState[object], runtime: Runtime | None
@@ -1424,11 +1431,20 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
-        if worker_args := self._worker_args(state, runtime):
+        if self._launch_memory_worker and (worker_args := self._worker_args(state, runtime)):
             try:
                 _launch_memory_worker(**worker_args)
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
+        elif self._launch_synthesis:
+            try:
+                _launch_synthesis_worker(
+                    memory_dir=self._memory_dir,
+                    project_id=self._project_id,
+                    trigger=self._synthesis_trigger(),
+                )
+            except Exception:
+                logger.warning("Failed to launch EvoMemory synthesis worker", exc_info=True)
         return None
 
     async def aafter_agent(
@@ -1436,11 +1452,20 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
-        if worker_args := self._worker_args(state, runtime):
+        if self._launch_memory_worker and (worker_args := self._worker_args(state, runtime)):
             try:
                 await _alaunch_memory_worker(**worker_args)
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
+        elif self._launch_synthesis:
+            try:
+                await _alaunch_synthesis_worker(
+                    memory_dir=self._memory_dir,
+                    project_id=self._project_id,
+                    trigger=self._synthesis_trigger(),
+                )
+            except Exception:
+                logger.warning("Failed to launch EvoMemory synthesis worker", exc_info=True)
         return None
 
 
@@ -1451,6 +1476,8 @@ def create_memory_lifecycle_middleware(
     project_id: str,
     role: MemoryLifecycleRole,
     source_agent: str,
+    launch_memory_worker: bool = True,
+    launch_synthesis: bool = False,
 ) -> EvoMemoryLifecycleMiddleware:
     """Build the post-run EvoMemory lifecycle middleware."""
 
@@ -1462,4 +1489,6 @@ def create_memory_lifecycle_middleware(
         project_id=project_id,
         role=role,
         source_agent=source_agent,
+        launch_memory_worker=launch_memory_worker,
+        launch_synthesis=launch_synthesis,
     )

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from EvoScientist.config.settings import EvoScientistConfig
+from EvoScientist.config.settings import EvoScientistConfig, MemoryObservationWriter
 from EvoScientist.langgraph_dev import manager
 
 
@@ -216,6 +216,38 @@ class TestEnsureLanggraphDev:
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
         cfg.memory_workers_enabled = True
+        cfg.langgraph_dev_port = 6174
+        cfg.langgraph_dev_file_persistence = True
+        proc = MagicMock()
+        with (
+            patch.object(manager, "is_langgraph_dev_running", return_value=False),
+            patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
+            patch.object(
+                manager,
+                "RUNTIME",
+                dataclasses.replace(
+                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
+                    lock_file=tmp_path / "lg.lock",
+                ),
+            ),
+        ):
+            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
+
+        assert result is proc
+        start.assert_called_once()
+        assert manager.is_async_subagents_available() is True
+
+    def test_starts_for_agent_only_synthesis_without_memory_worker(
+        self, tmp_path, runtime_paths
+    ):
+        """Agent-written observations still need langgraph dev for synthesis."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_profile_enabled = False
+        cfg.memory_observations_enabled = True
+        cfg.memory_observation_writer = MemoryObservationWriter.AGENT
+        cfg.memory_workers_enabled = True
+        cfg.memory_synthesis_enabled = True
         cfg.langgraph_dev_port = 6174
         cfg.langgraph_dev_file_persistence = True
         proc = MagicMock()

@@ -910,14 +910,23 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
     tmp_path, monkeypatch, run_async
 ):
     calls = []
+    synthesis_calls = []
 
     async def fake_launch(**kwargs):
         calls.append(kwargs)
+
+    async def fake_synthesis(**kwargs):
+        synthesis_calls.append(kwargs)
 
     monkeypatch.setattr(
         memory_lifecycle,
         "_alaunch_memory_worker",
         fake_launch,
+    )
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_alaunch_synthesis_worker",
+        fake_synthesis,
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
@@ -925,6 +934,8 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
+        launch_memory_worker=True,
+        launch_synthesis=True,
     )
     runtime = _runtime("thread-1")
 
@@ -953,6 +964,56 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
     assert calls[0]["trajectory"] == [
         {"role": "human", "content": "hi"},
         {"role": "ai", "content": "done"},
+    ]
+    assert synthesis_calls == []
+
+
+def test_lifecycle_synthesis_only_launches_directly(
+    tmp_path, monkeypatch, run_async
+):
+    worker_calls = []
+    synthesis_calls = []
+
+    async def fake_worker(**kwargs):
+        worker_calls.append(kwargs)
+
+    async def fake_synthesis(**kwargs):
+        synthesis_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_alaunch_memory_worker",
+        fake_worker,
+    )
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_alaunch_synthesis_worker",
+        fake_synthesis,
+    )
+    middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_agent="EvoScientist",
+        launch_memory_worker=False,
+        launch_synthesis=True,
+    )
+
+    async def run():
+        state: AgentState[object] = {"messages": []}
+        await middleware.aafter_agent(state, _runtime("thread-1"))
+        await asyncio.sleep(0)
+
+    run_async(run())
+
+    assert worker_calls == []
+    assert synthesis_calls == [
+        {
+            "memory_dir": tmp_path / "memories",
+            "project_id": "P-project",
+            "trigger": "turn_lifecycle",
+        }
     ]
 
 

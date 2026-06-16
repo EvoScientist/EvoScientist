@@ -337,7 +337,11 @@ def _inject_subagent_middleware(
         ]
         if memory_controls.memory_enabled:
             middleware.append(memory_middleware)
-        if memory_controls.worker_needed(MemoryObservationTarget.SUBAGENT_WORKER):
+        worker_needed = memory_controls.worker_needed(
+            MemoryObservationTarget.SUBAGENT_WORKER
+        )
+        synthesis_needed = memory_controls.synthesis_worker_needed
+        if worker_needed or synthesis_needed:
             middleware.append(
                 create_memory_lifecycle_middleware(
                     memory_dir,
@@ -345,6 +349,8 @@ def _inject_subagent_middleware(
                     project_id=memory_middleware.project_id,
                     role=MemoryLifecycleRole.SUBAGENT,
                     source_agent=name,
+                    launch_memory_worker=worker_needed,
+                    launch_synthesis=synthesis_needed,
                 )
             )
         sa.setdefault("middleware", []).extend(middleware)
@@ -731,7 +737,9 @@ def _get_default_middleware(
     ]
     if memory_controls.memory_enabled:
         mw.append(memory_middleware)
-    if memory_controls.worker_needed(worker_target):
+    worker_needed = memory_controls.worker_needed(worker_target)
+    synthesis_needed = memory_controls.synthesis_worker_needed
+    if worker_needed or synthesis_needed:
         mw.append(
             create_memory_lifecycle_middleware(
                 memory_dir,
@@ -743,6 +751,8 @@ def _get_default_middleware(
                     else MemoryLifecycleRole.TURN
                 ),
                 source_agent=memory_source_agent,
+                launch_memory_worker=worker_needed,
+                launch_synthesis=synthesis_needed,
             )
         )
 

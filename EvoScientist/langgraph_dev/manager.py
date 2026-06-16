@@ -95,7 +95,9 @@ def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
     memory_controls = MemoryControls.from_config(config)
     return memory_controls.worker_needed(
         MemoryObservationTarget.TURN_WORKER
-    ) or memory_controls.worker_needed(MemoryObservationTarget.SUBAGENT_WORKER)
+    ) or memory_controls.worker_needed(
+        MemoryObservationTarget.SUBAGENT_WORKER
+    ) or memory_controls.synthesis_worker_needed
 
 
 # Reentrant lock guarding ``_PROCESS`` / ``_PROCESS_WORKSPACE`` /

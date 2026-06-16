@@ -185,6 +185,8 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
         "read_memory",
     ]
     assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
+    assert lifecycle_middleware._launch_memory_worker is True
+    assert lifecycle_middleware._launch_synthesis is True
 
 
 @patch(
@@ -227,6 +229,52 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
         m for m in middleware if type(m).__name__ == "EvoMemoryLifecycleMiddleware"
     )
     assert lifecycle_middleware._role.value == "turn"
+    assert lifecycle_middleware._launch_memory_worker is True
+    assert lifecycle_middleware._launch_synthesis is True
+
+
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_agent_observation_writer_schedules_synthesis_without_memory_worker(
+    mock_config, mock_chat, mock_tool_selector
+):
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.memory_profile_enabled = False
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.AGENT
+    cfg.memory_workers_enabled = True
+    cfg.memory_synthesis_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    middleware = _get_default_middleware()
+    memory_middleware = next(
+        m for m in middleware if type(m).__name__ == "EvoMemoryMiddleware"
+    )
+    lifecycle_middleware = next(
+        m for m in middleware if type(m).__name__ == "EvoMemoryLifecycleMiddleware"
+    )
+
+    assert [tool.name for tool in memory_middleware.tools] == [
+        "search_memory",
+        "read_memory",
+        "record_observation",
+    ]
+    assert lifecycle_middleware._role.value == "turn"
+    assert lifecycle_middleware._launch_memory_worker is False
+    assert lifecycle_middleware._launch_synthesis is True
 
 
 # ---------------------------------------------------------------------------
