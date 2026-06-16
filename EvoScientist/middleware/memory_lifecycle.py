@@ -62,7 +62,6 @@ _MEMORY_WORKER_TERMINAL_STATUSES = frozenset(
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset({"execute", "task", "write_todos"})
 _MEMORY_WORKER_POLL_INTERVAL_SECONDS = 1.0
 _MEMORY_WORKER_MAX_POLL_FAILURES = 3
-_memory_worker_tracker_tasks: set[asyncio.Task[None]] = set()
 
 
 class MemoryLifecycleRole(StrEnum):
@@ -1056,16 +1055,6 @@ def _delete_memory_worker_thread(client: Any, thread_id: str) -> None:
         )
 
 
-async def _adelete_memory_worker_thread(client: Any, thread_id: str) -> None:
-    """Async variant of :func:`_delete_memory_worker_thread`."""
-    try:
-        await client.threads.delete(thread_id)
-    except Exception:
-        logger.debug(
-            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
-        )
-
-
 def _spawn_memory_worker_status_thread(
     *,
     url: str,
@@ -1137,85 +1126,6 @@ def _watch_memory_worker_run_sync(
             if synthesis_after is not None:
                 try:
                     _launch_synthesis_worker(
-                        memory_dir=synthesis_after.memory_dir,
-                        project_id=synthesis_after.project_id,
-                        trigger=synthesis_after.trigger,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to launch EvoMemory synthesis worker",
-                        exc_info=True,
-                    )
-        else:
-            forget_memory_worker(thread_id, run_id)
-
-
-def _spawn_memory_worker_status_task(
-    client: Any,
-    *,
-    thread_id: str,
-    run_id: str,
-    synthesis_after: SynthesisLaunchArgs | None = None,
-) -> None:
-    """Poll an async-launched memory worker without blocking the agent."""
-    task = asyncio.create_task(
-        _watch_memory_worker_run_async(
-            client,
-            thread_id=thread_id,
-            run_id=run_id,
-            synthesis_after=synthesis_after,
-        )
-    )
-    _memory_worker_tracker_tasks.add(task)
-    task.add_done_callback(_memory_worker_tracker_tasks.discard)
-
-
-async def _watch_memory_worker_run_async(
-    client: Any,
-    *,
-    thread_id: str,
-    run_id: str,
-    synthesis_after: SynthesisLaunchArgs | None = None,
-) -> None:
-    failures = 0
-    worker_confirmed_finished = False
-    try:
-        while True:
-            try:
-                run = await client.runs.get(thread_id=thread_id, run_id=run_id)
-                failures = 0
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failures += 1
-                if failures >= _MEMORY_WORKER_MAX_POLL_FAILURES:
-                    logger.warning(
-                        "Stopping EvoMemory worker status watch for %s after "
-                        "%d failed polls",
-                        run_id,
-                        failures,
-                        exc_info=True,
-                    )
-                    return
-                await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
-                continue
-
-            if _status_from_run_response(run) in _MEMORY_WORKER_TERMINAL_STATUSES:
-                worker_confirmed_finished = True
-                return
-            await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
-    finally:
-        if worker_confirmed_finished:
-            # Accounting BEFORE the best-effort deletion: if this task is
-            # cancelled mid-finally, only the deletion await is lost
-            # (startup purge covers the residue). The to_thread side
-            # effect completes even if its await is cancelled, so the
-            # worker is never stuck "running".
-            await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
-            await _adelete_memory_worker_thread(client, thread_id)
-            if synthesis_after is not None:
-                try:
-                    await _alaunch_synthesis_worker(
                         memory_dir=synthesis_after.memory_dir,
                         project_id=synthesis_after.project_id,
                         trigger=synthesis_after.trigger,
@@ -1356,8 +1266,8 @@ async def _alaunch_memory_worker(
             role=role,
         )
         try:
-            _spawn_memory_worker_status_task(
-                client,
+            _spawn_memory_worker_status_thread(
+                url=url,
                 thread_id=worker_thread_id,
                 run_id=run_id,
                 synthesis_after=synthesis_after,

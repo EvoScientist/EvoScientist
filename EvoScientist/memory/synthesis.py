@@ -56,7 +56,6 @@ _SYNTHESIS_TERMINAL_STATUSES = frozenset(
 )
 _SYNTHESIS_POLL_INTERVAL_SECONDS = 1.0
 _SYNTHESIS_MAX_POLL_FAILURES = 3
-_synthesis_tracker_tasks: set[asyncio.Task[None]] = set()
 _active_synthesis_lock = threading.Lock()
 _active_synthesis_contexts: set[tuple[str, str]] = set()
 
@@ -587,17 +586,6 @@ def _delete_synthesis_thread(client: Any, thread_id: str) -> None:
         )
 
 
-async def _adelete_synthesis_thread(client: Any, thread_id: str) -> None:
-    try:
-        await client.threads.delete(thread_id)
-    except Exception:
-        logger.debug(
-            "Failed to delete EvoMemory synthesis thread %s",
-            thread_id,
-            exc_info=True,
-        )
-
-
 def _watch_synthesis_run_sync(
     *,
     url: str,
@@ -644,50 +632,6 @@ def _watch_synthesis_run_sync(
             )
 
 
-async def _watch_synthesis_run_async(
-    client: Any,
-    *,
-    thread_id: str,
-    run_id: str,
-    active_key: tuple[str, str] | None = None,
-) -> None:
-    failures = 0
-    confirmed_finished = False
-    try:
-        while True:
-            try:
-                run = await client.runs.get(thread_id=thread_id, run_id=run_id)
-                failures = 0
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failures += 1
-                if failures >= _SYNTHESIS_MAX_POLL_FAILURES:
-                    logger.warning(
-                        "Stopping EvoMemory synthesis status watch for %s after "
-                        "%d failed polls",
-                        run_id,
-                        failures,
-                        exc_info=True,
-                    )
-                    return
-                await asyncio.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
-                continue
-            if _status_from_run_response(run) in _SYNTHESIS_TERMINAL_STATUSES:
-                confirmed_finished = True
-                return
-            await asyncio.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
-    finally:
-        if confirmed_finished:
-            await _adelete_synthesis_thread(client, thread_id)
-        if active_key is not None:
-            project_id, context_digest = active_key
-            _release_synthesis_context(
-                project_id=project_id,
-                context_digest=context_digest,
-            )
-
-
 def _spawn_synthesis_status_thread(
     *,
     url: str,
@@ -707,25 +651,6 @@ def _spawn_synthesis_status_thread(
         daemon=True,
     )
     thread.start()
-
-
-def _spawn_synthesis_status_task(
-    client: Any,
-    *,
-    thread_id: str,
-    run_id: str,
-    active_key: tuple[str, str] | None = None,
-) -> None:
-    task = asyncio.create_task(
-        _watch_synthesis_run_async(
-            client,
-            thread_id=thread_id,
-            run_id=run_id,
-            active_key=active_key,
-        )
-    )
-    _synthesis_tracker_tasks.add(task)
-    task.add_done_callback(_synthesis_tracker_tasks.discard)
 
 
 def _launch_synthesis_worker(
@@ -860,8 +785,8 @@ async def _alaunch_synthesis_worker(
             config=payload["config"],
         )
         if run_id := _run_id_from_response(run):
-            _spawn_synthesis_status_task(
-                client,
+            _spawn_synthesis_status_thread(
+                url=url,
                 thread_id=thread_id,
                 run_id=run_id,
                 active_key=active_key,

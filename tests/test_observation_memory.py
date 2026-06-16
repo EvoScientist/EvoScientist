@@ -12,7 +12,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
-from blockbuster import BlockBuster
 from langchain.agents.middleware.types import AgentState
 from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -22,6 +21,7 @@ from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
 from EvoScientist.config import MemoryObservationWriter
+from EvoScientist.memory import synthesis as memory_synthesis
 from EvoScientist.memory import worker_activity
 from EvoScientist.memory.knowledge import (
     create_read_memory_tool,
@@ -1290,84 +1290,6 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
-    tmp_path, monkeypatch, run_async
-):
-    worker_activity.reset_memory_worker_status_for_tests()
-    memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
-    observation_path = memory_dir / "observations" / "global" / "O-1.md"
-    observation_path.parent.mkdir(parents=True)
-    observation_path.write_text("# Observation\n", encoding="utf-8")
-
-    class _Runs:
-        async def get(self, **_kwargs):
-            raise RuntimeError("poll failed")
-
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
-
-    try:
-        run_async(
-            memory_lifecycle._watch_memory_worker_run_async(
-                SimpleNamespace(runs=_Runs()),
-                thread_id="worker-thread",
-                run_id="run-1",
-            )
-        )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
-    tmp_path, run_async
-):
-    worker_activity.reset_memory_worker_status_for_tests()
-    memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
-    )
-    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
-    profile_path.parent.mkdir(parents=True)
-    profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
-
-    class _Runs:
-        async def get(self, **_kwargs):
-            return {"status": "success"}
-
-    async def run():
-        blocker = BlockBuster(scanned_modules=[memory_lifecycle, worker_activity])
-        blocker.activate()
-        try:
-            await memory_lifecycle._watch_memory_worker_run_async(
-                SimpleNamespace(runs=_Runs()),
-                thread_id="worker-thread",
-                run_id="run-1",
-            )
-        finally:
-            blocker.deactivate()
-
-    try:
-        run_async(run())
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 1
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
 def test_memory_worker_watcher_untracks_when_client_creation_fails(
     tmp_path, monkeypatch
 ):
@@ -1589,45 +1511,6 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_async_watcher_deletes_worker_thread_on_terminal_status(
-    tmp_path, monkeypatch, run_async
-):
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        async def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        async def delete(self, thread_id):
-            # Accounting must complete BEFORE the best-effort deletion —
-            # cancellation mid-deletion must never leave the worker
-            # stuck as "running" (CodeRabbit on #279).
-            assert worker_activity.memory_worker_status().is_running is False
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        run_async(
-            memory_lifecycle._watch_memory_worker_run_async(
-                SimpleNamespace(runs=_Runs(), threads=_Threads()),
-                thread_id="worker-thread",
-                run_id="run-1",
-            )
-        )
-        assert deleted == ["worker-thread"]
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
     monkeypatch.setattr(
@@ -1762,8 +1645,8 @@ def test_async_memory_worker_launch_offloads_blocking_work(
     spawned = []
     monkeypatch.setattr(
         memory_lifecycle,
-        "_spawn_memory_worker_status_task",
-        lambda *args, **kwargs: spawned.append((args, kwargs)),
+        "_spawn_memory_worker_status_thread",
+        lambda **kwargs: spawned.append(kwargs),
     )
     synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
         memory_dir=tmp_path / "memories",
@@ -1794,15 +1677,90 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
         assert worker_activity.memory_worker_status().is_running is True
         assert spawned == [
-            (
-                (fake_client,),
-                {
-                    "thread_id": "worker-thread",
-                    "run_id": "run-1",
-                    "synthesis_after": synthesis_after,
-                },
-            )
+            {
+                "url": "http://x",
+                "thread_id": "worker-thread",
+                "run_id": "run-1",
+                "synthesis_after": synthesis_after,
+            }
         ]
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_async_synthesis_worker_launch_uses_status_thread(
+    tmp_path, monkeypatch, run_async
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    context = {
+        "project_id": "P-project",
+        "observations": [{"id": "O-1", "summary": "Durable observation."}],
+        "existing_knowledge": [],
+        "covered_observation_ids": [],
+    }
+    context_digest = memory_synthesis._synthesis_context_digest(context)
+
+    monkeypatch.setattr(memory_synthesis, "_synthesis_worker_url", lambda: "http://x")
+    monkeypatch.setattr(
+        memory_synthesis,
+        "build_synthesis_context",
+        lambda **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        memory_synthesis,
+        "snapshot_memory_outputs",
+        lambda _memory_dir: worker_activity.MemoryOutputSnapshot(
+            profile_files={},
+            observation_files=frozenset(),
+        ),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+        lambda **_kwargs: True,
+    )
+
+    class _Threads:
+        async def create(self, **_kwargs):
+            return {"thread_id": "synthesis-thread"}
+
+    class _Runs:
+        async def create(self, **_kwargs):
+            return {"run_id": "synthesis-run", "status": "pending"}
+
+    fake_client = SimpleNamespace(threads=_Threads(), runs=_Runs())
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: fake_client)
+
+    spawned = []
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        assert worker_activity.memory_worker_status().synthesis_running is True
+        active_key = kwargs["active_key"]
+        memory_synthesis._release_synthesis_context(
+            project_id=active_key[0],
+            context_digest=active_key[1],
+        )
+
+    monkeypatch.setattr(memory_synthesis, "_spawn_synthesis_status_thread", fake_spawn)
+
+    try:
+        run_async(
+            memory_synthesis._alaunch_synthesis_worker(
+                memory_dir=memory_dir,
+                project_id="P-project",
+                trigger="turn_memory_worker",
+            )
+        )
+        assert spawned == [
+            {
+                "url": "http://x",
+                "thread_id": "synthesis-thread",
+                "run_id": "synthesis-run",
+                "active_key": ("P-project", context_digest),
+            }
+        ]
+        assert worker_activity.memory_worker_status().synthesis_running is False
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
 
