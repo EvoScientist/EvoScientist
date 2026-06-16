@@ -222,7 +222,9 @@ def _find_knowledge_file(
     requested_id = knowledge_id.strip()
     if not requested_id:
         return None
-    for path in _knowledge_files(memory_dir=memory_dir, project_id=project_id, scope=None):
+    for path in _knowledge_files(
+        memory_dir=memory_dir, project_id=project_id, scope=None
+    ):
         document = _read_memory_document(path)
         if document is None:
             continue
@@ -368,7 +370,9 @@ def _format_frontmatter(
         ]
     )
     if supersedes_knowledge_ids:
-        lines.append(f"supersedes_knowledge_ids: {_json_list(supersedes_knowledge_ids)}")
+        lines.append(
+            f"supersedes_knowledge_ids: {_json_list(supersedes_knowledge_ids)}"
+        )
     if archived_at:
         lines.append(f"archived_at: {_json_string(archived_at)}")
     if archived_reason:
@@ -690,10 +694,7 @@ def search_memory_files(
             scope=scope,
             memory_type=memory_type,
         )
-        if (
-            resolved_level == MemoryLevelFilter.ANY
-            and not include_covered_observations
-        ):
+        if resolved_level == MemoryLevelFilter.ANY and not include_covered_observations:
             covered = {
                 observation_id
                 for document in knowledge_documents

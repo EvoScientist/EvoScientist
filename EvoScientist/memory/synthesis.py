@@ -51,9 +51,7 @@ SYNTHESIS_RECURSION_LIMIT = 100
 SYNTHESIS_CONTEXT_OBSERVATION_LIMIT = 16
 SYNTHESIS_CONTEXT_KNOWLEDGE_LIMIT = 12
 SYNTHESIS_CONTEXT_MAX_CHARS = 32_000
-_SYNTHESIS_TERMINAL_STATUSES = frozenset(
-    {"success", "error", "timeout", "interrupted"}
-)
+_SYNTHESIS_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _SYNTHESIS_POLL_INTERVAL_SECONDS = 1.0
 _SYNTHESIS_MAX_POLL_FAILURES = 3
 _active_synthesis_lock = threading.Lock()
@@ -277,9 +275,7 @@ def build_synthesis_context(
                 "memory_type": document.memory_type.value,
                 "scope": document.scope.value,
                 "summary": document.summary,
-                "supporting_observation_ids": list(
-                    document.supporting_observation_ids
-                ),
+                "supporting_observation_ids": list(document.supporting_observation_ids),
                 "body": _truncate_text(document.body, 1200),
             }
             for document in selected_knowledge
@@ -288,7 +284,9 @@ def build_synthesis_context(
     }
     encoded = _pretty_json(context)
     if len(encoded) > max_chars:
-        context["observations"] = cast(list[object], context["observations"])[: max(1, observation_limit // 2)]
+        context["observations"] = cast(list[object], context["observations"])[
+            : max(1, observation_limit // 2)
+        ]
         encoded = _pretty_json(context)
     if len(encoded) > max_chars:
         context["existing_knowledge"] = []

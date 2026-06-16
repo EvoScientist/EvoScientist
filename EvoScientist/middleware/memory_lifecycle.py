@@ -1341,7 +1341,9 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
-        if self._launch_memory_worker and (worker_args := self._worker_args(state, runtime)):
+        if self._launch_memory_worker and (
+            worker_args := self._worker_args(state, runtime)
+        ):
             try:
                 _launch_memory_worker(**worker_args)
             except Exception:
@@ -1354,7 +1356,9 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
                     trigger=self._synthesis_trigger(),
                 )
             except Exception:
-                logger.warning("Failed to launch EvoMemory synthesis worker", exc_info=True)
+                logger.warning(
+                    "Failed to launch EvoMemory synthesis worker", exc_info=True
+                )
         return None
 
     async def aafter_agent(
@@ -1362,7 +1366,9 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
-        if self._launch_memory_worker and (worker_args := self._worker_args(state, runtime)):
+        if self._launch_memory_worker and (
+            worker_args := self._worker_args(state, runtime)
+        ):
             try:
                 await _alaunch_memory_worker(**worker_args)
             except Exception:
@@ -1375,7 +1381,9 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
                     trigger=self._synthesis_trigger(),
                 )
             except Exception:
-                logger.warning("Failed to launch EvoMemory synthesis worker", exc_info=True)
+                logger.warning(
+                    "Failed to launch EvoMemory synthesis worker", exc_info=True
+                )
         return None
 
 

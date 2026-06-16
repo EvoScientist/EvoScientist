@@ -602,12 +602,8 @@ def test_search_observation_files_supports_keyword_or_regex_queries(tmp_path):
         query="silent[- ]failure|status",
     )
 
-    assert [hit["memory_id"] for hit in variant_hits] == [
-        relevant["observation_id"]
-    ]
-    assert [hit["memory_id"] for hit in focused_hits] == [
-        relevant["observation_id"]
-    ]
+    assert [hit["memory_id"] for hit in variant_hits] == [relevant["observation_id"]]
+    assert [hit["memory_id"] for hit in focused_hits] == [relevant["observation_id"]]
 
 
 def test_search_observation_files_handles_regex_like_literals(tmp_path):
@@ -993,9 +989,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
     assert synthesis_calls == []
 
 
-def test_lifecycle_synthesis_only_launches_directly(
-    tmp_path, monkeypatch, run_async
-):
+def test_lifecycle_synthesis_only_launches_directly(tmp_path, monkeypatch, run_async):
     worker_calls = []
     synthesis_calls = []
 
