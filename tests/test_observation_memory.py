@@ -36,8 +36,10 @@ from EvoScientist.memory.observations import (
 )
 from EvoScientist.memory.synthesis import (
     SynthesisAction,
-    SynthesisDecision,
+    SynthesisArchiveDecision,
+    SynthesisCreateDecision,
     SynthesisReviewDecision,
+    SynthesisUpdateDecision,
     apply_synthesis_review_decision,
 )
 from EvoScientist.memory.types import (
@@ -476,7 +478,7 @@ def test_synthesis_decision_creates_updates_and_archives_knowledge(tmp_path):
     )
     review = SynthesisReviewDecision(
         decisions=[
-            SynthesisDecision(
+            SynthesisCreateDecision(
                 action=SynthesisAction.CREATE,
                 rationale="The observation is a reusable debugging rule.",
                 summary="Check GraphQL resolver aliases before frontend query fixes.",
@@ -504,13 +506,12 @@ def test_synthesis_decision_creates_updates_and_archives_knowledge(tmp_path):
         project_id="P-project",
         review=SynthesisReviewDecision(
             decisions=[
-                SynthesisDecision(
+                SynthesisUpdateDecision(
                     action=SynthesisAction.UPDATE,
                     target_knowledge_id=target_id,
                     rationale="Tighten the reusable wording.",
                     summary="Audit GraphQL resolver aliases before changing queries.",
                     memory_type=MemoryType.SEMANTIC,
-                    scope=MemoryScope.GLOBAL,
                     knowledge=(
                         "When GraphQL camelCase fields are blank, audit backend "
                         "resolver aliases before changing frontend query names."
@@ -526,7 +527,7 @@ def test_synthesis_decision_creates_updates_and_archives_knowledge(tmp_path):
         project_id="P-project",
         review=SynthesisReviewDecision(
             decisions=[
-                SynthesisDecision(
+                SynthesisArchiveDecision(
                     action=SynthesisAction.ARCHIVE,
                     target_knowledge_id=target_id,
                     rationale="The record is superseded.",
@@ -766,7 +767,7 @@ def test_record_observation_tool_schema_hides_runtime(tmp_path):
     )
 
     tool = _tool_by_name(middleware.tools, "record_observation")
-    assert "runtime" in tool.get_input_schema().model_fields
+    assert "runtime" in tool.get_input_schema().model_fields  # type: ignore[possibly-missing-attribute]
     schema = tool.tool_call_schema
     assert isinstance(schema, type)
     assert issubclass(schema, BaseModel)
@@ -1687,9 +1688,18 @@ def test_async_synthesis_worker_launch_uses_status_thread(
 ):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    context = {
+    context: memory_synthesis.SynthesisContext = {
         "project_id": "P-project",
-        "observations": [{"id": "O-1", "summary": "Durable observation."}],
+        "observations": [
+            {
+                "id": "O-1",
+                "path": "/memories/observations/project/P-project/O-1.md",
+                "memory_type": MemoryType.SEMANTIC.value,
+                "scope": MemoryScope.PROJECT.value,
+                "summary": "Durable observation.",
+                "body": "Durable observation.",
+            }
+        ],
         "existing_knowledge": [],
         "covered_observation_ids": [],
     }

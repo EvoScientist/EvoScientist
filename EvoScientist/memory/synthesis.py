@@ -12,13 +12,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    TypeAlias,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from .. import paths as _paths
 from .knowledge import (
@@ -42,7 +51,7 @@ from .worker_activity import (
 )
 
 if TYPE_CHECKING:
-    from langgraph_sdk.schema import Config, Input
+    from langgraph_sdk.schema import Config, Input, Run
 
 logger = logging.getLogger(__name__)
 
@@ -67,30 +76,41 @@ class SynthesisAction(StrEnum):
     ARCHIVE = "archive"
 
 
-class SynthesisDecision(BaseModel):
-    """One proposed maintenance action for synthesized knowledge."""
+class _SynthesisDecisionBase(BaseModel):
+    """Common fields for one synthesis maintenance decision."""
 
-    action: SynthesisAction = Field(
-        description="create, update, archive, or skip.",
-    )
     rationale: str = Field(
         min_length=1,
         description="Brief reason for this decision.",
     )
-    summary: str | None = Field(
-        default=None,
+
+
+class SynthesisSkipDecision(_SynthesisDecisionBase):
+    """Decision to leave the current context unchanged."""
+
+    action: Literal[SynthesisAction.SKIP] = Field(
+        description="Skip when the context does not justify durable knowledge changes.",
+    )
+
+
+class SynthesisCreateDecision(_SynthesisDecisionBase):
+    """Decision to create a new synthesized knowledge record."""
+
+    action: Literal[SynthesisAction.CREATE] = Field(
+        description="Create a new reusable knowledge record.",
+    )
+    summary: str = Field(
+        min_length=1,
         description="One-line summary for create/update decisions.",
     )
-    memory_type: MemoryType | None = Field(
-        default=None,
+    memory_type: MemoryType = Field(
         description="Knowledge memory type for create/update decisions.",
     )
-    scope: MemoryScope | None = Field(
-        default=None,
+    scope: MemoryScope = Field(
         description="Knowledge scope for create/update decisions.",
     )
-    knowledge: str | None = Field(
-        default=None,
+    knowledge: str = Field(
+        min_length=1,
         description="Compact synthesized knowledge body for create/update decisions.",
     )
     when_to_use: str | None = Field(
@@ -98,11 +118,50 @@ class SynthesisDecision(BaseModel):
         description="Short guidance describing when future agents should use it.",
     )
     supporting_observation_ids: list[str] = Field(
-        default_factory=list,
+        min_length=1,
         description="Minimal O-* evidence IDs supporting create/update decisions.",
     )
-    target_knowledge_id: str | None = Field(
+
+
+class SynthesisUpdateDecision(_SynthesisDecisionBase):
+    """Decision to update an existing synthesized knowledge record."""
+
+    action: Literal[SynthesisAction.UPDATE] = Field(
+        description="Update an existing reusable knowledge record.",
+    )
+    target_knowledge_id: str = Field(
+        min_length=1,
+        description="Existing K-* id for update/archive decisions.",
+    )
+    summary: str = Field(
+        min_length=1,
+        description="One-line summary for create/update decisions.",
+    )
+    memory_type: MemoryType = Field(
+        description="Knowledge memory type for create/update decisions.",
+    )
+    knowledge: str = Field(
+        min_length=1,
+        description="Compact synthesized knowledge body for create/update decisions.",
+    )
+    when_to_use: str | None = Field(
         default=None,
+        description="Short guidance describing when future agents should use it.",
+    )
+    supporting_observation_ids: list[str] = Field(
+        min_length=1,
+        description="Minimal O-* evidence IDs supporting create/update decisions.",
+    )
+
+
+class SynthesisArchiveDecision(_SynthesisDecisionBase):
+    """Decision to archive an existing synthesized knowledge record."""
+
+    action: Literal[SynthesisAction.ARCHIVE] = Field(
+        description="Archive an obsolete, contradicted, or superseded knowledge record.",
+    )
+    target_knowledge_id: str = Field(
+        min_length=1,
         description="Existing K-* id for update/archive decisions.",
     )
     archive_reason: str | None = Field(
@@ -110,29 +169,14 @@ class SynthesisDecision(BaseModel):
         description="Reason to store when archiving an existing knowledge record.",
     )
 
-    @model_validator(mode="after")
-    def _validate_action_fields(self) -> SynthesisDecision:
-        if self.action in {SynthesisAction.CREATE, SynthesisAction.UPDATE}:
-            missing = []
-            if not self.summary:
-                missing.append("summary")
-            if self.memory_type is None:
-                missing.append("memory_type")
-            if self.scope is None:
-                missing.append("scope")
-            if not self.knowledge:
-                missing.append("knowledge")
-            if not self.supporting_observation_ids:
-                missing.append("supporting_observation_ids")
-            if self.action == SynthesisAction.UPDATE and not self.target_knowledge_id:
-                missing.append("target_knowledge_id")
-            if missing:
-                raise ValueError(
-                    f"{self.action.value} decision missing: {', '.join(missing)}"
-                )
-        if self.action == SynthesisAction.ARCHIVE and not self.target_knowledge_id:
-            raise ValueError("archive decision missing target_knowledge_id")
-        return self
+
+SynthesisDecision: TypeAlias = Annotated[
+    SynthesisSkipDecision
+    | SynthesisCreateDecision
+    | SynthesisUpdateDecision
+    | SynthesisArchiveDecision,
+    Field(discriminator="action"),
+]
 
 
 class SynthesisReviewDecision(BaseModel):
@@ -158,6 +202,38 @@ class SynthesisRunPayload(TypedDict):
     input: Input
     metadata: dict[str, str]
     config: Config
+
+
+class SynthesisObservationContext(TypedDict):
+    """Observation payload included in a bounded synthesis prompt."""
+
+    id: str
+    path: str
+    memory_type: str
+    scope: str
+    summary: str
+    body: str
+
+
+class SynthesisKnowledgeContext(TypedDict):
+    """Knowledge payload included in a bounded synthesis prompt."""
+
+    id: str
+    path: str
+    memory_type: str
+    scope: str
+    summary: str
+    supporting_observation_ids: list[str]
+    body: str
+
+
+class SynthesisContext(TypedDict):
+    """Bounded observation/knowledge context submitted to synthesis."""
+
+    project_id: str
+    observations: list[SynthesisObservationContext]
+    existing_knowledge: list[SynthesisKnowledgeContext]
+    covered_observation_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -230,7 +306,7 @@ def build_synthesis_context(
     observation_limit: int = SYNTHESIS_CONTEXT_OBSERVATION_LIMIT,
     knowledge_limit: int = SYNTHESIS_CONTEXT_KNOWLEDGE_LIMIT,
     max_chars: int = SYNTHESIS_CONTEXT_MAX_CHARS,
-) -> dict[str, object] | None:
+) -> SynthesisContext | None:
     """Build bounded observation/knowledge context for the synthesis agent."""
     knowledge_documents = knowledge_search_documents(
         memory_dir=memory_dir,
@@ -255,38 +331,38 @@ def build_synthesis_context(
 
     selected_observations = observation_documents[:observation_limit]
     selected_knowledge = knowledge_documents[:knowledge_limit]
-    context: dict[str, object] = {
+    observations: list[SynthesisObservationContext] = [
+        {
+            "id": document.observation_id,
+            "path": document.path,
+            "memory_type": document.memory_type.value,
+            "scope": document.scope.value,
+            "summary": document.summary,
+            "body": _truncate_text(document.body, 1800),
+        }
+        for document in selected_observations
+    ]
+    existing_knowledge: list[SynthesisKnowledgeContext] = [
+        {
+            "id": document.knowledge_id,
+            "path": document.path,
+            "memory_type": document.memory_type.value,
+            "scope": document.scope.value,
+            "summary": document.summary,
+            "supporting_observation_ids": list(document.supporting_observation_ids),
+            "body": _truncate_text(document.body, 1200),
+        }
+        for document in selected_knowledge
+    ]
+    context: SynthesisContext = {
         "project_id": project_id,
-        "observations": [
-            {
-                "id": document.observation_id,
-                "path": document.path,
-                "memory_type": document.memory_type.value,
-                "scope": document.scope.value,
-                "summary": document.summary,
-                "body": _truncate_text(document.body, 1800),
-            }
-            for document in selected_observations
-        ],
-        "existing_knowledge": [
-            {
-                "id": document.knowledge_id,
-                "path": document.path,
-                "memory_type": document.memory_type.value,
-                "scope": document.scope.value,
-                "summary": document.summary,
-                "supporting_observation_ids": list(document.supporting_observation_ids),
-                "body": _truncate_text(document.body, 1200),
-            }
-            for document in selected_knowledge
-        ],
+        "observations": observations,
+        "existing_knowledge": existing_knowledge,
         "covered_observation_ids": sorted(covered_observation_ids),
     }
     encoded = _pretty_json(context)
     if len(encoded) > max_chars:
-        context["observations"] = cast(list[object], context["observations"])[
-            : max(1, observation_limit // 2)
-        ]
+        context["observations"] = observations[: max(1, observation_limit // 2)]
         encoded = _pretty_json(context)
     if len(encoded) > max_chars:
         context["existing_knowledge"] = []
@@ -326,7 +402,7 @@ def _synthesis_system_prompt() -> str:
     )
 
 
-def _synthesis_user_prompt(context: dict[str, object], *, trigger: str) -> str:
+def _synthesis_user_prompt(context: SynthesisContext, *, trigger: str) -> str:
     return "\n\n".join(
         [
             "Review this bounded EvoMemory context and decide whether synthesis "
@@ -349,28 +425,28 @@ def apply_synthesis_review_decision(
     results: list[KnowledgeRecordResult] = []
     for decision in review.decisions:
         try:
-            match decision.action:
-                case SynthesisAction.SKIP:
+            match decision:
+                case SynthesisSkipDecision():
                     continue
-                case SynthesisAction.CREATE:
+                case SynthesisCreateDecision():
                     results.append(
                         record_knowledge_file(
                             memory_dir=memory_dir,
                             project_id=project_id,
-                            memory_type=cast(MemoryType, decision.memory_type),
-                            summary=cast(str, decision.summary),
-                            knowledge=cast(str, decision.knowledge),
+                            memory_type=decision.memory_type,
+                            summary=decision.summary,
+                            knowledge=decision.knowledge,
                             supporting_observation_ids=decision.supporting_observation_ids,
-                            scope=cast(MemoryScope, decision.scope),
+                            scope=decision.scope,
                             when_to_use=decision.when_to_use,
                             source_agent=source_agent,
                         )
                     )
-                case SynthesisAction.UPDATE:
+                case SynthesisUpdateDecision():
                     existing = read_knowledge_file(
                         memory_dir=memory_dir,
                         project_id=project_id,
-                        knowledge_id=cast(str, decision.target_knowledge_id),
+                        knowledge_id=decision.target_knowledge_id,
                     )
                     if existing is None:
                         continue
@@ -378,21 +454,21 @@ def apply_synthesis_review_decision(
                         record_knowledge_file(
                             memory_dir=memory_dir,
                             project_id=project_id,
-                            knowledge_id=cast(str, decision.target_knowledge_id),
-                            memory_type=cast(MemoryType, decision.memory_type),
-                            summary=cast(str, decision.summary),
-                            knowledge=cast(str, decision.knowledge),
+                            knowledge_id=decision.target_knowledge_id,
+                            memory_type=decision.memory_type,
+                            summary=decision.summary,
+                            knowledge=decision.knowledge,
                             supporting_observation_ids=decision.supporting_observation_ids,
                             scope=existing["scope"],
                             when_to_use=decision.when_to_use,
                             source_agent=source_agent,
                         )
                     )
-                case SynthesisAction.ARCHIVE:
+                case SynthesisArchiveDecision():
                     result = archive_knowledge_file(
                         memory_dir=memory_dir,
                         project_id=project_id,
-                        knowledge_id=cast(str, decision.target_knowledge_id),
+                        knowledge_id=decision.target_knowledge_id,
                         reason=decision.archive_reason or decision.rationale,
                         source_agent=source_agent,
                     )
@@ -484,11 +560,11 @@ def _runs_create_kwargs(kwargs: SynthesisRunPayload) -> SynthesisRunPayload:
     return cast("SynthesisRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
 
 
-def _synthesis_thread_id(*, project_id: str, context: dict[str, object]) -> str:
+def _synthesis_thread_id(*, project_id: str, context: SynthesisContext) -> str:
     return f"evomemory-synth:{_short_hash(project_id + _stable_json(context))}"
 
 
-def _synthesis_context_digest(context: dict[str, object]) -> str:
+def _synthesis_context_digest(context: SynthesisContext) -> str:
     return _short_hash(_stable_json(context))
 
 
@@ -510,7 +586,7 @@ def _release_synthesis_context(*, project_id: str, context_digest: str) -> None:
 def _synthesis_run_kwargs(
     *,
     project_id: str,
-    context: dict[str, object],
+    context: SynthesisContext,
     trigger: str,
 ) -> SynthesisRunPayload:
     context_digest = _synthesis_context_digest(context)
@@ -552,25 +628,13 @@ def _synthesis_worker_url() -> str:
     return f"http://localhost:{port}"
 
 
-def _run_id_from_response(run: object) -> str | None:
-    if not isinstance(run, Mapping):
-        return None
-    value = cast(Mapping[str, object], run).get("run_id") or cast(
-        Mapping[str, object], run
-    ).get("id")
-    if value is None:
-        return None
-    run_id = str(value).strip()
+def _run_id_from_response(run: Run) -> str | None:
+    run_id = run["run_id"].strip()
     return run_id or None
 
 
-def _status_from_run_response(run: object) -> str:
-    value: object | None = None
-    if isinstance(run, Mapping):
-        value = cast(Mapping[str, object], run).get("status")
-    else:
-        value = getattr(run, "status", None)
-    return str(value or "").strip().lower()
+def _status_from_run_response(run: Run) -> str:
+    return str(run["status"]).strip().lower()
 
 
 def _delete_synthesis_thread(client: Any, thread_id: str) -> None:
