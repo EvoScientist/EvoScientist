@@ -20,6 +20,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
 
@@ -36,6 +37,9 @@ from .prompts import get_system_prompt
 
 # Suppress noisy warnings from deepagents skill loader (non-string frontmatter fields, etc.)
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 # =============================================================================
 # Constants
@@ -853,7 +857,7 @@ def create_cli_agent(
     chat_model=None,
     *,
     on_mcp_progress=None,
-):
+) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
     A fresh backend is constructed on every call using the current

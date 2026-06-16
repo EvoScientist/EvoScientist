@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
@@ -14,7 +14,9 @@ from ..llm.context_window import (
     resolve_context_window,
 )
 from ..memory.worker_activity import MemoryWorkerStatusSnapshot, memory_worker_status
-from ..sessions import get_thread_messages
+
+if TYPE_CHECKING:
+    from ..gateway import ThreadStore
 
 _FALLBACK_CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW_FALLBACK
 STATUS_BAR_BG = "#171a20"
@@ -409,11 +411,12 @@ async def build_session_status_snapshot(
     model_name: str | None = None,
     model_obj: Any | None = None,
     pending_user_text: str | None = None,
+    thread_store: ThreadStore,
 ) -> SessionStatusSnapshot:
     """Count current thread context and return a display snapshot."""
     resolved_name = _resolve_model_name(model_name, model_obj)
     window = _resolve_context_window(model_obj)
-    messages = list(await get_thread_messages(thread_id))
+    messages = list(await thread_store.get_thread_messages(thread_id))
 
     pending = (pending_user_text or "").strip()
     if pending:

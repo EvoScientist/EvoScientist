@@ -5,15 +5,15 @@ from typing import ClassVar
 
 from rich.table import Table
 
-from ...gateway import LocalThreadStore, ThreadStore
+from ...gateway import ThreadStore
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
 
 def _thread_store(ctx: CommandContext) -> ThreadStore:
-    if ctx.thread_store is not None:
-        return ctx.thread_store
-    return LocalThreadStore()
+    if ctx.thread_store is None:
+        raise RuntimeError("Session commands require a thread_store")
+    return ctx.thread_store
 
 
 class CompactCommand(Command):

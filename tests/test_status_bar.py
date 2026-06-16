@@ -21,6 +21,7 @@ from EvoScientist.cli.status_bar import (
     status_style_name,
     trim_status_text,
 )
+from tests.fakes import FakeThreadStore
 
 
 def _render_fragments(fragments: list[tuple[str, str]]) -> str:
@@ -208,10 +209,6 @@ def test_build_status_text_uses_rich_styles():
 
 
 def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
-    async def _fake_messages(thread_id: str):
-        assert thread_id == "thread-1"
-        return [HumanMessage(content="existing")]
-
     class _FakeModel:
         model_name: ClassVar[str] = "provider/demo-model"
         profile: ClassVar[dict[str, object]] = {}
@@ -221,10 +218,6 @@ def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
         assert messages[-1].content == "pending"
         return 42_000
 
-    monkeypatch.setattr(
-        "EvoScientist.cli.status_bar.get_thread_messages",
-        _fake_messages,
-    )
     monkeypatch.setattr(
         "EvoScientist.cli.status_bar._get_default_chat_model",
         lambda: _FakeModel(),
@@ -238,6 +231,7 @@ def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
         build_session_status_snapshot(
             "thread-1",
             pending_user_text="pending",
+            thread_store=FakeThreadStore(messages=[HumanMessage(content="existing")]),
         )
     )
 

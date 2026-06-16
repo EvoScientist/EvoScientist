@@ -10,9 +10,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.cli.channel import (
     ChannelMessage,
-    dispatch_channel_slash_command,
 )
+from EvoScientist.cli.channel import (
+    dispatch_channel_slash_command as _dispatch_channel_slash_command,
+)
+from EvoScientist.gateway import ThreadStore
 from tests.conftest import run_async as _run
+from tests.fakes import FakeThreadStore
+
+
+def _thread_store() -> ThreadStore:
+    return FakeThreadStore()
+
+
+def dispatch_channel_slash_command(*args, **kwargs):
+    kwargs.setdefault("thread_store", _thread_store())
+    return _dispatch_channel_slash_command(*args, **kwargs)
 
 
 def _make_msg(
@@ -70,6 +83,33 @@ def test_unresolved_slash_returns_false():
     assert handled is False
 
 
+def test_known_slash_requires_thread_store():
+    msg = _make_msg()
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["core"]),
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = _run(
+            _dispatch_channel_slash_command(
+                msg,
+                agent="fake-agent",
+                thread_id="t1",
+                workspace_dir="/tmp",
+                checkpointer=None,
+                append_system=MagicMock(),
+            )
+        )
+
+    assert handled is True
+    mock_set_resp.assert_called_once()
+    assert "requires a thread_store" in mock_set_resp.call_args.args[1]
+
+
 def test_successful_slash_execution_sets_response_and_breadcrumb():
     """Known slash command: cmd_manager.execute ran, helper returns True,
     sends a confirmation to the channel user, and appends a local log line."""
@@ -105,6 +145,45 @@ def test_successful_slash_execution_sets_response_and_breadcrumb():
     assert "Command executed" in mock_set_resp.call_args[0][1]
     breadcrumbs = [call.args[0] for call in append.call_args_list]
     assert any("Executed command from" in t for t in breadcrumbs)
+
+
+def test_slash_dispatch_passes_thread_store_to_command_context():
+    msg = _make_msg()
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+    append = MagicMock()
+    thread_store = _thread_store()
+    captured = {}
+
+    async def _execute(_content, ctx):
+        captured["thread_store"] = ctx.thread_store
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["core"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            new=AsyncMock(side_effect=_execute),
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response"),
+    ):
+        handled = _run(
+            dispatch_channel_slash_command(
+                msg,
+                agent="fake-agent",
+                thread_id="t1",
+                workspace_dir="/tmp",
+                checkpointer=None,
+                append_system=append,
+                thread_store=thread_store,
+            )
+        )
+
+    assert handled is True
+    assert captured["thread_store"] is thread_store
 
 
 def test_needs_agent_awaits_loader_and_passes_result():

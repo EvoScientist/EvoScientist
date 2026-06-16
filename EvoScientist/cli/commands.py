@@ -15,6 +15,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from ..commands.base import Command, CommandContext
+from ..gateway import LocalGraphGateway, LocalThreadStore, ThreadStore
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
@@ -812,6 +813,8 @@ _serve_logger = logging.getLogger(__name__)
 def _make_serve_start_new_session_cb(
     agent_holder: dict[str, Any],
     channel_runtime: Any | None = None,
+    *,
+    thread_store: ThreadStore,
 ):
     """Build the ``start_new_session_cb`` used by serve mode.
 
@@ -826,9 +829,7 @@ def _make_serve_start_new_session_cb(
     """
 
     def _cb() -> None:
-        from ..sessions import generate_thread_id
-
-        new_tid = generate_thread_id()
+        new_tid = thread_store.generate_thread_id()
         forget_channel_origin(agent_holder.get("thread_id"))
         agent_holder["thread_id"] = new_tid
         if channel_runtime is not None:
@@ -836,6 +837,13 @@ def _make_serve_start_new_session_cb(
         console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
 
     return _cb
+
+
+def _require_serve_thread_store(agent_holder: dict[str, Any]) -> ThreadStore:
+    thread_store = agent_holder.get("thread_store")
+    if thread_store is None:
+        raise RuntimeError("Serve runtime missing thread_store")
+    return thread_store
 
 
 def _serve_resume_config(
@@ -1042,6 +1050,8 @@ def _serve_process_message(
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
+    thread_store = _require_serve_thread_store(agent_holder)
+
     if not _claim_or_complete_channel_request(msg):
         return
 
@@ -1144,7 +1154,11 @@ def _serve_process_message(
                     checkpointer=None,
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
-                    or _make_serve_start_new_session_cb(agent_holder, channel_runtime),
+                    or _make_serve_start_new_session_cb(
+                        agent_holder,
+                        channel_runtime,
+                        thread_store=thread_store,
+                    ),
                     handle_session_resume_cb=handle_session_resume_cb
                     or _make_serve_handle_session_resume_cb(
                         agent_holder,
@@ -1157,6 +1171,7 @@ def _serve_process_message(
                         config=agent_holder.get("config"),
                     ),
                     channel_runtime=channel_runtime,
+                    thread_store=thread_store,
                 )
             )
         except Exception as exc:
@@ -1198,6 +1213,10 @@ def _serve_process_message(
                 hitl_prompt_fn=_hitl_prompt,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
+                gateway=LocalGraphGateway(
+                    agent_holder["agent"],
+                    thread_store=thread_store,
+                ),
             )
         except Exception as e:
             response = f"Error: {e}"
@@ -1244,6 +1263,7 @@ def _serve_drain_notifications(
         runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
         meta = build_metadata(runtime_workspace, model)
         tid = agent_holder["thread_id"]
+        thread_store = _require_serve_thread_store(agent_holder)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1253,6 +1273,10 @@ def _serve_drain_notifications(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                gateway=LocalGraphGateway(
+                    agent_holder["agent"],
+                    thread_store=thread_store,
+                ),
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
@@ -1406,9 +1430,9 @@ def serve(
         )
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
-    from ..sessions import generate_thread_id
 
-    tid = generate_thread_id()
+    thread_store = LocalThreadStore()
+    tid = thread_store.generate_thread_id()
 
     # Mutable holder shared with _serve_process_message so ``/model``
     # invoked over a channel can hot-swap the agent for subsequent
@@ -1419,6 +1443,7 @@ def serve(
         "thread_id": tid,
         "workspace_dir": ws,
         "config": config,
+        "thread_store": thread_store,
     }
 
     from ..commands.base import ChannelRuntime
@@ -1435,7 +1460,7 @@ def serve(
         agent_holder, channel_runtime, config=config
     )
     _serve_start_new_session_cb = _make_serve_start_new_session_cb(
-        agent_holder, channel_runtime
+        agent_holder, channel_runtime, thread_store=thread_store
     )
 
     _start_channels_bus_mode(
@@ -2173,20 +2198,20 @@ def _main_callback(
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
-        from ..sessions import (
-            generate_thread_id,
-            get_checkpointer,
-            resolve_thread_id_prefix,
-        )
+        from ..sessions import get_checkpointer
         from .interactive import cmd_run
         from .resume_hint import print_resume_hint
+
+        thread_store = LocalThreadStore()
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
                 # Resolve resume target first so a bad --resume/--thread-id
                 # exits before the slow _load_agent() provider setup.
                 if thread_id:
-                    resolved, matches = await resolve_thread_id_prefix(thread_id)
+                    resolved, matches = await thread_store.resolve_thread_id_prefix(
+                        thread_id
+                    )
                     if resolved:
                         tid = resolved
                     elif matches:
@@ -2202,7 +2227,7 @@ def _main_callback(
                         )
                         raise typer.Exit(1)
                 else:
-                    tid = generate_thread_id()
+                    tid = thread_store.generate_thread_id()
                 console.print("[dim]Loading agent...[/dim]")
                 agent = _load_agent(
                     workspace_dir=workspace_dir,
@@ -2218,6 +2243,7 @@ def _main_callback(
                         workspace_dir=workspace_dir,
                         model=config.model,
                         ui_backend=config.ui_backend,
+                        thread_store=thread_store,
                     )
                 finally:
                     try:

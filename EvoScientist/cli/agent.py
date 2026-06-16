@@ -3,8 +3,12 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..paths import new_run_dir
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 
 def _shorten_path(path: str) -> str:
@@ -65,7 +69,7 @@ def _load_agent(
     chat_model=None,
     *,
     on_mcp_progress=None,
-):
+) -> "CompiledStateGraph":
     """Load the CLI agent with optional persistent checkpointer.
 
     Args:

@@ -9,6 +9,8 @@ enqueues a ``ChannelMessage`` on a thread-safe ``queue.Queue`` and waits
 for the main thread to set a response via ``_set_channel_response()``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import queue
@@ -17,13 +19,16 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.panel import Panel
 from rich.text import Text
 
 from ..commands.base import ChannelRuntime
 from ..stream.console import console
+
+if TYPE_CHECKING:
+    from ..gateway import ThreadStore
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -258,6 +263,7 @@ async def dispatch_channel_slash_command(
     await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     channel_runtime: ChannelRuntime | None = None,
+    thread_store: ThreadStore | None = None,
 ) -> bool:
     """Dispatch a slash command from a channel message.
 
@@ -284,6 +290,9 @@ async def dispatch_channel_slash_command(
         Optional lifecycle callbacks forwarded to ``ChannelCommandUI``.
         Headless serve passes ``None`` — ``/new`` and ``/resume`` degrade
         gracefully via the default ``ChannelCommandUI`` messages.
+    thread_store:
+        Optional thread store forwarded to slash commands and channel
+        resume-history rendering. Defaults are resolved by the command layer.
     await_agent_ready:
         Optional async resolver that blocks until the background agent
         load finishes.  Called only when ``cmd.needs_agent(args)`` is
@@ -320,6 +329,7 @@ async def dispatch_channel_slash_command(
             await_agent_ready=await_agent_ready,
             on_cmd_completed=on_cmd_completed,
             channel_runtime=channel_runtime,
+            thread_store=thread_store,
         )
     except Exception as exc:
         # Last-ditch safety: any uncaught exception from inside the
@@ -355,6 +365,7 @@ async def _dispatch_channel_slash_impl(
     await_agent_ready: Callable[[], Awaitable[Any]] | None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None,
     channel_runtime: ChannelRuntime | None,
+    thread_store: ThreadStore | None,
 ) -> bool:
     """Inner body of ``dispatch_channel_slash_command``.
 
@@ -373,6 +384,9 @@ async def _dispatch_channel_slash_impl(
         return False
     cmd, cmd_args = parsed
 
+    if thread_store is None:
+        raise RuntimeError("Channel slash dispatch requires a thread_store")
+
     agent_for_ctx = agent
     if cmd.needs_agent(cmd_args) and await_agent_ready is not None:
         try:
@@ -386,6 +400,7 @@ async def _dispatch_channel_slash_impl(
         append_system_callback=append_system,
         start_new_session_callback=start_new_session_cb,
         handle_session_resume_callback=handle_session_resume_cb,
+        thread_store=thread_store,
     )
     ctx = CommandContext(
         agent=agent_for_ctx,
@@ -394,6 +409,7 @@ async def _dispatch_channel_slash_impl(
         workspace_dir=workspace_dir,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
+        thread_store=thread_store,
     )
 
     try:
@@ -619,7 +635,7 @@ def _try_set_hitl_reply(channel_type: str, chat_id: str, content: str) -> bool:
 
 def channel_ask_user_prompt(
     ask_user_data: dict,
-    msg: "ChannelMessage | None" = None,
+    msg: ChannelMessage | None = None,
 ) -> dict:
     """Format ask_user questions and collect answers from a channel user.
 
@@ -748,7 +764,7 @@ def channel_ask_user_prompt(
 
 def channel_hitl_prompt(
     action_requests: list,
-    msg: "ChannelMessage",
+    msg: ChannelMessage,
 ) -> list[dict] | None:
     """Send HITL approval prompt to channel user and wait for reply.
 

@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import (
-    GraphEvent,
-    GraphGateway,
     LocalGraphGateway,
     RunRequest,
-    ThreadResolution,
-    ThreadStore,
 )
 from EvoScientist.stream import display as display_mod
 from tests.conftest import run_async
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def test_local_gateway_streams_from_injected_streamer():
@@ -63,57 +59,15 @@ def test_local_gateway_streams_from_injected_streamer():
 
 
 def test_local_graph_gateway_delegates_thread_operations():
-    class _ThreadStore(ThreadStore):
-        def __init__(self):
-            self.calls: list[tuple[str, Any]] = []
-
-        def generate_thread_id(self) -> str:
-            self.calls.append(("generate_thread_id", None))
-            return "new12345"
-
-        async def list_threads(
-            self,
-            *,
-            limit: int = 20,
-            include_message_count: bool = False,
-            include_preview: bool = False,
-        ) -> list[dict[str, Any]]:
-            self.calls.append(
-                (
-                    "list_threads",
-                    {
-                        "limit": limit,
-                        "include_message_count": include_message_count,
-                        "include_preview": include_preview,
-                    },
-                )
-            )
-            return [{"thread_id": "abc12345"}]
-
-        async def resolve_thread_id_prefix(
-            self,
-            thread_id_or_prefix: str,
-        ) -> tuple[str | None, list[str]]:
-            self.calls.append(("resolve_thread_id_prefix", thread_id_or_prefix))
-            return "abc12345", []
-
-        async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
-            self.calls.append(("get_thread_metadata", thread_id))
-            return {"workspace_dir": "/tmp/ws"}
-
-        async def get_thread_messages(self, thread_id: str) -> list[Any]:
-            self.calls.append(("get_thread_messages", thread_id))
-            return ["message"]
-
-        async def thread_exists(self, thread_id: str) -> bool:
-            self.calls.append(("thread_exists", thread_id))
-            return True
-
-        async def delete_thread(self, thread_id: str) -> bool:
-            self.calls.append(("delete_thread", thread_id))
-            return True
-
-    thread_store = _ThreadStore()
+    thread_store = FakeThreadStore(
+        generated_thread_id="new12345",
+        threads=[{"thread_id": "abc12345"}],
+        resolved_thread_id="abc12345",
+        metadata={"workspace_dir": "/tmp/ws"},
+        messages=["message"],
+        exists=True,
+        deleted=True,
+    )
     agent = MagicMock()
 
     async def _run():
@@ -163,47 +117,12 @@ def test_local_graph_gateway_delegates_thread_operations():
 
 
 def test_run_streaming_can_consume_injected_gateway():
-    class _Gateway(GraphGateway):
-        def __init__(self):
-            self.requests: list[RunRequest] = []
-
-        async def create_thread(self) -> str:
-            return "unused"
-
-        async def list_threads(
-            self,
-            *,
-            limit: int = 20,
-            include_message_count: bool = False,
-            include_preview: bool = False,
-        ) -> list[dict[str, Any]]:
-            return []
-
-        async def resolve_thread(self, thread_id_or_prefix: str) -> ThreadResolution:
-            raise AssertionError("resolve_thread should not be called")
-
-        async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
-            raise AssertionError("get_thread_metadata should not be called")
-
-        async def get_thread_messages(self, thread_id: str) -> list[Any]:
-            raise AssertionError("get_thread_messages should not be called")
-
-        async def thread_exists(self, thread_id: str) -> bool:
-            raise AssertionError("thread_exists should not be called")
-
-        async def delete_thread(self, thread_id: str) -> bool:
-            raise AssertionError("delete_thread should not be called")
-
-        def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
-            self.requests.append(request)
-
-            async def _events():
-                yield {"type": "text", "content": "gateway-ok"}
-                yield {"type": "done", "response": "gateway-ok"}
-
-            return _events()
-
-    gateway: GraphGateway = _Gateway()
+    gateway = FakeGraphGateway(
+        events=[
+            {"type": "text", "content": "gateway-ok"},
+            {"type": "done", "response": "gateway-ok"},
+        ]
+    )
 
     with patch("EvoScientist.stream.display.Live"):
         result = display_mod._run_streaming(
@@ -230,42 +149,12 @@ def test_resume_command_consumes_context_gateway():
     from EvoScientist.commands.base import CommandContext
     from EvoScientist.commands.implementation.session import ResumeCommand
 
-    class _ThreadStore(ThreadStore):
-        def generate_thread_id(self) -> str:
-            return "unused"
-
-        async def list_threads(
-            self,
-            *,
-            limit: int = 20,
-            include_message_count: bool = False,
-            include_preview: bool = False,
-        ) -> list[dict[str, Any]]:
-            return []
-
-        async def resolve_thread_id_prefix(
-            self,
-            thread_id_or_prefix: str,
-        ) -> tuple[str | None, list[str]]:
-            assert thread_id_or_prefix == "abc"
-            return "abc12345", []
-
-        async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
-            assert thread_id == "abc12345"
-            return {"workspace_dir": "/restored"}
-
-        async def get_thread_messages(self, thread_id: str) -> list[Any]:
-            return []
-
-        async def thread_exists(self, thread_id: str) -> bool:
-            return False
-
-        async def delete_thread(self, thread_id: str) -> bool:
-            return False
-
     ui = MagicMock()
     ui.handle_session_resume = AsyncMock()
-    thread_store: ThreadStore = _ThreadStore()
+    thread_store = FakeThreadStore(
+        resolved_thread_id="abc12345",
+        metadata={"workspace_dir": "/restored"},
+    )
     ctx = CommandContext(
         agent=None,
         thread_id="current",
@@ -279,3 +168,33 @@ def test_resume_command_consumes_context_gateway():
     assert ctx.thread_id == "abc12345"
     assert ctx.workspace_dir == "/restored"
     ui.handle_session_resume.assert_awaited_once_with("abc12345", "/restored")
+
+
+def test_cmd_run_passes_local_graph_gateway(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    thread_store = FakeThreadStore(generated_thread_id="generated-thread")
+    seen: dict[str, Any] = {}
+
+    def _run_streaming(**kwargs):
+        seen.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(interactive, "LocalThreadStore", lambda: thread_store)
+    monkeypatch.setattr(interactive, "run_streaming", _run_streaming)
+
+    agent = MagicMock()
+    interactive.cmd_run(
+        agent,
+        "hello",
+        show_thinking=False,
+        workspace_dir="/tmp/ws",
+        model="test-model",
+        thread_store=thread_store,
+    )
+
+    assert seen["agent"] is agent
+    assert seen["thread_id"] == "generated-thread"
+    assert isinstance(seen["gateway"], LocalGraphGateway)
+    assert seen["gateway"].agent is agent
+    assert seen["gateway"].thread_store is thread_store

@@ -7,7 +7,7 @@ import random
 import sys
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer  # type: ignore[import-untyped]
 from prompt_toolkit import PromptSession  # type: ignore[import-untyped]
@@ -33,15 +33,8 @@ import EvoScientist.cli.channel as _ch_mod
 
 from ..commands.base import Command, CommandContext
 from ..commands.manager import manager as cmd_manager
-from ..sessions import (
-    generate_thread_id,
-    get_checkpointer,
-    get_thread_messages,
-    get_thread_metadata,
-    resolve_thread_id_prefix,
-    short_thread_id,
-    thread_exists,
-)
+from ..gateway import LocalGraphGateway, LocalThreadStore, ThreadStore
+from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
@@ -89,6 +82,9 @@ _channel_logger = logging.getLogger(__name__)
 
 # Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
 _background_tasks: set[asyncio.Task] = set()
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 # =============================================================================
 # Banner
@@ -348,9 +344,11 @@ def cmd_interactive(
         width = console.size.width
         console.print(Text("\u2500" * width, style="dim"))
 
+    thread_store = LocalThreadStore()
+
     # Mutable state for async loop
     state: dict[str, Any] = {
-        "thread_id": thread_id or generate_thread_id(),
+        "thread_id": thread_id or thread_store.generate_thread_id(),
         "workspace_dir": workspace_dir,
         "running": True,
         "resumed": False,
@@ -414,7 +412,7 @@ def cmd_interactive(
             config=config,
         )
 
-    async def _await_agent_ready() -> Any:
+    async def _await_agent_ready() -> "CompiledStateGraph":
         """Await the agent load and apply CLI-side post-load side effects.
 
         Raises when called before ``_start_agent_load``: reloading here
@@ -470,6 +468,7 @@ def cmd_interactive(
                     state["thread_id"],
                     model_name=model,
                     pending_user_text=pending,
+                    thread_store=thread_store,
                 )
         elif state["status_last_input_tokens"] is not None:
             state["status_base_snapshot"] = make_usage_status_snapshot(
@@ -480,6 +479,7 @@ def cmd_interactive(
             state["status_base_snapshot"] = await build_session_status_snapshot(
                 state["thread_id"],
                 model_name=model,
+                thread_store=thread_store,
             )
         if reset_streaming_text:
             state["status_streaming_text"] = ""
@@ -543,7 +543,7 @@ def cmd_interactive(
 
     async def _resolve_thread_id(tid: str) -> str | None:
         """Resolve a (possibly partial) thread ID. Returns full ID or None."""
-        resolved, matches = await resolve_thread_id_prefix(tid)
+        resolved, matches = await thread_store.resolve_thread_id_prefix(tid)
         if resolved:
             return resolved
         if matches:
@@ -558,7 +558,7 @@ def cmd_interactive(
 
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
-        messages = await get_thread_messages(thread_id)
+        messages = await thread_store.get_thread_messages(thread_id)
         if not messages:
             return
 
@@ -647,7 +647,7 @@ def cmd_interactive(
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 if not workspace_fixed:
                     state["workspace_dir"] = _create_session_workspace(run_name)
-                state["thread_id"] = generate_thread_id()
+                state["thread_id"] = thread_store.generate_thread_id()
                 state["resumed"] = False
                 state["status_started_at"] = datetime.now()
                 state["status_last_input_tokens"] = None
@@ -741,7 +741,7 @@ def cmd_interactive(
             if thread_id:
                 resolved = await _resolve_thread_id(thread_id)
                 if resolved:
-                    meta = await get_thread_metadata(resolved)
+                    meta = await thread_store.get_thread_metadata(resolved)
                     ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
                     state["thread_id"] = resolved
                     state["resumed"] = True
@@ -774,7 +774,7 @@ def cmd_interactive(
                     # input is still seeded in state["thread_id"] from init.
                     # Replace with a fresh ID so a new session isn't
                     # checkpointed under the bad prefix.
-                    state["thread_id"] = generate_thread_id()
+                    state["thread_id"] = thread_store.generate_thread_id()
 
             # Kick off agent construction (MCP tool enumeration is the
             # slow part) in the background so the banner and prompt can
@@ -971,6 +971,7 @@ def cmd_interactive(
                         await_agent_ready=_await_agent_ready,
                         on_cmd_completed=_on_channel_cmd_completed,
                         channel_runtime=channel_runtime,
+                        thread_store=thread_store,
                     )
                     if _slash_handled:
                         # A channel-issued /new or /resume rotates the thread
@@ -1005,6 +1006,10 @@ def cmd_interactive(
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
                             cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
+                            gateway=LocalGraphGateway(
+                                ready_agent,
+                                thread_store=thread_store,
+                            ),
                         )
                     except Exception as e:
                         response = f"Error: {e}"
@@ -1045,9 +1050,10 @@ def cmd_interactive(
                     console.print(line_text, style=line_style, markup=False)
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
+                ready_agent = await _await_agent_ready()
                 response = run_streaming(
                     ui_backend=state["ui_backend"],
-                    agent=await _await_agent_ready(),
+                    agent=ready_agent,
                     message=text,
                     # Falls back to live state["thread_id"] if no override is
                     # passed (legacy / direct-call paths). Dedup reader has no
@@ -1060,6 +1066,7 @@ def cmd_interactive(
                     metadata=meta,
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
+                    gateway=LocalGraphGateway(ready_agent, thread_store=thread_store),
                 )
                 _notif_tid = target_thread_id or state["thread_id"]
                 if _ch_mod.publish_to_channel_origin(_notif_tid, response):
@@ -1259,6 +1266,7 @@ def cmd_interactive(
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                                 channel_runtime=channel_runtime,
+                                thread_store=thread_store,
                             )
                             await cmd_manager.execute(user_input, ctx)
 
@@ -1351,6 +1359,10 @@ def cmd_interactive(
                             metadata=meta,
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
+                            gateway=LocalGraphGateway(
+                                ready_agent,
+                                thread_store=thread_store,
+                            ),
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1390,7 +1402,7 @@ def cmd_interactive(
                 current_tid = state.get("thread_id")
                 if current_tid:
                     try:
-                        if await thread_exists(current_tid):
+                        if await thread_store.thread_exists(current_tid):
                             state["resume_hint_thread_id"] = current_tid
                     except Exception:
                         _channel_logger.debug(
@@ -1413,13 +1425,15 @@ def cmd_interactive(
 
 
 def cmd_run(
-    agent: Any,
+    agent: "CompiledStateGraph",
     prompt: str,
     thread_id: str | None = None,
     show_thinking: bool = True,
     workspace_dir: str | None = None,
     model: str | None = None,
     ui_backend: str = "cli",
+    *,
+    thread_store: ThreadStore,
 ) -> None:
     """Single-shot execution with streaming display.
 
@@ -1432,7 +1446,7 @@ def cmd_run(
         model: Model name for checkpoint metadata
         ui_backend: UI backend ('cli' or 'tui')
     """
-    thread_id = thread_id or generate_thread_id()
+    thread_id = thread_id or thread_store.generate_thread_id()
 
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
@@ -1454,6 +1468,7 @@ def cmd_run(
             show_thinking=show_thinking,
             interactive=False,
             metadata=meta,
+            gateway=LocalGraphGateway(agent, thread_store=thread_store),
         )
     except Exception as e:
         error_msg = str(e)

@@ -21,7 +21,13 @@ from EvoScientist.cli.commands import (
     _serve_process_message,
 )
 from EvoScientist.commands.base import ChannelRuntime
+from EvoScientist.gateway import ThreadStore
 from tests.conftest import run_async as _run
+from tests.fakes import FakeThreadStore
+
+
+def _thread_store(thread_id: str = "unused") -> ThreadStore:
+    return FakeThreadStore(generated_thread_id=thread_id)
 
 
 def test_hook_updates_holder_on_agent_swap():
@@ -239,12 +245,12 @@ def test_start_new_session_cb_rotates_thread_id():
     holder = {"agent": "a", "thread_id": "old-tid"}
     runtime = ChannelRuntime(agent="a", thread_id="old-tid")
 
-    with patch(
-        "EvoScientist.sessions.generate_thread_id",
-        return_value="freshly-generated-tid",
-    ):
-        cb = _make_serve_start_new_session_cb(holder, runtime)
-        cb()
+    cb = _make_serve_start_new_session_cb(
+        holder,
+        runtime,
+        thread_store=_thread_store("freshly-generated-tid"),
+    )
+    cb()
 
     assert holder["thread_id"] == "freshly-generated-tid"
     assert runtime.thread_id == "freshly-generated-tid"
@@ -255,12 +261,8 @@ def test_start_new_session_cb_leaves_agent_alone():
     (serve's agent is a single pre-loaded instance, not per-thread)."""
     holder = {"agent": "a", "thread_id": "old-tid"}
 
-    with patch(
-        "EvoScientist.sessions.generate_thread_id",
-        return_value="new-tid",
-    ):
-        cb = _make_serve_start_new_session_cb(holder)
-        cb()
+    cb = _make_serve_start_new_session_cb(holder, thread_store=_thread_store("new-tid"))
+    cb()
 
     assert holder["agent"] == "a"
 
@@ -456,7 +458,11 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
         chat_id="channel-user",
         message_id="ts-1",
     )
-    holder = {"agent": "agent", "thread_id": "tid"}
+    holder = {
+        "agent": "agent",
+        "thread_id": "tid",
+        "thread_store": _thread_store(),
+    }
 
     with (
         patch(
@@ -479,6 +485,30 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
     mock_run_streaming.assert_not_called()
 
 
+def test_serve_process_message_requires_thread_store():
+    msg = ChannelMessage(
+        msg_id="msg-missing-store",
+        content="hello",
+        sender="channel-user",
+        channel_type="imessage",
+        metadata={},
+        channel_ref=None,
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-1",
+    )
+    holder = {"agent": "agent", "thread_id": "tid"}
+
+    with pytest.raises(RuntimeError, match="missing thread_store"):
+        _serve_process_message(
+            msg,
+            agent_holder=holder,
+            model="model",
+            workspace_dir="/tmp",
+            show_thinking=False,
+        )
+
+
 def test_serve_process_message_uses_runtime_workspace_from_holder():
     """After `/resume`, serve should use the adopted workspace, not startup ws."""
     msg = ChannelMessage(
@@ -496,6 +526,7 @@ def test_serve_process_message_uses_runtime_workspace_from_holder():
         "agent": "agent",
         "thread_id": "tid",
         "workspace_dir": "/restored-workspace",
+        "thread_store": _thread_store(),
     }
     captured: dict[str, str] = {}
 

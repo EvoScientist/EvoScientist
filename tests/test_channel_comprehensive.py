@@ -16,14 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from EvoScientist.channels.base import (
-    Channel,
     ChannelError,
     InboundMessage,
     OutboundMessage,
@@ -47,40 +45,8 @@ from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
 from tests.conftest import run_async as _run
-
-
-@dataclass
-class _FakeConfig:
-    text_chunk_limit: int = 4096
-    allowed_senders: list | None = None
-    allowed_channels: list | None = None
-    proxy: str | None = None
-    require_mention: str = "group"
-    dm_policy: str = "allowlist"
-
-
-class StubChannel(Channel):
-    """Minimal concrete channel for unit testing."""
-
-    name = "stub"
-
-    def __init__(self, config=None):
-        super().__init__(config or _FakeConfig())
-        self._sent_chunks: list[tuple] = []
-        self._typing_started: list[str] = []
-        self._typing_stopped: list[str] = []
-        self._started = False
-
-    async def start(self):
-        self._started = True
-        self._running = True
-
-    async def _send_chunk(self, chat_id, formatted, raw, reply_to, metadata):
-        self._sent_chunks.append((chat_id, formatted, raw, reply_to, metadata))
-
-    async def _send_typing_action(self, chat_id):
-        self._typing_started.append(chat_id)
-
+from tests.fakes import FakeChannelConfig as _FakeConfig
+from tests.fakes import StubChannel
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. DedupCache

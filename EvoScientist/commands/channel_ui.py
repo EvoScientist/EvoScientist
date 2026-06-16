@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import CommandUI
+
+if TYPE_CHECKING:
+    from ..gateway import ThreadStore
 
 _logger = logging.getLogger(__name__)
 
@@ -21,6 +24,8 @@ class ChannelCommandUI(CommandUI):
     def __init__(
         self,
         channel_msg: Any,
+        *,
+        thread_store: ThreadStore,
         append_system_callback: Any = None,
         start_new_session_callback: Any = None,
         handle_session_resume_callback: Any = None,
@@ -29,6 +34,7 @@ class ChannelCommandUI(CommandUI):
         self.append_system_callback = append_system_callback
         self.start_new_session_callback = start_new_session_callback
         self.handle_session_resume_callback = handle_session_resume_callback
+        self.thread_store = thread_store
         self._system_buffer: list[str] = []
 
     def _queue_system(
@@ -188,11 +194,9 @@ class ChannelCommandUI(CommandUI):
         mirror_local = self.handle_session_resume_callback is None
         if self.handle_session_resume_callback:
             await self.handle_session_resume_callback(thread_id, workspace_dir)
-        from ..sessions import get_thread_messages
-
         lines = [f"Resumed session: {thread_id}"]
         try:
-            messages = await get_thread_messages(thread_id)
+            messages = await self.thread_store.get_thread_messages(thread_id)
         except Exception as exc:
             _logger.exception(
                 "Failed to load saved history for resumed thread %s",

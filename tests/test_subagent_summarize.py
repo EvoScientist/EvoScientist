@@ -10,16 +10,15 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from EvoScientist.channels.base import Channel
 from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer, _join_subagent_text
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
 from tests.conftest import run_async as _run
+from tests.fakes import StubChannel as _StubChannel
 from tests.stream_v3_fakes import (
     FakeSubagent,
     FakeV3Agent,
@@ -30,16 +29,6 @@ from tests.stream_v3_fakes import (
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
-
-
-@dataclass
-class _FakeConfig:
-    text_chunk_limit: int = 4096
-    allowed_senders: list | None = None
-    allowed_channels: list | None = None
-    proxy: str | None = None
-    require_mention: str = "group"
-    dm_policy: str = "allowlist"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -190,24 +179,6 @@ class TestStreamAgentEventsSubagentText:
 # ═══════════════════════════════════════════════════════════════════
 # 3. InboundConsumer — subagent_text buffer & fallback priority
 # ═══════════════════════════════════════════════════════════════════
-
-
-class _StubChannel(Channel):
-    """Minimal concrete channel for consumer tests."""
-
-    name = "stub"
-
-    def __init__(self, config=None):
-        super().__init__(config or _FakeConfig())
-
-    async def start(self):
-        self._running = True
-
-    async def _send_chunk(self, chat_id, formatted, raw, reply_to, metadata):
-        pass
-
-    async def _send_typing_action(self, chat_id):
-        pass
 
 
 def _make_consumer(stream_events: list[dict], **kw):
