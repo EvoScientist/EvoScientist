@@ -22,10 +22,7 @@ from ..stream.events import (
     _V3EventProcessor,
     build_agent_stream_input,
 )
-from ..stream.summarization import (
-    _find_summarization_event_payload,
-    _summarization_event_signature,
-)
+from ..stream.summarization import _find_summarization_event_payload
 from ..stream.v3_payloads import _as_raw_map, _event_namespace
 from .types import (
     DEFAULT_GRAPH_ID,
@@ -455,6 +452,14 @@ class LangGraphServerGateway:
     ) -> GraphStateValues:
         return await self._get_state_values(thread_id)
 
+    async def update_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        values: dict[str, object],
+    ) -> None:
+        await self.thread_store.client.threads.update_state(thread_id, values)
+
     async def _get_state_values(self, thread_id: str) -> GraphStateValues:
         state = await self.thread_store.client.threads.get_state(thread_id)
         values = state.get("values")
@@ -464,13 +469,10 @@ class LangGraphServerGateway:
 
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
-        baseline_summarization_signature: tuple[object, ...] | None = None
+        existing_summarization_event: Mapping[str, object] | None = None
         try:
             values = await self._get_state_values(request.thread_id)
-            baseline_event = _find_summarization_event_payload(values)
-            baseline_summarization_signature = _summarization_event_signature(
-                baseline_event
-            )
+            existing_summarization_event = _find_summarization_event_payload(values)
         except Exception:
             pass
 
@@ -478,7 +480,7 @@ class LangGraphServerGateway:
         processor = _V3EventProcessor(
             emitter,
             subagents,
-            baseline_summarization_signature,
+            existing_summarization_event,
         )
         tracker = _ServerSubagentTracker(emitter, subagents)
         stream = self.thread_store.client.threads.stream(

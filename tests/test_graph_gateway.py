@@ -145,6 +145,25 @@ def test_local_graph_gateway_reads_state_values():
     )
 
 
+def test_local_graph_gateway_updates_state_values():
+    agent = MagicMock()
+    agent.aupdate_state = AsyncMock()
+    gateway = LocalGraphGateway()
+
+    run_async(
+        gateway.update_state_values(
+            GraphTarget(local_graph=agent),
+            "abc12345",
+            {"_summarization_event": {"cutoff_index": 2}},
+        )
+    )
+
+    agent.aupdate_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "abc12345"}},
+        {"_summarization_event": {"cutoff_index": 2}},
+    )
+
+
 def test_run_streaming_can_consume_injected_gateway():
     agent = MagicMock()
     gateway = FakeGraphGateway(
@@ -357,6 +376,30 @@ def test_langgraph_server_gateway_reads_state_values():
     values = run_async(gateway.get_state_values(GraphTarget(), "abc12345"))
 
     assert values == {"async_tasks": {"task-1": {}}}
+
+
+def test_langgraph_server_gateway_updates_state_values():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    run_async(
+        gateway.update_state_values(
+            GraphTarget(),
+            "abc12345",
+            {"_summarization_event": {"cutoff_index": 2}},
+        )
+    )
+
+    assert threads.state_updates == [
+        ("abc12345", {"_summarization_event": {"cutoff_index": 2}})
+    ]
 
 
 def test_langgraph_server_gateway_streams_root_protocol_events():

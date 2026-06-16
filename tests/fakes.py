@@ -205,13 +205,16 @@ class FakeGraphGateway(GraphGateway):
         *,
         stream: FakeStreamFactory | None = None,
         state_values: GraphStateValues | None = None,
+        state_error: BaseException | None = None,
         thread_store: ThreadStore | None = None,
     ) -> None:
         self.events = list(events or [])
         self.stream = stream
         self.state_values = state_values or {}
+        self.state_error = state_error
         self.thread_store = thread_store or FakeThreadStore()
         self.requests: list[RunRequest] = []
+        self.updated_states: list[tuple[GraphTarget, str, dict[str, object]]] = []
 
     async def create_thread(self, target: GraphTarget | None = None) -> str:
         return self.thread_store.generate_thread_id()
@@ -284,7 +287,17 @@ class FakeGraphGateway(GraphGateway):
         target: GraphTarget,
         thread_id: str,
     ) -> GraphStateValues:
+        if self.state_error is not None:
+            raise self.state_error
         return self.state_values
+
+    async def update_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        values: dict[str, object],
+    ) -> None:
+        self.updated_states.append((target, thread_id, values))
 
 
 class FakeLangGraphRunModule:
@@ -376,6 +389,7 @@ class FakeLangGraphThreadsClient:
         self.deleted: list[str] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
+        self.state_updates: list[tuple[str, dict[str, object]]] = []
 
     async def create(
         self,
@@ -444,6 +458,14 @@ class FakeLangGraphThreadsClient:
         if thread_id in self.states:
             return self.states[thread_id]
         raise NotFoundError("not found", response=_not_found_response(), body=None)
+
+    async def update_state(
+        self,
+        thread_id: str,
+        values: dict[str, object],
+    ) -> dict[str, Any]:
+        self.state_updates.append((thread_id, values))
+        return {"checkpoint": {"thread_id": thread_id}}
 
     async def delete(self, thread_id: str) -> None:
         await self.get(thread_id)

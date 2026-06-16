@@ -8,7 +8,7 @@ import base64
 import inspect
 import mimetypes
 import os
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
@@ -107,11 +107,13 @@ class _V3EventProcessor:
         self,
         emitter: StreamEventEmitter,
         subagents: _SubagentRegistry,
-        baseline_summarization_signature: tuple[object, ...] | None,
+        existing_summarization_event: Mapping[str, object] | None,
     ) -> None:
         self.emitter = emitter
         self.subagents = subagents
-        self.baseline_summarization_signature = baseline_summarization_signature
+        self._suppressed_summarization_signature = _summarization_event_signature(
+            existing_summarization_event
+        )
         self.full_response = ""
         self._summarization_in_progress = False
         self._tool_inputs: dict[
@@ -451,7 +453,7 @@ class _V3EventProcessor:
             signature = _summarization_event_signature(summarization_event)
             if (
                 signature is not None
-                and signature == self.baseline_summarization_signature
+                and signature == self._suppressed_summarization_signature
             ):
                 return events
             summary_message = summarization_event.get("summary_message")
@@ -640,6 +642,8 @@ async def stream_agent_events(
     thread_id: str,
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,
+    *,
+    existing_summarization_event: Mapping[str, object] | None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -655,6 +659,8 @@ async def stream_agent_events(
         metadata: Optional metadata dict merged into the LangGraph config
             (e.g. agent_name, updated_at for checkpoint persistence).
         media: Optional list of local file paths for attachments.
+        existing_summarization_event: Existing persisted summarization event
+            to suppress if LangGraph replays it in stream updates.
 
     Yields:
         Event dicts: thinking, text, tool_call, tool_result,
@@ -668,19 +674,6 @@ async def stream_agent_events(
 
     clear_memory_worker_saved_counts()
     astream_input = await build_agent_stream_input(message, media=media)
-
-    _baseline_summarization_signature: tuple[object, ...] | None = None
-
-    try:
-        snapshot = await agent.aget_state(config)
-        values = snapshot.values
-        if isinstance(values, dict):
-            baseline_event = _find_summarization_event_payload(values)
-            _baseline_summarization_signature = _summarization_event_signature(
-                baseline_event
-            )
-    except Exception:
-        pass
 
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
@@ -704,7 +697,7 @@ async def stream_agent_events(
         processor = _V3EventProcessor(
             emitter,
             subagents,
-            _baseline_summarization_signature,
+            existing_summarization_event,
         )
         queue: asyncio.Queue[Any] = asyncio.Queue()
         producer_done = object()

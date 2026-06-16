@@ -515,6 +515,7 @@ class InboundConsumer:
                         media=msg.media or None
                         if isinstance(stream_input, str)
                         else None,
+                        existing_summarization_event=None,
                     ),
                     self._inference_timeout,
                 ):

@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from rich.table import Table
 
-from ...gateway import GraphGateway
+from ...gateway import GraphGateway, GraphTarget
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
@@ -43,8 +43,12 @@ class CompactCommand(Command):
 
         try:
             result = await compact_conversation(
-                agent=ctx.agent,
+                graph_gateway=_graph_gateway(ctx),
                 thread_id=ctx.thread_id,
+                target=GraphTarget(
+                    local_graph=ctx.agent,
+                    workspace_dir=ctx.workspace_dir,
+                ),
                 input_tokens_hint=ctx.input_tokens_hint,
             )
         finally:

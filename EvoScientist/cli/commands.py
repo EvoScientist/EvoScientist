@@ -17,7 +17,12 @@ from rich.markup import escape
 from rich.table import Table
 
 from ..commands.base import ChannelRuntime, Command, CommandContext
-from ..gateway import GraphTarget, RuntimeGateways, create_runtime_gateways
+from ..gateway import (
+    GraphGateway,
+    GraphTarget,
+    RuntimeGateways,
+    create_runtime_gateways,
+)
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
@@ -605,16 +610,17 @@ def build_compact_summary_renderable(
 
 
 async def compact_conversation(
-    agent: Any,
+    graph_gateway: GraphGateway | None,
     thread_id: str | None,
+    target: GraphTarget | None,
     *,
     input_tokens_hint: int | None = None,
 ) -> CompactResult:
     """Compact the conversation by summarizing old messages.
 
-    Reads the agent's checkpointed state, creates a temporary
+    Reads the graph's checkpointed state, creates a temporary
     ``SummarizationMiddleware``, generates a summary, and writes
-    the compacted state back via ``aupdate_state``.
+    the compacted state back through ``GraphGateway``.
 
     ``input_tokens_hint`` is the real LLM input token count from the last
     ``usage_metadata`` (includes system prompt + tool schemas).  When
@@ -624,7 +630,7 @@ async def compact_conversation(
 
     Returns a structured ``CompactResult``.
     """
-    if not agent or not thread_id:
+    if graph_gateway is None or target is None or not thread_id:
         return CompactResult("noop", "Nothing to compact — start a conversation first.")
 
     from langchain_core.messages.utils import count_tokens_approximately
@@ -633,11 +639,11 @@ async def compact_conversation(
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
     try:
-        state_snapshot = await agent.aget_state(config)
+        state_values = await graph_gateway.get_state_values(target, thread_id)
     except Exception as exc:
         return CompactResult("error", f"Failed to read state: {exc}")
 
-    messages = state_snapshot.values.get("messages", [])
+    messages = state_values.get("messages", [])
     if not messages:
         return CompactResult(
             "noop", "Nothing to compact — no messages in conversation."
@@ -670,7 +676,7 @@ async def compact_conversation(
     )
 
     # Rebuild effective message list accounting for prior compaction
-    event = state_snapshot.values.get("_summarization_event")
+    event = state_values.get("_summarization_event")
     effective = middleware._apply_event_to_messages(messages, event)
     effective_tokens = count_tokens_approximately(effective)
 
@@ -792,7 +798,11 @@ async def compact_conversation(
         "file_path": file_path,
     }
 
-    await agent.aupdate_state(config, {"_summarization_event": new_event})
+    await graph_gateway.update_state_values(
+        target,
+        thread_id,
+        {"_summarization_event": new_event},
+    )
 
     return CompactResult(
         "ok",

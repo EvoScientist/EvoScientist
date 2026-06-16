@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -121,16 +121,37 @@ class LocalGraphGateway:
         return await self.thread_store.delete_thread(thread_id)
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
-        from ..stream.events import stream_agent_events
+        target = request.target
+        local_graph = self._require_local_graph(target)
+        if target is None:
+            raise RuntimeError("LocalGraphGateway requires GraphTarget.local_graph")
+        return self._stream_events(local_graph, target, request)
 
-        local_graph = self._require_local_graph(request.target)
-        return stream_agent_events(
+    async def _stream_events(
+        self,
+        local_graph: CompiledStateGraph,
+        target: GraphTarget,
+        request: RunRequest,
+    ) -> AsyncIterator[GraphEvent]:
+        from ..stream.events import stream_agent_events
+        from ..stream.summarization import _find_summarization_event_payload
+
+        existing_summarization_event: Mapping[str, object] | None = None
+        try:
+            values = await self.get_state_values(target, request.thread_id)
+            existing_summarization_event = _find_summarization_event_payload(values)
+        except Exception:
+            pass
+
+        async for event in stream_agent_events(
             local_graph,
             request.message,
             request.thread_id,
             metadata=request.metadata,
             media=request.media,
-        )
+            existing_summarization_event=existing_summarization_event,
+        ):
+            yield event
 
     async def get_state_values(
         self,
@@ -145,6 +166,18 @@ class LocalGraphGateway:
         if not isinstance(values, dict):
             return {}
         return {str(key): value for key, value in values.items()}
+
+    async def update_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        values: dict[str, object],
+    ) -> None:
+        local_graph = self._require_local_graph(target)
+        await local_graph.aupdate_state(
+            {"configurable": {"thread_id": thread_id}},
+            values,
+        )
 
     def _require_local_graph(self, target: GraphTarget | None) -> CompiledStateGraph:
         if target is None or target.local_graph is None:

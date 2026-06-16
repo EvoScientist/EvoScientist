@@ -151,3 +151,11 @@ class GraphGateway(Protocol):
         thread_id: str,
     ) -> GraphStateValues:
         """Return the graph state values for a thread."""
+
+    async def update_state_values(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        values: dict[str, object],
+    ) -> None:
+        """Update graph state values for a thread."""

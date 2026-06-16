@@ -352,7 +352,10 @@ class TestV3ProtocolStreaming:
             ],
             state_values=summary_event,
         )
-        events = collect_events(agent)
+        events = collect_events(
+            agent,
+            existing_summarization_event=summary_event["_summarization_event"],
+        )
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
         ]
@@ -432,7 +435,10 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, "run probe", "live-deepagents-tool-id"
+                    agent,
+                    "run probe",
+                    "live-deepagents-tool-id",
+                    existing_summarization_event=None,
                 )
             ]
 
@@ -493,7 +499,10 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, "run echo", "live-deepagents-hitl"
+                    agent,
+                    "run echo",
+                    "live-deepagents-hitl",
+                    existing_summarization_event=None,
                 )
             ]
 
@@ -554,7 +563,10 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, message, "live-deepagents-ask-user"
+                    agent,
+                    message,
+                    "live-deepagents-ask-user",
+                    existing_summarization_event=None,
                 )
             ]
 
@@ -625,7 +637,10 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, "delegate", "live-deepagents-subagent"
+                    agent,
+                    "delegate",
+                    "live-deepagents-subagent",
+                    existing_summarization_event=None,
                 )
             ]
 
@@ -971,6 +986,7 @@ class TestV3ProtocolStreaming:
                 ErroringV3Agent(RuntimeError("boom")),
                 "hi",
                 "t1",
+                existing_summarization_event=None,
             ):
                 events.append(ev)
 
@@ -983,7 +999,12 @@ class TestV3ProtocolStreaming:
 
         async def consume_one_and_close():
             agent = HangingV3Agent([message_delta("hi")])
-            stream = stream_agent_events(agent, "hi", "t1")
+            stream = stream_agent_events(
+                agent,
+                "hi",
+                "t1",
+                existing_summarization_event=None,
+            )
             first = await stream.__anext__()
             await stream.aclose()
             return first, agent.aborted
