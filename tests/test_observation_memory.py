@@ -23,16 +23,30 @@ from pydantic import BaseModel
 
 from EvoScientist.config import MemoryObservationWriter
 from EvoScientist.memory import worker_activity
-from EvoScientist.memory.observations import (
-    MemoryScope,
-    MemorySourceType,
-    MemoryType,
-    ObservationSearchMode,
+from EvoScientist.memory.knowledge import (
     create_read_memory_tool,
-    create_search_observations_tool,
+    create_search_memory_tool,
+    record_knowledge_file,
+    search_memory_files,
+)
+from EvoScientist.memory.observations import (
     read_observation_file,
     record_observation_file,
     search_observation_files,
+)
+from EvoScientist.memory.synthesis import (
+    SynthesisAction,
+    SynthesisDecision,
+    SynthesisReviewDecision,
+    apply_synthesis_review_decision,
+)
+from EvoScientist.memory.types import (
+    KnowledgeStatus,
+    MemoryLevel,
+    MemoryScope,
+    MemorySearchMode,
+    MemorySourceType,
+    MemoryType,
 )
 from EvoScientist.middleware import memory_lifecycle
 
@@ -51,6 +65,18 @@ def _stable_created_at(metadata: dict[str, Any]) -> dict[str, Any]:
     assert isinstance(created_at, str)
     datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ")
     return {**metadata, "created_at": "<created_at>"}
+
+
+def _stable_memory_timestamps(metadata: dict[str, Any]) -> dict[str, Any]:
+    out = dict(metadata)
+    for key in ("created_at", "updated_at", "archived_at"):
+        if key not in out:
+            continue
+        value = out[key]
+        assert isinstance(value, str)
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        out[key] = f"<{key}>"
+    return out
 
 
 def _markdown_sections(body: str) -> dict[str, str]:
@@ -225,7 +251,8 @@ def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
         limit=5,
     )
 
-    assert [hit["observation_id"] for hit in hits] == [first["observation_id"]]
+    assert [hit["memory_id"] for hit in hits] == [first["observation_id"]]
+    assert hits[0]["level"] == MemoryLevel.OBSERVATION
     assert hits[0]["path"] == first["path"]
     assert hits[0]["memory_type"] == MemoryType.PROCEDURAL
     assert hits[0]["scope"] == MemoryScope.GLOBAL
@@ -245,17 +272,25 @@ def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
             query="date|sorting",
             scope=MemoryScope.PROJECT,
             memory_type=MemoryType.SEMANTIC,
-        )[0]["observation_id"]
+        )[0]["memory_id"]
         == second["observation_id"]
     )
 
-    tool = create_search_observations_tool(
+    tool = create_search_memory_tool(
         memory_dir=memories,
         project_id="P-project",
     )
-    payload = json.loads(tool.run({"query": "GraphQL userName frontend", "limit": 5}))
+    payload = json.loads(
+        tool.run(
+            {
+                "query": "GraphQL userName frontend",
+                "memory_level": "observation",
+                "limit": 5,
+            }
+        )
+    )
     assert list(payload) == ["results"]
-    assert payload["results"][0]["observation_id"] == first["observation_id"]
+    assert payload["results"][0]["memory_id"] == first["observation_id"]
 
 
 def test_read_memory_returns_full_observation_by_id(tmp_path):
@@ -290,13 +325,202 @@ def test_read_memory_returns_full_observation_by_id(tmp_path):
     assert observation in read["text"]
 
     tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
-    payload = json.loads(tool.run({"observation_id": result["observation_id"]}))
+    payload = json.loads(tool.run({"memory_id": result["observation_id"]}))
     assert payload == {"text": read["text"]}
 
-    missing = json.loads(tool.run({"observation_id": "../not-a-memory"}))
+    missing = json.loads(tool.run({"memory_id": "../not-a-memory"}))
     assert missing == {
-        "error": "No observation with that ID exists in global or current-project memory.",
+        "error": "No memory with that ID exists in global or current-project memory.",
     }
+
+
+def test_knowledge_memory_writes_support_and_combined_search_prefers_it(tmp_path):
+    memories = tmp_path / "memories"
+    observation = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Focused pytest should run before broad suites.",
+        observation="Run focused pytest for the changed test file before the suite.",
+        why_it_matters="Future agents catch local regressions faster.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    result = record_knowledge_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Run focused pytest before broad regression suites.",
+        knowledge=(
+            "When editing a narrow area, first run the focused pytest file that "
+            "covers the change before escalating to the broader suite."
+        ),
+        when_to_use="Use during coding or debugging changes with a focused test.",
+        supporting_observation_ids=[observation["observation_id"]],
+        scope=MemoryScope.PROJECT,
+    )
+
+    path = memories / result["path"].removeprefix("/memories/")
+    metadata, body = _read_memory_document(path)
+
+    assert result["created"] is True
+    assert result["path"].startswith("/memories/knowledge/projects/P-project/K-")
+    assert _stable_memory_timestamps(metadata) == {
+        "id": result["knowledge_id"],
+        "created_at": "<created_at>",
+        "updated_at": "<updated_at>",
+        "summary": "Run focused pytest before broad regression suites.",
+        "memory_type": "procedural",
+        "scope": "project",
+        "project_id": "P-project",
+        "status": "active",
+        "supporting_observation_ids": [observation["observation_id"]],
+        "source": {"type": "synthesis", "agent": "evomemory-synthesizer"},
+    }
+    assert _markdown_sections(body) == {
+        "Knowledge": (
+            "When editing a narrow area, first run the focused pytest file that "
+            "covers the change before escalating to the broader suite."
+        ),
+        "When To Use": "Use during coding or debugging changes with a focused test.",
+        "Support": (
+            f"- {observation['observation_id']}: "
+            "Focused pytest should run before broad suites."
+        ),
+    }
+
+    hits = search_memory_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="focused pytest regression suite",
+    )
+    assert [hit["memory_id"] for hit in hits] == [result["knowledge_id"]]
+    raw_hits = search_memory_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="focused pytest regression suite",
+        memory_level="observation",
+    )
+    assert [hit["memory_id"] for hit in raw_hits] == [observation["observation_id"]]
+
+    tool = create_read_memory_tool(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    knowledge_payload = json.loads(tool.run({"memory_id": result["knowledge_id"]}))
+    assert result["knowledge_id"] in knowledge_payload["text"]
+    observation_payload = json.loads(
+        tool.run({"memory_id": observation["observation_id"]})
+    )
+    assert observation["observation_id"] in observation_payload["text"]
+
+    search_tool = create_search_memory_tool(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    schema = search_tool.tool_call_schema
+    assert isinstance(schema, type)
+    assert issubclass(schema, BaseModel)
+    assert sorted(schema.model_json_schema()["properties"]) == [
+        "include_archived_knowledge",
+        "limit",
+        "memory_level",
+        "memory_type",
+        "mode",
+        "query",
+        "scope",
+    ]
+
+
+def test_synthesis_decision_creates_updates_and_archives_knowledge(tmp_path):
+    memories = tmp_path / "memories"
+    observation = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Resolver aliases preserve camelCase GraphQL fields.",
+        observation="Check resolver aliases before changing camelCase queries.",
+        why_it_matters="Future agents can avoid frontend-only fixes.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    review = SynthesisReviewDecision(
+        decisions=[
+            SynthesisDecision(
+                action=SynthesisAction.CREATE,
+                rationale="The observation is a reusable debugging rule.",
+                summary="Check GraphQL resolver aliases before frontend query fixes.",
+                memory_type=MemoryType.SEMANTIC,
+                scope=MemoryScope.GLOBAL,
+                knowledge=(
+                    "Blank camelCase GraphQL fields can come from resolver alias "
+                    "mismatches; inspect resolver aliases before changing the "
+                    "frontend query."
+                ),
+                when_to_use="Use when GraphQL camelCase fields render blank.",
+                supporting_observation_ids=[observation["observation_id"]],
+            )
+        ]
+    )
+
+    created = apply_synthesis_review_decision(
+        memory_dir=memories,
+        project_id="P-project",
+        review=review,
+    )
+    target_id = created[0]["knowledge_id"]
+    updated = apply_synthesis_review_decision(
+        memory_dir=memories,
+        project_id="P-project",
+        review=SynthesisReviewDecision(
+            decisions=[
+                SynthesisDecision(
+                    action=SynthesisAction.UPDATE,
+                    target_knowledge_id=target_id,
+                    rationale="Tighten the reusable wording.",
+                    summary="Audit GraphQL resolver aliases before changing queries.",
+                    memory_type=MemoryType.SEMANTIC,
+                    scope=MemoryScope.GLOBAL,
+                    knowledge=(
+                        "When GraphQL camelCase fields are blank, audit backend "
+                        "resolver aliases before changing frontend query names."
+                    ),
+                    when_to_use="Use during GraphQL blank-field debugging.",
+                    supporting_observation_ids=[observation["observation_id"]],
+                )
+            ]
+        ),
+    )
+    archived = apply_synthesis_review_decision(
+        memory_dir=memories,
+        project_id="P-project",
+        review=SynthesisReviewDecision(
+            decisions=[
+                SynthesisDecision(
+                    action=SynthesisAction.ARCHIVE,
+                    target_knowledge_id=target_id,
+                    rationale="The record is superseded.",
+                    archive_reason="Superseded by a later rule.",
+                )
+            ]
+        ),
+    )
+
+    assert created[0]["created"] is True
+    assert updated[0]["knowledge_id"] == target_id
+    assert updated[0]["created"] is False
+    assert archived[0]["knowledge_id"] == target_id
+    assert archived[0]["status"] == KnowledgeStatus.ARCHIVED
+    metadata, body = _read_memory_document(
+        memories / archived[0]["path"].removeprefix("/memories/")
+    )
+    assert _stable_memory_timestamps(metadata)["status"] == "archived"
+    assert _markdown_sections(body)["Archive Reason"] == "Superseded by a later rule."
 
 
 def test_search_observation_files_supports_keyword_or_regex_queries(tmp_path):
@@ -349,14 +573,14 @@ def test_search_observation_files_supports_keyword_or_regex_queries(tmp_path):
     focused_hits = search_observation_files(
         memory_dir=memories,
         project_id="P-project",
-        mode=ObservationSearchMode.REGEX,
+        mode=MemorySearchMode.REGEX,
         query="silent[- ]failure|status",
     )
 
-    assert [hit["observation_id"] for hit in variant_hits] == [
+    assert [hit["memory_id"] for hit in variant_hits] == [
         relevant["observation_id"]
     ]
-    assert [hit["observation_id"] for hit in focused_hits] == [
+    assert [hit["memory_id"] for hit in focused_hits] == [
         relevant["observation_id"]
     ]
 
@@ -385,11 +609,11 @@ def test_search_observation_files_handles_regex_like_literals(tmp_path):
         memory_dir=memories,
         project_id="P-project",
         query="[bracket",
-        mode=ObservationSearchMode.REGEX,
+        mode=MemorySearchMode.REGEX,
     )
 
-    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
-    assert [hit["observation_id"] for hit in regex_hits] == [relevant["observation_id"]]
+    assert [hit["memory_id"] for hit in hits] == [relevant["observation_id"]]
+    assert [hit["memory_id"] for hit in regex_hits] == [relevant["observation_id"]]
 
 
 def test_search_observation_files_ranks_bag_of_words_queries(tmp_path):
@@ -435,7 +659,7 @@ def test_search_observation_files_ranks_bag_of_words_queries(tmp_path):
         limit=2,
     )
 
-    assert hits[0]["observation_id"] == relevant["observation_id"]
+    assert hits[0]["memory_id"] == relevant["observation_id"]
     assert hits[0]["score"] > hits[1]["score"]
 
 
@@ -852,12 +1076,12 @@ def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
     )
 
     assert [tool.name for tool in turn_middleware[0].tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
         "record_observation",
     ]
     assert [tool.name for tool in subagent_middleware[0].tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
         "record_observation",
     ]
@@ -884,16 +1108,16 @@ def test_memory_worker_observation_writer_modes(tmp_path):
     )
 
     assert [tool.name for tool in agent_only[0].tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
     ]
     assert [tool.name for tool in worker_subagent[0].tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
         "record_observation",
     ]
     assert [tool.name for tool in worker_turn[0].tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
         "record_observation",
     ]
@@ -1157,6 +1381,58 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_sync_watcher_launches_synthesis_after_terminal_status(tmp_path, monkeypatch):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+    )
+    calls = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        def delete(self, _thread_id):
+            pass
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_launch_synthesis_worker",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        trigger="turn_memory_worker",
+    )
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+            synthesis_after=synthesis_after,
+        )
+        assert calls == [
+            {
+                "memory_dir": memory_dir,
+                "project_id": "P-project",
+                "trigger": "turn_memory_worker",
+            }
+        ]
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch):
     """Thread deletion is best-effort: a failure must not break accounting."""
     worker_activity.reset_memory_worker_status_for_tests()
@@ -1311,12 +1587,22 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
         "_spawn_memory_worker_status_thread",
         lambda **kwargs: spawned.append(kwargs),
     )
+    memory_dir = tmp_path / "memories"
+    synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        trigger="turn_memory_worker",
+    )
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_synthesis_after_worker_args",
+        lambda **_kwargs: synthesis_after,
+    )
 
     trajectory: list[memory_lifecycle.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
 
-    memory_dir = tmp_path / "memories"
     memory_lifecycle._launch_memory_worker(
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         memory_dir=memory_dir,
@@ -1329,7 +1615,12 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
     try:
         assert worker_activity.memory_worker_status().is_running is True
         assert spawned == [
-            {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
+            {
+                "url": "http://x",
+                "thread_id": "worker-thread",
+                "run_id": "run-1",
+                "synthesis_after": synthesis_after,
+            }
         ]
         profile_path = memory_dir / "profile" / "USER_PROFILE.md"
         profile_path.parent.mkdir(parents=True)
@@ -1385,8 +1676,18 @@ def test_async_memory_worker_launch_offloads_blocking_work(
     spawned = []
     monkeypatch.setattr(
         memory_lifecycle,
-        "_spawn_memory_worker_status_thread",
-        lambda **kwargs: spawned.append(kwargs),
+        "_spawn_memory_worker_status_task",
+        lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+    synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
+        memory_dir=tmp_path / "memories",
+        project_id="P-project",
+        trigger="turn_memory_worker",
+    )
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_synthesis_after_worker_args",
+        lambda **_kwargs: synthesis_after,
     )
 
     async def run():
@@ -1407,7 +1708,14 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
         assert worker_activity.memory_worker_status().is_running is True
         assert spawned == [
-            {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
+            (
+                (fake_client,),
+                {
+                    "thread_id": "worker-thread",
+                    "run_id": "run-1",
+                    "synthesis_after": synthesis_after,
+                },
+            )
         ]
     finally:
         worker_activity.reset_memory_worker_status_for_tests()

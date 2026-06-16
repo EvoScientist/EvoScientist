@@ -1,15 +1,18 @@
-"""Search helpers for file-backed observation memory."""
+"""Search helpers for EvoMemory."""
 
 from __future__ import annotations
 
 import math
 import re
 from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from .types import (
-    ObservationSearchDocument,
-    ObservationSearchHit,
-    ObservationSearchMode,
+    MemoryLevel,
+    MemorySearchDocument,
+    MemorySearchHit,
+    MemorySearchMode,
 )
 
 MIN_TOKEN_CHARS = 3
@@ -17,12 +20,22 @@ ID_MATCH_WEIGHT = 5.0
 SUMMARY_MATCH_WEIGHT = 3.0
 BODY_MATCH_WEIGHT = 1.0
 METADATA_MATCH_WEIGHT = 0.5
+KNOWLEDGE_SCORE_BOOST = 1.15
 IDF_SMOOTHING = 0.5
 IDF_OFFSET = 1.0
 DEFAULT_MATCH_LINES = 3
 DEFAULT_MATCH_CHARS = 240
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+
+@dataclass(frozen=True)
+class _SearchMatch:
+    """Internal search result before serialization to a memory hit."""
+
+    document: MemorySearchDocument
+    matches: list[str]
+    score: float | None = None
 
 
 def _compile_query_pattern(query: str) -> re.Pattern[str]:
@@ -42,16 +55,15 @@ def _tokens(text: str) -> list[str]:
     ]
 
 
-def _document_tokens(document: ObservationSearchDocument) -> set[str]:
+def _document_tokens(document: MemorySearchDocument) -> set[str]:
     """Return unique tokens used for IDF calculation."""
     return set(
         _tokens(
             " ".join(
                 [
-                    document.observation_id,
+                    document.memory_id,
                     document.summary,
-                    str(document.memory_type),
-                    str(document.scope),
+                    " ".join(document.search_metadata),
                     document.body,
                 ]
             )
@@ -59,8 +71,8 @@ def _document_tokens(document: ObservationSearchDocument) -> set[str]:
     )
 
 
-def _token_idf(documents: list[ObservationSearchDocument]) -> dict[str, float]:
-    """Compute smoothed IDF over the current observation corpus."""
+def _token_idf(documents: Sequence[MemorySearchDocument]) -> dict[str, float]:
+    """Compute smoothed IDF over the current memory corpus."""
     document_frequency: Counter[str] = Counter()
     for document in documents:
         document_frequency.update(_document_tokens(document))
@@ -74,14 +86,14 @@ def _token_idf(documents: list[ObservationSearchDocument]) -> dict[str, float]:
 def _ranked_score(
     *,
     query_tokens: set[str],
-    document: ObservationSearchDocument,
+    document: MemorySearchDocument,
     idf: dict[str, float],
 ) -> float:
     """Score a document with named token-overlap weights."""
-    id_tokens = set(_tokens(document.observation_id))
+    id_tokens = set(_tokens(document.memory_id))
     summary_tokens = set(_tokens(document.summary))
     body_tokens = set(_tokens(document.body))
-    metadata_tokens = set(_tokens(f"{document.memory_type} {document.scope}"))
+    metadata_tokens = set(_tokens(" ".join(document.search_metadata)))
 
     score = 0.0
     for token in query_tokens:
@@ -94,6 +106,8 @@ def _ranked_score(
             score += BODY_MATCH_WEIGHT * token_weight
         elif token in metadata_tokens:
             score += METADATA_MATCH_WEIGHT * token_weight
+    if document.memory_level == MemoryLevel.KNOWLEDGE:
+        score *= KNOWLEDGE_SCORE_BOOST
     return score
 
 
@@ -147,78 +161,95 @@ def _ranked_matching_lines(
 ) -> list[str]:
     """Return compact lines that explain a ranked match."""
     matches: list[str] = []
-
     scored_lines: list[tuple[int, int, str]] = []
+
     for index, line in enumerate(raw_line.strip() for raw_line in body.splitlines()):
         if not line:
             continue
         overlap = len(query_tokens & set(_tokens(line)))
         if overlap:
             scored_lines.append((-overlap, index, line[:max_chars]))
+
     for _, _, line in sorted(scored_lines):
         if line not in matches:
             matches.append(line)
         if len(matches) >= max_lines:
             return matches
+    return matches
 
-    return matches[:max_lines]
 
-
-def _observation_haystack(document: ObservationSearchDocument) -> str:
+def _haystack(document: MemorySearchDocument) -> str:
     """Return searchable text for regex search."""
     return "\n".join(
         [
-            document.observation_id,
+            document.memory_id,
             document.summary,
-            str(document.memory_type),
-            str(document.scope),
+            " ".join(document.search_metadata),
             document.body,
         ]
     )
 
 
-def _regex_search_documents(
+def _hit(match: _SearchMatch) -> MemorySearchHit:
+    """Serialize one internal match to the canonical search hit shape."""
+    document = match.document
+    hit: MemorySearchHit = {
+        "memory_id": document.memory_id,
+        "level": document.memory_level,
+        "path": document.path,
+        "memory_type": document.memory_type,
+        "scope": document.scope,
+        "summary": document.summary,
+        "matches": match.matches,
+    }
+    if match.score is not None:
+        hit["score"] = round(match.score, 2)
+    hit.update(document.search_hit_extra)
+    return hit
+
+
+def _regex_matches(
     *,
-    documents: list[ObservationSearchDocument],
+    documents: Sequence[MemorySearchDocument],
     query: str,
     limit: int,
-) -> list[ObservationSearchHit]:
-    """Search observations with grep-like regex semantics."""
+) -> list[_SearchMatch]:
+    """Search memory documents with grep-like regex semantics."""
     pattern = _compile_query_pattern(query)
-    hits: list[ObservationSearchHit] = []
+    hits: list[_SearchMatch] = []
     for document in documents:
-        if pattern.search(_observation_haystack(document)) is None:
+        if pattern.search(_haystack(document)) is None:
             continue
-        hit: ObservationSearchHit = {
-            "observation_id": document.observation_id,
-            "path": document.path,
-            "memory_type": document.memory_type,
-            "scope": document.scope,
-            "summary": document.summary,
-            "matches": _regex_matching_lines(
-                body=document.body,
-                summary=document.summary,
-                pattern=pattern,
-            ),
-        }
-        hits.append(hit)
+        hits.append(
+            _SearchMatch(
+                document=document,
+                matches=_regex_matching_lines(
+                    body=document.body,
+                    summary=document.summary,
+                    pattern=pattern,
+                ),
+            )
+        )
         if len(hits) >= limit:
             break
     return hits
 
 
-def _ranked_search_documents(
+def _ranked_matches(
     *,
-    documents: list[ObservationSearchDocument],
+    documents: Sequence[MemorySearchDocument],
     query: str,
     limit: int,
-) -> list[ObservationSearchHit]:
-    """Search observations with token-overlap ranking."""
+) -> list[_SearchMatch]:
+    """Search memory documents with token-overlap ranking."""
     if not documents:
         return []
     query_tokens = set(_tokens(query.replace("|", " ")))
     if not query_tokens:
-        return _regex_search_documents(documents=documents, query=query, limit=limit)
+        return [
+            _SearchMatch(document=match.document, matches=match.matches, score=0.0)
+            for match in _regex_matches(documents=documents, query=query, limit=limit)
+        ]
 
     idf = _token_idf(documents)
     scored = [
@@ -234,37 +265,32 @@ def _ranked_search_documents(
         for index, document in enumerate(documents)
     ]
     ranked = sorted(scored, key=lambda item: (-item[0], item[1]))
-    positive_ranked = [item for item in ranked if item[0] > 0]
-    if not positive_ranked:
-        return []
-    selected = positive_ranked[:limit]
+    selected = [item for item in ranked if item[0] > 0][:limit]
 
-    hits: list[ObservationSearchHit] = []
-    for score, _, document in selected:
-        hit: ObservationSearchHit = {
-            "observation_id": document.observation_id,
-            "path": document.path,
-            "memory_type": document.memory_type,
-            "scope": document.scope,
-            "summary": document.summary,
-            "matches": _ranked_matching_lines(
+    return [
+        _SearchMatch(
+            document=document,
+            matches=_ranked_matching_lines(
                 body=document.body,
                 query_tokens=query_tokens,
             ),
-            "score": round(score, 2),
-        }
-        hits.append(hit)
-    return hits
+            score=score,
+        )
+        for score, _, document in selected
+    ]
 
 
-def search_documents(
+def search_memory_documents(
     *,
-    documents: list[ObservationSearchDocument],
+    documents: Sequence[MemorySearchDocument],
     query: str,
     limit: int,
-    mode: ObservationSearchMode,
-) -> list[ObservationSearchHit]:
-    """Search parsed observation documents."""
-    if mode == ObservationSearchMode.REGEX:
-        return _regex_search_documents(documents=documents, query=query, limit=limit)
-    return _ranked_search_documents(documents=documents, query=query, limit=limit)
+    mode: MemorySearchMode,
+) -> list[MemorySearchHit]:
+    """Search parsed memory documents and return canonical memory hits."""
+    matches = (
+        _regex_matches(documents=documents, query=query, limit=limit)
+        if mode == MemorySearchMode.REGEX
+        else _ranked_matches(documents=documents, query=query, limit=limit)
+    )
+    return [_hit(match) for match in matches]

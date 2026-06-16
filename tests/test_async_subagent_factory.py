@@ -30,7 +30,7 @@ def _assert_subagent_memory_middleware(subagent: dict, *, source_agent: str) -> 
     )
 
     assert [tool.name for tool in memory_middleware.tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
         "record_observation",
     ]
@@ -71,6 +71,7 @@ def test_factory_requests_async_safe_middleware(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.memory_synthesis_enabled = True
     mock_get_cfg.return_value = cfg
     # Factory looks up the requested name in the loaded subagent specs;
     # any matching name is fine.
@@ -129,6 +130,7 @@ def test_inject_subagent_omits_memory_middleware_when_memory_disabled(
     cfg.memory_observations_enabled = False
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.memory_synthesis_enabled = True
     cfg.auxiliary_model = ""
     cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
@@ -159,6 +161,7 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.WORKER
     cfg.memory_workers_enabled = True
+    cfg.memory_synthesis_enabled = True
     cfg.auxiliary_model = ""
     cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
@@ -178,7 +181,7 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
         "EvoMemoryLifecycleMiddleware",
     )
     assert [tool.name for tool in memory_middleware.tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
     ]
     assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
@@ -202,6 +205,7 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.memory_synthesis_enabled = True
     cfg.auxiliary_model = ""
     cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
@@ -215,7 +219,7 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
     )
 
     assert [tool.name for tool in memory_middleware.tools] == [
-        "search_observations",
+        "search_memory",
         "read_memory",
         "record_observation",
     ]
@@ -262,6 +266,7 @@ def test_async_subagent_mode_filters_ask_user(
     cfg.memory_observations_enabled = True
     cfg.memory_observation_writer = MemoryObservationWriter.ALL
     cfg.memory_workers_enabled = True
+    cfg.memory_synthesis_enabled = True
     cfg.auxiliary_model = ""
     cfg.auxiliary_provider = ""
     mock_config.return_value = cfg

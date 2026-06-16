@@ -36,8 +36,8 @@ _DEFAULT_TIMEOUT_SECONDS: float = 60.0
 _DEFAULT_MAX_RESULT_CHARS: int = 10000
 
 _MEMORY_FIRST_INTERPRETER_PROMPT = (
-    "\n\nWhen memory tools (search_observations, read_memory) are available, use "
-    "them before `code_interpreter` for workspace inspection or implementation work."
+    "\n\nWhen memory tools (search_memory, read_memory) are available, use them "
+    "before `code_interpreter` for workspace inspection or implementation work."
 )
 
 
@@ -56,7 +56,7 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
 # reachable) are silently skipped by ``filter_tools_for_ptc``.
 _DEFAULT_PTC_ALLOWLIST: list[str] = [
     # Memory lookup (read-only, should precede workspace inspection)
-    "search_observations",
+    "search_memory",
     "read_memory",
     # Sub-agent dispatch — sync (deepagents) + async (langgraph dev)
     "task",

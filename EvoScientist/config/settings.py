@@ -211,6 +211,9 @@ class EvoScientistConfig:
     # Post-turn and post-subagent memory workers. Disable for no-background-memory
     # controls while still allowing live agents to read configured memory.
     memory_workers_enabled: bool = True
+    # Dedicated background agent that synthesizes observations into knowledge.
+    # Requires observation memory and memory workers.
+    memory_synthesis_enabled: bool = True
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -423,6 +426,7 @@ class MemoryControls:
     observations_enabled: bool
     observation_writer: MemoryObservationWriter
     workers_enabled: bool
+    synthesis_enabled: bool = True
 
     @classmethod
     def from_config(cls, config: EvoScientistConfig) -> MemoryControls:
@@ -431,6 +435,7 @@ class MemoryControls:
             observations_enabled=config.memory_observations_enabled,
             observation_writer=config.memory_observation_writer,
             workers_enabled=config.memory_workers_enabled,
+            synthesis_enabled=config.memory_synthesis_enabled,
         )
 
     @property
@@ -450,6 +455,14 @@ class MemoryControls:
                 return self.profile_enabled or self.observation_tool_enabled(target)
             case MemoryObservationTarget.AGENT:
                 return False
+
+    @property
+    def synthesis_worker_needed(self) -> bool:
+        return (
+            self.workers_enabled
+            and self.observations_enabled
+            and self.synthesis_enabled
+        )
 
 
 # =============================================================================
@@ -669,6 +682,7 @@ _ENV_MAPPINGS = {
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
     "memory_observation_writer": "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
     "memory_workers_enabled": "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
+    "memory_synthesis_enabled": "EVOSCIENTIST_MEMORY_SYNTHESIS_ENABLED",
 }
 
 

@@ -36,6 +36,11 @@ from ..config import (
     get_effective_config,
 )
 from ..memory import MemorySourceType
+from ..memory.synthesis import (
+    SynthesisLaunchArgs,
+    _alaunch_synthesis_worker,
+    _launch_synthesis_worker,
+)
 from ..memory.worker_activity import (
     forget_memory_worker,
     mark_memory_worker_finished,
@@ -747,6 +752,7 @@ def _memory_worker_middleware(
         observations_enabled=enable_observation_memory,
         observation_writer=observation_writer,
         workers_enabled=True,
+        synthesis_enabled=False,
     )
     enable_observation_tool = memory_controls.observation_tool_enabled(
         role.observation_target
@@ -1065,11 +1071,17 @@ def _spawn_memory_worker_status_thread(
     url: str,
     thread_id: str,
     run_id: str,
+    synthesis_after: SynthesisLaunchArgs | None = None,
 ) -> None:
     """Poll a sync-launched memory worker from a daemon thread."""
     thread = threading.Thread(
         target=_watch_memory_worker_run_sync,
-        kwargs={"url": url, "thread_id": thread_id, "run_id": run_id},
+        kwargs={
+            "url": url,
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "synthesis_after": synthesis_after,
+        },
         name="evomemory-worker-status",
         daemon=True,
     )
@@ -1081,6 +1093,7 @@ def _watch_memory_worker_run_sync(
     url: str,
     thread_id: str,
     run_id: str,
+    synthesis_after: SynthesisLaunchArgs | None = None,
 ) -> None:
     from langgraph_sdk import get_sync_client
 
@@ -1121,6 +1134,18 @@ def _watch_memory_worker_run_sync(
             mark_memory_worker_finished(thread_id, run_id)
             if client is not None:
                 _delete_memory_worker_thread(client, thread_id)
+            if synthesis_after is not None:
+                try:
+                    _launch_synthesis_worker(
+                        memory_dir=synthesis_after.memory_dir,
+                        project_id=synthesis_after.project_id,
+                        trigger=synthesis_after.trigger,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to launch EvoMemory synthesis worker",
+                        exc_info=True,
+                    )
         else:
             forget_memory_worker(thread_id, run_id)
 
@@ -1130,10 +1155,16 @@ def _spawn_memory_worker_status_task(
     *,
     thread_id: str,
     run_id: str,
+    synthesis_after: SynthesisLaunchArgs | None = None,
 ) -> None:
     """Poll an async-launched memory worker without blocking the agent."""
     task = asyncio.create_task(
-        _watch_memory_worker_run_async(client, thread_id=thread_id, run_id=run_id)
+        _watch_memory_worker_run_async(
+            client,
+            thread_id=thread_id,
+            run_id=run_id,
+            synthesis_after=synthesis_after,
+        )
     )
     _memory_worker_tracker_tasks.add(task)
     task.add_done_callback(_memory_worker_tracker_tasks.discard)
@@ -1144,6 +1175,7 @@ async def _watch_memory_worker_run_async(
     *,
     thread_id: str,
     run_id: str,
+    synthesis_after: SynthesisLaunchArgs | None = None,
 ) -> None:
     failures = 0
     worker_confirmed_finished = False
@@ -1181,8 +1213,36 @@ async def _watch_memory_worker_run_async(
             # worker is never stuck "running".
             await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
             await _adelete_memory_worker_thread(client, thread_id)
+            if synthesis_after is not None:
+                try:
+                    await _alaunch_synthesis_worker(
+                        memory_dir=synthesis_after.memory_dir,
+                        project_id=synthesis_after.project_id,
+                        trigger=synthesis_after.trigger,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to launch EvoMemory synthesis worker",
+                        exc_info=True,
+                    )
         else:
             forget_memory_worker(thread_id, run_id)
+
+
+def _synthesis_after_worker_args(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    role: MemoryLifecycleRole,
+) -> SynthesisLaunchArgs | None:
+    """Return synthesis launch metadata when the feature is enabled."""
+    if not MemoryControls.from_config(get_effective_config()).synthesis_worker_needed:
+        return None
+    return SynthesisLaunchArgs(
+        memory_dir=memory_dir,
+        project_id=project_id,
+        trigger=f"{role.value}_memory_worker",
+    )
 
 
 def _launch_memory_worker(
@@ -1229,11 +1289,17 @@ def _launch_memory_worker(
             memory_dir=memory_dir,
             before_outputs=before_outputs,
         )
+        synthesis_after = _synthesis_after_worker_args(
+            memory_dir=memory_dir,
+            project_id=project_id,
+            role=role,
+        )
         try:
             _spawn_memory_worker_status_thread(
                 url=url,
                 thread_id=worker_thread_id,
                 run_id=run_id,
+                synthesis_after=synthesis_after,
             )
         except Exception:
             mark_memory_worker_finished(worker_thread_id, run_id)
@@ -1284,11 +1350,17 @@ async def _alaunch_memory_worker(
             memory_dir=memory_dir,
             before_outputs=before_outputs,
         )
+        synthesis_after = _synthesis_after_worker_args(
+            memory_dir=memory_dir,
+            project_id=project_id,
+            role=role,
+        )
         try:
-            _spawn_memory_worker_status_thread(
-                url=url,
+            _spawn_memory_worker_status_task(
+                client,
                 thread_id=worker_thread_id,
                 run_id=run_id,
+                synthesis_after=synthesis_after,
             )
         except Exception:
             mark_memory_worker_finished(worker_thread_id, run_id)

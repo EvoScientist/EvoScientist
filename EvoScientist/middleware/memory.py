@@ -28,18 +28,21 @@ from langchain_core.messages import SystemMessage
 
 from .. import paths as _paths
 from ..memory import (
+    KnowledgeStatus,
     MemoryScope,
     MemorySourceType,
     MemoryType,
     create_read_memory_tool,
     create_record_observation_tool,
-    create_search_observations_tool,
+    create_search_memory_tool,
+    knowledge_search_documents,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_INLINE_PROFILE_CHARS = 24_000
 DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS = 12_000
+DEFAULT_MAX_INLINE_KNOWLEDGE_INDEX_CHARS = 12_000
 _LEGACY_MEMORY_FILENAME = "MEMORY.md"
 _LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
@@ -71,7 +74,9 @@ Profile update scope:
 """
 
 OBSERVATION_MEMORY_READ_INSTRUCTIONS = """
-Observation memory lives under `/memories/observations/`:
+Observation and synthesized knowledge memory live under `/memories/`:
+- `/memories/knowledge/global/`: cross-project synthesized knowledge.
+- `/memories/knowledge/projects/{project_id}/`: workspace-specific synthesized knowledge.
 - `/memories/observations/global/`: cross-project observations.
 - `/memories/observations/projects/{project_id}/`: observations for this workspace.
 
@@ -79,18 +84,21 @@ Required memory preflight:
 - For coding, debugging, research, planning, or evaluation tasks, complete this
   preflight before inspecting workspace/task files, running commands, editing
   files, delegating, using `code_interpreter`, or making a plan.
-- First use the inlined observation index. If a listed summary clearly matches
-  the task, call `read_memory` with that observation ID.
-- Otherwise, call `search_observations` with a few distinctive words or short
-  phrases that describe the issue, constraint, procedure, or prior result to
-  find. If one query misses, try 1-3 focused variants. Use `mode=regex` only
-  when exact grep-like matching is required. If a result looks promising but
-  the snippet is not enough to act on confidently, call `read_memory` with its
-  observation ID.
+- First use the inlined knowledge and observation indexes. If a listed summary
+  clearly matches the task, call `read_memory` with that K-* or O-* ID.
+- Otherwise, call `search_memory` with a few distinctive words or short phrases
+  that describe the issue, constraint, procedure, or prior result to find. It
+  prefers synthesized knowledge and omits observations already covered by active
+  knowledge. If one query misses, try 1-3 focused variants. Use `mode=regex`
+  only when exact grep-like matching is required.
+- Use `search_memory(memory_level=observation)` when you specifically need raw
+  observation evidence or want to inspect observations hidden behind a
+  synthesized knowledge record. If a result looks promising but the snippet is
+  not enough to act on confidently, call `read_memory` with its K-* or O-* ID.
 - After this preflight, use direct tools or `code_interpreter` to do or batch
   the actual workspace work as appropriate.
-- Mention the result briefly before continuing: observation IDs used, or that
-  no relevant observation was found. Keep this preflight short.
+- Mention the result briefly before continuing: memory IDs used, or that no
+  relevant memory was found. Keep this preflight short.
 """
 
 OBSERVATION_MEMORY_WRITE_INSTRUCTIONS = """
@@ -295,6 +303,18 @@ class ObservationIndexRecord:
     summary: str
 
 
+@dataclass(frozen=True)
+class KnowledgeIndexRecord:
+    """One active synthesized knowledge record listed in the prompt index."""
+
+    knowledge_id: str
+    memory_path: str
+    memory_type: MemoryType
+    scope: MemoryScope
+    summary: str
+    supporting_observation_ids: tuple[str, ...]
+
+
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
@@ -332,7 +352,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self.tools = []
         if enable_observation_memory:
             self.tools.append(
-                create_search_observations_tool(
+                create_search_memory_tool(
                     memory_dir=self._memory_dir,
                     project_id=self._project_id,
                 )
@@ -354,10 +374,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
             )
         self._observation_index_records = []
         self._observation_index_context = ""
+        self._knowledge_index_records = []
+        self._knowledge_index_context = ""
         if not enable_observation_memory:
             return
 
         self._refresh_observation_index_context()
+        self._refresh_knowledge_index_context()
 
     @property
     def project_id(self) -> str:
@@ -400,15 +423,17 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return True
 
     def _ensure_observation_dirs(self) -> None:
-        """Create the observation directories agents are prompted to search."""
+        """Create memory directories agents are prompted to search."""
         for memory_path in (
+            "/knowledge/global",
+            f"/knowledge/projects/{self._project_id}",
             "/observations/global",
             f"/observations/projects/{self._project_id}",
         ):
             try:
                 self._file_path(memory_path).mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                logger.warning("Failed to create observation memory dir: %s", e)
+                logger.warning("Failed to create memory dir: %s", e)
 
     def _ensure_profile_files(self) -> list[tuple[str, str]]:
         """Create the expected profile files if needed and return their contents."""
@@ -624,8 +649,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 "Search hints:",
                 "- Each line gives id, type/scope, path, and summary.",
                 (
-                    "- Use `search_observations` for ranked keyword search "
-                    "and `read_memory` for known observation IDs."
+                    "- Use `search_memory(memory_level=observation)` for "
+                    "ranked keyword search over raw observations and "
+                    "`read_memory` for known observation IDs."
                 ),
                 "- Use `mode=regex` only when exact grep-like matching is required.",
                 "- Search by id when you already know it from the index.",
@@ -708,6 +734,116 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._observation_index_context = context
         return context
 
+    def _read_knowledge_index_records(self) -> list[KnowledgeIndexRecord]:
+        """Load active summary-bearing knowledge records for prompt indexing."""
+        documents = knowledge_search_documents(
+            memory_dir=self._memory_dir,
+            project_id=self._project_id,
+            status=KnowledgeStatus.ACTIVE,
+        )
+        records = [
+            KnowledgeIndexRecord(
+                knowledge_id=document.knowledge_id,
+                memory_path=document.path.removeprefix("/memories"),
+                memory_type=document.memory_type,
+                scope=document.scope,
+                summary=document.summary,
+                supporting_observation_ids=document.supporting_observation_ids,
+            )
+            for document in documents
+        ]
+        return sorted(records, key=lambda record: record.knowledge_id)
+
+    def _knowledge_index_count_line(self, records: list[KnowledgeIndexRecord]) -> str:
+        """Return compact knowledge counts by scope and memory type."""
+        scope_counts = dict.fromkeys(MemoryScope, 0)
+        type_counts = dict.fromkeys(MemoryType, 0)
+        for record in records:
+            scope_counts[record.scope] += 1
+            type_counts[record.memory_type] += 1
+        return (
+            f"Counts: total={len(records)}; "
+            f"scope global={scope_counts[MemoryScope.GLOBAL]}, "
+            f"project={scope_counts[MemoryScope.PROJECT]}; "
+            f"type semantic={type_counts[MemoryType.SEMANTIC]}, "
+            f"procedural={type_counts[MemoryType.PROCEDURAL]}, "
+            f"episodic={type_counts[MemoryType.EPISODIC]}."
+        )
+
+    def _knowledge_index_context_from_records(
+        self,
+        records: list[KnowledgeIndexRecord],
+        *,
+        max_inline_chars: int = DEFAULT_MAX_INLINE_KNOWLEDGE_INDEX_CHARS,
+    ) -> str:
+        """Build the active knowledge index injected into the system prompt."""
+        header = "\n".join(
+            [
+                "<knowledge_memory>",
+                self._knowledge_index_count_line(records),
+            ]
+        )
+        hints = "\n".join(
+            [
+                "Search hints:",
+                "- Each line gives id, type/scope, path, support IDs, and summary.",
+                "- Use `search_memory` for ranked search across knowledge and observations.",
+                "- Use `read_memory` for known K-* or O-* IDs.",
+                (
+                    "- Use `search_memory(memory_level=observation)` when raw "
+                    "observation evidence is needed."
+                ),
+            ]
+        )
+        if not records:
+            return "\n".join([header, hints, "</knowledge_memory>"])
+
+        lines = [
+            f"- {record.knowledge_id} "
+            f"[{record.memory_type.value}/{record.scope.value}] "
+            f"{_agent_path(record.memory_path)} "
+            f"supports={','.join(record.supporting_observation_ids) or 'none'}: "
+            f"{record.summary}"
+            for record in records
+        ]
+        full = "\n".join(
+            [
+                header,
+                "Active synthesized knowledge:",
+                *lines,
+                hints,
+                "</knowledge_memory>",
+            ]
+        )
+        if len(full) <= max_inline_chars:
+            return full
+        return "\n".join(
+            [
+                header,
+                "Knowledge summaries are too large to inline; search on demand.",
+                hints,
+                "</knowledge_memory>",
+            ]
+        )
+
+    def _refresh_knowledge_index_context(self) -> str:
+        """Refresh the prompt knowledge index from current memory files."""
+        if not self._enable_observation_memory:
+            return ""
+        try:
+            self._ensure_observation_dirs()
+            records = self._read_knowledge_index_records()
+            context = self._knowledge_index_context_from_records(records)
+        except OSError as e:
+            logger.warning("Failed to refresh knowledge memory index: %s", e)
+            return self._knowledge_index_context
+        except Exception as e:
+            logger.debug("Failed to refresh knowledge memory index: %s", e)
+            return self._knowledge_index_context
+        self._knowledge_index_records = records
+        self._knowledge_index_context = context
+        return context
+
     def _observation_memory_instructions(self) -> str:
         if not self._enable_observation_memory:
             return ""
@@ -753,6 +889,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
     def _memory_context_for_request(
         self,
         *,
+        knowledge_index_context: str,
         observation_index_context: str,
         profile_content: str,
     ) -> str:
@@ -761,6 +898,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             part
             for part in (
                 self._memory_instructions_context(),
+                knowledge_index_context,
                 observation_index_context,
                 self._profile_memory_context(profile_content),
             )
@@ -771,6 +909,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self,
         request: ModelRequest,
         *,
+        knowledge_index_context: str,
         observation_index_context: str,
         profile_content: str,
     ) -> ModelRequest:
@@ -779,6 +918,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return request
 
         injection = self._memory_context_for_request(
+            knowledge_index_context=knowledge_index_context,
             observation_index_context=observation_index_context,
             profile_content=profile_content,
         )
@@ -794,29 +934,38 @@ class EvoMemoryMiddleware(AgentMiddleware):
         """Apply memory injection for synchronous model calls."""
         return self._inject_memory_context(
             request,
+            knowledge_index_context=self._refresh_knowledge_index_context(),
             observation_index_context=self._refresh_observation_index_context(),
             profile_content=self._profile_context_for_request(),
         )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for asynchronous model calls."""
+        knowledge_index_context = ""
         observation_index_context = ""
         profile_context = ""
 
         if self._enable_observation_memory and self._enable_profile_memory:
-            observation_index_context, profile_context = await asyncio.gather(
+            (
+                knowledge_index_context,
+                observation_index_context,
+                profile_context,
+            ) = await asyncio.gather(
+                asyncio.to_thread(self._refresh_knowledge_index_context),
                 asyncio.to_thread(self._refresh_observation_index_context),
                 asyncio.to_thread(self._read_profile_memory),
             )
         elif self._enable_observation_memory:
-            observation_index_context = await asyncio.to_thread(
-                self._refresh_observation_index_context
+            knowledge_index_context, observation_index_context = await asyncio.gather(
+                asyncio.to_thread(self._refresh_knowledge_index_context),
+                asyncio.to_thread(self._refresh_observation_index_context),
             )
         elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
 
         return self._inject_memory_context(
             request,
+            knowledge_index_context=knowledge_index_context,
             observation_index_context=observation_index_context,
             profile_content=profile_context,
         )

@@ -5,7 +5,8 @@
         "writing-agent": "EvoScientist.langgraph_dev.graphs:writing_agent",
         "data-analysis-agent": "EvoScientist.langgraph_dev.graphs:data_analysis_agent",
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
-        "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker"
+        "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker",
+        "evomemory-synthesizer": "EvoScientist.langgraph_dev.graphs:evomemory_synthesizer"
     },
     "checkpointer": {
         "backend": "custom",

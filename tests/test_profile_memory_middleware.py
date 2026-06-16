@@ -9,10 +9,12 @@ from langchain_core.messages import SystemMessage
 import EvoScientist.middleware.memory as memory_module
 from EvoScientist import paths
 from EvoScientist.memory.observations import (
+    record_observation_file,
+)
+from EvoScientist.memory.types import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
-    record_observation_file,
 )
 
 
@@ -60,7 +62,7 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     assert _sorted_tool_names(middleware) == [
         "read_memory",
         "record_observation",
-        "search_observations",
+        "search_memory",
     ]
     assert (memories / "profile" / "SOUL.md").exists()
     assert (memories / "profile" / "USER_PROFILE.md").exists()
@@ -68,6 +70,8 @@ def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypat
     assert list((memories / "profile" / "projects").glob("*/PROJECT_PROFILE.md"))
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))
+    assert (memories / "knowledge" / "global").is_dir()
+    assert list((memories / "knowledge" / "projects").glob("P-*"))
     assert content.index("base system") < content.index("<memory_instructions>")
     assert content.index("<memory_instructions>") < content.index(
         "<observation_memory>"
@@ -113,7 +117,7 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
 
     assert _sorted_tool_names(middleware) == [
         "read_memory",
-        "search_observations",
+        "search_memory",
     ]
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
@@ -155,13 +159,15 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
 
     assert _sorted_tool_names(middleware) == [
         "read_memory",
-        "search_observations",
+        "search_memory",
     ]
     assert not (memories / "profile").exists()
     assert (memories / "observations" / "global").is_dir()
     assert list((memories / "observations" / "projects").glob("P-*"))
+    assert (memories / "knowledge" / "global").is_dir()
+    assert list((memories / "knowledge" / "projects").glob("P-*"))
     assert "<observation_memory>" in content
-    assert "search_observations" in content
+    assert "search_memory" in content
     assert "read_memory" in content
     assert "record_observation" not in content
 

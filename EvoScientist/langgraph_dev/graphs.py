@@ -22,6 +22,7 @@ because it follows a different mechanism (re-exporting a lazily-constructed
 attribute), not the yaml-driven factory.
 """
 
+from EvoScientist.memory.synthesis import build_synthesis_agent_graph
 from EvoScientist.middleware.memory_lifecycle import (
     MemoryLifecycleRole,
     build_memory_worker_graph,
@@ -32,3 +33,4 @@ writing_agent = build_async_subagent_graph("writing-agent")
 data_analysis_agent = build_async_subagent_graph("data-analysis-agent")
 evomemory_subagent_worker = build_memory_worker_graph(MemoryLifecycleRole.SUBAGENT)
 evomemory_turn_worker = build_memory_worker_graph(MemoryLifecycleRole.TURN)
+evomemory_synthesizer = build_synthesis_agent_graph()
