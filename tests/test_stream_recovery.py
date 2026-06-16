@@ -71,8 +71,8 @@ def test_recovery_clears_stuck_state_after_crash():
     _run(_clear_interrupted_graph_state(app, cfg))
 
     snap = app.get_state(cfg)
-    assert snap.next == ()              # stuck state actually cleared
-    assert snap.values == {"x": 1}      # channel values (history) preserved
+    assert snap.next == ()  # stuck state actually cleared
+    assert snap.values == {"x": 1}  # channel values (history) preserved
 
     # And the graph is genuinely unstuck: a fresh run completes (a: +1, b: +100)
     # instead of replaying the dead node.
@@ -82,7 +82,7 @@ def test_recovery_clears_stuck_state_after_crash():
 def test_recovery_preserves_pending_hitl_interrupt():
     app = _interrupting_app()
     cfg = {"configurable": {"thread_id": "t1"}}
-    app.invoke({"x": 0}, cfg)           # parks at interrupt()
+    app.invoke({"x": 0}, cfg)  # parks at interrupt()
     before = app.get_state(cfg)
     assert before.next == ("ask",)
     assert before.interrupts
@@ -90,5 +90,5 @@ def test_recovery_preserves_pending_hitl_interrupt():
     _run(_clear_interrupted_graph_state(app, cfg))
 
     after = app.get_state(cfg)
-    assert after.next == ("ask",)       # interrupt left intact, still resumable
+    assert after.next == ("ask",)  # interrupt left intact, still resumable
     assert after.interrupts
