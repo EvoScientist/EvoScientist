@@ -34,6 +34,7 @@ from ..gateway import (
 from ..paths import DATA_DIR
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
+from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
     DANGEROUS_BANNER_LABEL,
@@ -882,8 +883,6 @@ def run_textual_interactive(
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
-            from EvoScientist.cli import async_notifier
-
             try:
                 msg = _message_queue.get_nowait()
             except queue.Empty:
@@ -921,8 +920,6 @@ def run_textual_interactive(
             ``asyncio.ensure_future(...)`` scheduled by ``_poll_channel_queue``
             and silently kill notification + channel dispatch.
             """
-            from EvoScientist.cli import async_notifier
-
             target_tid = self._conversation_tid
             try:
                 try:
@@ -1001,7 +998,7 @@ def run_textual_interactive(
 
         async def _read_async_tasks_tui(
             self, target_thread_id: str | None
-        ) -> dict[str, dict]:
+        ) -> async_notifier.AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
 
             ``target_thread_id`` is captured by ``_consume_notifications_tui`` at
@@ -1012,10 +1009,10 @@ def run_textual_interactive(
             if agent is None or not target_thread_id:
                 return {}
             try:
-                snap = await agent.aget_state(
-                    {"configurable": {"thread_id": target_thread_id}}
+                return await async_notifier.read_async_tasks_from_gateway(
+                    self._graph_gateway(),
+                    target_thread_id,
                 )
-                return (snap.values or {}).get("async_tasks") or {}
             except Exception:
                 return {}
 
@@ -2730,8 +2727,12 @@ def run_textual_interactive(
                 # Only gate on agent readiness for commands that need it —
                 # recovery commands like ``/mcp add`` must run even when
                 # ``_await_agent_ready`` would hang on a broken MCP load.
-                cmd, cmd_args = cmd_manager.resolve(command) or (None, [])
+                parsed = cmd_manager.resolve(command)
+                cmd = None
+                cmd_args: list[str] = []
                 agent = None
+                if parsed is not None:
+                    cmd, cmd_args = parsed
                 if cmd is not None and cmd.needs_agent(cmd_args):
                     try:
                         agent = await self._await_agent_ready()
@@ -2750,6 +2751,8 @@ def run_textual_interactive(
                 )
 
                 if await cmd_manager.execute(command, ctx):
+                    if cmd is None:
+                        return
                     await _sync_tui_command_completion(
                         self,
                         ctx,

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from .. import sessions as session_store
 from .types import (
     GraphEvent,
+    GraphStateValues,
     RunRequest,
     ThreadResolution,
     ThreadStore,
@@ -108,3 +109,10 @@ class LocalGraphGateway:
             metadata=request.metadata,
             media=request.media,
         )
+
+    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+        snapshot = await self.agent.aget_state({"configurable": {"thread_id": thread_id}})
+        values = getattr(snapshot, "values", None)
+        if not isinstance(values, dict):
+            return {}
+        return {str(key): value for key, value in values.items()}

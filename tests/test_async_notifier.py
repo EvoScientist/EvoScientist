@@ -12,6 +12,7 @@ from EvoScientist.cli.async_notifier import (
     format_batch_message,
     format_notification_lines,
 )
+from tests.fakes import FakeGraphGateway
 
 
 def test_notification_dataclass_fields():
@@ -47,6 +48,21 @@ def _drain_queue(q):
             items.append(q.get_nowait())
         except queue.Empty:
             return items
+
+
+def test_read_async_tasks_from_gateway_filters_state_values(run_async):
+    gateway = FakeGraphGateway(
+        state_values={
+            "async_tasks": {
+                "task-1": {"status": "success"},
+                "task-2": "not-a-task-map",
+            }
+        }
+    )
+
+    tasks = run_async(async_notifier.read_async_tasks_from_gateway(gateway, "tid"))
+
+    assert tasks == {"task-1": {"status": "success"}}
 
 
 def test_watcher_pushes_notification_on_stream_end(run_async):

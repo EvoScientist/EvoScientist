@@ -15,6 +15,7 @@ from EvoScientist.channels.bus.events import InboundMessage, OutboundMessage
 from EvoScientist.gateway import (
     GraphEvent,
     GraphGateway,
+    GraphStateValues,
     RunRequest,
     ThreadResolution,
     ThreadStore,
@@ -202,10 +203,12 @@ class FakeGraphGateway(GraphGateway):
         events: Iterable[GraphEvent] | None = None,
         *,
         stream: FakeStreamFactory | None = None,
+        state_values: GraphStateValues | None = None,
         thread_store: ThreadStore | None = None,
     ) -> None:
         self.events = list(events or [])
         self.stream = stream
+        self.state_values = state_values or {}
         self.thread_store = thread_store or FakeThreadStore()
         self.requests: list[RunRequest] = []
 
@@ -253,6 +256,9 @@ class FakeGraphGateway(GraphGateway):
                 yield event
 
         return _events()
+
+    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+        return self.state_values
 
 
 class FakeLangGraphRunModule:

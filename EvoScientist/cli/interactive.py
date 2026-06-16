@@ -37,6 +37,7 @@ from ..gateway import RuntimeGateways, create_runtime_gateways
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
+from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
     DANGEROUS_BANNER_LABEL,
@@ -1086,7 +1087,7 @@ def cmd_interactive(
 
             async def _read_current_async_tasks(
                 target_thread_id: str | None,
-            ) -> dict[str, dict]:
+            ) -> async_notifier.AsyncTasksState:
                 """Snapshot async_tasks from the active agent state for dedup.
 
                 Uses ``agent_loader.agent`` (the currently loaded agent) and
@@ -1098,17 +1099,15 @@ def cmd_interactive(
                 if agent is None or not target_thread_id:
                     return {}
                 try:
-                    snap = await agent.aget_state(
-                        {"configurable": {"thread_id": target_thread_id}}
+                    return await async_notifier.read_async_tasks_from_gateway(
+                        runtime_gateways.graph_gateway(agent),
+                        target_thread_id,
                     )
-                    return (snap.values or {}).get("async_tasks") or {}
                 except Exception:
                     return {}
 
             async def _check_channel_queue() -> None:
                 """Poll the channel + notification queues and dispatch."""
-                from EvoScientist.cli import async_notifier
-
                 while True:
                     try:
                         msg = _message_queue.get_nowait()

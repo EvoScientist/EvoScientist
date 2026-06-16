@@ -20,6 +20,7 @@ from ..gateway import RuntimeGateways, ThreadStore, create_runtime_gateways
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
+from . import async_notifier
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
@@ -1267,8 +1268,6 @@ def _serve_drain_notifications(
     """
     import asyncio as _aio
 
-    from EvoScientist.cli import async_notifier
-
     from .tui_runtime import run_streaming
 
     def _run_notification_message(text: str, notifs: list) -> None:
@@ -1312,16 +1311,14 @@ def _serve_drain_notifications(
     async def _run_notification_message_async(text: str, notifs: list) -> None:
         await _aio.to_thread(_run_notification_message, text, notifs)
 
-    async def _read_async_tasks() -> dict:
-        agent = runtime_state.agent
+    async def _read_async_tasks() -> async_notifier.AsyncTasksState:
         thread_id = runtime_state.thread_id
-        if agent is None or not thread_id:
+        if not thread_id:
             return {}
-        try:
-            snap = await agent.aget_state({"configurable": {"thread_id": thread_id}})
-            return (snap.values or {}).get("async_tasks") or {}
-        except Exception:
-            return {}
+        return await async_notifier.read_async_tasks_from_gateway(
+            runtime_state.runtime_gateways.graph_gateway(runtime_state.agent),
+            thread_id,
+        )
 
     async def _consume() -> None:
         await async_notifier.consume_notifications(
@@ -1542,8 +1539,6 @@ def serve(
                     break
 
             # Poll notification queue when idle (no channel message was pending).
-            from EvoScientist.cli import async_notifier
-
             if async_notifier.has_pending_notifications(runtime_state.thread_id):
                 _serve_drain_notifications(
                     runtime_state=runtime_state,

@@ -27,7 +27,13 @@ from ..stream.summarization import (
     _summarization_event_signature,
 )
 from ..stream.v3_payloads import _as_raw_map, _event_namespace
-from .types import GraphEvent, RunRequest, ThreadResolution, ThreadStore
+from .types import (
+    GraphEvent,
+    GraphStateValues,
+    RunRequest,
+    ThreadResolution,
+    ThreadStore,
+)
 
 DEFAULT_GRAPH_ID = "EvoScientist"
 _THREAD_SEARCH_LIMIT = 1000
@@ -399,17 +405,22 @@ class LangGraphServerGateway:
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         return self._stream_events(request)
 
+    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+        state = await self.thread_store.client.threads.get_state(thread_id)
+        values = state.get("values")
+        if not isinstance(values, dict):
+            return {}
+        return {str(key): value for key, value in values.items()}
+
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
         baseline_summarization_signature: tuple[object, ...] | None = None
         try:
-            state = await self.thread_store.client.threads.get_state(request.thread_id)
-            values = state.get("values")
-            if isinstance(values, dict):
-                baseline_event = _find_summarization_event_payload(values)
-                baseline_summarization_signature = _summarization_event_signature(
-                    baseline_event
-                )
+            values = await self.get_state_values(request.thread_id)
+            baseline_event = _find_summarization_event_payload(values)
+            baseline_summarization_signature = _summarization_event_signature(
+                baseline_event
+            )
         except Exception:
             pass
 

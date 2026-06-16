@@ -10,6 +10,7 @@ from langgraph.types import Command
 
 GraphEvent: TypeAlias = dict[str, Any]
 GraphRunInput: TypeAlias = str | Command
+GraphStateValues: TypeAlias = dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,3 +105,6 @@ class GraphGateway(Protocol):
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         """Stream normalized EvoScientist graph events for a run."""
+
+    async def get_state_values(self, thread_id: str) -> GraphStateValues:
+        """Return the graph state values for a thread."""

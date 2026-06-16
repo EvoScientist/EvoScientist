@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -128,6 +129,21 @@ def test_local_graph_gateway_delegates_thread_operations():
         ("thread_exists", "abc12345"),
         ("delete_thread", "abc12345"),
     ]
+
+
+def test_local_graph_gateway_reads_state_values():
+    agent = MagicMock()
+    agent.aget_state = AsyncMock(
+        return_value=SimpleNamespace(values={"async_tasks": {"task-1": {}}})
+    )
+    gateway = LocalGraphGateway(agent)
+
+    values = run_async(gateway.get_state_values("abc12345"))
+
+    assert values == {"async_tasks": {"task-1": {}}}
+    agent.aget_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "abc12345"}}
+    )
 
 
 def test_run_streaming_can_consume_injected_gateway():
@@ -329,6 +345,23 @@ def test_runtime_gateways_can_use_langgraph_server_backend():
     assert isinstance(runtime_gateways.thread_store, LangGraphServerThreadStore)
     assert isinstance(gateway, LangGraphServerGateway)
     assert gateway.thread_store is runtime_gateways.thread_store
+
+
+def test_langgraph_server_gateway_reads_state_values():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {"async_tasks": {"task-1": {}}}}},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    values = run_async(gateway.get_state_values("abc12345"))
+
+    assert values == {"async_tasks": {"task-1": {}}}
 
 
 def test_langgraph_server_gateway_streams_root_protocol_events():
