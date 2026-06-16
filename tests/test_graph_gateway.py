@@ -192,7 +192,6 @@ def test_resume_command_consumes_context_gateway():
         ui=ui,
         workspace_dir="/old",
         graph_gateway=FakeGraphGateway(thread_store=thread_store),
-        thread_store=thread_store,
     )
 
     run_async(ResumeCommand().execute(ctx, ["abc"]))
@@ -223,6 +222,7 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     interactive.cmd_run(
         agent,
         "hello",
+        thread_id="generated-thread",
         show_thinking=False,
         workspace_dir="/tmp/ws",
         model="test-model",

@@ -20,7 +20,6 @@ def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
         ui=ui,
         workspace_dir=workspace_dir,
         graph_gateway=FakeGraphGateway(thread_store=store),
-        thread_store=store,
     ), ui
 
 
@@ -61,7 +60,6 @@ class TestResumeCommand:
             resolved_thread_id="picked-tid",
         )
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        ctx.thread_store = store
         _run(ResumeCommand().execute(ctx, []))
         ui.wait_for_thread_pick.assert_awaited_once()
         ui.handle_session_resume.assert_awaited_once()
@@ -74,7 +72,6 @@ class TestResumeCommand:
         threads = [{"thread_id": "t1", "preview": "", "message_count": 0}]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        ctx.thread_store = store
         _run(ResumeCommand().execute(ctx, []))
         ui.handle_session_resume.assert_not_called()
 

@@ -20,7 +20,6 @@ def _ctx(**overrides):
         ui=ui,
         workspace_dir=overrides.pop("workspace_dir", "/ws"),
         graph_gateway=FakeGraphGateway(thread_store=store),
-        thread_store=store,
     ), ui
 
 
@@ -55,7 +54,6 @@ class TestThreadsCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        ctx.thread_store = store
         _run(ThreadsCommand().execute(ctx, []))
         ui.mount_renderable.assert_called_once()
         table = ui.mount_renderable.call_args.args[0]
@@ -82,7 +80,6 @@ class TestThreadsCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        ctx.thread_store = store
         _run(ThreadsCommand().execute(ctx, []))
         ui.append_system.assert_not_called()
 
@@ -102,7 +99,6 @@ class TestThreadsCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        ctx.thread_store = store
         _run(ThreadsCommand().execute(ctx, []))
         # Channel mode: no Model column. 4 columns: ID, Preview, Msgs, Last Used.
         table = ui.mount_renderable.call_args.args[0]

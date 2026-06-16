@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from ..gateway import GraphGateway, ThreadStore
+    from ..gateway import GraphGateway
 
 
 @dataclass
@@ -56,7 +56,7 @@ class CommandUI(Protocol):
     def clear_chat(self) -> None: ...
     def request_quit(self) -> None: ...
     def force_quit(self) -> None: ...
-    def start_new_session(self) -> None: ...
+    async def start_new_session(self) -> None: ...
     async def handle_session_resume(
         self, thread_id: str, workspace_dir: str | None = None
     ) -> None: ...
@@ -91,7 +91,6 @@ class CommandContext:
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
     graph_gateway: GraphGateway | None = None
-    thread_store: ThreadStore | None = None
     command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.

@@ -17,7 +17,6 @@ def _ctx(thread_id="current", thread_store=None):
         thread_id=thread_id,
         ui=ui,
         graph_gateway=FakeGraphGateway(thread_store=store),
-        thread_store=store,
     ), ui
 
 
@@ -97,6 +96,5 @@ class TestDeleteCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        ctx.thread_store = store
         _run(DeleteCommand().execute(ctx, []))
         ui.wait_for_thread_pick.assert_awaited_once()

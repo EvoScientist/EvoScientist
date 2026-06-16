@@ -29,7 +29,6 @@ from ..gateway import (
     GraphTarget,
     RunRequest,
     RuntimeGateways,
-    ThreadStore,
     create_runtime_gateways,
 )
 from ..paths import DATA_DIR
@@ -292,7 +291,6 @@ def run_textual_interactive(
 
     runtime_gateways = create_runtime_gateways()
     graph_gateway = runtime_gateways.graph_gateway
-    thread_store = runtime_gateways.thread_store
 
     try:
         from textual.app import App, ComposeResult
@@ -413,7 +411,6 @@ def run_textual_interactive(
             thread_id_value: str,
             workspace: str | None,
             checkpointer: Any,
-            thread_store: ThreadStore,
             runtime_gateways: RuntimeGateways,
             channel_send_thinking_value: bool = True,
             resumed: bool = False,
@@ -431,7 +428,6 @@ def run_textual_interactive(
             self._conversation_tid = thread_id_value
             self._workspace_dir = workspace
             self._checkpointer = checkpointer
-            self._thread_store = thread_store
             self._runtime_gateways = runtime_gateways
             self._channel_send_thinking = channel_send_thinking_value
             self._resumed = resumed
@@ -655,14 +651,18 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
-        def start_new_session(self) -> None:
+        async def start_new_session(self) -> None:
             # Clear all widgets except #welcome
             self.clear_chat()
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
             if not workspace_fixed:
                 self._workspace_dir = create_session_workspace(run_name)
-            self._conversation_tid = self._thread_store.generate_thread_id()
+            self._conversation_tid = (
+                await self._runtime_gateways.graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=self._workspace_dir)
+                )
+            )
             # Background reload: next user message awaits it.
             self._start_background_agent_load(self._workspace_dir)
             self._status_started_at = datetime.now()
@@ -2264,7 +2264,6 @@ def run_textual_interactive(
                     on_cmd_completed=self._on_channel_cmd_completed,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
-                    thread_store=self._thread_store,
                 )
                 if _slash_handled:
                     # A channel-issued /new or /resume rotates the thread in
@@ -2760,7 +2759,6 @@ def run_textual_interactive(
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
-                    thread_store=self._thread_store,
                 )
 
                 if await cmd_manager.execute(command, ctx):
@@ -2946,7 +2944,7 @@ def run_textual_interactive(
                         self._conversation_tid,
                         model_name=self._current_model,
                         pending_user_text=pending,
-                        thread_store=self._thread_store,
+                        graph_gateway=self._runtime_gateways.graph_gateway,
                     )
             elif self._status_last_input_tokens is not None:
                 self._status_base_snapshot = make_usage_status_snapshot(
@@ -2957,7 +2955,7 @@ def run_textual_interactive(
                 self._status_base_snapshot = await build_session_status_snapshot(
                     self._conversation_tid,
                     model_name=self._current_model,
-                    thread_store=self._thread_store,
+                    graph_gateway=self._runtime_gateways.graph_gateway,
                 )
             if reset_streaming_text:
                 self._status_streaming_text = ""
@@ -3250,7 +3248,6 @@ def run_textual_interactive(
                 thread_id_value=effective_thread_id,
                 workspace=effective_workspace,
                 checkpointer=checkpointer,
-                thread_store=thread_store,
                 runtime_gateways=runtime_gateways,
                 channel_send_thinking_value=channel_send_thinking,
                 resumed=resumed,

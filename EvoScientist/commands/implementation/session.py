@@ -206,7 +206,7 @@ class NewCommand(Command):
     description = "Start a new session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        ctx.ui.start_new_session()
+        await ctx.ui.start_new_session()
 
 
 class ClearCommand(Command):

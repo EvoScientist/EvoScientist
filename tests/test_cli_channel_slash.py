@@ -14,18 +14,16 @@ from EvoScientist.cli.channel import (
 from EvoScientist.cli.channel import (
     dispatch_channel_slash_command as _dispatch_channel_slash_command,
 )
-from EvoScientist.gateway import ThreadStore
 from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
-def _thread_store() -> ThreadStore:
+def _thread_store() -> FakeThreadStore:
     return FakeThreadStore()
 
 
 def dispatch_channel_slash_command(*args, **kwargs):
-    thread_store = kwargs.setdefault("thread_store", _thread_store())
-    kwargs.setdefault("graph_gateway", FakeGraphGateway(thread_store=thread_store))
+    kwargs.setdefault("graph_gateway", FakeGraphGateway())
     return _dispatch_channel_slash_command(*args, **kwargs)
 
 
@@ -148,16 +146,16 @@ def test_successful_slash_execution_sets_response_and_breadcrumb():
     assert any("Executed command from" in t for t in breadcrumbs)
 
 
-def test_slash_dispatch_passes_thread_store_to_command_context():
+def test_slash_dispatch_passes_graph_gateway_to_command_context():
     msg = _make_msg()
     fake_cmd = MagicMock()
     fake_cmd.needs_agent.return_value = False
     append = MagicMock()
-    thread_store = _thread_store()
+    graph_gateway = FakeGraphGateway(thread_store=_thread_store())
     captured = {}
 
     async def _execute(_content, ctx):
-        captured["thread_store"] = ctx.thread_store
+        captured["graph_gateway"] = ctx.graph_gateway
         return True
 
     with (
@@ -179,12 +177,12 @@ def test_slash_dispatch_passes_thread_store_to_command_context():
                 workspace_dir="/tmp",
                 checkpointer=None,
                 append_system=append,
-                thread_store=thread_store,
+                graph_gateway=graph_gateway,
             )
         )
 
     assert handled is True
-    assert captured["thread_store"] is thread_store
+    assert captured["graph_gateway"] is graph_gateway
 
 
 def test_needs_agent_awaits_loader_and_passes_result():

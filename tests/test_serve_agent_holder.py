@@ -67,7 +67,6 @@ def _runtime_state(
         thread_id=thread_id,
         workspace_dir=workspace_dir,
         config=config,
-        thread_store=store,
         runtime_gateways=runtime_gateways or _runtime_gateways(store),
     )
 
@@ -309,7 +308,7 @@ def test_start_new_session_cb_rotates_thread_id():
         state,
         runtime,
     )
-    cb()
+    _run(cb())
 
     assert state.thread_id == "freshly-generated-tid"
     assert runtime.thread_id == "freshly-generated-tid"
@@ -326,7 +325,7 @@ def test_start_new_session_cb_leaves_agent_alone():
     )
 
     cb = _make_serve_start_new_session_cb(state)
-    cb()
+    _run(cb())
 
     assert state.agent is agent
 

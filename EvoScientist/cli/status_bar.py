@@ -16,7 +16,7 @@ from ..llm.context_window import (
 from ..memory.worker_activity import MemoryWorkerStatusSnapshot, memory_worker_status
 
 if TYPE_CHECKING:
-    from ..gateway import ThreadStore
+    from ..gateway import GraphGateway
 
 _FALLBACK_CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW_FALLBACK
 STATUS_BAR_BG = "#171a20"
@@ -411,12 +411,12 @@ async def build_session_status_snapshot(
     model_name: str | None = None,
     model_obj: Any | None = None,
     pending_user_text: str | None = None,
-    thread_store: ThreadStore,
+    graph_gateway: GraphGateway,
 ) -> SessionStatusSnapshot:
     """Count current thread context and return a display snapshot."""
     resolved_name = _resolve_model_name(model_name, model_obj)
     window = _resolve_context_window(model_obj)
-    messages = list(await thread_store.get_thread_messages(thread_id))
+    messages = list(await graph_gateway.get_thread_messages(thread_id))
 
     pending = (pending_user_text or "").strip()
     if pending:

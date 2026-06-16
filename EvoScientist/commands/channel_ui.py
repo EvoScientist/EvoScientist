@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .base import CommandUI
@@ -27,7 +28,7 @@ class ChannelCommandUI(CommandUI):
         *,
         graph_gateway: GraphGateway,
         append_system_callback: Any = None,
-        start_new_session_callback: Any = None,
+        start_new_session_callback: Callable[[], Awaitable[None]] | None = None,
         handle_session_resume_callback: Any = None,
     ):
         self.msg = channel_msg
@@ -180,9 +181,9 @@ class ChannelCommandUI(CommandUI):
     def force_quit(self) -> None:
         self.request_quit()
 
-    def start_new_session(self) -> None:
+    async def start_new_session(self) -> None:
         if self.start_new_session_callback:
-            self.start_new_session_callback()
+            await self.start_new_session_callback()
         else:
             self.append_system(
                 "New session requested. Please restart the channel link or use /new if supported."

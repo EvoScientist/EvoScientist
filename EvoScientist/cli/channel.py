@@ -28,7 +28,7 @@ from ..commands.base import ChannelRuntime
 from ..stream.console import console
 
 if TYPE_CHECKING:
-    from ..gateway import GraphGateway, ThreadStore
+    from ..gateway import GraphGateway
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -258,13 +258,12 @@ async def dispatch_channel_slash_command(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
-    start_new_session_cb: Callable[[], None] | None = None,
+    start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     channel_runtime: ChannelRuntime | None = None,
     graph_gateway: GraphGateway | None = None,
-    thread_store: ThreadStore | None = None,
 ) -> bool:
     """Dispatch a slash command from a channel message.
 
@@ -331,7 +330,6 @@ async def dispatch_channel_slash_command(
             on_cmd_completed=on_cmd_completed,
             channel_runtime=channel_runtime,
             graph_gateway=graph_gateway,
-            thread_store=thread_store,
         )
     except Exception as exc:
         # Last-ditch safety: any uncaught exception from inside the
@@ -362,13 +360,12 @@ async def _dispatch_channel_slash_impl(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
-    start_new_session_cb: Callable[[], None] | None,
+    start_new_session_cb: Callable[[], Awaitable[None]] | None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None,
     channel_runtime: ChannelRuntime | None,
     graph_gateway: GraphGateway | None,
-    thread_store: ThreadStore | None,
 ) -> bool:
     """Inner body of ``dispatch_channel_slash_command``.
 
@@ -413,7 +410,6 @@ async def _dispatch_channel_slash_impl(
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
         graph_gateway=graph_gateway,
-        thread_store=thread_store,
     )
 
     try:

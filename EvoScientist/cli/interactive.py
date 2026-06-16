@@ -376,11 +376,10 @@ def cmd_interactive(
 
     runtime_gateways = create_runtime_gateways()
     graph_gateway = runtime_gateways.graph_gateway
-    thread_store = runtime_gateways.thread_store
 
     # Mutable state for async loop
     state: dict[str, Any] = {
-        "thread_id": thread_id or thread_store.generate_thread_id(),
+        "thread_id": thread_id or "",
         "workspace_dir": workspace_dir,
         "running": True,
         "resumed": False,
@@ -471,7 +470,7 @@ def cmd_interactive(
                     state["thread_id"],
                     model_name=model,
                     pending_user_text=pending,
-                    thread_store=thread_store,
+                    graph_gateway=graph_gateway,
                 )
         elif state["status_last_input_tokens"] is not None:
             state["status_base_snapshot"] = make_usage_status_snapshot(
@@ -482,7 +481,7 @@ def cmd_interactive(
             state["status_base_snapshot"] = await build_session_status_snapshot(
                 state["thread_id"],
                 model_name=model,
-                thread_store=thread_store,
+                graph_gateway=graph_gateway,
             )
         if reset_streaming_text:
             state["status_streaming_text"] = ""
@@ -637,11 +636,15 @@ def cmd_interactive(
         """Async main loop with prompt_async and channel queue checking."""
         nonlocal model
         async with get_checkpointer() as checkpointer:
+            if not state["thread_id"]:
+                state["thread_id"] = await graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=state["workspace_dir"])
+                )
             # Lifecycle callbacks (new / resume) need ``checkpointer``
             # in scope — define the ``rich_ui`` adapter here rather than
             # at the outer function level.
 
-            def _on_start_new_session() -> None:
+            async def _on_start_new_session() -> None:
                 """NewCommand callback — rotate workspace (if not fixed),
                 issue a new thread id, reset session-scoped status fields,
                 and kick off background agent reload. The dispatch block
@@ -650,7 +653,9 @@ def cmd_interactive(
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 if not workspace_fixed:
                     state["workspace_dir"] = _create_session_workspace(run_name)
-                state["thread_id"] = thread_store.generate_thread_id()
+                state["thread_id"] = await graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=state["workspace_dir"])
+                )
                 state["resumed"] = False
                 state["status_started_at"] = datetime.now()
                 state["status_last_input_tokens"] = None
@@ -975,7 +980,6 @@ def cmd_interactive(
                         on_cmd_completed=_on_channel_cmd_completed,
                         channel_runtime=channel_runtime,
                         graph_gateway=runtime_gateways.graph_gateway,
-                        thread_store=thread_store,
                     )
                     if _slash_handled:
                         # A channel-issued /new or /resume rotates the thread
@@ -1270,7 +1274,6 @@ def cmd_interactive(
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                                 channel_runtime=channel_runtime,
                                 graph_gateway=runtime_gateways.graph_gateway,
-                                thread_store=thread_store,
                             )
                             await cmd_manager.execute(user_input, ctx)
 
@@ -1428,7 +1431,7 @@ def cmd_interactive(
 def cmd_run(
     agent: "CompiledStateGraph",
     prompt: str,
-    thread_id: str | None = None,
+    thread_id: str,
     show_thinking: bool = True,
     workspace_dir: str | None = None,
     model: str | None = None,
@@ -1441,15 +1444,12 @@ def cmd_run(
     Args:
         agent: Compiled agent graph
         prompt: User prompt
-        thread_id: Optional thread ID (generates new one if None)
+        thread_id: Thread ID for conversation persistence.
         show_thinking: Whether to display thinking panels
         workspace_dir: Per-session workspace directory path
         model: Model name for checkpoint metadata
         ui_backend: UI backend ('cli' or 'tui')
     """
-    thread_store = runtime_gateways.thread_store
-    thread_id = thread_id or thread_store.generate_thread_id()
-
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
     console.print(sep)

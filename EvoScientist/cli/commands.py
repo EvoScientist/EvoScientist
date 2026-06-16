@@ -1,5 +1,6 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import asyncio
 import logging
 import os
 import queue
@@ -16,7 +17,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from ..commands.base import ChannelRuntime, Command, CommandContext
-from ..gateway import GraphTarget, RuntimeGateways, ThreadStore, create_runtime_gateways
+from ..gateway import GraphTarget, RuntimeGateways, create_runtime_gateways
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
@@ -825,7 +826,6 @@ class ServeRuntimeState:
     thread_id: str
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
-    thread_store: ThreadStore
     runtime_gateways: RuntimeGateways
     resume_warning_thread_id: str | None = None
 
@@ -869,8 +869,10 @@ def _make_serve_start_new_session_cb(
     subsequent messages land on the new thread.
     """
 
-    def _cb() -> None:
-        new_tid = runtime_state.thread_store.generate_thread_id()
+    async def _cb() -> None:
+        new_tid = await runtime_state.runtime_gateways.graph_gateway.create_thread(
+            GraphTarget(workspace_dir=runtime_state.workspace_dir)
+        )
         runtime_state.set_thread_id(new_tid, channel_runtime)
         console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
 
@@ -1053,7 +1055,7 @@ def _serve_process_message(
     show_thinking: bool,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
-    start_new_session_cb: Callable[[], None] | None = None,
+    start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     channel_runtime: ChannelRuntime | None = None,
 ) -> None:
     """Process a single channel message in headless serve mode.
@@ -1074,7 +1076,6 @@ def _serve_process_message(
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
-    thread_store = runtime_state.thread_store
     runtime_gateways = runtime_state.runtime_gateways
 
     if not _claim_or_complete_channel_request(msg):
@@ -1196,7 +1197,6 @@ def _serve_process_message(
                     ),
                     channel_runtime=channel_runtime,
                     graph_gateway=runtime_gateways.graph_gateway,
-                    thread_store=thread_store,
                 )
             )
         except Exception as exc:
@@ -1450,8 +1450,9 @@ def serve(
     agent = _load_agent(workspace_dir=ws, config=config)
 
     runtime_gateways = create_runtime_gateways()
-    thread_store = runtime_gateways.thread_store
-    tid = thread_store.generate_thread_id()
+    tid = asyncio.run(
+        runtime_gateways.graph_gateway.create_thread(GraphTarget(workspace_dir=ws))
+    )
 
     # Mutable runtime shared with _serve_process_message so channel slash
     # commands can update the active agent/thread/workspace for subsequent
@@ -1461,7 +1462,6 @@ def serve(
         thread_id=tid,
         workspace_dir=ws,
         config=config,
-        thread_store=thread_store,
         runtime_gateways=runtime_gateways,
     )
 

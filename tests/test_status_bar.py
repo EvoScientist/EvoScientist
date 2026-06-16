@@ -21,7 +21,7 @@ from EvoScientist.cli.status_bar import (
     status_style_name,
     trim_status_text,
 )
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _render_fragments(fragments: list[tuple[str, str]]) -> str:
@@ -231,7 +231,11 @@ def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
         build_session_status_snapshot(
             "thread-1",
             pending_user_text="pending",
-            thread_store=FakeThreadStore(messages=[HumanMessage(content="existing")]),
+            graph_gateway=FakeGraphGateway(
+                thread_store=FakeThreadStore(
+                    messages=[HumanMessage(content="existing")]
+                )
+            ),
         )
     )
 
