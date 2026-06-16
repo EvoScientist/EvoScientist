@@ -21,7 +21,7 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
-from ..gateway import GraphGateway, RunRequest
+from ..gateway import GraphGateway, GraphRunInput, RunRequest
 from ..paths import resolve_virtual_path
 from .console import console
 from .diff_format import build_edit_diff
@@ -1265,7 +1265,7 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
 
 def _run_streaming(
     agent: Any,
-    message: Any,
+    message: GraphRunInput,
     thread_id: str,
     show_thinking: bool,
     interactive: bool,

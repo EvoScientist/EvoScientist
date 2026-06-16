@@ -6,14 +6,17 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias
 
+from langgraph.types import Command
+
 GraphEvent: TypeAlias = dict[str, Any]
+GraphRunInput: TypeAlias = str | Command
 
 
 @dataclass(frozen=True, slots=True)
 class RunRequest:
     """A graph turn request, independent of the UI that initiated it."""
 
-    message: Any
+    message: GraphRunInput
     thread_id: str
     metadata: dict[str, Any] | None = None
     media: list[str] | None = None

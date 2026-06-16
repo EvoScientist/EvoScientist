@@ -10,7 +10,7 @@ import mimetypes
 import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeAlias
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.types import Command, Interrupt
@@ -36,6 +36,8 @@ from .v3_payloads import (
     _text_from_content,
     _usage_counts,
 )
+
+GraphRunInput: TypeAlias = str | Command
 
 
 def _is_interrupt_error_message(message: object) -> bool:
@@ -555,7 +557,7 @@ class _V3EventProcessor:
 
 async def stream_agent_events(
     agent: Any,
-    message: str | Command,
+    message: GraphRunInput,
     thread_id: str,
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,

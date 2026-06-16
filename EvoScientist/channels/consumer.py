@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from ..gateway import GraphRunInput
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import InboundMessage, OutboundMessage
@@ -468,7 +469,7 @@ class InboundConsumer:
         """Stream agent events with HITL interrupt handling."""
         from ..stream.events import stream_agent_events
 
-        stream_input: Any = msg.content
+        stream_input: GraphRunInput = msg.content
 
         try:
             if channel:

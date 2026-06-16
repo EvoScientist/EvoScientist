@@ -11,6 +11,7 @@ from .runtime import GraphGatewayFactory, RuntimeGateways, create_runtime_gatewa
 from .types import (
     GraphEvent,
     GraphGateway,
+    GraphRunInput,
     RunRequest,
     ThreadResolution,
     ThreadStore,
@@ -20,6 +21,7 @@ __all__ = [
     "GraphEvent",
     "GraphGateway",
     "GraphGatewayFactory",
+    "GraphRunInput",
     "LocalGraphGateway",
     "LocalThreadStore",
     "RunRequest",
