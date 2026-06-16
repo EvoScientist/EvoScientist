@@ -16,7 +16,7 @@ from EvoScientist.cli.channel import (
 )
 from EvoScientist.gateway import ThreadStore
 from tests.conftest import run_async as _run
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _thread_store() -> ThreadStore:
@@ -24,7 +24,8 @@ def _thread_store() -> ThreadStore:
 
 
 def dispatch_channel_slash_command(*args, **kwargs):
-    kwargs.setdefault("thread_store", _thread_store())
+    thread_store = kwargs.setdefault("thread_store", _thread_store())
+    kwargs.setdefault("graph_gateway", FakeGraphGateway(thread_store=thread_store))
     return _dispatch_channel_slash_command(*args, **kwargs)
 
 
@@ -83,7 +84,7 @@ def test_unresolved_slash_returns_false():
     assert handled is False
 
 
-def test_known_slash_requires_thread_store():
+def test_known_slash_requires_graph_gateway():
     msg = _make_msg()
     fake_cmd = MagicMock()
     fake_cmd.needs_agent.return_value = False
@@ -107,7 +108,7 @@ def test_known_slash_requires_thread_store():
 
     assert handled is True
     mock_set_resp.assert_called_once()
-    assert "requires a thread_store" in mock_set_resp.call_args.args[1]
+    assert "requires a graph_gateway" in mock_set_resp.call_args.args[1]
 
 
 def test_successful_slash_execution_sets_response_and_breadcrumb():

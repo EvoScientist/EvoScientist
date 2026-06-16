@@ -3,19 +3,21 @@
 from unittest.mock import AsyncMock, MagicMock
 
 from tests.conftest import run_async as _run
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(thread_id="current", thread_store=None):
     from EvoScientist.commands.base import CommandContext
 
+    store = thread_store or FakeThreadStore()
     ui = MagicMock()
     ui.supports_interactive = True
     return CommandContext(
         agent=None,
         thread_id=thread_id,
         ui=ui,
-        thread_store=thread_store or FakeThreadStore(),
+        graph_gateway=FakeGraphGateway(thread_store=store),
+        thread_store=store,
     ), ui
 
 
@@ -93,6 +95,8 @@ class TestDeleteCommand:
                 "updated_at": None,
             }
         ]
-        ctx.thread_store = FakeThreadStore(threads=threads)
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        ctx.thread_store = store
         _run(DeleteCommand().execute(ctx, []))
         ui.wait_for_thread_pick.assert_awaited_once()

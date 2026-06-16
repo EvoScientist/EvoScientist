@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from ..gateway import ThreadStore
+    from ..gateway import GraphGateway, ThreadStore
 
 
 @dataclass
@@ -90,6 +90,7 @@ class CommandContext:
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
+    graph_gateway: GraphGateway | None = None
     thread_store: ThreadStore | None = None
     command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system

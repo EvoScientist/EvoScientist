@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 from rich.table import Table
 
 from tests.conftest import run_async as _run
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(**overrides):
@@ -13,12 +13,14 @@ def _ctx(**overrides):
 
     ui = MagicMock()
     ui.supports_interactive = overrides.pop("supports_interactive", True)
+    store = overrides.pop("thread_store", FakeThreadStore())
     return CommandContext(
         agent=None,
         thread_id=overrides.pop("thread_id", "tid-1"),
         ui=ui,
         workspace_dir=overrides.pop("workspace_dir", "/ws"),
-        thread_store=overrides.pop("thread_store", FakeThreadStore()),
+        graph_gateway=FakeGraphGateway(thread_store=store),
+        thread_store=store,
     ), ui
 
 
@@ -51,7 +53,9 @@ class TestThreadsCommand:
                 "updated_at": None,
             },
         ]
-        ctx.thread_store = FakeThreadStore(threads=threads)
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        ctx.thread_store = store
         _run(ThreadsCommand().execute(ctx, []))
         ui.mount_renderable.assert_called_once()
         table = ui.mount_renderable.call_args.args[0]
@@ -76,7 +80,9 @@ class TestThreadsCommand:
                 "updated_at": None,
             }
         ]
-        ctx.thread_store = FakeThreadStore(threads=threads)
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        ctx.thread_store = store
         _run(ThreadsCommand().execute(ctx, []))
         ui.append_system.assert_not_called()
 
@@ -94,7 +100,9 @@ class TestThreadsCommand:
                 "updated_at": None,
             }
         ]
-        ctx.thread_store = FakeThreadStore(threads=threads)
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        ctx.thread_store = store
         _run(ThreadsCommand().execute(ctx, []))
         # Channel mode: no Model column. 4 columns: ID, Preview, Msgs, Last Used.
         table = ui.mount_renderable.call_args.args[0]

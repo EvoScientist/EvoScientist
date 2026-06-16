@@ -16,7 +16,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from ..commands.base import ChannelRuntime, Command, CommandContext
-from ..gateway import RuntimeGateways, ThreadStore, create_runtime_gateways
+from ..gateway import GraphTarget, RuntimeGateways, ThreadStore, create_runtime_gateways
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
@@ -1195,6 +1195,7 @@ def _serve_process_message(
                         config=runtime_state.config,
                     ),
                     channel_runtime=channel_runtime,
+                    graph_gateway=runtime_gateways.graph_gateway,
                     thread_store=thread_store,
                 )
             )
@@ -1237,7 +1238,7 @@ def _serve_process_message(
                 hitl_prompt_fn=_hitl_prompt,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
-                gateway=runtime_gateways.graph_gateway(runtime_state.agent),
+                gateway=runtime_gateways.graph_gateway,
             )
         except Exception as e:
             response = f"Error: {e}"
@@ -1291,9 +1292,7 @@ def _serve_drain_notifications(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
-                gateway=runtime_state.runtime_gateways.graph_gateway(
-                    runtime_state.agent
-                ),
+                gateway=runtime_state.runtime_gateways.graph_gateway,
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
@@ -1316,7 +1315,11 @@ def _serve_drain_notifications(
         if not thread_id:
             return {}
         return await async_notifier.read_async_tasks_from_gateway(
-            runtime_state.runtime_gateways.graph_gateway(runtime_state.agent),
+            runtime_state.runtime_gateways.graph_gateway,
+            GraphTarget(
+                local_graph=runtime_state.agent,
+                workspace_dir=runtime_state.workspace_dir,
+            ),
             thread_id,
         )
 
@@ -2215,23 +2218,21 @@ def _main_callback(
         from .resume_hint import print_resume_hint
 
         runtime_gateways = create_runtime_gateways()
-        thread_store = runtime_gateways.thread_store
+        graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
                 # Resolve resume target first so a bad --resume/--thread-id
                 # exits before the slow _load_agent() provider setup.
                 if thread_id:
-                    resolved, matches = await thread_store.resolve_thread_id_prefix(
-                        thread_id
-                    )
-                    if resolved:
-                        tid = resolved
-                    elif matches:
+                    resolution = await graph_gateway.resolve_thread(thread_id)
+                    if resolution.thread_id:
+                        tid = resolution.thread_id
+                    elif resolution.matches:
                         console.print(
                             f"[yellow]Ambiguous thread ID '{escape(thread_id)}'. Matches:[/yellow]"
                         )
-                        for s in matches:
+                        for s in resolution.matches:
                             console.print(f"  [cyan]{escape(s)}[/cyan]")
                         raise typer.Exit(1)
                     else:
@@ -2240,7 +2241,7 @@ def _main_callback(
                         )
                         raise typer.Exit(1)
                 else:
-                    tid = thread_store.generate_thread_id()
+                    tid = await graph_gateway.create_thread()
                 console.print("[dim]Loading agent...[/dim]")
                 agent = _load_agent(
                     workspace_dir=workspace_dir,

@@ -33,7 +33,7 @@ import EvoScientist.cli.channel as _ch_mod
 
 from ..commands.base import Command, CommandContext
 from ..commands.manager import manager as cmd_manager
-from ..gateway import RuntimeGateways, create_runtime_gateways
+from ..gateway import GraphTarget, RuntimeGateways, create_runtime_gateways
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
@@ -345,23 +345,6 @@ def cmd_interactive(
         width = console.size.width
         console.print(Text("\u2500" * width, style="dim"))
 
-    runtime_gateways = create_runtime_gateways()
-    thread_store = runtime_gateways.thread_store
-
-    # Mutable state for async loop
-    state: dict[str, Any] = {
-        "thread_id": thread_id or thread_store.generate_thread_id(),
-        "workspace_dir": workspace_dir,
-        "running": True,
-        "resumed": False,
-        "ui_backend": resolved_ui_backend,
-        "status_started_at": datetime.now(),
-        "status_base_snapshot": make_empty_status_snapshot(model),
-        "status_snapshot": make_empty_status_snapshot(model),
-        "status_streaming_text": "",
-        "status_last_input_tokens": None,
-    }
-
     from ..commands.base import ChannelRuntime
 
     channel_runtime = ChannelRuntime()
@@ -390,6 +373,24 @@ def cmd_interactive(
         _load_agent,
         on_progress=_on_mcp_progress,
     )
+
+    runtime_gateways = create_runtime_gateways()
+    graph_gateway = runtime_gateways.graph_gateway
+    thread_store = runtime_gateways.thread_store
+
+    # Mutable state for async loop
+    state: dict[str, Any] = {
+        "thread_id": thread_id or thread_store.generate_thread_id(),
+        "workspace_dir": workspace_dir,
+        "running": True,
+        "resumed": False,
+        "ui_backend": resolved_ui_backend,
+        "status_started_at": datetime.now(),
+        "status_base_snapshot": make_empty_status_snapshot(model),
+        "status_snapshot": make_empty_status_snapshot(model),
+        "status_streaming_text": "",
+        "status_last_input_tokens": None,
+    }
 
     def _on_status_after_compact(input_tokens: int) -> None:
         """Mirror inline /compact post-update: refresh both fields so the
@@ -545,14 +546,14 @@ def cmd_interactive(
 
     async def _resolve_thread_id(tid: str) -> str | None:
         """Resolve a (possibly partial) thread ID. Returns full ID or None."""
-        resolved, matches = await thread_store.resolve_thread_id_prefix(tid)
-        if resolved:
-            return resolved
-        if matches:
+        resolution = await graph_gateway.resolve_thread(tid)
+        if resolution.thread_id:
+            return resolution.thread_id
+        if resolution.matches:
             console.print(
                 f"[yellow]Ambiguous thread ID '{escape(tid)}'. Matches:[/yellow]"
             )
-            for s in matches:
+            for s in resolution.matches:
                 console.print(f"  [cyan]{s}[/cyan]")
             return None
         console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
@@ -560,7 +561,7 @@ def cmd_interactive(
 
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
-        messages = await thread_store.get_thread_messages(thread_id)
+        messages = await graph_gateway.get_thread_messages(thread_id)
         if not messages:
             return
 
@@ -743,7 +744,7 @@ def cmd_interactive(
             if thread_id:
                 resolved = await _resolve_thread_id(thread_id)
                 if resolved:
-                    meta = await thread_store.get_thread_metadata(resolved)
+                    meta = await graph_gateway.get_thread_metadata(resolved)
                     ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
                     state["thread_id"] = resolved
                     state["resumed"] = True
@@ -776,7 +777,7 @@ def cmd_interactive(
                     # input is still seeded in state["thread_id"] from init.
                     # Replace with a fresh ID so a new session isn't
                     # checkpointed under the bad prefix.
-                    state["thread_id"] = thread_store.generate_thread_id()
+                    state["thread_id"] = await graph_gateway.create_thread()
 
             # Kick off agent construction (MCP tool enumeration is the
             # slow part) in the background so the banner and prompt can
@@ -973,6 +974,7 @@ def cmd_interactive(
                         await_agent_ready=_await_agent_ready,
                         on_cmd_completed=_on_channel_cmd_completed,
                         channel_runtime=channel_runtime,
+                        graph_gateway=runtime_gateways.graph_gateway,
                         thread_store=thread_store,
                     )
                     if _slash_handled:
@@ -1008,7 +1010,7 @@ def cmd_interactive(
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
                             cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
-                            gateway=runtime_gateways.graph_gateway(ready_agent),
+                            gateway=runtime_gateways.graph_gateway,
                         )
                     except Exception as e:
                         response = f"Error: {e}"
@@ -1065,7 +1067,7 @@ def cmd_interactive(
                     metadata=meta,
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
-                    gateway=runtime_gateways.graph_gateway(ready_agent),
+                    gateway=runtime_gateways.graph_gateway,
                 )
                 _notif_tid = target_thread_id or state["thread_id"]
                 if _ch_mod.publish_to_channel_origin(_notif_tid, response):
@@ -1100,7 +1102,11 @@ def cmd_interactive(
                     return {}
                 try:
                     return await async_notifier.read_async_tasks_from_gateway(
-                        runtime_gateways.graph_gateway(agent),
+                        runtime_gateways.graph_gateway,
+                        GraphTarget(
+                            local_graph=agent,
+                            workspace_dir=state["workspace_dir"],
+                        ),
                         target_thread_id,
                     )
                 except Exception:
@@ -1263,6 +1269,7 @@ def cmd_interactive(
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                                 channel_runtime=channel_runtime,
+                                graph_gateway=runtime_gateways.graph_gateway,
                                 thread_store=thread_store,
                             )
                             await cmd_manager.execute(user_input, ctx)
@@ -1356,7 +1363,7 @@ def cmd_interactive(
                             metadata=meta,
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
-                            gateway=runtime_gateways.graph_gateway(ready_agent),
+                            gateway=runtime_gateways.graph_gateway,
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1396,7 +1403,7 @@ def cmd_interactive(
                 current_tid = state.get("thread_id")
                 if current_tid:
                     try:
-                        if await thread_store.thread_exists(current_tid):
+                        if await graph_gateway.thread_exists(current_tid):
                             state["resume_hint_thread_id"] = current_tid
                     except Exception:
                         _channel_logger.debug(
@@ -1463,7 +1470,7 @@ def cmd_run(
             show_thinking=show_thinking,
             interactive=False,
             metadata=meta,
-            gateway=runtime_gateways.graph_gateway(agent),
+            gateway=runtime_gateways.graph_gateway,
         )
     except Exception as e:
         error_msg = str(e)

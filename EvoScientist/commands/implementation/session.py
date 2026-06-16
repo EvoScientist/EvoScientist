@@ -5,15 +5,15 @@ from typing import ClassVar
 
 from rich.table import Table
 
-from ...gateway import ThreadStore
+from ...gateway import GraphGateway
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
 
-def _thread_store(ctx: CommandContext) -> ThreadStore:
-    if ctx.thread_store is None:
-        raise RuntimeError("Session commands require a thread_store")
-    return ctx.thread_store
+def _graph_gateway(ctx: CommandContext) -> GraphGateway:
+    if ctx.graph_gateway is None:
+        raise RuntimeError("Session commands require a graph_gateway")
+    return ctx.graph_gateway
 
 
 class CompactCommand(Command):
@@ -82,8 +82,8 @@ class ThreadsCommand(Command):
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...sessions import _format_relative_time, short_thread_id
 
-        thread_store = _thread_store(ctx)
-        threads = await thread_store.list_threads(
+        gateway = _graph_gateway(ctx)
+        threads = await gateway.list_threads(
             limit=0,
             include_message_count=True,
             include_preview=True,
@@ -143,10 +143,10 @@ class ResumeCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        thread_store = _thread_store(ctx)
+        gateway = _graph_gateway(ctx)
         arg = args[0] if args else ""
         if not arg:
-            threads = await thread_store.list_threads(
+            threads = await gateway.list_threads(
                 limit=0,
                 include_message_count=True,
                 include_preview=True,
@@ -170,7 +170,7 @@ class ResumeCommand(Command):
         if not resolved:
             return
 
-        metadata = await thread_store.get_thread_metadata(resolved)
+        metadata = await gateway.get_thread_metadata(resolved)
         restored_workspace = (metadata or {}).get("workspace_dir", "")
         if restored_workspace:
             ctx.workspace_dir = restored_workspace
@@ -182,16 +182,16 @@ class ResumeCommand(Command):
             await ctx.ui.handle_session_resume(resolved, restored_workspace)
 
     async def _resolve_thread_id(self, prefix: str, ctx: CommandContext) -> str | None:
-        resolved, matches = await _thread_store(ctx).resolve_thread_id_prefix(prefix)
-        if resolved:
-            return resolved
+        resolution = await _graph_gateway(ctx).resolve_thread(prefix)
+        if resolution.thread_id:
+            return resolution.thread_id
 
-        if matches:
+        if resolution.matches:
             ctx.ui.append_system(
                 f"Ambiguous thread ID '{prefix}'. Use a longer prefix.",
                 style="yellow",
             )
-            for thread in matches:
+            for thread in resolution.matches:
                 ctx.ui.append_system(f"  - {thread}", style="dim")
             return None
 
@@ -234,10 +234,10 @@ class DeleteCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        thread_store = _thread_store(ctx)
+        gateway = _graph_gateway(ctx)
         arg = args[0] if args else ""
         if not arg:
-            threads = await thread_store.list_threads(
+            threads = await gateway.list_threads(
                 limit=0,
                 include_message_count=True,
                 include_preview=True,
@@ -257,16 +257,17 @@ class DeleteCommand(Command):
             arg = selected
 
         # Resolve thread_id
-        resolved, matches = await thread_store.resolve_thread_id_prefix(arg)
-        if matches:
+        resolution = await gateway.resolve_thread(arg)
+        if resolution.matches:
             ctx.ui.append_system(
                 f"Ambiguous thread ID '{arg}'. Use a longer prefix.",
                 style="yellow",
             )
-            for thread in matches:
+            for thread in resolution.matches:
                 ctx.ui.append_system(f"  - {thread}", style="dim")
             return
 
+        resolved = resolution.thread_id
         if not resolved:
             ctx.ui.append_system(f"Session '{arg}' not found.", style="red")
             return
@@ -278,7 +279,7 @@ class DeleteCommand(Command):
             )
             return
 
-        deleted = await thread_store.delete_thread(resolved)
+        deleted = await gateway.delete_thread(resolved)
         if deleted:
             ctx.ui.append_system(f"Deleted session {resolved}.", style="green")
         else:

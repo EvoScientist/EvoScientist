@@ -9,7 +9,7 @@ import pytest
 from EvoScientist.commands.channel_ui import ChannelCommandUI
 from EvoScientist.gateway import ThreadStore
 from tests.conftest import run_async as _run
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _make_ui(*, thread_store: ThreadStore, callback=None, bus_ref=None):
@@ -25,7 +25,7 @@ def _make_ui(*, thread_store: ThreadStore, callback=None, bus_ref=None):
         ),
         append_system_callback=lambda text, style="dim": captured.append(text),
         handle_session_resume_callback=callback,
-        thread_store=thread_store,
+        graph_gateway=FakeGraphGateway(thread_store=thread_store),
     )
     return ui, captured
 

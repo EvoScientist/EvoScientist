@@ -3,12 +3,13 @@
 from unittest.mock import AsyncMock, MagicMock
 
 from tests.conftest import run_async as _run
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
     from EvoScientist.commands.base import CommandContext
 
+    store = thread_store or FakeThreadStore()
     ui = MagicMock()
     ui.supports_interactive = True
     ui.wait_for_thread_pick = AsyncMock()
@@ -18,7 +19,8 @@ def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
         thread_id=thread_id,
         ui=ui,
         workspace_dir=workspace_dir,
-        thread_store=thread_store or FakeThreadStore(),
+        graph_gateway=FakeGraphGateway(thread_store=store),
+        thread_store=store,
     ), ui
 
 
@@ -54,10 +56,12 @@ class TestResumeCommand:
         ctx, ui = _ctx()
         ui.wait_for_thread_pick.return_value = "picked-tid"
         threads = [{"thread_id": "picked-tid", "preview": "p", "message_count": 1}]
-        ctx.thread_store = FakeThreadStore(
+        store = FakeThreadStore(
             threads=threads,
             resolved_thread_id="picked-tid",
         )
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        ctx.thread_store = store
         _run(ResumeCommand().execute(ctx, []))
         ui.wait_for_thread_pick.assert_awaited_once()
         ui.handle_session_resume.assert_awaited_once()
@@ -68,7 +72,9 @@ class TestResumeCommand:
         ctx, ui = _ctx()
         ui.wait_for_thread_pick.return_value = None
         threads = [{"thread_id": "t1", "preview": "", "message_count": 0}]
-        ctx.thread_store = FakeThreadStore(threads=threads)
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        ctx.thread_store = store
         _run(ResumeCommand().execute(ctx, []))
         ui.handle_session_resume.assert_not_called()
 

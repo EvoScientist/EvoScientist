@@ -14,7 +14,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.console import Group
 from rich.text import Text
@@ -26,6 +26,7 @@ from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
 from ..gateway import (
     GraphGateway,
+    GraphTarget,
     RunRequest,
     RuntimeGateways,
     ThreadStore,
@@ -73,6 +74,9 @@ from .status_bar import (
 )
 
 _channel_logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 
 def _shorten_path(path: str) -> str:
@@ -287,6 +291,7 @@ def run_textual_interactive(
         config = get_effective_config()
 
     runtime_gateways = create_runtime_gateways()
+    graph_gateway = runtime_gateways.graph_gateway
     thread_store = runtime_gateways.thread_store
 
     try:
@@ -546,17 +551,14 @@ def run_textual_interactive(
             if widget.dismissed:
                 self._mcp_loader_widget = None
 
-        async def _await_agent_ready(self) -> Any:
+        async def _await_agent_ready(self) -> CompiledStateGraph:
             """Await the agent load, auto-retrying on cold-start or failure."""
             if self._agent_loader.needs_restart:
                 self._start_background_agent_load(self._workspace_dir)
             return await self._agent_loader.await_ready()
 
         def _graph_gateway(self) -> GraphGateway:
-            agent = self._agent_loader.agent
-            if agent is None:
-                raise RuntimeError("Agent is not loaded")
-            return self._runtime_gateways.graph_gateway(agent)
+            return self._runtime_gateways.graph_gateway
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -1011,6 +1013,10 @@ def run_textual_interactive(
             try:
                 return await async_notifier.read_async_tasks_from_gateway(
                     self._graph_gateway(),
+                    GraphTarget(
+                        local_graph=agent,
+                        workspace_dir=self._workspace_dir,
+                    ),
                     target_thread_id,
                 )
             except Exception:
@@ -1321,6 +1327,7 @@ def run_textual_interactive(
 
             metadata = build_metadata(self._workspace_dir, self._current_model)
             response = ""
+            agent = await self._await_agent_ready()
 
             async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -1501,6 +1508,10 @@ def run_textual_interactive(
                             message=_stream_input,
                             thread_id=thread_id_override or self._conversation_tid,
                             metadata=metadata,
+                            target=GraphTarget(
+                                local_graph=agent,
+                                workspace_dir=self._workspace_dir,
+                            ),
                         )
                     ):
                         if is_stream_cancel_requested(cancel_scope):
@@ -2252,6 +2263,7 @@ def run_textual_interactive(
                     await_agent_ready=self._await_agent_ready,
                     on_cmd_completed=self._on_channel_cmd_completed,
                     channel_runtime=self._channel_runtime,
+                    graph_gateway=self._runtime_gateways.graph_gateway,
                     thread_store=self._thread_store,
                 )
                 if _slash_handled:
@@ -2747,6 +2759,7 @@ def run_textual_interactive(
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
+                    graph_gateway=self._runtime_gateways.graph_gateway,
                     thread_store=self._thread_store,
                 )
 
@@ -2776,7 +2789,9 @@ def run_textual_interactive(
             skipped — they are difficult to faithfully reproduce from
             checkpoint data.
             """
-            messages = await self._thread_store.get_thread_messages(thread_id_value)
+            messages = await self._runtime_gateways.graph_gateway.get_thread_messages(
+                thread_id_value
+            )
             if not messages:
                 return
 
@@ -3153,11 +3168,9 @@ def run_textual_interactive(
             resumed = False
             resume_warning = ""
             if thread_id:
-                resolved, matches = await thread_store.resolve_thread_id_prefix(
-                    thread_id
-                )
-                if resolved:
-                    meta = await thread_store.get_thread_metadata(resolved)
+                resolution = await graph_gateway.resolve_thread(thread_id)
+                if resolution.thread_id:
+                    meta = await graph_gateway.get_thread_metadata(resolution.thread_id)
                     ws = (meta or {}).get("workspace_dir", "")
                     mismatch_aborted = False
                     if ws:
@@ -3216,19 +3229,19 @@ def run_textual_interactive(
                             "workspace conflict. Starting new session."
                         )
                     else:
-                        effective_thread_id = resolved
+                        effective_thread_id = resolution.thread_id
                         resumed = True
-                elif matches:
+                elif resolution.matches:
                     resume_warning = (
                         f"Thread prefix '{thread_id}' is ambiguous "
-                        f"({', '.join(matches)}). Starting new session."
+                        f"({', '.join(resolution.matches)}). Starting new session."
                     )
                 else:
                     resume_warning = (
                         f"Thread '{thread_id}' not found. Starting new session."
                     )
             if not effective_thread_id:
-                effective_thread_id = thread_store.generate_thread_id()
+                effective_thread_id = await graph_gateway.create_thread()
 
             # The TUI opens instantly and starts MCP loading in the
             # background; ``on_mount`` in the app kicks off the real
@@ -3255,7 +3268,7 @@ def run_textual_interactive(
                 hint_tid: str | None = None
                 if exit_tid:
                     try:
-                        if await thread_store.thread_exists(exit_tid):
+                        if await graph_gateway.thread_exists(exit_tid):
                             hint_tid = exit_tid
                     except Exception:
                         _channel_logger.debug(

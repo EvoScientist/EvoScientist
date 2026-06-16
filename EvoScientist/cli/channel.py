@@ -28,7 +28,7 @@ from ..commands.base import ChannelRuntime
 from ..stream.console import console
 
 if TYPE_CHECKING:
-    from ..gateway import ThreadStore
+    from ..gateway import GraphGateway, ThreadStore
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -263,6 +263,7 @@ async def dispatch_channel_slash_command(
     await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     channel_runtime: ChannelRuntime | None = None,
+    graph_gateway: GraphGateway | None = None,
     thread_store: ThreadStore | None = None,
 ) -> bool:
     """Dispatch a slash command from a channel message.
@@ -290,9 +291,9 @@ async def dispatch_channel_slash_command(
         Optional lifecycle callbacks forwarded to ``ChannelCommandUI``.
         Headless serve passes ``None`` — ``/new`` and ``/resume`` degrade
         gracefully via the default ``ChannelCommandUI`` messages.
-    thread_store:
-        Optional thread store forwarded to slash commands and channel
-        resume-history rendering. Defaults are resolved by the command layer.
+    graph_gateway:
+        Optional graph gateway forwarded to slash commands and channel
+        resume-history rendering.
     await_agent_ready:
         Optional async resolver that blocks until the background agent
         load finishes.  Called only when ``cmd.needs_agent(args)`` is
@@ -329,6 +330,7 @@ async def dispatch_channel_slash_command(
             await_agent_ready=await_agent_ready,
             on_cmd_completed=on_cmd_completed,
             channel_runtime=channel_runtime,
+            graph_gateway=graph_gateway,
             thread_store=thread_store,
         )
     except Exception as exc:
@@ -365,6 +367,7 @@ async def _dispatch_channel_slash_impl(
     await_agent_ready: Callable[[], Awaitable[Any]] | None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None,
     channel_runtime: ChannelRuntime | None,
+    graph_gateway: GraphGateway | None,
     thread_store: ThreadStore | None,
 ) -> bool:
     """Inner body of ``dispatch_channel_slash_command``.
@@ -384,8 +387,8 @@ async def _dispatch_channel_slash_impl(
         return False
     cmd, cmd_args = parsed
 
-    if thread_store is None:
-        raise RuntimeError("Channel slash dispatch requires a thread_store")
+    if graph_gateway is None:
+        raise RuntimeError("Channel slash dispatch requires a graph_gateway")
 
     agent_for_ctx = agent
     if cmd.needs_agent(cmd_args) and await_agent_ready is not None:
@@ -400,7 +403,7 @@ async def _dispatch_channel_slash_impl(
         append_system_callback=append_system,
         start_new_session_callback=start_new_session_cb,
         handle_session_resume_callback=handle_session_resume_cb,
-        thread_store=thread_store,
+        graph_gateway=graph_gateway,
     )
     ctx = CommandContext(
         agent=agent_for_ctx,
@@ -409,6 +412,7 @@ async def _dispatch_channel_slash_impl(
         workspace_dir=workspace_dir,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
+        graph_gateway=graph_gateway,
         thread_store=thread_store,
     )
 

@@ -26,7 +26,7 @@ from EvoScientist.cli.commands import (
 )
 from EvoScientist.commands.base import ChannelRuntime
 from EvoScientist.config import EvoScientistConfig
-from EvoScientist.gateway import GraphGateway, RuntimeGateways, ThreadStore
+from EvoScientist.gateway import RuntimeGateways, ThreadStore
 from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
@@ -46,12 +46,9 @@ def _thread_store(thread_id: str = "unused") -> ThreadStore:
 def _runtime_gateways(thread_store: ThreadStore | None = None) -> RuntimeGateways:
     store = thread_store or _thread_store()
 
-    def _graph_gateway_factory(agent: CompiledStateGraph) -> GraphGateway:
-        return FakeGraphGateway(thread_store=store)
-
     return RuntimeGateways(
         thread_store=store,
-        graph_gateway_factory=_graph_gateway_factory,
+        graph_gateway=FakeGraphGateway(thread_store=store),
     )
 
 
