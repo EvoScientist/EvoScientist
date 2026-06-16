@@ -382,11 +382,27 @@ def _synthesis_system_prompt() -> str:
                 "memories from vibes."
             ),
             (
-                "Knowledge is an abstraction over evidence. Create or update "
-                "knowledge only when multiple observations or a single strong "
-                "observation support a reusable rule, fact, procedure, failure "
-                "mode, or project convention. Every create/update decision must "
-                "cite the minimal supporting O-* IDs."
+                "Knowledge is an abstraction over evidence, not a restatement "
+                "of each observation. Prefer fewer, higher-value records that "
+                "merge related observations. Skip when a candidate would only "
+                "promote one narrow observation without clear future decision "
+                "value."
+            ),
+            (
+                "Use a high evidence bar. Global semantic or empirical claims "
+                "normally need at least two independent supporting observations. "
+                "A single observation can justify a create only when it captures "
+                "a concrete procedural/tooling fact, explicit project convention, "
+                "reproducible failure mode, or explicit user preference. Every "
+                "create/update decision must cite the minimal supporting O-* IDs."
+            ),
+            (
+                "Do not widen scope beyond the evidence. Project-scoped "
+                "observations should produce project knowledge. Global knowledge "
+                "must be supported only by global observations. Preserve "
+                "uncertainty and qualifiers from the evidence, including words "
+                "like `appears`, version ranges, benchmark names, workspace "
+                "constraints, and environment details."
             ),
             (
                 "Prefer update over duplicate create when existing knowledge "
