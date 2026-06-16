@@ -7,6 +7,7 @@ package for thread/run operations instead of reaching directly into
 """
 
 from .local import LocalGraphGateway, LocalThreadStore
+from .runtime import GraphGatewayFactory, RuntimeGateways, create_runtime_gateways
 from .types import (
     GraphEvent,
     GraphGateway,
@@ -18,9 +19,12 @@ from .types import (
 __all__ = [
     "GraphEvent",
     "GraphGateway",
+    "GraphGatewayFactory",
     "LocalGraphGateway",
     "LocalThreadStore",
     "RunRequest",
+    "RuntimeGateways",
     "ThreadResolution",
     "ThreadStore",
+    "create_runtime_gateways",
 ]

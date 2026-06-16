@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import (
+    GraphGateway,
     LocalGraphGateway,
     RunRequest,
+    RuntimeGateways,
 )
 from EvoScientist.stream import display as display_mod
 from tests.conftest import run_async
 from tests.fakes import FakeGraphGateway, FakeThreadStore
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 
 def test_local_gateway_streams_from_injected_streamer():
@@ -174,13 +179,23 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     from EvoScientist.cli import interactive
 
     thread_store = FakeThreadStore(generated_thread_id="generated-thread")
+
+    def _graph_gateway_factory(agent: CompiledStateGraph) -> GraphGateway:
+        return LocalGraphGateway(
+            agent,
+            thread_store=thread_store,
+        )
+
+    runtime_gateways = RuntimeGateways(
+        thread_store=thread_store,
+        graph_gateway_factory=_graph_gateway_factory,
+    )
     seen: dict[str, Any] = {}
 
     def _run_streaming(**kwargs):
         seen.update(kwargs)
         return "ok"
 
-    monkeypatch.setattr(interactive, "LocalThreadStore", lambda: thread_store)
     monkeypatch.setattr(interactive, "run_streaming", _run_streaming)
 
     agent = MagicMock()
@@ -190,7 +205,7 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
         show_thinking=False,
         workspace_dir="/tmp/ws",
         model="test-model",
-        thread_store=thread_store,
+        runtime_gateways=runtime_gateways,
     )
 
     assert seen["agent"] is agent

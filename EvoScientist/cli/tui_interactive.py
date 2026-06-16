@@ -24,7 +24,13 @@ from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
 from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
-from ..gateway import LocalGraphGateway, LocalThreadStore, RunRequest, ThreadStore
+from ..gateway import (
+    GraphGateway,
+    RunRequest,
+    RuntimeGateways,
+    ThreadStore,
+    create_runtime_gateways,
+)
 from ..paths import DATA_DIR
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
@@ -279,7 +285,8 @@ def run_textual_interactive(
 
         config = get_effective_config()
 
-    thread_store = LocalThreadStore()
+    runtime_gateways = create_runtime_gateways()
+    thread_store = runtime_gateways.thread_store
 
     try:
         from textual.app import App, ComposeResult
@@ -401,6 +408,7 @@ def run_textual_interactive(
             workspace: str | None,
             checkpointer: Any,
             thread_store: ThreadStore,
+            runtime_gateways: RuntimeGateways,
             channel_send_thinking_value: bool = True,
             resumed: bool = False,
             resume_warning: str = "",
@@ -418,6 +426,7 @@ def run_textual_interactive(
             self._workspace_dir = workspace
             self._checkpointer = checkpointer
             self._thread_store = thread_store
+            self._runtime_gateways = runtime_gateways
             self._channel_send_thinking = channel_send_thinking_value
             self._resumed = resumed
             self._resume_warning = resume_warning
@@ -542,11 +551,11 @@ def run_textual_interactive(
                 self._start_background_agent_load(self._workspace_dir)
             return await self._agent_loader.await_ready()
 
-        def _graph_gateway(self) -> LocalGraphGateway:
+        def _graph_gateway(self) -> GraphGateway:
             agent = self._agent_loader.agent
             if agent is None:
                 raise RuntimeError("Agent is not loaded")
-            return LocalGraphGateway(agent, thread_store=self._thread_store)
+            return self._runtime_gateways.graph_gateway(agent)
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -3226,6 +3235,7 @@ def run_textual_interactive(
                 workspace=effective_workspace,
                 checkpointer=checkpointer,
                 thread_store=thread_store,
+                runtime_gateways=runtime_gateways,
                 channel_send_thinking_value=channel_send_thinking,
                 resumed=resumed,
                 resume_warning=resume_warning,

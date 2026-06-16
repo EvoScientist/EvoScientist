@@ -6,6 +6,9 @@ subsequent messages, not silently keep the stale one the while-loop
 captured at startup.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,13 +24,28 @@ from EvoScientist.cli.commands import (
     _serve_process_message,
 )
 from EvoScientist.commands.base import ChannelRuntime
-from EvoScientist.gateway import ThreadStore
+from EvoScientist.gateway import GraphGateway, RuntimeGateways, ThreadStore
 from tests.conftest import run_async as _run
-from tests.fakes import FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 
 def _thread_store(thread_id: str = "unused") -> ThreadStore:
     return FakeThreadStore(generated_thread_id=thread_id)
+
+
+def _runtime_gateways(thread_store: ThreadStore | None = None) -> RuntimeGateways:
+    store = thread_store or _thread_store()
+
+    def _graph_gateway_factory(agent: CompiledStateGraph) -> GraphGateway:
+        return FakeGraphGateway(thread_store=store)
+
+    return RuntimeGateways(
+        thread_store=store,
+        graph_gateway_factory=_graph_gateway_factory,
+    )
 
 
 def test_hook_updates_holder_on_agent_swap():
@@ -458,10 +476,12 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
         chat_id="channel-user",
         message_id="ts-1",
     )
+    thread_store = _thread_store()
     holder = {
         "agent": "agent",
         "thread_id": "tid",
-        "thread_store": _thread_store(),
+        "thread_store": thread_store,
+        "runtime_gateways": _runtime_gateways(thread_store),
     }
 
     with (
@@ -522,11 +542,13 @@ def test_serve_process_message_uses_runtime_workspace_from_holder():
         chat_id="channel-user",
         message_id="ts-2",
     )
+    thread_store = _thread_store()
     holder = {
         "agent": "agent",
         "thread_id": "tid",
         "workspace_dir": "/restored-workspace",
-        "thread_store": _thread_store(),
+        "thread_store": thread_store,
+        "runtime_gateways": _runtime_gateways(thread_store),
     }
     captured: dict[str, str] = {}
 

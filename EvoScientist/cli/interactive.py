@@ -33,7 +33,7 @@ import EvoScientist.cli.channel as _ch_mod
 
 from ..commands.base import Command, CommandContext
 from ..commands.manager import manager as cmd_manager
-from ..gateway import LocalGraphGateway, LocalThreadStore, ThreadStore
+from ..gateway import RuntimeGateways, create_runtime_gateways
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
@@ -344,7 +344,8 @@ def cmd_interactive(
         width = console.size.width
         console.print(Text("\u2500" * width, style="dim"))
 
-    thread_store = LocalThreadStore()
+    runtime_gateways = create_runtime_gateways()
+    thread_store = runtime_gateways.thread_store
 
     # Mutable state for async loop
     state: dict[str, Any] = {
@@ -1006,10 +1007,7 @@ def cmd_interactive(
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
                             cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
-                            gateway=LocalGraphGateway(
-                                ready_agent,
-                                thread_store=thread_store,
-                            ),
+                            gateway=runtime_gateways.graph_gateway(ready_agent),
                         )
                     except Exception as e:
                         response = f"Error: {e}"
@@ -1066,7 +1064,7 @@ def cmd_interactive(
                     metadata=meta,
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
-                    gateway=LocalGraphGateway(ready_agent, thread_store=thread_store),
+                    gateway=runtime_gateways.graph_gateway(ready_agent),
                 )
                 _notif_tid = target_thread_id or state["thread_id"]
                 if _ch_mod.publish_to_channel_origin(_notif_tid, response):
@@ -1359,10 +1357,7 @@ def cmd_interactive(
                             metadata=meta,
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
-                            gateway=LocalGraphGateway(
-                                ready_agent,
-                                thread_store=thread_store,
-                            ),
+                            gateway=runtime_gateways.graph_gateway(ready_agent),
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1433,7 +1428,7 @@ def cmd_run(
     model: str | None = None,
     ui_backend: str = "cli",
     *,
-    thread_store: ThreadStore,
+    runtime_gateways: RuntimeGateways,
 ) -> None:
     """Single-shot execution with streaming display.
 
@@ -1446,6 +1441,7 @@ def cmd_run(
         model: Model name for checkpoint metadata
         ui_backend: UI backend ('cli' or 'tui')
     """
+    thread_store = runtime_gateways.thread_store
     thread_id = thread_id or thread_store.generate_thread_id()
 
     width = console.size.width
@@ -1468,7 +1464,7 @@ def cmd_run(
             show_thinking=show_thinking,
             interactive=False,
             metadata=meta,
-            gateway=LocalGraphGateway(agent, thread_store=thread_store),
+            gateway=runtime_gateways.graph_gateway(agent),
         )
     except Exception as e:
         error_msg = str(e)

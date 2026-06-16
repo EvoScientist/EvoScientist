@@ -15,7 +15,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from ..commands.base import Command, CommandContext
-from ..gateway import LocalGraphGateway, LocalThreadStore, ThreadStore
+from ..gateway import RuntimeGateways, ThreadStore, create_runtime_gateways
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
@@ -846,6 +846,13 @@ def _require_serve_thread_store(agent_holder: dict[str, Any]) -> ThreadStore:
     return thread_store
 
 
+def _require_serve_runtime_gateways(agent_holder: dict[str, Any]) -> RuntimeGateways:
+    runtime_gateways = agent_holder.get("runtime_gateways")
+    if runtime_gateways is None:
+        raise RuntimeError("Serve runtime missing runtime_gateways")
+    return runtime_gateways
+
+
 def _serve_resume_config(
     agent_holder: dict[str, Any],
     config: Any | None,
@@ -1051,6 +1058,7 @@ def _serve_process_message(
     from .tui_runtime import run_streaming
 
     thread_store = _require_serve_thread_store(agent_holder)
+    runtime_gateways = _require_serve_runtime_gateways(agent_holder)
 
     if not _claim_or_complete_channel_request(msg):
         return
@@ -1213,10 +1221,7 @@ def _serve_process_message(
                 hitl_prompt_fn=_hitl_prompt,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
-                gateway=LocalGraphGateway(
-                    agent_holder["agent"],
-                    thread_store=thread_store,
-                ),
+                gateway=runtime_gateways.graph_gateway(agent_holder["agent"]),
             )
         except Exception as e:
             response = f"Error: {e}"
@@ -1263,7 +1268,7 @@ def _serve_drain_notifications(
         runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
         meta = build_metadata(runtime_workspace, model)
         tid = agent_holder["thread_id"]
-        thread_store = _require_serve_thread_store(agent_holder)
+        runtime_gateways = _require_serve_runtime_gateways(agent_holder)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1273,10 +1278,7 @@ def _serve_drain_notifications(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
-                gateway=LocalGraphGateway(
-                    agent_holder["agent"],
-                    thread_store=thread_store,
-                ),
+                gateway=runtime_gateways.graph_gateway(agent_holder["agent"]),
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
@@ -1431,7 +1433,8 @@ def serve(
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
 
-    thread_store = LocalThreadStore()
+    runtime_gateways = create_runtime_gateways()
+    thread_store = runtime_gateways.thread_store
     tid = thread_store.generate_thread_id()
 
     # Mutable holder shared with _serve_process_message so ``/model``
@@ -1444,6 +1447,7 @@ def serve(
         "workspace_dir": ws,
         "config": config,
         "thread_store": thread_store,
+        "runtime_gateways": runtime_gateways,
     }
 
     from ..commands.base import ChannelRuntime
@@ -2202,7 +2206,8 @@ def _main_callback(
         from .interactive import cmd_run
         from .resume_hint import print_resume_hint
 
-        thread_store = LocalThreadStore()
+        runtime_gateways = create_runtime_gateways()
+        thread_store = runtime_gateways.thread_store
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
@@ -2243,7 +2248,7 @@ def _main_callback(
                         workspace_dir=workspace_dir,
                         model=config.model,
                         ui_backend=config.ui_backend,
-                        thread_store=thread_store,
+                        runtime_gateways=runtime_gateways,
                     )
                 finally:
                     try:
