@@ -7,6 +7,9 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+from langgraph_sdk.client import LangGraphClient
+
 from EvoScientist.channels.base import Channel
 from EvoScientist.channels.bus.events import InboundMessage, OutboundMessage
 from EvoScientist.gateway import (
@@ -250,3 +253,190 @@ class FakeGraphGateway(GraphGateway):
                 yield event
 
         return _events()
+
+
+class FakeLangGraphRunModule:
+    """Fake thread-stream run controller for server gateway tests."""
+
+    def __init__(self) -> None:
+        self.starts: list[dict[str, Any]] = []
+        self.responses: list[dict[str, Any]] = []
+
+    async def start(
+        self,
+        *,
+        input: object = None,
+        config: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.starts.append(
+            {
+                "input": input,
+                "config": config,
+                "metadata": metadata,
+            }
+        )
+        return {"run_id": "run-1"}
+
+    async def respond(
+        self,
+        response: object,
+        *,
+        interrupt_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.responses.append(
+            {
+                "response": response,
+                "interrupt_id": interrupt_id,
+            }
+        )
+        return {"run_id": "run-1"}
+
+
+class FakeLangGraphThreadStream:
+    """Finite fake of the LangGraph SDK thread stream."""
+
+    def __init__(
+        self,
+        thread_id: str,
+        events: Iterable[dict[str, Any]] | None = None,
+        *,
+        interrupts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.thread_id = thread_id
+        self.events = list(events or [])
+        self.interrupts = interrupts or []
+        self.run = FakeLangGraphRunModule()
+        self.subscribed_channels: list[list[str]] = []
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self) -> FakeLangGraphThreadStream:
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.exited = True
+
+    async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
+        for event in self.events:
+            yield event
+
+    def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
+        self.subscribed_channels.append(channels)
+        return self._iter_events()
+
+
+class FakeLangGraphThreadsClient:
+    """Fake LangGraph ``client.threads`` surface."""
+
+    def __init__(
+        self,
+        *,
+        threads: list[dict[str, Any]] | None = None,
+        states: dict[str, dict[str, Any]] | None = None,
+        streams: dict[str, FakeLangGraphThreadStream] | None = None,
+    ) -> None:
+        self.threads = threads or []
+        self.states = states or {}
+        self.streams = streams or {}
+        self.created: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
+        self.searches: list[dict[str, Any]] = []
+
+    async def create(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        thread_id: str | None = None,
+        if_exists: str | None = None,
+        graph_id: str | None = None,
+    ) -> dict[str, Any]:
+        if thread_id is not None and if_exists == "do_nothing":
+            for thread in self.threads:
+                if thread.get("thread_id") == thread_id:
+                    return thread
+        created = {
+            "thread_id": thread_id or "server-thread",
+            "metadata": {
+                **(metadata or {}),
+                **({"graph_id": graph_id} if graph_id else {}),
+            },
+        }
+        self.created.append(created)
+        self.threads.append(created)
+        return created
+
+    async def search(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        limit: int = 10,
+        offset: int = 0,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.searches.append(
+            {
+                "metadata": metadata,
+                "limit": limit,
+                "offset": offset,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+            }
+        )
+        rows = self.threads
+        if metadata:
+            rows = [
+                thread
+                for thread in rows
+                if all(
+                    (thread.get("metadata") or {}).get(key) == value
+                    for key, value in metadata.items()
+                )
+            ]
+        return rows[offset : offset + limit]
+
+    async def get(self, thread_id: str) -> dict[str, Any]:
+        from langgraph_sdk.errors import NotFoundError
+
+        for thread in self.threads:
+            if thread.get("thread_id") == thread_id:
+                return thread
+        raise NotFoundError("not found", response=_not_found_response(), body=None)
+
+    async def get_state(self, thread_id: str) -> dict[str, Any]:
+        from langgraph_sdk.errors import NotFoundError
+
+        if thread_id in self.states:
+            return self.states[thread_id]
+        raise NotFoundError("not found", response=_not_found_response(), body=None)
+
+    async def delete(self, thread_id: str) -> None:
+        await self.get(thread_id)
+        self.deleted.append(thread_id)
+        self.threads = [
+            thread for thread in self.threads if thread.get("thread_id") != thread_id
+        ]
+
+    def stream(
+        self,
+        thread_id: str | None = None,
+        *,
+        assistant_id: str,
+    ) -> FakeLangGraphThreadStream:
+        del assistant_id
+        assert thread_id is not None
+        return self.streams[thread_id]
+
+
+class FakeLangGraphClient(LangGraphClient):
+    """Fake LangGraph SDK async client."""
+
+    def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
+        self.threads = threads
+
+
+def _not_found_response() -> httpx.Response:
+    request = httpx.Request("GET", "http://test.local/not-found")
+    return httpx.Response(404, request=request)

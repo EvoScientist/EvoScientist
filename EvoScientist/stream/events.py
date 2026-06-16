@@ -37,7 +37,9 @@ from .v3_payloads import (
     _usage_counts,
 )
 
+UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
+LangGraphStreamInput: TypeAlias = dict[str, list[dict[str, object]]] | Command
 
 
 def _is_interrupt_error_message(message: object) -> bool:
@@ -145,6 +147,8 @@ class _V3EventProcessor:
             interrupts = params.get("interrupts") or ()
             if interrupts:
                 return self._process_update_event({"__interrupt__": interrupts})
+        if method == "input.requested":
+            return self._process_input_requested(event.get("params"))
         return []
 
     def _process_message_event(
@@ -467,34 +471,55 @@ class _V3EventProcessor:
                 continue
 
             interrupt_value = interrupt_obj.value
-            if not isinstance(interrupt_value, dict):
-                continue
-
-            iv_type = interrupt_value.get("type")
             interrupt_id = interrupt_obj.id or "default"
-            if iv_type == "ask_user":
-                questions = interrupt_value.get("questions", [])
-                tc_id = str(interrupt_value.get("tool_call_id", ""))
-                events.extend(
-                    self._dedupe_interrupt_event(
-                        self.emitter.ask_user_interrupt(
-                            interrupt_id, questions, tc_id
-                        ).data
-                    )
-                )
-                continue
-
-            action_reqs = interrupt_value.get("action_requests", [])
-            review_cfgs = interrupt_value.get("review_configs", [])
-            if action_reqs:
-                events.extend(
-                    self._dedupe_interrupt_event(
-                        self.emitter.interrupt(
-                            interrupt_id, action_reqs, review_cfgs
-                        ).data
-                    )
-                )
+            events.extend(self._process_interrupt_value(interrupt_id, interrupt_value))
         return events
+
+    def _process_input_requested(self, params: object) -> list[dict[str, Any]]:
+        params_map = _as_raw_map(params)
+        if params_map is None:
+            return []
+        data = _as_raw_map(params_map.get("data"))
+        if data is None:
+            return []
+        interrupt_id = str(data.get("interrupt_id") or "default")
+        return self._process_interrupt_value(interrupt_id, data.get("value"))
+
+    def _process_interrupt_value(
+        self,
+        interrupt_id: str,
+        interrupt_value: object,
+    ) -> list[dict[str, Any]]:
+        interrupt_map = _as_raw_map(interrupt_value)
+        if interrupt_map is None:
+            return []
+
+        iv_type = interrupt_map.get("type")
+        if iv_type == "ask_user":
+            raw_questions = interrupt_map.get("questions")
+            questions = raw_questions if isinstance(raw_questions, list) else []
+            tc_id = str(interrupt_map.get("tool_call_id", ""))
+            return self._dedupe_interrupt_event(
+                self.emitter.ask_user_interrupt(
+                    interrupt_id,
+                    questions,
+                    tc_id,
+                ).data
+            )
+
+        raw_action_reqs = interrupt_map.get("action_requests")
+        action_reqs = raw_action_reqs if isinstance(raw_action_reqs, list) else []
+        raw_review_cfgs = interrupt_map.get("review_configs")
+        review_cfgs = raw_review_cfgs if isinstance(raw_review_cfgs, list) else None
+        if action_reqs:
+            return self._dedupe_interrupt_event(
+                self.emitter.interrupt(
+                    interrupt_id,
+                    action_reqs,
+                    review_cfgs,
+                ).data
+            )
+        return []
 
     def _dedupe_interrupt_event(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         signature = repr(event)
@@ -555,6 +580,60 @@ class _V3EventProcessor:
         return _text_from_content(payload.content)
 
 
+async def build_agent_stream_input(
+    message: GraphRunInput,
+    *,
+    media: list[str] | None = None,
+) -> LangGraphStreamInput:
+    """Build the LangGraph run input shared by local and server gateways."""
+    if not isinstance(message, str):
+        return message
+
+    user_content: UserMessageContent = message
+    if media:
+        image_exts = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+        max_inline_size = 5 * 1024 * 1024
+        content_blocks: list[dict[str, object]] = []
+        if message:
+            content_blocks.append({"type": "text", "text": message})
+
+        def _read_file_b64(path: str) -> str:
+            with open(path, "rb") as fh:
+                return base64.b64encode(fh.read()).decode("ascii")
+
+        file_refs: list[str] = []
+        for path in media:
+            ext = os.path.splitext(path)[1].lower()
+            is_image = ext in image_exts and await asyncio.to_thread(
+                os.path.isfile, path
+            )
+            if is_image:
+                fsize = await asyncio.to_thread(os.path.getsize, path)
+                if fsize <= max_inline_size:
+                    mime = mimetypes.guess_type(path)[0] or "image/png"
+                    b64 = await asyncio.to_thread(_read_file_b64, path)
+                    content_blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime};base64,{b64}",
+                            },
+                        }
+                    )
+                else:
+                    file_refs.append(path)
+            else:
+                file_refs.append(path)
+        if file_refs:
+            ref_text = "\n".join(
+                f"[attached file: {os.path.basename(p)}] path: {p}" for p in file_refs
+            )
+            content_blocks.append({"type": "text", "text": ref_text})
+        if content_blocks:
+            user_content = content_blocks
+    return {"messages": [{"role": "user", "content": user_content}]}
+
+
 async def stream_agent_events(
     agent: Any,
     message: GraphRunInput,
@@ -588,58 +667,7 @@ async def stream_agent_events(
     emitter = StreamEventEmitter()
 
     clear_memory_worker_saved_counts()
-    # Build input for agent.astream_events()
-    if isinstance(message, str):
-        # Build user message content: text + inline images + file path references
-        user_content: str | list[dict[str, object]] = message
-        if media:
-            _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
-            _MAX_INLINE_SIZE = 5 * 1024 * 1024  # 5 MB
-            content_blocks: list[dict[str, object]] = []
-            if message:
-                content_blocks.append({"type": "text", "text": message})
-
-            def _read_file_b64(path: str) -> str:
-                with open(path, "rb") as fh:
-                    return base64.b64encode(fh.read()).decode("ascii")
-
-            file_refs: list[str] = []
-            for path in media:
-                ext = os.path.splitext(path)[1].lower()
-                is_image = ext in _IMAGE_EXTS and await asyncio.to_thread(
-                    os.path.isfile, path
-                )
-                if is_image:
-                    fsize = await asyncio.to_thread(os.path.getsize, path)
-                    if fsize <= _MAX_INLINE_SIZE:
-                        mime = mimetypes.guess_type(path)[0] or "image/png"
-                        b64 = await asyncio.to_thread(_read_file_b64, path)
-                        content_blocks.append(
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime};base64,{b64}",
-                                },
-                            }
-                        )
-                    else:
-                        file_refs.append(path)
-                else:
-                    file_refs.append(path)
-            if file_refs:
-                ref_text = "\n".join(
-                    f"[attached file: {os.path.basename(p)}] path: {p}"
-                    for p in file_refs
-                )
-                content_blocks.append({"type": "text", "text": ref_text})
-            if content_blocks:
-                user_content = content_blocks
-        astream_input: dict[str, list[dict[str, object]]] | Command = {
-            "messages": [{"role": "user", "content": user_content}]
-        }
-    else:
-        # HITL resume: Command object passed directly to agent
-        astream_input = message
+    astream_input = await build_agent_stream_input(message, media=media)
 
     _baseline_summarization_signature: tuple[object, ...] | None = None
 

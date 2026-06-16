@@ -7,13 +7,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import (
     GraphGateway,
+    LangGraphServerGateway,
+    LangGraphServerThreadStore,
     LocalGraphGateway,
     RunRequest,
     RuntimeGateways,
+    create_runtime_gateways,
 )
 from EvoScientist.stream import display as display_mod
 from tests.conftest import run_async
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes import (
+    FakeGraphGateway,
+    FakeLangGraphClient,
+    FakeLangGraphThreadsClient,
+    FakeLangGraphThreadStream,
+    FakeThreadStore,
+)
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -213,3 +222,290 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     assert isinstance(seen["gateway"], LocalGraphGateway)
     assert seen["gateway"].agent is agent
     assert seen["gateway"].thread_store is thread_store
+
+
+def test_langgraph_server_thread_store_delegates_to_sdk_threads():
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "abc12345",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z",
+                "metadata": {"graph_id": "EvoScientist", "workspace_dir": "/tmp/ws"},
+            },
+            {
+                "thread_id": "worker123",
+                "metadata": {"graph_id": "evomemory-turn-worker"},
+            },
+        ],
+        states={
+            "abc12345": {
+                "values": {
+                    "messages": [
+                        {"role": "user", "content": "hello from server"},
+                        {"role": "assistant", "content": "hi"},
+                    ]
+                }
+            }
+        },
+    )
+    client = FakeLangGraphClient(threads)
+
+    def _client_factory(_base_url, _headers):
+        return client
+
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=_client_factory,
+    )
+
+    async def _run():
+        return {
+            "created": await store.create_thread(),
+            "threads": await store.list_threads(
+                include_message_count=True,
+                include_preview=True,
+            ),
+            "resolution": await store.resolve_thread_id_prefix("abc"),
+            "metadata": await store.get_thread_metadata("abc12345"),
+            "messages": await store.get_thread_messages("abc12345"),
+            "exists": await store.thread_exists("abc12345"),
+            "deleted": await store.delete_thread("abc12345"),
+        }
+
+    result = run_async(_run())
+
+    assert result["created"] == "server-thread"
+    assert threads.created == [
+        {
+            "thread_id": "server-thread",
+            "metadata": {"graph_id": "EvoScientist"},
+        }
+    ]
+    assert result["threads"] == [
+        {
+            "thread_id": "abc12345",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "metadata": {"graph_id": "EvoScientist", "workspace_dir": "/tmp/ws"},
+            "message_count": 2,
+            "preview": "hello from server",
+        },
+        {
+            "thread_id": "server-thread",
+            "created_at": None,
+            "updated_at": None,
+            "metadata": {"graph_id": "EvoScientist"},
+            "message_count": 0,
+            "preview": "",
+        },
+    ]
+    assert result["resolution"] == ("abc12345", [])
+    assert result["metadata"] == {
+        "graph_id": "EvoScientist",
+        "workspace_dir": "/tmp/ws",
+    }
+    assert [message.type for message in result["messages"]] == ["human", "ai"]
+    assert result["exists"] is True
+    assert result["deleted"] is True
+    assert threads.deleted == ["abc12345"]
+
+
+def test_runtime_gateways_can_use_langgraph_server_backend():
+    threads = FakeLangGraphThreadsClient()
+    client = FakeLangGraphClient(threads)
+
+    def _client_factory(_base_url, _headers):
+        return client
+
+    runtime_gateways = create_runtime_gateways(
+        backend="langgraph_server",
+        base_url="http://localhost:2024",
+        client_factory=_client_factory,
+    )
+
+    gateway = runtime_gateways.graph_gateway(MagicMock())
+
+    assert isinstance(runtime_gateways.thread_store, LangGraphServerThreadStore)
+    assert isinstance(gateway, LangGraphServerGateway)
+    assert gateway.thread_store is runtime_gateways.thread_store
+
+
+def test_langgraph_server_gateway_streams_root_protocol_events():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message="hi",
+                    thread_id="abc12345",
+                    metadata={"workspace_dir": "/tmp/ws"},
+                )
+            )
+        ]
+
+    events = run_async(_collect())
+
+    assert stream.run.starts == [
+        {
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "config": {"configurable": {"thread_id": "abc12345"}},
+            "metadata": {"workspace_dir": "/tmp/ws"},
+        }
+    ]
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
+
+
+def test_langgraph_server_gateway_streams_subagent_protocol_events():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "lifecycle",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {"event": "started"},
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "sub text"},
+                    },
+                },
+            },
+            {
+                "method": "lifecycle",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {"event": "completed"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            )
+        ]
+
+    events = run_async(_collect())
+
+    assert events == [
+        {
+            "type": "subagent_start",
+            "name": "data-analysis-agent",
+            "description": "",
+            "instance_id": "data-analysis-agent:tool-1",
+            "tool_call_id": "tool-1",
+        },
+        {
+            "type": "subagent_text",
+            "subagent": "data-analysis-agent",
+            "content": "sub text",
+            "instance_id": "data-analysis-agent:tool-1",
+        },
+        {
+            "type": "subagent_end",
+            "name": "data-analysis-agent",
+            "instance_id": "data-analysis-agent:tool-1",
+        },
+        {"type": "done", "content": "", "response": ""},
+    ]
+
+
+def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message=Command(resume={"decisions": [{"allowed": True}]}),
+                    thread_id="abc12345",
+                )
+            )
+        ]
+
+    events = run_async(_collect())
+
+    assert stream.run.starts == []
+    assert stream.run.responses == [
+        {
+            "response": {"decisions": [{"allowed": True}]},
+            "interrupt_id": "interrupt-1",
+        }
+    ]
+    assert events == [{"type": "done", "content": "", "response": ""}]
