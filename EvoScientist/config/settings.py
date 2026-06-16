@@ -440,9 +440,7 @@ class MemoryControls:
             observation_writer=config.memory_observation_writer,
             workers_enabled=config.memory_workers_enabled,
             synthesis_enabled=config.memory_synthesis_enabled,
-            worker_thread_cleanup_enabled=(
-                config.memory_worker_thread_cleanup_enabled
-            ),
+            worker_thread_cleanup_enabled=(config.memory_worker_thread_cleanup_enabled),
         )
 
     @property

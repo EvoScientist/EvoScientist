@@ -546,9 +546,7 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_OBSERVATION_WRITER", "worker")
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_WORKERS_ENABLED", "false")
         monkeypatch.setenv("EVOSCIENTIST_MEMORY_SYNTHESIS_ENABLED", "false")
-        monkeypatch.setenv(
-            "EVOSCIENTIST_MEMORY_WORKER_THREAD_CLEANUP_ENABLED", "false"
-        )
+        monkeypatch.setenv("EVOSCIENTIST_MEMORY_WORKER_THREAD_CLEANUP_ENABLED", "false")
 
         config = get_effective_config()
         assert config.memory_profile_enabled is False

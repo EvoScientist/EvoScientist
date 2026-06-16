@@ -2486,12 +2486,15 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             self._make_db_with_threads(
                 db, [drop_worker], graph_id="evomemory-turn-worker"
             )
-            with patch(
-                "EvoScientist.sessions.get_db_path",
-                return_value=_mock_path(db),
-            ), patch(
-                "EvoScientist.sessions._internal_worker_thread_cleanup_enabled",
-                return_value=True,
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch(
+                    "EvoScientist.sessions._internal_worker_thread_cleanup_enabled",
+                    return_value=True,
+                ),
             ):
                 _run(_purge_internal_worker_threads())
                 # Idempotent: second run is a no-op, not an error.
@@ -2520,12 +2523,15 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             self._make_db_with_threads(
                 db, [keep_worker], graph_id="evomemory-turn-worker"
             )
-            with patch(
-                "EvoScientist.sessions.get_db_path",
-                return_value=_mock_path(db),
-            ), patch(
-                "EvoScientist.sessions._internal_worker_thread_cleanup_enabled",
-                return_value=False,
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch(
+                    "EvoScientist.sessions._internal_worker_thread_cleanup_enabled",
+                    return_value=False,
+                ),
             ):
                 _run(_purge_internal_worker_threads())
 
