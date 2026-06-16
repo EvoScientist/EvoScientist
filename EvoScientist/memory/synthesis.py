@@ -24,6 +24,7 @@ from typing import (
 )
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.structured_output import ToolStrategy
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
@@ -394,8 +395,9 @@ def _synthesis_system_prompt() -> str:
                 "better active record."
             ),
             (
-                "Return structured decisions only. Use `skip` or an empty "
-                "decision list when the observations are too narrow, redundant, "
+                "Return exactly one structured response by calling the "
+                "`SynthesisReviewDecision` tool. Use `skip` or an empty decision "
+                "list when the observations are too narrow, redundant, "
                 "unsupported, routine, or merely session progress."
             ),
         ]
@@ -547,7 +549,10 @@ def build_synthesis_agent_graph(
         backend=FilesystemBackend(root_dir=str(worker_memory_dir), virtual_mode=True),
         middleware=[_SynthesisApplyMiddleware(memory_dir=worker_memory_dir)],
         subagents=[],
-        response_format=SynthesisReviewDecision,
+        response_format=ToolStrategy(
+            schema=SynthesisReviewDecision,
+            tool_message_content="Synthesis review accepted.",
+        ),
     )
     return agent.with_config({"recursion_limit": SYNTHESIS_RECURSION_LIMIT})
 
