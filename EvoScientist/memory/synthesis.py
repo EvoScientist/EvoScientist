@@ -725,14 +725,15 @@ def _watch_synthesis_run_sync(
                 return
             time.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
     finally:
-        if confirmed_finished and client is not None:
-            _delete_synthesis_thread(client, thread_id)
-        if active_key is not None:
-            project_id, context_digest = active_key
-            _release_synthesis_context(
-                project_id=project_id,
-                context_digest=context_digest,
-            )
+        if confirmed_finished:
+            if client is not None:
+                _delete_synthesis_thread(client, thread_id)
+            if active_key is not None:
+                project_id, context_digest = active_key
+                _release_synthesis_context(
+                    project_id=project_id,
+                    context_digest=context_digest,
+                )
 
 
 def _spawn_synthesis_status_thread(

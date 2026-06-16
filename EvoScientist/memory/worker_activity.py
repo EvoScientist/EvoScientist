@@ -276,7 +276,7 @@ def memory_worker_observed_outputs() -> MemoryWorkerStatusSnapshot:
     knowledge_updated_count += len(new_knowledge_updated)
     knowledge_archived_count += len(new_knowledge_archived)
     return MemoryWorkerStatusSnapshot(
-        is_running=bool(active_workers),
+        is_running=bool(active_workers or active_synthesis_workers),
         synthesis_running=bool(active_synthesis_workers),
         profile_updates=profile_updates,
         observations_recorded=observations_recorded,

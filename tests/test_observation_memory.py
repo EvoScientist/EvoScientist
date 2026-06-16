@@ -1578,6 +1578,44 @@ def test_synthesis_watcher_preserves_thread_when_cleanup_disabled(monkeypatch):
     assert deleted == []
 
 
+def test_synthesis_watcher_poll_abort_does_not_release_active_context(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    worker_activity.mark_synthesis_started(
+        project_id="P-project",
+        context_digest="digest-1",
+        memory_dir=memory_dir,
+        before_outputs=before,
+    )
+
+    class _Runs:
+        def get(self, **_kwargs):
+            raise RuntimeError("poll failed")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
+    )
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_MAX_POLL_FAILURES", 1)
+
+    try:
+        memory_synthesis._watch_synthesis_run_sync(
+            url="http://x",
+            thread_id="synthesis-thread",
+            run_id="run-1",
+            active_key=("P-project", "digest-1"),
+        )
+        status = worker_activity.memory_worker_status()
+        assert status.synthesis_running is True
+        assert status.knowledge_created == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
     monkeypatch.setattr(
@@ -1925,6 +1963,7 @@ def test_memory_activity_tracks_active_synthesis_knowledge_create(tmp_path):
         assert worker_activity.memory_worker_status().synthesis_running is True
         _write_knowledge_status_file(memory_dir, body="Created knowledge.")
         observed = worker_activity.memory_worker_observed_outputs()
+        assert observed.is_running is True
         assert observed.synthesis_running is True
         assert observed.knowledge_created == 1
         assert worker_activity.memory_worker_status().knowledge_created == 0
@@ -2050,6 +2089,43 @@ def test_one_shot_cli_wait_reports_fast_worker_output(monkeypatch):
     interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
 
     assert printed == ["[dim]EvoMemory saved 1 observation(s).[/dim]"]
+
+
+def test_one_shot_cli_wait_treats_synthesis_as_running(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    printed = []
+    observed_calls = 0
+
+    def fake_sleep(_seconds):
+        pass
+
+    def fake_observed_outputs():
+        nonlocal observed_calls
+        observed_calls += 1
+        if observed_calls < 3:
+            return worker_activity.MemoryWorkerStatusSnapshot(
+                is_running=True,
+                synthesis_running=True,
+            )
+        return worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False,
+            synthesis_running=False,
+            knowledge_created=1,
+        )
+
+    monkeypatch.setattr(interactive.time, "sleep", fake_sleep)
+    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
+    monkeypatch.setattr(
+        worker_activity,
+        "memory_worker_observed_outputs",
+        fake_observed_outputs,
+    )
+
+    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+
+    assert observed_calls == 3
+    assert not any("still running" in str(line) for line in printed)
 
 
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
