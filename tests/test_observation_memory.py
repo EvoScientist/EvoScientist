@@ -233,7 +233,7 @@ def test_record_observation_tool_schema_hides_runtime(tmp_path):
     )
 
     tool = middleware.tools[0]
-    assert "runtime" in tool.get_input_schema().model_fields
+    assert "runtime" in tool.get_input_schema().model_fields  # type: ignore[possibly-missing-attribute]
     schema = tool.tool_call_schema
     assert isinstance(schema, type)
     assert issubclass(schema, BaseModel)
@@ -434,13 +434,15 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     assert _markdown_sections(body) == {"Summary": summary}
 
 
-def test_memory_worker_run_kwargs_use_graph_id_and_source_metadata_only():
+def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monkeypatch):
+    monkeypatch.setattr(memory_lifecycle, "_worker_workspace_dir", lambda: "/tmp/ws")
     trajectory: list[memory_lifecycle.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
 
     kwargs = memory_lifecycle._memory_worker_run_kwargs(
         role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        thread_id="worker-thread",
         project_id="P-project",
         source_agent="writing-agent",
         session_id="thread-1",
@@ -449,20 +451,15 @@ def test_memory_worker_run_kwargs_use_graph_id_and_source_metadata_only():
 
     assert kwargs["assistant_id"] == memory_lifecycle.SUBAGENT_MEMORY_WORKER_GRAPH_ID
     assert kwargs["metadata"] == {
-        "agent_name": "EvoScientist",
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",
         "source_agent": "writing-agent",
         "project_id": "P-project",
         "trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+        "workspace_dir": "/tmp/ws",
     }
     configurable = kwargs["config"]["configurable"]
-    assert configurable["thread_id"] == memory_lifecycle._worker_thread_id(
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        session_id="thread-1",
-        source_agent="writing-agent",
-        trajectory=trajectory,
-    )
+    assert configurable["thread_id"] == "worker-thread"
     assert {
         key: value
         for key, value in configurable.items()
@@ -725,7 +722,9 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch):
+def test_sync_memory_worker_watcher_marks_terminal_status_finished(
+    tmp_path, monkeypatch
+):
     worker_activity.reset_memory_worker_status_for_tests()
     worker_activity.mark_memory_worker_started(
         thread_id="worker-thread",
@@ -754,113 +753,7 @@ def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeypatch):
-    """Finished workers leave no checkpoint residue: thread is deleted."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        def delete(self, thread_id):
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert deleted == ["worker-thread"]
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch):
-    """Thread deletion is best-effort: a failure must not break accounting."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        def delete(self, thread_id):
-            raise RuntimeError("delete failed")
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch):
-    """A run we lost track of may still be live — never delete its thread."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        def get(self, **_kwargs):
-            raise RuntimeError("poll failed")
-
-    class _Threads:
-        def delete(self, thread_id):
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert deleted == []
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_async_watcher_deletes_worker_thread_on_terminal_status(
+def test_async_memory_worker_watcher_marks_terminal_status_finished(
     tmp_path, monkeypatch, run_async
 ):
     worker_activity.reset_memory_worker_status_for_tests()
@@ -869,31 +762,21 @@ def test_async_watcher_deletes_worker_thread_on_terminal_status(
         run_id="run-1",
         memory_dir=tmp_path / "memories",
     )
-    deleted: list[str] = []
 
     class _Runs:
         async def get(self, **_kwargs):
             return {"status": "success"}
-
-    class _Threads:
-        async def delete(self, thread_id):
-            # Accounting must complete BEFORE the best-effort deletion —
-            # cancellation mid-deletion must never leave the worker
-            # stuck as "running" (CodeRabbit on #279).
-            assert worker_activity.memory_worker_status().is_running is False
-            deleted.append(thread_id)
 
     monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
 
     try:
         run_async(
             memory_lifecycle._watch_memory_worker_run_async(
-                SimpleNamespace(runs=_Runs(), threads=_Threads()),
+                SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
             )
         )
-        assert deleted == ["worker-thread"]
         assert worker_activity.memory_worker_status().is_running is False
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
@@ -928,6 +811,7 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
 def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
+    monkeypatch.setattr(memory_lifecycle, "_worker_workspace_dir", lambda: "/tmp/ws")
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         lambda **_kwargs: True,
@@ -961,6 +845,23 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
 
     try:
         assert worker_activity.memory_worker_status().is_running is True
+        expected_metadata = {
+            "run_kind": "evomemory_turn_worker",
+            "source_session_id": "thread-1",
+            "source_agent": "EvoScientist",
+            "project_id": "P-project",
+            "trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+            "workspace_dir": "/tmp/ws",
+        }
+        fake_client.threads.create.assert_called_once_with(
+            graph_id=memory_lifecycle.TURN_MEMORY_WORKER_GRAPH_ID,
+            metadata=expected_metadata,
+        )
+        fake_client.runs.create.assert_called_once()
+        run_kwargs = fake_client.runs.create.call_args.kwargs
+        assert run_kwargs["thread_id"] == "worker-thread"
+        assert run_kwargs["metadata"] == expected_metadata
+        assert run_kwargs["config"]["configurable"]["thread_id"] == "worker-thread"
         assert spawned == [
             {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
         ]
@@ -984,6 +885,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
 ):
     worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
+    monkeypatch.setattr(memory_lifecycle, "_worker_workspace_dir", lambda: "/tmp/ws")
 
     call_threads: list[tuple[str, int]] = []
 

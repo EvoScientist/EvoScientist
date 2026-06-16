@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict, TypeVar, cast
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, filter_messages
@@ -44,7 +44,7 @@ from ..memory.worker_activity import (
 )
 
 if TYPE_CHECKING:
-    from langgraph_sdk.schema import Config, Input
+    from langgraph_sdk.schema import Config, Input, Run, Thread
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,62 @@ class MemoryWorkerRunPayload(TypedDict):
     input: Input
     metadata: dict[str, str]
     config: Config
+
+
+class _SyncMemoryWorkerThreads(Protocol):
+    def create(
+        self,
+        *,
+        graph_id: str,
+        metadata: dict[str, str],
+    ) -> Thread: ...
+
+
+class _SyncMemoryWorkerRuns(Protocol):
+    def create(
+        self,
+        thread_id: str,
+        assistant_id: str,
+        *,
+        input: Input,
+        metadata: dict[str, str],
+        config: Config,
+    ) -> Run: ...
+
+    def get(self, thread_id: str, run_id: str) -> Run: ...
+
+
+class _SyncMemoryWorkerClient(Protocol):
+    threads: _SyncMemoryWorkerThreads
+    runs: _SyncMemoryWorkerRuns
+
+
+class _AsyncMemoryWorkerThreads(Protocol):
+    async def create(
+        self,
+        *,
+        graph_id: str,
+        metadata: dict[str, str],
+    ) -> Thread: ...
+
+
+class _AsyncMemoryWorkerRuns(Protocol):
+    async def create(
+        self,
+        thread_id: str,
+        assistant_id: str,
+        *,
+        input: Input,
+        metadata: dict[str, str],
+        config: Config,
+    ) -> Run: ...
+
+    async def get(self, thread_id: str, run_id: str) -> Run: ...
+
+
+class _AsyncMemoryWorkerClient(Protocol):
+    threads: _AsyncMemoryWorkerThreads
+    runs: _AsyncMemoryWorkerRuns
 
 
 @dataclass(frozen=True)
@@ -541,20 +597,6 @@ def _safe_segment(value: str) -> str:
     return safe.strip("-") or "unknown"
 
 
-def _worker_thread_id(
-    *,
-    role: MemoryLifecycleRole,
-    session_id: str,
-    source_agent: str,
-    trajectory: list[CompactMessage],
-) -> str:
-    """Return a deterministic thread id for a background worker run."""
-    key = "\n".join(
-        [role.value, session_id, source_agent, _trajectory_digest(trajectory)]
-    )
-    return f"evomemory-{role.value}:{_short_hash(key)}"
-
-
 def _agent_result_model(result: Mapping[str, object], model_type: type[T]) -> T | None:
     """Extract a DeepAgents/LangChain structured response from agent state."""
     value = result.get("structured_response")
@@ -876,30 +918,46 @@ def _runs_create_kwargs(kwargs: MemoryWorkerRunPayload) -> MemoryWorkerRunPayloa
     return cast("MemoryWorkerRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
 
 
+def _worker_workspace_dir() -> str:
+    return str(Path(_paths.WORKSPACE_ROOT).expanduser().resolve())
+
+
+def _memory_worker_metadata(
+    *,
+    role: MemoryLifecycleRole,
+    project_id: str,
+    source_agent: str,
+    session_id: str,
+    trajectory_digest: str,
+) -> dict[str, str]:
+    return {
+        "run_kind": f"evomemory_{role.value}_worker",
+        "source_session_id": session_id,
+        "source_agent": source_agent,
+        "project_id": project_id,
+        "trajectory_digest": trajectory_digest,
+        "workspace_dir": _worker_workspace_dir(),
+    }
+
+
 def _memory_worker_run_kwargs(
     *,
     role: MemoryLifecycleRole,
+    thread_id: str,
     project_id: str,
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
 ) -> MemoryWorkerRunPayload:
     """Build the LangGraph SDK run payload for a memory worker."""
-    worker_thread_id = _worker_thread_id(
-        role=role,
-        session_id=session_id,
-        source_agent=source_agent,
-        trajectory=trajectory,
-    )
     trajectory_digest = _trajectory_digest(trajectory)
-    metadata = {
-        "agent_name": "EvoScientist",
-        "run_kind": f"evomemory_{role.value}_worker",
-        "source_session_id": session_id,
-        "source_agent": source_agent,
-        "project_id": project_id,
-        "trajectory_digest": trajectory_digest,
-    }
+    metadata = _memory_worker_metadata(
+        role=role,
+        project_id=project_id,
+        source_agent=source_agent,
+        session_id=session_id,
+        trajectory_digest=trajectory_digest,
+    )
     payload: MemoryWorkerRunPayload = {
         "assistant_id": role.graph_id,
         "input": {
@@ -917,7 +975,7 @@ def _memory_worker_run_kwargs(
         "metadata": metadata,
         "config": {
             "configurable": {
-                "thread_id": worker_thread_id,
+                "thread_id": thread_id,
                 "evomemory_source_session_id": session_id,
                 "evomemory_source_agent": source_agent,
                 "evomemory_project_id": project_id,
@@ -958,32 +1016,6 @@ def _status_from_run_response(run: object) -> str:
     return str(value or "").strip().lower()
 
 
-def _delete_memory_worker_thread(client: Any, thread_id: str) -> None:
-    """Best-effort delete of a finished worker thread.
-
-    Worker conversations have no value after the run: the durable artifact
-    is the memory files they write, and worker threads are never resumed.
-    Deleting the thread drops its checkpoints from the shared sessions.db
-    so short-lived workers leave no per-turn residue behind.
-    """
-    try:
-        client.threads.delete(thread_id)
-    except Exception:
-        logger.debug(
-            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
-        )
-
-
-async def _adelete_memory_worker_thread(client: Any, thread_id: str) -> None:
-    """Async variant of :func:`_delete_memory_worker_thread`."""
-    try:
-        await client.threads.delete(thread_id)
-    except Exception:
-        logger.debug(
-            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
-        )
-
-
 def _spawn_memory_worker_status_thread(
     *,
     url: str,
@@ -1010,9 +1042,10 @@ def _watch_memory_worker_run_sync(
 
     failures = 0
     worker_confirmed_finished = False
-    client = None
     try:
-        client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
+        client: _SyncMemoryWorkerClient = get_sync_client(
+            url=url, headers={"x-auth-scheme": "langsmith"}
+        )
         while True:
             try:
                 run = client.runs.get(thread_id=thread_id, run_id=run_id)
@@ -1037,20 +1070,13 @@ def _watch_memory_worker_run_sync(
             time.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
-            # Accounting first, then best-effort deletion (mirrors the
-            # async watcher's cancellation-safe ordering). Only delete
-            # once the run is terminal — deleting a thread with a live
-            # run would break it. Crash residue is handled by the
-            # restore whitelist + startup purge in sessions.py.
             mark_memory_worker_finished(thread_id, run_id)
-            if client is not None:
-                _delete_memory_worker_thread(client, thread_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
 
 def _spawn_memory_worker_status_task(
-    client: Any,
+    client: _AsyncMemoryWorkerClient,
     *,
     thread_id: str,
     run_id: str,
@@ -1064,7 +1090,7 @@ def _spawn_memory_worker_status_task(
 
 
 async def _watch_memory_worker_run_async(
-    client: Any,
+    client: _AsyncMemoryWorkerClient,
     *,
     thread_id: str,
     run_id: str,
@@ -1098,13 +1124,9 @@ async def _watch_memory_worker_run_async(
             await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
     finally:
         if worker_confirmed_finished:
-            # Accounting BEFORE the best-effort deletion: if this task is
-            # cancelled mid-finally, only the deletion await is lost
-            # (startup purge covers the residue). The to_thread side
-            # effect completes even if its await is cancelled, so the
-            # worker is never stuck "running".
+            # The to_thread side effect completes even if its await is
+            # cancelled, so the worker is never stuck "running".
             await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
-            await _adelete_memory_worker_thread(client, thread_id)
         else:
             forget_memory_worker(thread_id, run_id)
 
@@ -1128,12 +1150,22 @@ def _launch_memory_worker(
         logger.info("Skipping EvoMemory worker launch; LangGraph dev is unavailable")
         return
 
-    client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
-    thread = client.threads.create(graph_id=role.graph_id)
+    client: _SyncMemoryWorkerClient = get_sync_client(
+        url=url, headers={"x-auth-scheme": "langsmith"}
+    )
+    metadata = _memory_worker_metadata(
+        role=role,
+        project_id=project_id,
+        source_agent=source_agent,
+        session_id=session_id,
+        trajectory_digest=_trajectory_digest(trajectory),
+    )
+    thread = client.threads.create(graph_id=role.graph_id, metadata=metadata)
     worker_thread_id = str(thread["thread_id"])
     before_outputs = snapshot_memory_outputs(memory_dir)
     payload = _memory_worker_run_kwargs(
         role=role,
+        thread_id=worker_thread_id,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
@@ -1183,12 +1215,22 @@ async def _alaunch_memory_worker(
         logger.info("Skipping EvoMemory worker launch; LangGraph dev is unavailable")
         return
 
-    client = get_client(url=url, headers={"x-auth-scheme": "langsmith"})
-    thread = await client.threads.create(graph_id=role.graph_id)
+    client: _AsyncMemoryWorkerClient = get_client(
+        url=url, headers={"x-auth-scheme": "langsmith"}
+    )
+    metadata = _memory_worker_metadata(
+        role=role,
+        project_id=project_id,
+        source_agent=source_agent,
+        session_id=session_id,
+        trajectory_digest=_trajectory_digest(trajectory),
+    )
+    thread = await client.threads.create(graph_id=role.graph_id, metadata=metadata)
     worker_thread_id = str(thread["thread_id"])
     before_outputs = await asyncio.to_thread(snapshot_memory_outputs, memory_dir)
     payload = _memory_worker_run_kwargs(
         role=role,
+        thread_id=worker_thread_id,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
