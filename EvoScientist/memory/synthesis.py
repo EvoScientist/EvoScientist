@@ -35,6 +35,11 @@ from .types import (
     MemoryScope,
     MemoryType,
 )
+from .worker_activity import (
+    mark_synthesis_finished,
+    mark_synthesis_started,
+    snapshot_memory_outputs,
+)
 
 if TYPE_CHECKING:
     from langgraph_sdk.schema import Config, Input
@@ -502,6 +507,7 @@ def _claim_synthesis_context(*, project_id: str, context_digest: str) -> bool:
 def _release_synthesis_context(*, project_id: str, context_digest: str) -> None:
     with _active_synthesis_lock:
         _active_synthesis_contexts.discard((project_id, context_digest))
+    mark_synthesis_finished(project_id=project_id, context_digest=context_digest)
 
 
 def _synthesis_run_kwargs(
@@ -753,6 +759,12 @@ def _launch_synthesis_worker(
         )
         return
 
+    mark_synthesis_started(
+        project_id=project_id,
+        context_digest=context_digest,
+        memory_dir=memory_dir,
+        before_outputs=snapshot_memory_outputs(memory_dir),
+    )
     active_key: tuple[str, str] | None = (project_id, context_digest)
     try:
         client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
@@ -822,6 +834,14 @@ async def _alaunch_synthesis_worker(
         )
         return
 
+    before_outputs = await asyncio.to_thread(snapshot_memory_outputs, memory_dir)
+    await asyncio.to_thread(
+        mark_synthesis_started,
+        project_id=project_id,
+        context_digest=context_digest,
+        memory_dir=memory_dir,
+        before_outputs=before_outputs,
+    )
     active_key: tuple[str, str] | None = (project_id, context_digest)
     try:
         client = get_client(url=url, headers={"x-auth-scheme": "langsmith"})

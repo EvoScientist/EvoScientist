@@ -189,12 +189,21 @@ def _memory_worker_label(status: MemoryWorkerStatusSnapshot) -> str:
     parts: list[str] = []
     if status.is_running:
         parts.append("🧠")
+    if getattr(status, "synthesis_running", False):
+        parts.append("💡")
 
     saved: list[str] = []
     if status.profile_updates:
         saved.append(_plural(status.profile_updates, "profile edit"))
     if status.observations_recorded:
         saved.append(_plural(status.observations_recorded, "observation"))
+    knowledge_saved = (
+        getattr(status, "knowledge_created", 0)
+        + getattr(status, "knowledge_updated", 0)
+        + getattr(status, "knowledge_archived", 0)
+    )
+    if knowledge_saved:
+        saved.append(_plural(knowledge_saved, "knowledge", "knowledge"))
     if saved:
         parts.append(f"Saved {', '.join(saved)}")
 

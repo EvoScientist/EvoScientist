@@ -109,6 +109,68 @@ def test_build_status_fragments_shows_memory_worker_indicator_when_running(
     )
 
 
+def test_build_status_fragments_shows_synthesis_lightbulb(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_memory_worker_status",
+        lambda: SimpleNamespace(
+            is_running=False,
+            synthesis_running=True,
+            profile_updates=0,
+            observations_recorded=0,
+        ),
+    )
+    snapshot = SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            snapshot,
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "💡" in rendered
+    assert "🧠" not in rendered
+
+
+def test_build_status_fragments_shows_saved_knowledge(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_memory_worker_status",
+        lambda: SimpleNamespace(
+            is_running=False,
+            synthesis_running=False,
+            profile_updates=0,
+            observations_recorded=0,
+            knowledge_created=1,
+            knowledge_updated=1,
+            knowledge_archived=1,
+        ),
+    )
+    snapshot = SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            snapshot,
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "Saved 3 knowledge" in rendered
+
+
 def test_build_status_fragments_hides_memory_indicator_when_idle(monkeypatch):
     monkeypatch.setattr(
         "EvoScientist.cli.status_bar.get_memory_worker_status",

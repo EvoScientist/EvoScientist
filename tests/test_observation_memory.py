@@ -60,6 +60,31 @@ def _read_memory_document(path) -> tuple[dict[str, Any], str]:
     return metadata, body
 
 
+def _write_knowledge_status_file(
+    memory_dir,
+    *,
+    status: str = "active",
+    body: str = "Knowledge body.",
+) -> None:
+    path = memory_dir / "knowledge" / "projects" / "P-project" / "K-1.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "---",
+                "id: K-1",
+                "summary: Status test knowledge.",
+                "memory_type: semantic",
+                "scope: project",
+                f"status: {status}",
+                "---",
+                body,
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _stable_created_at(metadata: dict[str, Any]) -> dict[str, Any]:
     created_at = metadata.get("created_at")
     assert isinstance(created_at, str)
@@ -1847,6 +1872,80 @@ def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
         assert status.observations_recorded == 1
         assert status.profile_updates == 0
         assert worker_activity.memory_worker_status().observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_memory_activity_tracks_active_synthesis_knowledge_create(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    worker_activity.mark_synthesis_started(
+        project_id="P-project",
+        context_digest="digest-1",
+        memory_dir=memory_dir,
+        before_outputs=before,
+    )
+
+    try:
+        assert worker_activity.memory_worker_status().synthesis_running is True
+        _write_knowledge_status_file(memory_dir, body="Created knowledge.")
+        observed = worker_activity.memory_worker_observed_outputs()
+        assert observed.synthesis_running is True
+        assert observed.knowledge_created == 1
+        assert worker_activity.memory_worker_status().knowledge_created == 0
+
+        worker_activity.mark_synthesis_finished(
+            project_id="P-project",
+            context_digest="digest-1",
+        )
+        status = worker_activity.memory_worker_status()
+        assert status.synthesis_running is False
+        assert status.knowledge_created == 1
+        assert status.knowledge_updated == 0
+        assert status.knowledge_archived == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_memory_activity_counts_knowledge_update_and_archive(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    _write_knowledge_status_file(memory_dir, body="Initial knowledge.")
+
+    try:
+        before_update = worker_activity.snapshot_memory_outputs(memory_dir)
+        worker_activity.mark_memory_worker_started(
+            thread_id="thread-1",
+            run_id="run-1",
+            memory_dir=memory_dir,
+            before_outputs=before_update,
+        )
+        _write_knowledge_status_file(memory_dir, body="Updated knowledge.")
+        worker_activity.mark_memory_worker_finished("thread-1", "run-1")
+        status = worker_activity.memory_worker_status()
+        assert status.knowledge_created == 0
+        assert status.knowledge_updated == 1
+        assert status.knowledge_archived == 0
+
+        worker_activity.clear_memory_worker_saved_counts()
+        before_archive = worker_activity.snapshot_memory_outputs(memory_dir)
+        worker_activity.mark_memory_worker_started(
+            thread_id="thread-2",
+            run_id="run-2",
+            memory_dir=memory_dir,
+            before_outputs=before_archive,
+        )
+        _write_knowledge_status_file(
+            memory_dir,
+            status="archived",
+            body="Archived knowledge.",
+        )
+        worker_activity.mark_memory_worker_finished("thread-2", "run-2")
+        status = worker_activity.memory_worker_status()
+        assert status.knowledge_created == 0
+        assert status.knowledge_updated == 0
+        assert status.knowledge_archived == 1
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
 
