@@ -29,7 +29,11 @@ def _assert_subagent_memory_middleware(subagent: dict, *, source_agent: str) -> 
         "EvoMemoryLifecycleMiddleware",
     )
 
-    assert [tool.name for tool in memory_middleware.tools] == ["record_observation"]
+    assert [tool.name for tool in memory_middleware.tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
     assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
     assert lifecycle_middleware._source_agent == source_agent
     assert lifecycle_middleware._project_id == memory_middleware.project_id
@@ -173,7 +177,10 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
         subs[0],
         "EvoMemoryLifecycleMiddleware",
     )
-    assert memory_middleware.tools == []
+    assert [tool.name for tool in memory_middleware.tools] == [
+        "search_observations",
+        "read_memory",
+    ]
     assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
 
 
@@ -183,7 +190,7 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_all_observation_writer_skips_turn_worker_without_profile_memory(
+def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
     mock_config, mock_chat, mock_tool_selector
 ):
     cfg = MagicMock()
@@ -207,25 +214,15 @@ def test_all_observation_writer_skips_turn_worker_without_profile_memory(
         m for m in middleware if type(m).__name__ == "EvoMemoryMiddleware"
     )
 
-    assert [tool.name for tool in memory_middleware.tools] == ["record_observation"]
-    assert not any(
-        type(m).__name__ == "EvoMemoryLifecycleMiddleware" for m in middleware
+    assert [tool.name for tool in memory_middleware.tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
+    lifecycle_middleware = next(
+        m for m in middleware if type(m).__name__ == "EvoMemoryLifecycleMiddleware"
     )
-
-
-def test_configured_system_prompt_matches_live_observation_tool():
-    cfg = MagicMock()
-    cfg.memory_profile_enabled = True
-    cfg.memory_observations_enabled = True
-    cfg.memory_observation_writer = MemoryObservationWriter.WORKER
-    cfg.memory_workers_enabled = True
-
-    from EvoScientist.EvoScientist import _configured_system_prompt
-
-    prompt = _configured_system_prompt(cfg)
-
-    assert "/memories/observations/" in prompt
-    assert "record_observation" not in prompt
+    assert lifecycle_middleware._role.value == "turn"
 
 
 # ---------------------------------------------------------------------------

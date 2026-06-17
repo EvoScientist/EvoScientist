@@ -12,8 +12,6 @@ code-agent:
     - Write outputs under /artifacts/ (recommended) and log key params to /experiment_log.md (optional).
     - Do not modify /skills/.
     - If a relevant local skill exists, read its SKILL.md and follow its workflow instead of reinventing.
-    - Search `/memories/observations/` for relevant proven commands, failed attempts,
-      tool constraints, or project lessons before implementing. Skip if there is no useful memory yet.
     - Before heavy runs, confirm GPU/CUDA/VRAM availability and required packages.
     - Suggested preflight commands:
       - nvidia-smi

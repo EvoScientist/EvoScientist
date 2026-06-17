@@ -1420,6 +1420,10 @@ def _api_workspace_dir() -> str:
     ``start_langgraph_dev`` injects ``EVOSCIENTIST_WORKSPACE_DIR`` and sets
     the subprocess cwd to the workspace, so either source identifies the
     workspace this server instance is serving.
+
+    NOTE: ``Path.resolve()`` / ``Path.cwd()`` call ``os.getcwd()``, a blocking
+    syscall. Call this from a sync context or via ``asyncio.to_thread`` — never
+    directly from an async function on the dev runtime (blockbuster will flag it).
     """
     import os
 
@@ -1427,6 +1431,16 @@ def _api_workspace_dir() -> str:
     if ws:
         return str(Path(ws).expanduser().resolve())
     return str(Path.cwd().resolve())
+
+
+async def _api_workspace_dir_async() -> str:
+    """Async wrapper for :func:`_api_workspace_dir`.
+
+    Offloads the blocking ``os.getcwd()`` (via ``Path.cwd()/resolve()``) to a
+    thread so it never runs on the event loop — the dev runtime's blockbuster
+    guard flags it otherwise. Use this from any async call site.
+    """
+    return await asyncio.to_thread(_api_workspace_dir)
 
 
 class _ApiPruningCheckpointer(PruningCheckpointer):
@@ -1452,7 +1466,13 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
     ) -> Any:
         if isinstance(metadata, dict) and isinstance(metadata.get("graph_id"), str):
             metadata = dict(metadata)
-            metadata.setdefault("workspace_dir", _api_workspace_dir())
+            # _api_workspace_dir() calls Path.resolve()/Path.cwd() -> os.getcwd(),
+            # a blocking syscall flagged by the dev runtime's blockbuster guard.
+            # Run it in a thread, and only when actually needed — ``setdefault``
+            # would evaluate the argument eagerly on every write even when the
+            # key is already present.
+            if "workspace_dir" not in metadata:
+                metadata["workspace_dir"] = await _api_workspace_dir_async()
             metadata["updated_at"] = datetime.now(UTC).isoformat()
             if metadata.get("graph_id") == AGENT_NAME:
                 metadata.setdefault("agent_name", AGENT_NAME)
@@ -1511,7 +1531,7 @@ async def _restore_webui_threads_to_global_store() -> None:
         # Legacy WebUI/CLI interop rows without graph_id are restored as the
         # main graph only when they carry agent_name == AGENT_NAME. Rows
         # predating workspace stamping remain deliberately excluded.
-        current_workspace = _api_workspace_dir()
+        current_workspace = await _api_workspace_dir_async()
         sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
         titles: dict[uuid.UUID, str] = {}
         db_path = str(get_db_path())

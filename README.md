@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.1.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.1.7" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -149,6 +149,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[16 Jun 2026]** **[v0.1.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.7)** — Memory retrieval: agents run a per-task preflight over stored observations (`search_observations` ranked keyword search + `read_memory`); multi-stage slash-command completions with subcommand awareness; Windows reliability fixes (async MCP tool execution + graph-state recovery after interruptions, `cmd.exe` path quoting); quoted virtual-path handling; deepagents 0.6.10.
 - **[11 Jun 2026]** **[v0.1.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.6)** — Session persistence fix: WebUI / `langgraph dev` threads survive restarts (SQLite checkpointer + scoped thread restore), memory-worker checkpoint cleanup (delete-on-completion + startup purge), short thread IDs in `/threads` and resume hints.
 - **[11 Jun 2026]** **[v0.1.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.5)** — Dangerous mode (real-filesystem access with safety checks), LangGraph streaming v3 pipeline, opt-in Anthropic prompt caching via OpenRouter, claude-fable-5, free-scrolling TUI, Windows CI support, public Cloudflare tunnel for `EvoSci deploy` (`--tunnel`).
 - **[07 Jun 2026]** **[v0.1.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.4)** — Auxiliary model for background tasks & tool selection, observation-memory lifecycle, Qwen3.7-Max/Plus (DashScope), UI-backend selection, plus an OpenRouter multi-turn reasoning fix.

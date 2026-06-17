@@ -2,13 +2,24 @@
 
 from .observations import (
     OBSERVATION_DIR,
+    ReadMemoryArgs,
+    RecordObservationArgs,
+    SearchObservationsArgs,
+    create_read_memory_tool,
+    create_record_observation_tool,
+    create_search_observations_tool,
+    read_observation_file,
+    record_observation_file,
+    search_observation_files,
+)
+from .types import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    ObservationReadResult,
     ObservationRecordResult,
-    RecordObservationArgs,
-    create_record_observation_tool,
-    record_observation_file,
+    ObservationSearchHit,
+    ObservationSearchMode,
 )
 
 __all__ = [
@@ -16,8 +27,17 @@ __all__ = [
     "MemoryScope",
     "MemorySourceType",
     "MemoryType",
+    "ObservationReadResult",
     "ObservationRecordResult",
+    "ObservationSearchHit",
+    "ObservationSearchMode",
+    "ReadMemoryArgs",
     "RecordObservationArgs",
+    "SearchObservationsArgs",
+    "create_read_memory_tool",
     "create_record_observation_tool",
+    "create_search_observations_tool",
+    "read_observation_file",
     "record_observation_file",
+    "search_observation_files",
 ]
