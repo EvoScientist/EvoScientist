@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 # Module-level storage for tool selection state.
 # Updated by _ToolSelectionTrackerMiddleware; read by stream/events.py.
+# NOTE: process-global, so it is not isolated across concurrent runs and must be
+# reset between tests (see reset_tool_selection_state_for_tests + the autouse
+# conftest fixture). The durable fix is to surface this to the stream layer via a
+# custom stream event (langgraph get_stream_writer / stream_mode="custom")
+# instead of module state; tracked as a separate follow-up.
 _current_selected_tools: list[str] = []
 _last_emitted_tools: list[str] = []  # last selection shown to user
 _total_tools_count: int = 0  # total tools before selection
@@ -279,3 +284,20 @@ def create_tool_selector_middleware(
         ),
         _ToolSelectionTrackerMiddleware(),
     ]
+
+
+def reset_tool_selection_state_for_tests() -> None:
+    """Reset the process-global tool-selection state.
+
+    The selector/tracker record the last selected tools and the selector-active
+    flag in module globals that ``stream/tool_selection.py`` reads to suppress
+    selector chatter. Tests that drive the selector must not leak that state
+    into later tests; an autouse fixture resets it around every test.
+    """
+    global _current_selected_tools, _last_emitted_tools
+    global _total_tools_count, _selector_active
+
+    _current_selected_tools = []
+    _last_emitted_tools = []
+    _total_tools_count = 0
+    _selector_active = False
