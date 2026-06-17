@@ -7,7 +7,6 @@ can grep and read with ordinary file tools today.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -15,11 +14,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-import yaml
 from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
+from ._common import read_memory_document, short_hash
 from .search import search_memory_documents
 from .types import (
     MemoryScope,
@@ -122,8 +121,7 @@ def _observation_id(
             _normalize(why_it_matters).casefold(),
         ]
     )
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
-    return f"O-{digest}"
+    return f"O-{short_hash(key)}"
 
 
 def _agent_path(memory_path: str) -> str:
@@ -146,24 +144,6 @@ def _memory_path(
 def _json_string(value: str) -> str:
     """Render a string as a YAML-safe JSON scalar."""
     return json.dumps(value, ensure_ascii=False)
-
-
-def _read_observation_document(path: Path) -> tuple[dict[str, object], str] | None:
-    """Read an observation markdown document and parse its frontmatter."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not text.startswith("---\n"):
-        return None
-    try:
-        frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
-        metadata = yaml.safe_load(frontmatter)
-    except (ValueError, yaml.YAMLError):
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    return {key: value for key, value in metadata.items() if isinstance(key, str)}, body
 
 
 def _observation_files(
@@ -204,7 +184,7 @@ def candidate_observation_documents(
         project_id=project_id,
         scope=scope,
     ):
-        document = _read_observation_document(path)
+        document = read_memory_document(path)
         if document is None:
             continue
         metadata, body = document
@@ -293,7 +273,7 @@ def read_observation_file(
         project_id=project_id,
         scope=None,
     ):
-        document = _read_observation_document(path)
+        document = read_memory_document(path)
         if document is None:
             continue
         metadata, _body = document

@@ -8,16 +8,15 @@ abstraction matters.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-import yaml
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
+from ._common import dedupe_ids, read_memory_document, short_hash
 from .observations import (
     candidate_observation_documents,
     read_observation_file,
@@ -130,8 +129,7 @@ def _knowledge_id(
             "\n".join(sorted(supporting_observation_ids)),
         ]
     )
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
-    return f"K-{digest}"
+    return f"K-{short_hash(key)}"
 
 
 def _agent_path(memory_path: str) -> str:
@@ -155,23 +153,6 @@ def _json_string(value: str) -> str:
 
 def _json_list(values: list[str]) -> str:
     return json.dumps(values, ensure_ascii=False)
-
-
-def _read_memory_document(path: Path) -> tuple[dict[str, object], str] | None:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not text.startswith("---\n"):
-        return None
-    try:
-        frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
-        metadata = yaml.safe_load(frontmatter)
-    except (ValueError, yaml.YAMLError):
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    return {key: value for key, value in metadata.items() if isinstance(key, str)}, body
 
 
 def _string_list(value: object) -> list[str]:
@@ -226,7 +207,7 @@ def _find_knowledge_file(
     for path in _knowledge_files(
         memory_dir=memory_dir, project_id=project_id, scope=None
     ):
-        document = _read_memory_document(path)
+        document = read_memory_document(path)
         if document is None:
             continue
         metadata, _body = document
@@ -240,7 +221,7 @@ def _knowledge_document_from_path(
     path: Path,
     memory_dir: str | Path,
 ) -> KnowledgeSearchDocument | None:
-    document = _read_memory_document(path)
+    document = read_memory_document(path)
     if document is None:
         return None
     metadata, body = document
@@ -309,7 +290,7 @@ def _markdown_sections(body: str) -> dict[str, str]:
 
 
 def _existing_created_at(path: Path) -> str | None:
-    document = _read_memory_document(path)
+    document = read_memory_document(path)
     if document is None:
         return None
     metadata, _body = document
@@ -437,18 +418,6 @@ def _format_knowledge_markdown(
     return body
 
 
-def _unique_ids(ids: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw_id in ids:
-        memory_id = raw_id.strip()
-        if not memory_id or memory_id in seen:
-            continue
-        seen.add(memory_id)
-        out.append(memory_id)
-    return out
-
-
 def _validate_supporting_observations(
     *,
     memory_dir: str | Path,
@@ -493,8 +462,8 @@ def record_knowledge_file(
     """Create or update a synthesized knowledge markdown file."""
     summary_text = summary.strip()
     knowledge_text = knowledge.strip()
-    support_ids = _unique_ids(supporting_observation_ids)
-    supersedes_ids = _unique_ids(supersedes_knowledge_ids or [])
+    support_ids = list(dedupe_ids(supporting_observation_ids))
+    supersedes_ids = list(dedupe_ids(supersedes_knowledge_ids or []))
     if not summary_text:
         raise ValueError("summary must not be empty")
     if not knowledge_text:
@@ -733,7 +702,7 @@ def archive_knowledge_file(
     )
     if path is None:
         return None
-    raw = _read_memory_document(path)
+    raw = read_memory_document(path)
     if raw is None:
         return None
     metadata, body = raw

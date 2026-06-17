@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import threading
@@ -25,12 +24,20 @@ from typing import (
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import BaseTool, StructuredTool
-from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
 
 from .. import paths as _paths
+from ._common import (
+    config_str,
+    current_configurable,
+    dedupe_ids,
+    document_body,
+    pretty_json,
+    short_hash,
+    stable_json,
+)
 from .knowledge import (
     SYNTHESIS_AGENT_NAME,
     ReadMemoryArgs,
@@ -258,38 +265,6 @@ def _agent_result_model(result: Mapping[str, object], model_type: type[T]) -> T 
     return None
 
 
-def _current_configurable() -> Mapping[str, object]:
-    try:
-        config = get_config()
-    except RuntimeError:
-        return {}
-    configurable = config.get("configurable", {})
-    return configurable if isinstance(configurable, dict) else {}
-
-
-def _config_str(configurable: Mapping[str, object], key: str) -> str | None:
-    value = configurable.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _short_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _stable_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-
-
-def _pretty_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-
-
 def _truncate_text(text: str, max_chars: int) -> str:
     stripped = text.strip()
     if len(stripped) <= max_chars:
@@ -303,13 +278,13 @@ def _shrink_synthesis_context(
     max_chars: int,
 ) -> SynthesisContext:
     """Shrink seed context detail without dropping seed observation ids."""
-    encoded = _pretty_json(context)
+    encoded = pretty_json(context)
     if len(encoded) <= max_chars:
         return context
 
     for observation in context["uncovered_observations"]:
         observation["snippet"] = ""
-    encoded = _pretty_json(context)
+    encoded = pretty_json(context)
     if len(encoded) <= max_chars:
         return context
 
@@ -318,13 +293,13 @@ def _shrink_synthesis_context(
             observation["summary"],
             SYNTHESIS_CONTEXT_OBSERVATION_CLAMPED_SUMMARY_CHARS,
         )
-    encoded = _pretty_json(context)
+    encoded = pretty_json(context)
     if len(encoded) <= max_chars:
         return context
 
     for observation in context["uncovered_observations"]:
         observation["summary"] = ""
-    encoded = _pretty_json(context)
+    encoded = pretty_json(context)
 
     if len(encoded) > max_chars:
         logger.warning(
@@ -336,21 +311,6 @@ def _shrink_synthesis_context(
     return context
 
 
-def _normalize_seed_observation_ids(
-    observation_ids: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Strip blanks and dedupe seed observation ids in first-seen order."""
-    normalized = []
-    seen = set()
-    for observation_id in observation_ids:
-        clean_id = observation_id.strip()
-        if not clean_id or clean_id in seen:
-            continue
-        normalized.append(clean_id)
-        seen.add(clean_id)
-    return tuple(normalized)
-
-
 def build_synthesis_context(
     *,
     memory_dir: str | Path,
@@ -359,7 +319,7 @@ def build_synthesis_context(
     max_chars: int = SYNTHESIS_CONTEXT_MAX_CHARS,
 ) -> SynthesisContext | None:
     """Build bounded seed context for the synthesis agent."""
-    seed_ids = _normalize_seed_observation_ids(seed_observation_ids)
+    seed_ids = dedupe_ids(seed_observation_ids)
     if not seed_ids:
         return None
 
@@ -424,7 +384,7 @@ def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
     worker_memory_dir = Path(memory_dir).expanduser()
 
     def _project_id() -> str | None:
-        return _config_str(_current_configurable(), "evomemory_project_id")
+        return config_str(current_configurable(), "evomemory_project_id")
 
     def _search_memory(
         query: str,
@@ -570,7 +530,7 @@ def _synthesis_user_prompt(context: SynthesisContext, *, trigger: str) -> str:
                 "bounded; absence from it does not mean absence from memory."
             ),
             "Seed context JSON:",
-            _pretty_json(context),
+            pretty_json(context),
         ]
     )
 
@@ -657,7 +617,7 @@ class _SynthesisApplyMiddleware(AgentMiddleware):
         if review is None:
             logger.warning("EvoMemory synthesizer returned no structured decision")
             return
-        project_id = _config_str(_current_configurable(), "evomemory_project_id")
+        project_id = config_str(current_configurable(), "evomemory_project_id")
         if not project_id:
             logger.warning("EvoMemory synthesizer missing project id")
             return
@@ -723,11 +683,11 @@ def _runs_create_kwargs(kwargs: SynthesisRunPayload) -> SynthesisRunPayload:
 
 
 def _synthesis_thread_id(*, project_id: str, context: SynthesisContext) -> str:
-    return f"evomemory-synth:{_short_hash(project_id + _stable_json(context))}"
+    return f"evomemory-synth:{short_hash(project_id + stable_json(context))}"
 
 
 def _synthesis_context_digest(context: SynthesisContext) -> str:
-    return _short_hash(_stable_json(context))
+    return short_hash(stable_json(context))
 
 
 def _claim_synthesis_context(*, project_id: str, context_digest: str) -> bool:

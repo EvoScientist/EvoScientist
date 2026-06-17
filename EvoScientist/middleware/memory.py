@@ -18,7 +18,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ModelRequest,
@@ -37,6 +36,7 @@ from ..memory import (
     create_search_memory_tool,
     knowledge_search_documents,
 )
+from ..memory._common import parse_memory_document, short_hash
 
 logger = logging.getLogger(__name__)
 
@@ -185,13 +185,6 @@ def _append_to_system_message(
     return system_message.model_copy(update={"content": new_blocks})
 
 
-def _short_hash(text: str, *, n: int = 16) -> str:
-    """Return a deterministic hash fragment for generated profile paths."""
-    import hashlib
-
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
-
-
 def _run_git(args: list[str], cwd: Path) -> str | None:
     """Run a bounded git query, returning trimmed stdout when it succeeds.
 
@@ -227,8 +220,8 @@ def _resolve_project_id(workspace: str | Path | None = None) -> str:
         git_root_path = Path(git_root).expanduser().resolve()
         remote = _run_git(["remote", "get-url", "origin"], git_root_path)
         source = f"git-remote:{remote}" if remote else f"git-root:{git_root_path}"
-        return f"P-{_short_hash(source)}"
-    return f"P-{_short_hash(f'path:{root}')}"
+        return f"P-{short_hash(source)}"
+    return f"P-{short_hash(f'path:{root}')}"
 
 
 def _profile_specs(project_id: str) -> list[tuple[str, str]]:
@@ -567,16 +560,11 @@ class EvoMemoryMiddleware(AgentMiddleware):
         except (OSError, UnicodeDecodeError) as e:
             logger.warning("Failed to read observation memory %s: %s", path, e)
             return None
-        if not text.startswith("---\n"):
+        parsed = parse_memory_document(text)
+        if parsed is None:
             return None
-        try:
-            frontmatter, _body = text.removeprefix("---\n").split("\n---\n", 1)
-            metadata = yaml.safe_load(frontmatter)
-        except (ValueError, yaml.YAMLError):
-            return None
-        if not isinstance(metadata, dict):
-            return None
-        return {key: value for key, value in metadata.items() if isinstance(key, str)}
+        metadata, _body = parsed
+        return metadata
 
     def _observation_index_record_from_path(
         self, path: Path

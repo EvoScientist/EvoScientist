@@ -8,7 +8,6 @@ the background and can update profile files or record observations.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import threading
@@ -23,7 +22,6 @@ from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, TypeVar, cast
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, filter_messages
 from langchain_core.messages.tool import ToolCall
-from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
@@ -36,6 +34,14 @@ from ..config import (
     get_effective_config,
 )
 from ..memory import MemorySourceType
+from ..memory._common import (
+    config_str,
+    current_configurable,
+    dedupe_ids,
+    pretty_json,
+    short_hash,
+    stable_json,
+)
 from ..memory.synthesis import _launch_synthesis_worker
 from ..memory.worker_activity import (
     forget_memory_worker,
@@ -584,16 +590,6 @@ def _state_messages(state: AgentState[object]) -> list[BaseMessage]:
     return [message for message in messages if isinstance(message, BaseMessage)]
 
 
-def _dedupe_observation_ids(observation_ids: Sequence[str]) -> tuple[str, ...]:
-    """Return O-* ids in first-seen order."""
-    ids = []
-    for observation_id in observation_ids:
-        clean_id = observation_id.strip()
-        if clean_id.startswith("O-"):
-            ids.append(clean_id)
-    return tuple(dict.fromkeys(ids))
-
-
 def _created_observation_ids_from_messages(
     messages: Sequence[BaseMessage],
 ) -> tuple[str, ...]:
@@ -620,33 +616,17 @@ def _created_observation_ids_from_messages(
         observation_id = str(payload.get("observation_id") or "").strip()
         if observation_id.startswith("O-"):
             observation_ids.append(observation_id)
-    return _dedupe_observation_ids(observation_ids)
-
-
-def _stable_json(value: object) -> str:
-    """Serialize values deterministically for hashing."""
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-
-
-def _pretty_json(value: object) -> str:
-    """Serialize values readably for worker prompts."""
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    return dedupe_ids(observation_ids, require_prefix="O-")
 
 
 def _trajectory_digest(trajectory: list[CompactMessage]) -> str:
     """Return the stable digest for a compact trajectory."""
-    return _short_hash(_stable_json(trajectory))
+    return short_hash(stable_json(trajectory))
 
 
 def _trajectory_for_prompt(trajectory: list[CompactMessage]) -> str:
     """Serialize the full compact trajectory for worker prompts."""
-    return _pretty_json(trajectory)
+    return pretty_json(trajectory)
 
 
 def _runtime_thread_id(runtime: Runtime | None) -> str:
@@ -654,11 +634,6 @@ def _runtime_thread_id(runtime: Runtime | None) -> str:
     if runtime and runtime.execution_info and runtime.execution_info.thread_id:
         return str(runtime.execution_info.thread_id)
     return "unknown"
-
-
-def _short_hash(text: str) -> str:
-    """Return the short hash fragment used in generated ids."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _safe_segment(value: str) -> str:
@@ -678,7 +653,7 @@ def _worker_thread_id(
     key = "\n".join(
         [role.value, session_id, source_agent, _trajectory_digest(trajectory)]
     )
-    return f"evomemory-{role.value}:{_short_hash(key)}"
+    return f"evomemory-{role.value}:{short_hash(key)}"
 
 
 def _agent_result_model(result: Mapping[str, object], model_type: type[T]) -> T | None:
@@ -701,7 +676,7 @@ def _summary_memory_path(
     trajectory_digest: str,
 ) -> str:
     """Return the memory-relative path for a subagent execution summary."""
-    summary_id = _short_hash("\n".join([session_id, source_agent, trajectory_digest]))
+    summary_id = short_hash("\n".join([session_id, source_agent, trajectory_digest]))
     return (
         "/executions/"
         f"{_safe_segment(session_id)}/{_safe_segment(source_agent)}-{summary_id}.md"
@@ -715,7 +690,7 @@ def _execution_summary_id(
     trajectory_digest: str,
 ) -> str:
     key = "\n".join([session_id, source_agent, trajectory_digest])
-    return f"E-{_short_hash(key)}"
+    return f"E-{short_hash(key)}"
 
 
 def _json_string(value: str) -> str:
@@ -879,11 +854,11 @@ class _SubagentSummaryWriterMiddleware(AgentMiddleware):
             logger.warning("Subagent memory worker returned no structured summary")
             return None
 
-        configurable = _current_configurable()
-        session_id = _config_str(configurable, "evomemory_source_session_id")
-        source_agent = _config_str(configurable, "evomemory_source_agent")
-        project_id = _config_str(configurable, "evomemory_project_id")
-        trajectory_digest = _config_str(configurable, "evomemory_trajectory_digest")
+        configurable = current_configurable()
+        session_id = config_str(configurable, "evomemory_source_session_id")
+        source_agent = config_str(configurable, "evomemory_source_agent")
+        project_id = config_str(configurable, "evomemory_project_id")
+        trajectory_digest = config_str(configurable, "evomemory_trajectory_digest")
         if not session_id or not source_agent or not trajectory_digest:
             logger.warning("Subagent memory worker missing summary metadata")
             return None
@@ -979,20 +954,6 @@ def build_memory_worker_graph(
         observation_writer=memory_controls.observation_writer,
         middleware=middleware,
     )
-
-
-def _config_str(configurable: Mapping[str, object], key: str) -> str | None:
-    value = configurable.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _current_configurable() -> Mapping[str, object]:
-    try:
-        config = get_config()
-    except RuntimeError:
-        return {}
-    configurable = config.get("configurable", {})
-    return configurable if isinstance(configurable, dict) else {}
 
 
 def _runs_create_kwargs(kwargs: MemoryWorkerRunPayload) -> MemoryWorkerRunPayload:
@@ -1125,7 +1086,7 @@ def _observation_ids_from_output_paths(paths: frozenset[str]) -> tuple[str, ...]
         observation_id = Path(path).stem
         if observation_id.startswith("O-"):
             observation_ids.append(observation_id)
-    return _dedupe_observation_ids(observation_ids)
+    return dedupe_ids(observation_ids, require_prefix="O-")
 
 
 def _spawn_memory_worker_status_thread(
@@ -1197,11 +1158,12 @@ def _watch_memory_worker_run_sync(
             if client is not None:
                 _delete_memory_worker_thread(client, thread_id)
             if synthesis_after is not None:
-                seed_observation_ids = _dedupe_observation_ids(
+                seed_observation_ids = dedupe_ids(
                     (
                         *synthesis_after.seed_observation_ids,
                         *_observation_ids_from_output_paths(observation_paths),
-                    )
+                    ),
+                    require_prefix="O-",
                 )
                 if seed_observation_ids:
                     try:
@@ -1231,7 +1193,7 @@ def _synthesis_after_worker_args(
     memory_controls = MemoryControls.from_config(get_effective_config())
     if not memory_controls.synthesis_worker_needed:
         return None
-    seed_observation_ids = _dedupe_observation_ids(seed_observation_ids)
+    seed_observation_ids = dedupe_ids(seed_observation_ids, require_prefix="O-")
     if not seed_observation_ids and not memory_controls.observation_tool_enabled(
         role.observation_target
     ):

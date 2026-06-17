@@ -566,7 +566,7 @@ def test_build_synthesis_context_shrinks_detail_without_dropping_seed_ids(
     )
 
     assert context is not None
-    assert len(memory_synthesis._pretty_json(context)) <= 2200
+    assert len(memory_synthesis.pretty_json(context)) <= 2200
     assert [obs["id"] for obs in context["uncovered_observations"]] == list(seed_ids)
     assert {obs["snippet"] for obs in context["uncovered_observations"]} == {""}
     assert context["memory_inventory"]["seed_observation_count"] == len(seed_ids)
@@ -607,7 +607,7 @@ def test_build_synthesis_context_keeps_seed_ids_when_still_oversized(
     )
 
     assert context is not None
-    assert len(memory_synthesis._pretty_json(context)) > 100
+    assert len(memory_synthesis.pretty_json(context)) > 100
     assert [obs["id"] for obs in context["uncovered_observations"]] == list(seed_ids)
     assert {obs["summary"] for obs in context["uncovered_observations"]} == {""}
     assert {obs["snippet"] for obs in context["uncovered_observations"]} == {""}
@@ -629,7 +629,7 @@ def test_synthesis_memory_tools_resolve_project_from_run_config(tmp_path, monkey
     )
     monkeypatch.setattr(
         memory_synthesis,
-        "_current_configurable",
+        "current_configurable",
         lambda: {"evomemory_project_id": "P-project"},
     )
     tools = memory_synthesis._synthesis_memory_tools(memory_dir=memories)
@@ -1379,7 +1379,7 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     summary = "Completed the analysis."
     monkeypatch.setattr(
         memory_lifecycle,
-        "_current_configurable",
+        "current_configurable",
         lambda: {
             "evomemory_source_session_id": "thread-1",
             "evomemory_source_agent": "writing-agent",

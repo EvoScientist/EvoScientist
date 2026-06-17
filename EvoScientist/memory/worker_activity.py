@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
+from ._common import read_memory_document
 
 
 @dataclass(frozen=True)
@@ -82,19 +82,10 @@ def _file_digest(path: Path) -> str | None:
 
 
 def _knowledge_status(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    parsed = read_memory_document(path)
+    if parsed is None:
         return "unknown"
-    if not text.startswith("---\n"):
-        return "unknown"
-    try:
-        frontmatter, _body = text.removeprefix("---\n").split("\n---\n", 1)
-        metadata = yaml.safe_load(frontmatter)
-    except (ValueError, yaml.YAMLError):
-        return "unknown"
-    if not isinstance(metadata, dict):
-        return "unknown"
+    metadata, _body = parsed
     if "status" in metadata:
         status = str(metadata.get("status") or "").strip().lower()
         return status or "unknown"
