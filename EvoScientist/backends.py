@@ -95,6 +95,44 @@ _FORCED_FULL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\buv\s+(?:add|remove|pip)\b"), "modifies project dependencies"),
 ]
 
+# Inline interpreter execution: force confirmation when ANY interpreter is invoked
+# with an inline-code flag. This catches the execution VECTOR, not the payload —
+# much harder to bypass than content-level pattern matching.
+_FORCED_INTERPRETER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\bpython[0-9.]*\b.*\s-[A-Za-z]*c\b"),
+        "executes inline Python code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\b(?:node|bun)\b.*(?:\s-[A-Za-z]*[ep]\b|\s--(?:eval|print)\b)"),
+        "executes inline JavaScript code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\bdeno\s+eval\b"),
+        "executes inline JavaScript code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\bruby\b.*\s-[A-Za-z]*e\b"),
+        "executes inline Ruby code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\bperl\b.*\s-[A-Za-z]*[eE]\b"),
+        "executes inline Perl code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\bphp\b.*\s-[A-Za-z]*r\b"),
+        "executes inline PHP code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\blua[0-9.]*\b.*\s-[A-Za-z]*e\b"),
+        "executes inline Lua code (bypasses content safeguards)",
+    ),
+    (
+        re.compile(r"\b(?:ba|da|z|a|k|fi)?sh\b.*\s-[A-Za-z]*c\b"),
+        "executes shell-in-shell (bypasses content safeguards)",
+    ),
+]
+
 # Patterns checked ONLY outside quoted strings (| and > are common inside regexes/code)
 _FORCED_UNQUOTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
@@ -104,6 +142,14 @@ _FORCED_UNQUOTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"(?<![=\-<>&])>{1,2}(?![=&])"),
         "contains output redirection (can overwrite files)",
+    ),
+    (
+        re.compile(r"(?<![=\-<>&])<{1,3}(?![=&<])"),
+        "contains input redirection (can feed arbitrary code to interpreter)",
+    ),
+    (
+        re.compile(r"\beval\s"),
+        "uses eval (can construct commands that bypass safeguards)",
     ),
 ]
 
@@ -124,6 +170,9 @@ def check_forced_confirmation(command: str) -> str | None:
     """
     if _has_traversal_component(command):
         return "contains '..' path traversal (accesses files outside workspace)"
+    for pattern, reason in _FORCED_INTERPRETER_PATTERNS:
+        if pattern.search(command):
+            return reason
     for pattern, reason in _FORCED_FULL_PATTERNS:
         if pattern.search(command):
             return reason
@@ -466,10 +515,13 @@ def _split_shell_commands(command: str) -> list[str]:
     return base_commands
 
 
+_DOTDOT_RAW_RE = re.compile(r"(?:\.\./|/\.\.(?!\.))")
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component, including inside quotes."""
-    # Raw check catches ../  /..  and ../ inside any quoting style
-    if "../" in command or "/.." in command:
+    # Raw check catches ../  and /.. but NOT /... (Go's recursive glob)
+    if _DOTDOT_RAW_RE.search(command):
         return True
     # Token-level check for bare '..' at end of args (e.g. "ls ..")
     try:

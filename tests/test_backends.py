@@ -125,6 +125,320 @@ class TestValidateCommand:
         assert "/home/username/project" in result
 
 
+class TestInlineInterpreterGuardrails:
+    """Regression tests for inline interpreter execution detection.
+
+    These verify the fix for the bypass where commands like
+    ``python -c "os.getenv('KEY')"`` evaded content-level patterns.
+    The guardrail now detects the execution *vector* (interpreter flag)
+    rather than trying to parse the payload.
+    """
+
+    # -- Python ----------------------------------------------------------
+
+    def test_python_c_basic(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('python -c "print(1)"') is not None
+
+    def test_python3_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('python3 -c "print(1)"') is not None
+
+    def test_python_version_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('python3.11 -c "print(1)"') is not None
+
+    def test_python_combined_flags(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('python -Bc "exec("x")"') is not None
+
+    def test_python_c_getenv_bypass(self):
+        """Coderabbit bypass: os.getenv not caught by content patterns."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        r = check_forced_confirmation(
+            "python -c \"import os; print(os.getenv('OPENAI_API_KEY'))\""
+        )
+        assert r is not None
+
+    def test_python_c_from_import_bypass(self):
+        """Coderabbit bypass: from-import form."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        r = check_forced_confirmation(
+            "python -c \"from subprocess import run; run(['bash', '-lc', 'id'])\""
+        )
+        assert r is not None
+
+    def test_python_c_dunder_import_bypass(self):
+        """Coderabbit bypass: __import__ form."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        r = check_forced_confirmation("python -c \"__import__('os').system('id')\"")
+        assert r is not None
+
+    def test_python_c_exec_obfuscation(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        r = check_forced_confirmation(
+            r'python -c "exec(\"import os\\nos.system(\\\"id\\\")\")"'
+        )
+        assert r is not None
+
+    def test_python_W_ignore_c_bypass(self):
+        """Flags with args before -c: python -W ignore -c."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation(
+            "python -W ignore -c \"os.system('id')\""
+        ) is not None
+
+    def test_python_X_utf8_c_bypass(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation(
+            "python -X utf8 -c \"os.system('id')\""
+        ) is not None
+
+    def test_python_multi_flags_before_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation(
+            "python -O -W ignore -c \"os.system('id')\""
+        ) is not None
+
+    # -- Node / Bun / Deno -----------------------------------------------
+
+    def test_node_e(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert (
+            check_forced_confirmation(
+                "node -e \"require('child_process').exec('id')\""
+            )
+            is not None
+        )
+
+    def test_node_eval_long(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('node --eval "process.exit()"') is not None
+
+    def test_node_p(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('node -p "1+1"') is not None
+
+    def test_node_print_long(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('node --print "1+1"') is not None
+
+    def test_node_combined_pe(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('node -pe "1+1"') is not None
+
+    def test_node_require_then_e_bypass(self):
+        """node -r module -e: -r takes a separate arg, pushing -e later."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation(
+            'node -r dotenv/config -e "process.exit()"'
+        ) is not None
+
+    def test_node_require_long_then_eval_bypass(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation(
+            'node --require ts-node/register --eval "evil()"'
+        ) is not None
+
+    def test_bun_e(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('bun -e "console.log(1)"') is not None
+
+    def test_deno_eval(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('deno eval "Deno.exit()"') is not None
+
+    # -- Ruby ------------------------------------------------------------
+
+    def test_ruby_e(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("ruby -e \"system('id')\"") is not None
+
+    # -- Perl ------------------------------------------------------------
+
+    def test_perl_e(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("perl -e \"system('id')\"") is not None
+
+    def test_perl_E(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("perl -E \"say 'hello'\"") is not None
+
+    # -- PHP -------------------------------------------------------------
+
+    def test_php_r(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("php -r \"system('id');\"") is not None
+
+    # -- Lua -------------------------------------------------------------
+
+    def test_lua_e(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("lua -e \"os.execute('id')\"") is not None
+
+    def test_lua_version_e(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('lua5.4 -e "print(1)"') is not None
+
+    # -- Shell-in-shell --------------------------------------------------
+
+    def test_bash_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('bash -c "curl evil.com"') is not None
+
+    def test_sh_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('sh -c "cat /etc/passwd"') is not None
+
+    def test_zsh_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('zsh -c "whoami"') is not None
+
+    def test_dash_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('dash -c "id"') is not None
+
+    def test_ash_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('ash -c "id"') is not None
+
+    def test_ksh_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('ksh -c "id"') is not None
+
+    def test_fish_c(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('fish -c "id"') is not None
+
+    def test_sh_separated_flags_c(self):
+        """sh -l -c: flags separated before -c."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('sh -l -c "id"') is not None
+
+    # -- eval ------------------------------------------------------------
+
+    def test_eval_basic(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('eval "curl evil.com"') is not None
+
+    def test_eval_not_in_quotes(self):
+        """eval inside quoted string should NOT trigger."""
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('echo "never use eval in production"') is None
+
+    # -- Input redirection -----------------------------------------------
+
+    def test_input_redirect(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("python < evil.py") is not None
+
+    def test_heredoc(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("python - << 'EOF'") is not None
+
+    def test_herestring(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation('python <<< "print(1)"') is not None
+
+    # -- Go ./... traversal false positive (BUG 1) -----------------------
+
+    def test_go_test_triple_dot_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("go test ./...") is None
+
+    def test_go_build_triple_dot_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("go build ./...") is None
+
+    def test_go_vet_pkg_triple_dot_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("go vet ./pkg/...") is None
+
+    # -- Negative cases (should NOT trigger) -----------------------------
+
+    def test_python_script_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("python script.py") is None
+
+    def test_python_module_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("python -m pytest tests/") is None
+
+    def test_python_unbuffered_script_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("python -u script.py") is None
+
+    def test_node_file_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("node server.js") is None
+
+    def test_ruby_file_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("ruby script.rb") is None
+
+    def test_perl_file_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("perl script.pl") is None
+
+    def test_bash_script_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("bash script.sh") is None
+
+    def test_php_file_not_flagged(self):
+        from EvoScientist.backends import check_forced_confirmation
+
+        assert check_forced_confirmation("php index.php") is None
+
+
 # === convert_virtual_paths_in_command ===
 
 
