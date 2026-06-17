@@ -570,6 +570,11 @@ def apply_synthesis_review_decision(
                         knowledge_id=decision.target_knowledge_id,
                     )
                     if existing is None:
+                        logger.warning(
+                            "Skipping EvoMemory synthesis UPDATE for missing "
+                            "knowledge %s",
+                            decision.target_knowledge_id,
+                        )
                         continue
                     results.append(
                         record_knowledge_file(
