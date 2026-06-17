@@ -14,14 +14,17 @@ class _ToolSelectionSuppressor:
         self._buffer = ""
         self._was_active = False
 
-    def observe_tool_block(self, name: str) -> bool:
+    def observe_tool_block(self, name: str, *, emit_selection: bool = True) -> bool:
         if name == "ToolSelectionResponse":
-            self._was_active = True
+            if emit_selection:
+                self._was_active = True
             return True
         return False
 
-    def process_text(self, text: str) -> tuple[bool, list[dict[str, Any]], str]:
-        events = self._emit_selection_if_ready(text)
+    def process_text(
+        self, text: str, *, emit_selection: bool = True
+    ) -> tuple[bool, list[dict[str, Any]], str]:
+        events = self._emit_selection_if_ready(text) if emit_selection else []
         if not text:
             return False, events, ""
 
@@ -29,7 +32,8 @@ class _ToolSelectionSuppressor:
             self._buffer += text
             json_kind = self._json_buffer_kind(self._buffer)
             if json_kind == "selector" and self._selector_context_active():
-                self._was_active = True
+                if emit_selection:
+                    self._was_active = True
                 self._buffering = False
                 self._buffer = ""
                 return True, events, ""
@@ -53,7 +57,8 @@ class _ToolSelectionSuppressor:
         ):
             json_kind = self._json_buffer_kind(stripped)
             if json_kind == "selector":
-                self._was_active = True
+                if emit_selection:
+                    self._was_active = True
                 return True, events, ""
             if json_kind == "complete":
                 return False, events, text
@@ -104,7 +109,9 @@ class _ToolSelectionSuppressor:
 
         return bool(selector_mod._current_selected_tools)
 
-    def flush_selection(self) -> list[dict[str, Any]]:
+    def flush_selection(self, *, emit_selection: bool = True) -> list[dict[str, Any]]:
+        if not emit_selection:
+            return []
         return self._emit_selection_if_ready("")
 
     def flush_pending_text(self) -> str:
