@@ -24,13 +24,16 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.messages import SystemMessage
 
 from .. import paths as _paths
 from ..memory import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    create_read_memory_tool,
     create_record_observation_tool,
+    create_search_observations_tool,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,12 +44,7 @@ _LEGACY_MEMORY_FILENAME = "MEMORY.md"
 _LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
 
-PROFILE_INJECTION_TEMPLATE = """<profile_memory>
-{profile_content}
-</profile_memory>
-{observation_memory}
-
-<memory_instructions>
+PROFILE_MEMORY_INSTRUCTIONS = """
 These profile notes live under `/memories/profile/`.
 Every agent can read and update them with normal file tools.
 
@@ -60,7 +58,7 @@ Read the relevant file before editing it. Add small bullets under existing
 headings, skip duplicates, and leave out temporary task state.
 
 Profile update scope:
-- Review the profile context above and the latest trajectory for stable changes
+- Review the profile context below and the latest trajectory for stable changes
   to user preferences, research taste, collaboration style, or project
   conventions.
 - Do not infer profile facts from task content alone. Profile updates need
@@ -70,35 +68,36 @@ Profile update scope:
   existing heading.
 - When the turn only contains task progress, subagent findings, search results,
   command output, or temporary run context, leave profile files unchanged.
-{observation_instructions}
-</memory_instructions>"""
+"""
 
 OBSERVATION_MEMORY_READ_INSTRUCTIONS = """
 Observation memory lives under `/memories/observations/`:
 - `/memories/observations/global/`: cross-project observations.
 - `/memories/observations/projects/{project_id}/`: observations for this workspace.
 
-Memory preflight:
-- For main-agent and subagent work, before planning, running commands,
-  implementing, debugging, analyzing, or writing reports, run a quick search of
-  observation memory unless the task is clearly trivial or the observation
-  directories are empty.
-- Use file tools, not shell paths: start with `grep` on `/memories/observations/`
-  using task keywords, then `read_file` the relevant hits by id/path. Use
-  `glob` or `ls` only to inspect what exists when grep returns nothing useful.
-- When the task calls for a specific kind of memory, grep frontmatter first:
-  `memory_type: procedural` for reusable commands/workarounds, `memory_type:
-  semantic` for reusable facts/findings, `scope: project` for workspace-local
-  notes, and `scope: global` for cross-project notes.
-- Mention the result briefly in your plan or handoff: which observation mattered,
-  or that no relevant observation was found. Do not let this become a long detour.
+Required memory preflight:
+- For coding, debugging, research, planning, or evaluation tasks, complete this
+  preflight before inspecting workspace/task files, running commands, editing
+  files, delegating, using `code_interpreter`, or making a plan.
+- First use the inlined observation index. If a listed summary clearly matches
+  the task, call `read_memory` with that observation ID.
+- Otherwise, call `search_observations` with a few distinctive words or short
+  phrases that describe the issue, constraint, procedure, or prior result to
+  find. If one query misses, try 1-3 focused variants. Use `mode=regex` only
+  when exact grep-like matching is required. If a result looks promising but
+  the snippet is not enough to act on confidently, call `read_memory` with its
+  observation ID.
+- After this preflight, use direct tools or `code_interpreter` to do or batch
+  the actual workspace work as appropriate.
+- Mention the result briefly before continuing: observation IDs used, or that
+  no relevant observation was found. Keep this preflight short.
 """
 
 OBSERVATION_MEMORY_WRITE_INSTRUCTIONS = """
 Call `record_observation` only for durable, non-obvious, evidence-backed
 information that is not already in memory and is likely to change future behavior:
 recurring constraints, important decisions, failed approaches future agents might
-repeat, verified evaluator outcomes, or tool/workflow workarounds.
+repeat, verified outcomes, or tool/workflow workarounds.
 Provide a one-line `summary` that is specific enough for future agents to decide
 whether to read the full observation.
 
@@ -107,7 +106,8 @@ what happened.
 
 Use procedural/global for general tool or platform behavior that can recur
 outside this workspace; use project scope only for workspace-specific facts,
-commands, datasets, benchmarks, or config. Do not hand-write observation files.
+commands, resources, evaluation setup, or configuration. Do not hand-write
+observation files.
 Do not record routine progress, raw traces, ordinary command output, citation
 lists without synthesis, simple filesystem listings, temporary paths/run ids,
 one-off environment discoveries, or task summaries."""
@@ -160,6 +160,21 @@ Notes about this workspace: conventions, commands, tests, and traps.
 ## Known traps
 """,
 }
+
+
+def _append_to_system_message(
+    system_message: SystemMessage | None,
+    text: str,
+) -> SystemMessage:
+    """Append text to a system message while preserving existing metadata."""
+    existing_blocks = list(system_message.content_blocks) if system_message else []
+    new_blocks = [
+        *existing_blocks,
+        {"type": "text", "text": text},
+    ]
+    if system_message is None:
+        return SystemMessage(content=new_blocks)
+    return system_message.model_copy(update={"content": new_blocks})
 
 
 def _short_hash(text: str, *, n: int = 16) -> str:
@@ -314,28 +329,35 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._enable_observation_tool = (
             enable_observation_memory and enable_observation_tool
         )
-        self.tools = (
-            [
+        self.tools = []
+        if enable_observation_memory:
+            self.tools.append(
+                create_search_observations_tool(
+                    memory_dir=self._memory_dir,
+                    project_id=self._project_id,
+                )
+            )
+            self.tools.append(
+                create_read_memory_tool(
+                    memory_dir=self._memory_dir,
+                    project_id=self._project_id,
+                )
+            )
+        if self._enable_observation_tool:
+            self.tools.append(
                 create_record_observation_tool(
                     memory_dir=self._memory_dir,
                     project_id=self._project_id,
                     source_type=source_type,
                     source_agent=source_agent,
                 )
-            ]
-            if self._enable_observation_tool
-            else []
-        )
+            )
         self._observation_index_records = []
         self._observation_index_context = ""
         if not enable_observation_memory:
             return
 
-        self._ensure_observation_dirs()
-        self._observation_index_records = self._read_observation_index_records()
-        self._observation_index_context = self._observation_index_context_from_records(
-            self._observation_index_records
-        )
+        self._refresh_observation_index_context()
 
     @property
     def project_id(self) -> str:
@@ -600,17 +622,27 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return "\n".join(
             [
                 "Search hints:",
-                "- Grep by id when you already know it from the index.",
+                "- Each line gives id, type/scope, path, and summary.",
                 (
-                    "- Grep frontmatter by type when appropriate: "
+                    "- Use `search_observations` for ranked keyword search "
+                    "and `read_memory` for known observation IDs."
+                ),
+                "- Use `mode=regex` only when exact grep-like matching is required.",
+                "- Search by id when you already know it from the index.",
+                (
+                    "- Filter by type when appropriate: "
                     "`memory_type: procedural`, `memory_type: semantic`, or "
                     "`memory_type: episodic`."
                 ),
                 (
-                    "- Grep frontmatter by scope when appropriate: "
+                    "- Filter by scope when appropriate: "
                     "`scope: project` or `scope: global`."
                 ),
-                "- Combine those with task keywords, then read relevant hits.",
+                (
+                    "- Search with a few distinctive words or phrases from "
+                    "the current work that describe the issue, constraint, "
+                    "procedure, or prior result to find."
+                ),
             ]
         )
 
@@ -620,11 +652,10 @@ class EvoMemoryMiddleware(AgentMiddleware):
         *,
         max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
     ) -> str:
-        """Build the static observation index injected into the system prompt."""
+        """Build the observation index injected into the system prompt."""
         header = "\n".join(
             [
                 "<observation_memory>",
-                "Observation index loaded at agent start.",
                 self._observation_index_count_line(records),
             ]
         )
@@ -659,6 +690,24 @@ class EvoMemoryMiddleware(AgentMiddleware):
             ]
         )
 
+    def _refresh_observation_index_context(self) -> str:
+        """Refresh the prompt observation index from current memory files."""
+        if not self._enable_observation_memory:
+            return ""
+        try:
+            self._ensure_observation_dirs()
+            records = self._read_observation_index_records()
+            context = self._observation_index_context_from_records(records)
+        except OSError as e:
+            logger.warning("Failed to refresh observation memory index: %s", e)
+            return self._observation_index_context
+        except Exception as e:
+            logger.debug("Failed to refresh observation memory index: %s", e)
+            return self._observation_index_context
+        self._observation_index_records = records
+        self._observation_index_context = context
+        return context
+
     def _observation_memory_instructions(self) -> str:
         if not self._enable_observation_memory:
             return ""
@@ -670,42 +719,70 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return instructions
         return instructions + OBSERVATION_MEMORY_WRITE_INSTRUCTIONS
 
-    def _inject_profile_context(
-        self, request: ModelRequest, profile_content: str
-    ) -> ModelRequest:
-        """Append profile context and editing guidance to the system prompt."""
-        from deepagents.middleware._utils import append_to_system_message
+    def _memory_instructions_context(self) -> str:
+        """Return static memory instructions for enabled memory features."""
+        instructions = []
+        if self._enable_profile_memory:
+            instructions.append(
+                PROFILE_MEMORY_INSTRUCTIONS.format(project_id=self._project_id)
+            )
+        if observation_instructions := self._observation_memory_instructions():
+            instructions.append(observation_instructions)
+        if not instructions:
+            return ""
+        return "\n".join(
+            [
+                "<memory_instructions>",
+                "\n\n".join(part.strip() for part in instructions if part.strip()),
+                "</memory_instructions>",
+            ]
+        )
 
+    def _profile_memory_context(self, profile_content: str) -> str:
+        """Return profile memory context for prompt injection."""
+        if not self._enable_profile_memory:
+            return ""
+        return "\n".join(
+            [
+                "<profile_memory>",
+                profile_content,
+                "</profile_memory>",
+            ]
+        )
+
+    def _memory_context_for_request(
+        self,
+        *,
+        observation_index_context: str,
+        profile_content: str,
+    ) -> str:
+        """Build request memory context ordered from static to dynamic."""
+        return "\n\n".join(
+            part
+            for part in (
+                self._memory_instructions_context(),
+                observation_index_context,
+                self._profile_memory_context(profile_content),
+            )
+            if part
+        )
+
+    def _inject_memory_context(
+        self,
+        request: ModelRequest,
+        *,
+        observation_index_context: str,
+        profile_content: str,
+    ) -> ModelRequest:
+        """Append memory context and editing guidance to the system prompt."""
         if not self._enable_profile_memory and not self._enable_observation_memory:
             return request
 
-        observation_instructions = self._observation_memory_instructions()
-
-        if not self._enable_profile_memory:
-            injection = "\n\n".join(
-                part
-                for part in (
-                    self._observation_index_context,
-                    (
-                        "<memory_instructions>\n"
-                        f"{observation_instructions.strip()}\n"
-                        "</memory_instructions>"
-                    )
-                    if observation_instructions.strip()
-                    else "",
-                )
-                if part
-            )
-            new_system = append_to_system_message(request.system_message, injection)
-            return request.override(system_message=new_system)
-
-        injection = PROFILE_INJECTION_TEMPLATE.format(
+        injection = self._memory_context_for_request(
+            observation_index_context=observation_index_context,
             profile_content=profile_content,
-            observation_memory=self._observation_index_context,
-            project_id=self._project_id,
-            observation_instructions=observation_instructions,
         )
-        new_system = append_to_system_message(request.system_message, injection)
+        new_system = _append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
     def _profile_context_for_request(self) -> str:
@@ -715,16 +792,34 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for synchronous model calls."""
-        return self._inject_profile_context(
-            request, self._profile_context_for_request()
+        return self._inject_memory_context(
+            request,
+            observation_index_context=self._refresh_observation_index_context(),
+            profile_content=self._profile_context_for_request(),
         )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for asynchronous model calls."""
+        observation_index_context = ""
         profile_context = ""
-        if self._enable_profile_memory:
+
+        if self._enable_observation_memory and self._enable_profile_memory:
+            observation_index_context, profile_context = await asyncio.gather(
+                asyncio.to_thread(self._refresh_observation_index_context),
+                asyncio.to_thread(self._read_profile_memory),
+            )
+        elif self._enable_observation_memory:
+            observation_index_context = await asyncio.to_thread(
+                self._refresh_observation_index_context
+            )
+        elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
-        return self._inject_profile_context(request, profile_context)
+
+        return self._inject_memory_context(
+            request,
+            observation_index_context=observation_index_context,
+            profile_content=profile_context,
+        )
 
     def wrap_model_call(
         self,

@@ -7,11 +7,18 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
     timeout-minutes: 15
+    # ``fail-fast: false`` so a single failing (os, python-version) cell
+    # doesn't cancel the rest of the matrix. Useful while the Windows
+    # leg is being brought up — we want to see all four cell results
+    # in one CI run instead of playing whack-a-mole one failure at a
+    # time. See #207.
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6

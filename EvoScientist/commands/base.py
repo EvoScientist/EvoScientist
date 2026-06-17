@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 
@@ -13,6 +13,15 @@ class Argument:
     type: type
     description: str
     required: bool = True
+
+
+@dataclass
+class SubCommand:
+    """A subcommand of a parent slash command."""
+
+    name: str
+    description: str
+    arguments: list[Argument] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -91,6 +100,7 @@ class Command(ABC):
     alias: ClassVar[list[str]] = []
     description: str
     arguments: ClassVar[list[Argument]] = []
+    subcommands: ClassVar[list[SubCommand]] = []
     # When False, callers may dispatch this command without waiting for
     # the background agent load to finish — important so recovery
     # commands like ``/mcp add`` can run even when the MCP load is

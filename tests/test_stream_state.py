@@ -26,37 +26,16 @@ class TestSubAgentState:
         assert len(sa.tool_calls) == 1
         assert sa.tool_calls[0]["args"]["query"] == "updated"
 
-    def test_add_tool_call_merge_name(self):
-        """When first call has empty name, second should fill it in."""
+    def test_add_tool_call_merge_args_by_id(self):
         sa = SubAgentState("agent")
-        sa.add_tool_call("", {}, "tc1")
-        # Empty name + empty id → skipped entirely
-        # But with an id, it can be tracked:
-        # Actually, empty name with id is also skipped per the code (not name check)
-        # Let's use a named call first, then merge args
-        sa2 = SubAgentState("agent")
-        sa2.add_tool_call("search", {}, "tc1")
-        sa2.add_tool_call("search", {"query": "test"}, "tc1")
-        assert sa2.tool_calls[0]["args"] == {"query": "test"}
-
-    def test_skip_empty_name_no_id(self):
-        sa = SubAgentState("agent")
-        sa.add_tool_call("", {}, "")
-        assert len(sa.tool_calls) == 0
+        sa.add_tool_call("search", {}, "tc1")
+        sa.add_tool_call("search", {"query": "test"}, "tc1")
+        assert sa.tool_calls[0]["args"] == {"query": "test"}
 
     def test_add_tool_result_matched(self):
         sa = SubAgentState("agent")
         sa.add_tool_call("execute", {}, "tc1")
-        sa.add_tool_result("execute", "output", True)
-        result = sa.get_result_for(sa.tool_calls[0])
-        assert result is not None
-        assert result["content"] == "output"
-
-    def test_add_tool_result_fallback(self):
-        """When name doesn't match, falls back to first unmatched."""
-        sa = SubAgentState("agent")
-        sa.add_tool_call("execute", {}, "tc1")
-        sa.add_tool_result("different_name", "output", True)
+        sa.add_tool_result("execute", "output", True, tool_call_id="tc1")
         result = sa.get_result_for(sa.tool_calls[0])
         assert result is not None
         assert result["content"] == "output"
@@ -79,15 +58,6 @@ class TestSubAgentState:
         sa = SubAgentState("agent")
         tc = {"id": "tc_missing", "name": "x", "args": {}}
         assert sa.get_result_for(tc) is None
-
-    def test_get_result_for_index_fallback(self):
-        """When no id, falls back to index-based matching."""
-        sa = SubAgentState("agent")
-        tc = {"id": "", "name": "execute", "args": {}}
-        sa.tool_calls.append(tc)
-        sa.tool_results.append({"name": "execute", "content": "ok", "success": True})
-        result = sa.get_result_for(tc)
-        assert result is not None
 
 
 # =============================================================================
@@ -152,6 +122,7 @@ class TestStreamState:
                 "type": "tool_result",
                 "name": "execute",
                 "content": "[OK] done",
+                "id": "tc1",
             }
         )
         assert len(state.tool_results) == 1
@@ -164,6 +135,8 @@ class TestStreamState:
                 "type": "subagent_start",
                 "name": "research-agent",
                 "description": "Search",
+                "instance_id": "task:research",
+                "tool_call_id": "tc_task_research",
             }
         )
         assert len(state.subagents) == 1
@@ -174,8 +147,18 @@ class TestStreamState:
         state = StreamState()
         state.handle_event(
             {
+                "type": "subagent_start",
+                "name": "research-agent",
+                "description": "Search",
+                "instance_id": "task:research",
+                "tool_call_id": "tc_task_research",
+            }
+        )
+        state.handle_event(
+            {
                 "type": "subagent_tool_call",
                 "subagent": "research-agent",
+                "instance_id": "task:research",
                 "name": "tavily_search",
                 "args": {"query": "test"},
                 "id": "tc_sa1",
@@ -188,8 +171,18 @@ class TestStreamState:
         state = StreamState()
         state.handle_event(
             {
+                "type": "subagent_start",
+                "name": "code-agent",
+                "description": "Run code",
+                "instance_id": "task:code",
+                "tool_call_id": "tc_task_code",
+            }
+        )
+        state.handle_event(
+            {
                 "type": "subagent_tool_call",
                 "subagent": "code-agent",
+                "instance_id": "task:code",
                 "name": "execute",
                 "args": {},
                 "id": "tc1",
@@ -199,6 +192,7 @@ class TestStreamState:
             {
                 "type": "subagent_tool_result",
                 "subagent": "code-agent",
+                "instance_id": "task:code",
                 "name": "execute",
                 "content": "output",
                 "success": True,
@@ -212,10 +206,64 @@ class TestStreamState:
     def test_handle_subagent_end(self):
         state = StreamState()
         state.handle_event(
-            {"type": "subagent_start", "name": "agent-x", "description": ""}
+            {
+                "type": "subagent_start",
+                "name": "agent-x",
+                "description": "",
+                "instance_id": "task:x",
+                "tool_call_id": "tc_task_x",
+            }
         )
-        state.handle_event({"type": "subagent_end", "name": "agent-x"})
+        state.handle_event(
+            {"type": "subagent_end", "name": "agent-x", "instance_id": "task:x"}
+        )
         assert state.subagents[0].is_active is False
+
+    def test_same_name_subagents_are_separated_by_instance_id(self):
+        state = StreamState()
+        state.handle_event(
+            {
+                "type": "subagent_start",
+                "name": "research-agent",
+                "description": "Find A",
+                "instance_id": "task:one",
+                "tool_call_id": "tc_task_1",
+            }
+        )
+        state.handle_event(
+            {
+                "type": "subagent_start",
+                "name": "research-agent",
+                "description": "Find B",
+                "instance_id": "task:two",
+                "tool_call_id": "tc_task_2",
+            }
+        )
+        state.handle_event(
+            {
+                "type": "subagent_tool_call",
+                "subagent": "research-agent",
+                "instance_id": "task:two",
+                "name": "search",
+                "args": {"query": "b"},
+                "id": "tc2",
+            }
+        )
+        state.handle_event(
+            {
+                "type": "subagent_end",
+                "name": "research-agent",
+                "instance_id": "task:one",
+            }
+        )
+
+        assert len(state.subagents) == 2
+        first, second = state.subagents
+        assert first.name == "research-agent"
+        assert second.name == "research-agent"
+        assert first.is_active is False
+        assert second.is_active is True
+        assert second.tool_calls[0]["args"] == {"query": "b"}
 
     def test_handle_done(self):
         state = StreamState()
@@ -245,83 +293,6 @@ class TestStreamState:
         assert len(state.tool_results) == 1
         assert len(state.subagents) == 1
         assert state.subagents[0].is_active is False
-
-
-# =============================================================================
-# Name merging
-# =============================================================================
-
-
-class TestNameMerging:
-    def test_generic_subagent_merged(self):
-        state = StreamState()
-        # First event creates generic "sub-agent"
-        state.handle_event(
-            {
-                "type": "subagent_tool_call",
-                "subagent": "sub-agent",
-                "name": "execute",
-                "args": {},
-                "id": "tc1",
-            }
-        )
-        assert len(state.subagents) == 1
-        assert state.subagents[0].name == "sub-agent"
-
-        # Proper name arrives, should merge
-        sa = state._get_or_create_subagent("code-agent", "write code")
-        assert len(state.subagents) == 1
-        assert sa.name == "code-agent"
-        assert len(sa.tool_calls) == 1  # preserved from generic entry
-
-    def test_no_merge_when_not_generic(self):
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "research-agent", "description": ""}
-        )
-        state._get_or_create_subagent("code-agent", "code-agent")
-        assert len(state.subagents) == 2
-
-
-class TestSubagentNameResolution:
-    def test_subagent_tool_call_resolves_single_active(self):
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
-        )
-        state.handle_event(
-            {
-                "type": "subagent_tool_call",
-                "subagent": "sub-agent",
-                "name": "execute",
-                "args": {},
-                "id": "tc1",
-            }
-        )
-        assert len(state.subagents) == 1
-        assert state.subagents[0].name == "code-agent"
-        assert len(state.subagents[0].tool_calls) == 1
-
-    def test_subagent_tool_call_does_not_resolve_when_multiple_active(self):
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
-        )
-        state.handle_event(
-            {"type": "subagent_start", "name": "research-agent", "description": ""}
-        )
-        state.handle_event(
-            {
-                "type": "subagent_tool_call",
-                "subagent": "sub-agent",
-                "name": "execute",
-                "args": {},
-                "id": "tc1",
-            }
-        )
-        # Should stay as "sub-agent" because more than one named subagent is active
-        assert len(state.subagents) == 3
-        assert state.subagents[-1].name == "sub-agent"
 
 
 # =============================================================================
@@ -389,79 +360,6 @@ class TestBuildTodoStats:
 
 
 # =============================================================================
-# _resolve_subagent_name
-# =============================================================================
-
-
-class TestResolveSubagentName:
-    def test_real_name_passthrough(self):
-        state = StreamState()
-        assert state._resolve_subagent_name("code-agent") == "code-agent"
-
-    def test_resolve_single_active(self):
-        """When exactly one named active sub-agent exists, 'sub-agent' resolves to it."""
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
-        )
-        assert state._resolve_subagent_name("sub-agent") == "code-agent"
-
-    def test_no_resolve_multiple_active(self):
-        """With multiple active named sub-agents, 'sub-agent' stays generic."""
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
-        )
-        state.handle_event(
-            {"type": "subagent_start", "name": "research-agent", "description": ""}
-        )
-        assert state._resolve_subagent_name("sub-agent") == "sub-agent"
-
-    def test_no_resolve_no_active(self):
-        state = StreamState()
-        assert state._resolve_subagent_name("sub-agent") == "sub-agent"
-
-
-# =============================================================================
-# subagent_end fallback
-# =============================================================================
-
-
-class TestSubagentEndFallback:
-    def test_end_resolves_via_name(self):
-        """subagent_end with exact name deactivates sub-agent."""
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
-        )
-        state.handle_event({"type": "subagent_end", "name": "code-agent"})
-        assert state.subagents[0].is_active is False
-
-    def test_end_resolves_generic_to_single_active(self):
-        """subagent_end with 'sub-agent' resolves to the only active named sub-agent."""
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "research-agent", "description": ""}
-        )
-        state.handle_event({"type": "subagent_end", "name": "sub-agent"})
-        assert state.subagents[0].is_active is False
-
-    def test_end_fallback_deactivates_oldest(self):
-        """When name can't be resolved, deactivates oldest active sub-agent."""
-        state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "a-agent", "description": ""}
-        )
-        state.handle_event(
-            {"type": "subagent_start", "name": "b-agent", "description": ""}
-        )
-        # "sub-agent" can't resolve (2 active), falls back to oldest
-        state.handle_event({"type": "subagent_end", "name": "sub-agent"})
-        assert state.subagents[0].is_active is False  # a-agent deactivated
-        assert state.subagents[1].is_active is True  # b-agent still active
-
-
-# =============================================================================
 # Todo capture from write_todos args
 # =============================================================================
 
@@ -493,6 +391,7 @@ class TestTodoCaptureFromArgs:
         state.handle_event(
             {
                 "type": "tool_result",
+                "id": "tc1",
                 "name": "write_todos",
                 "content": json.dumps(items),
             }
@@ -520,6 +419,7 @@ class TestTodoCaptureFromArgs:
         state.handle_event(
             {
                 "type": "tool_result",
+                "id": "tc1",
                 "name": "write_todos",
                 "content": json.dumps(result_todos),
             }
@@ -536,6 +436,7 @@ class TestTodoCaptureFromArgs:
         state.handle_event(
             {
                 "type": "tool_result",
+                "id": "tc1",
                 "name": "read_todos",
                 "content": json.dumps(items),
             }
@@ -611,47 +512,32 @@ class TestLatestTextReset:
         ]
 
 
-# =============================================================================
-# Name merging edge cases
-# =============================================================================
-
-
-class TestNameMergingAdvanced:
-    def test_subagent_merges_into_preregistered(self):
-        """'sub-agent' event merges into pre-registered real-name entry with no tools."""
+class TestSubagentInstanceIds:
+    def test_multiple_subagents_no_cross_merge(self):
         state = StreamState()
-        state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": "code"}
-        )
-        assert len(state.subagents) == 1
-        # Now sub-agent tool call arrives — should merge into code-agent
         state.handle_event(
             {
-                "type": "subagent_tool_call",
-                "subagent": "sub-agent",
-                "name": "execute",
-                "args": {},
-                "id": "tc1",
+                "type": "subagent_start",
+                "name": "code-agent",
+                "description": "",
+                "instance_id": "task:code",
+                "tool_call_id": "tc_task_code",
             }
         )
-        # _resolve_subagent_name should resolve "sub-agent" → "code-agent" (single active)
-        assert len(state.subagents) == 1
-        assert state.subagents[0].name == "code-agent"
-        assert len(state.subagents[0].tool_calls) == 1
-
-    def test_multiple_subagents_no_cross_merge(self):
-        """Two named sub-agents should not merge with each other."""
-        state = StreamState()
         state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
-        )
-        state.handle_event(
-            {"type": "subagent_start", "name": "research-agent", "description": ""}
+            {
+                "type": "subagent_start",
+                "name": "research-agent",
+                "description": "",
+                "instance_id": "task:research",
+                "tool_call_id": "tc_task_research",
+            }
         )
         state.handle_event(
             {
                 "type": "subagent_tool_call",
                 "subagent": "code-agent",
+                "instance_id": "task:code",
                 "name": "execute",
                 "args": {},
                 "id": "tc1",
@@ -661,14 +547,15 @@ class TestNameMergingAdvanced:
             {
                 "type": "subagent_tool_call",
                 "subagent": "research-agent",
+                "instance_id": "task:research",
                 "name": "tavily_search",
                 "args": {},
                 "id": "tc2",
             }
         )
         assert len(state.subagents) == 2
-        code_sa = state._subagent_map["code-agent"]
-        research_sa = state._subagent_map["research-agent"]
+        code_sa = state._subagent_map["task:code"]
+        research_sa = state._subagent_map["task:research"]
         assert len(code_sa.tool_calls) == 1
         assert code_sa.tool_calls[0]["name"] == "execute"
         assert len(research_sa.tool_calls) == 1
@@ -788,7 +675,9 @@ class TestComputePhase:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         assert state.compute_phase() == "researching"
 
     def test_writing_after_tools_done_and_text_starts(self):
@@ -796,7 +685,9 @@ class TestComputePhase:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         state.handle_event({"type": "text", "content": "Final report"})
         assert state.compute_phase() == "writing"
 
@@ -808,16 +699,30 @@ class TestComputePhase:
     def test_researching_with_active_subagent(self):
         state = StreamState()
         state.handle_event(
-            {"type": "subagent_start", "name": "research", "description": ""}
+            {
+                "type": "subagent_start",
+                "name": "research",
+                "description": "",
+                "instance_id": "task:research",
+                "tool_call_id": "tc_task_research",
+            }
         )
         assert state.compute_phase() == "researching"
 
     def test_writing_after_subagent_ends(self):
         state = StreamState()
         state.handle_event(
-            {"type": "subagent_start", "name": "research", "description": ""}
+            {
+                "type": "subagent_start",
+                "name": "research",
+                "description": "",
+                "instance_id": "task:research",
+                "tool_call_id": "tc_task_research",
+            }
         )
-        state.handle_event({"type": "subagent_end", "name": "research"})
+        state.handle_event(
+            {"type": "subagent_end", "name": "research", "instance_id": "task:research"}
+        )
         state.handle_event({"type": "text", "content": "Report"})
         assert state.compute_phase() == "writing"
 
@@ -827,7 +732,9 @@ class TestComputePhase:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         state.is_processing = False
         assert state.compute_phase() == "researching"
 
@@ -846,7 +753,13 @@ class TestComputePhase:
             {"type": "tool_call", "id": "tc1", "name": "task", "args": {}}
         )
         state.handle_event(
-            {"type": "subagent_start", "name": "code-agent", "description": ""}
+            {
+                "type": "subagent_start",
+                "name": "code-agent",
+                "description": "",
+                "instance_id": "task:code",
+                "tool_call_id": "tc1",
+            }
         )
         assert state.compute_phase() == "researching"
 
@@ -868,7 +781,13 @@ class TestHasPendingWork:
     def test_active_subagent(self):
         state = StreamState()
         state.handle_event(
-            {"type": "subagent_start", "name": "agent", "description": ""}
+            {
+                "type": "subagent_start",
+                "name": "agent",
+                "description": "",
+                "instance_id": "task:agent",
+                "tool_call_id": "tc_task_agent",
+            }
         )
         assert state.has_pending_work() is True
 
@@ -877,7 +796,9 @@ class TestHasPendingWork:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         assert state.is_processing is True
         assert state.has_pending_work() is True
 
@@ -886,7 +807,9 @@ class TestHasPendingWork:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         state.handle_event({"type": "text", "content": "done"})
         assert state.has_pending_work() is False
 
@@ -910,7 +833,9 @@ class TestVisibleToolCounts:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         assert state.visible_tool_counts() == (1, 1)
 
     def test_mixed(self):
@@ -921,7 +846,9 @@ class TestVisibleToolCounts:
         state.handle_event(
             {"type": "tool_call", "id": "tc3", "name": "search", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         # execute done, search pending
         assert state.visible_tool_counts() == (1, 2)
 
@@ -971,7 +898,9 @@ class TestIsFinalResponseDelegation:
         state.handle_event(
             {"type": "tool_call", "id": "tc1", "name": "execute", "args": {}}
         )
-        state.handle_event({"type": "tool_result", "name": "execute", "content": "ok"})
+        state.handle_event(
+            {"type": "tool_result", "id": "tc1", "name": "execute", "content": "ok"}
+        )
         state.handle_event({"type": "text", "content": "done"})
         assert _is_final_response(state) == (not state.has_pending_work())
 

@@ -7,6 +7,10 @@
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
         "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker"
     },
+    "checkpointer": {
+        "backend": "custom",
+        "path": "EvoScientist.sessions.create_checkpointer_for_langgraph_api"
+    },
     "config": {
         "recursion_limit": 1000000
     }

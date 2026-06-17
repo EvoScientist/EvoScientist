@@ -3,7 +3,38 @@
 import asyncio
 from unittest.mock import Mock, patch
 
+import pytest
+
 from EvoScientist.stream.display import _create_event_loop, _get_event_loop
+
+
+class _TrackingEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+    """Event loop policy that records loops created by one test."""
+
+    def __init__(self):
+        super().__init__()
+        self.created_loops: list[asyncio.AbstractEventLoop] = []
+
+    def new_event_loop(self) -> asyncio.AbstractEventLoop:
+        loop = super().new_event_loop()
+        self.created_loops.append(loop)
+        return loop
+
+
+@pytest.fixture(autouse=True)
+def isolated_event_loop_policy():
+    previous_policy = asyncio.get_event_loop_policy()
+    test_policy = _TrackingEventLoopPolicy()
+    asyncio.set_event_loop_policy(test_policy)
+    try:
+        yield
+    finally:
+        try:
+            for loop in test_policy.created_loops:
+                if not loop.is_closed():
+                    loop.close()
+        finally:
+            asyncio.set_event_loop_policy(previous_policy)
 
 
 class TestCreateEventLoop:

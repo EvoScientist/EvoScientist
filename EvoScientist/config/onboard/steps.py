@@ -52,7 +52,7 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         Selected backend name ("tui", "cli", or "webui").
     """
     choices = [
-        Choice(title="WebUI (desktop interface, beta)", value="webui"),
+        Choice(title="WebUI (desktop interface, modern)", value="webui"),
         Choice(title="TUI (full-screen interface, recommended)", value="tui"),
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
     ]
@@ -222,7 +222,7 @@ def _step_webui_port(config: EvoScientistConfig) -> int:
     port = int(raw) if raw else current_port
     console.print(f"  [green]✓ WebUI will open at http://localhost:{port}[/green]")
     console.print(
-        "  [yellow]⚠️  Beta: the WebUI won't show your CLI/TUI chat history "
+        "  [yellow]⚠️  Note: the WebUI won't show your CLI/TUI chat history "
         "yet.[/yellow]"
     )
     return port

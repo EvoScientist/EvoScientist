@@ -5,6 +5,7 @@ import logging
 import queue
 import random
 import sys
+import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -39,12 +40,20 @@ from ..sessions import (
     get_thread_messages,
     get_thread_metadata,
     resolve_thread_id_prefix,
+    short_thread_id,
     thread_exists,
 )
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
-from ._constants import LOGO_GRADIENT, LOGO_LINES, WELCOME_SLOGANS, build_metadata
+from ._constants import (
+    DANGEROUS_BANNER_LABEL,
+    DANGEROUS_BANNER_MESSAGE,
+    LOGO_GRADIENT,
+    LOGO_LINES,
+    WELCOME_SLOGANS,
+    build_metadata,
+)
 from .agent import _create_session_workspace, _load_agent, _shorten_path
 from .channel import (
     ChannelMessage,
@@ -76,6 +85,10 @@ from .status_bar import (
 )
 from .tui_interactive import run_textual_interactive
 from .tui_runtime import resolve_ui_backend, run_streaming
+
+_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 90.0
+_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
+_MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -141,6 +154,22 @@ def print_banner(
     info.append(" \u2022 Ctrl+C ", style="#ffe082")
     info.append("interrupt", style="#ffe082 bold")
     console.print(info)
+    print_dangerous_warning()
+
+
+def print_dangerous_warning() -> None:
+    """Print an unmissable warning when dangerous (real-filesystem) mode is on."""
+    try:
+        from ..config import get_effective_config
+
+        if not get_effective_config().dangerous_mode:
+            return
+    except Exception:
+        return
+    warn = Text()
+    warn.append(f"\n  \u26a0 {DANGEROUS_BANNER_LABEL}", style="bold white on red")
+    warn.append(f"  {DANGEROUS_BANNER_MESSAGE}", style="bold red")
+    console.print(warn)
 
 
 # =============================================================================
@@ -179,9 +208,17 @@ class SlashCommandCompleter(Completer):
         self,
         workspace_getter: Callable[[], str | None] | None = None,
     ) -> None:
+        """Initialise the completer.
+
+        Args:
+            workspace_getter: Callable returning the current workspace
+                directory for ``@file`` completions.  Called on every
+                keystroke so suggestions stay in sync after ``/new``.
+        """
         self._workspace_getter = workspace_getter or (lambda: None)
 
     def get_completions(self, document, complete_event):
+        """Yield prompt_toolkit completions for slash commands and ``@file``."""
         text = document.text_before_cursor
         workspace_dir = self._workspace_getter()
 
@@ -201,16 +238,23 @@ class SlashCommandCompleter(Completer):
         # Slash command completion
         if not text.startswith("/"):
             return
-        # ``list_commands`` is dedup'd on the Command instance so aliases
-        # (e.g. /quit, /q for /exit) don't appear as separate rows.
-        for cmd, desc in sorted(cmd_manager.list_commands()):
-            if cmd.startswith(text):
-                yield Completion(
-                    cmd,
-                    start_position=-len(text),
-                    display=f"{cmd:<40}",
-                    display_meta=desc,
-                )
+
+        from ..commands._completion_engine import compute_completions
+
+        result = compute_completions(
+            document.text_before_cursor, len(document.text_before_cursor)
+        )
+        if result.kind == "empty" or not result.candidates:
+            return
+
+        # Sort alphabetically by completion text for stable, predictable
+        # ordering in the popup. The engine returns candidates in
+        # manager-registration order, which is not stable across changes.
+        for c in sorted(result.candidates, key=lambda c: c.text):
+            start_pos = c.replace_start - len(document.text_before_cursor)
+            yield Completion(
+                c.text, start_position=start_pos, display_meta=c.description
+            )
 
 
 # =============================================================================
@@ -1400,7 +1444,7 @@ def cmd_run(
     console.print(sep)
     console.print(Text(f"> {prompt}"))
     console.print(sep)
-    console.print(f"[dim]Thread: {thread_id}[/dim]")
+    console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
     if workspace_dir:
         console.print(f"[dim]Workspace: {_shorten_path(workspace_dir)}[/dim]")
     console.print()
@@ -1416,6 +1460,7 @@ def cmd_run(
             interactive=False,
             metadata=meta,
         )
+        _wait_for_memory_workers_before_exit()
     except Exception as e:
         error_msg = str(e)
         if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
@@ -1427,3 +1472,73 @@ def cmd_run(
         else:
             console.print(f"[red]Error: {e}[/red]")
             raise
+
+
+def _wait_for_memory_workers_before_exit(
+    *,
+    timeout_seconds: float = _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS,
+) -> None:
+    """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
+    try:
+        from ..memory.worker_activity import memory_worker_observed_outputs
+    except Exception:
+        return
+
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    saved_announced = False
+    announced_saved_counts: tuple[int, int] | None = None
+    output_seen_at: float | None = None
+    observed_status = None
+    while True:
+        now = time.monotonic()
+        try:
+            observed = memory_worker_observed_outputs()
+        except Exception:
+            return
+
+        if not observed.is_running:
+            saved_counts = (observed.observations_recorded, observed.profile_updates)
+            if saved_counts != (0, 0) and saved_counts != announced_saved_counts:
+                saved = []
+                if observed.observations_recorded:
+                    saved.append(f"{observed.observations_recorded} observation(s)")
+                if observed.profile_updates:
+                    saved.append(f"{observed.profile_updates} profile update(s)")
+                if saved:
+                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
+            return
+
+        if observed.observations_recorded or observed.profile_updates:
+            if output_seen_at is None:
+                output_seen_at = now
+            observed_status = observed
+            if (
+                now - output_seen_at >= _MEMORY_WORKER_OUTPUT_GRACE_SECONDS
+                and not saved_announced
+            ):
+                saved = []
+                if observed_status and observed_status.observations_recorded:
+                    saved.append(
+                        f"{observed_status.observations_recorded} observation(s)"
+                    )
+                if observed_status and observed_status.profile_updates:
+                    saved.append(f"{observed_status.profile_updates} profile update(s)")
+                if saved:
+                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
+                    saved_announced = True
+                    announced_saved_counts = (
+                        observed_status.observations_recorded,
+                        observed_status.profile_updates,
+                    )
+
+        if now >= deadline:
+            console.print(
+                "[dim]EvoMemory worker is still running; shutting down.[/dim]"
+            )
+            return
+
+        if not announced:
+            console.print("[dim]Waiting for EvoMemory worker...[/dim]")
+            announced = True
+        time.sleep(_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS)

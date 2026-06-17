@@ -15,10 +15,12 @@ import atexit
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -33,6 +35,57 @@ from EvoScientist.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LanggraphRuntimePaths:
+    """All on-disk paths the langgraph_dev manager writes to.
+
+    Grouped into a single object (rather than a handful of free-floating
+    module-level constants) so tests can substitute *one* object to
+    redirect every file the manager touches, instead of patching each
+    path constant separately. The previous design — five separate
+    ``_PID_DIR`` / ``_PID_FILE`` / ``_LOG_FILE`` / ``_WORKSPACE_SIDECAR``
+    / ``_FILE_LOCK_PATH`` names — invited inconsistent patches: a test
+    might redirect ``_LOG_FILE`` but leave ``_PID_DIR`` pointing at
+    ``~/.config/evoscientist``, so the function under test still wrote
+    to the user's real home directory. With a single object there's
+    one knob to turn; if you replace it, *every* path moves with it.
+
+    Production code constructs ``RUNTIME`` below with the conventional
+    ``~/.config/evoscientist/`` layout. Tests call
+    :meth:`for_directory` to spin up an isolated instance.
+    """
+
+    pid_dir: Path
+    pid_file: Path
+    log_file: Path
+    workspace_sidecar: Path
+    lock_file: Path
+
+    @classmethod
+    def for_directory(cls, pid_dir: Path) -> LanggraphRuntimePaths:
+        """Build a runtime-paths bundle rooted at ``pid_dir``.
+
+        Used by tests (and any future embedded-deployment override) to
+        spin up an isolated set of paths without spelling out every
+        individual path by hand.
+        """
+        return cls(
+            pid_dir=pid_dir,
+            pid_file=pid_dir / "langgraph_dev.pid",
+            log_file=pid_dir / "langgraph_dev.log",
+            workspace_sidecar=pid_dir / "langgraph_dev.workspace.json",
+            lock_file=pid_dir / "langgraph_dev.lock",
+        )
+
+
+# Module-level runtime paths. Defaulted to the conventional
+# ``~/.config/evoscientist/`` layout; tests override ``RUNTIME`` with
+# :meth:`LanggraphRuntimePaths.for_directory` to point at a temp dir
+# without touching the user's real home directory.
+DEFAULT_PID_DIR = Path.home() / ".config" / "evoscientist"
+RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths.for_directory(DEFAULT_PID_DIR)
 
 
 def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
@@ -64,9 +117,42 @@ def _base_url(port: int = _DEFAULT_PORT) -> str:
     return f"http://localhost:{port}"
 
 
-_PID_DIR = Path.home() / ".config" / "evoscientist"
-_PID_FILE = _PID_DIR / "langgraph_dev.pid"
-_LOG_FILE = _PID_DIR / "langgraph_dev.log"
+# Default rollover threshold for ``RUNTIME.log_file`` — once the log
+# exceeds this size, the next ``start_langgraph_dev`` invocation rotates
+# it to ``langgraph_dev.log.1`` (overwriting any existing backup) and
+# starts fresh. Single-backup policy keeps the disk footprint bounded
+# at roughly 2x the threshold even under heavy use (chatty MCP servers,
+# repeated failure paths with stack traces). See #209.
+_LOG_ROTATION_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _rotate_log_if_needed(log_path: Path) -> None:
+    """Rotate ``log_path`` to ``<log_path>.1`` when it exceeds the
+    module's ``_LOG_ROTATION_BYTES`` threshold.
+
+    Single-backup policy: at most one rotated copy is kept on disk. The
+    active log is fresh (zero bytes) after rotation, so the next
+    ``open(log_path, "ab")`` writes at offset 0.
+
+    Best-effort: failures are logged and swallowed. A failed rotation
+    must NOT block ``start_langgraph_dev`` — the worst case is the log
+    keeps growing for one more session and the next ``start`` try
+    rotates it.
+    """
+    try:
+        if not log_path.exists():
+            return
+        if log_path.stat().st_size <= _LOG_ROTATION_BYTES:
+            return
+        backup = log_path.with_name(log_path.name + ".1")
+        os.replace(log_path, backup)
+    except OSError as exc:
+        logger.warning(
+            "Failed to rotate log %s: %s. Continuing with the existing log.",
+            log_path,
+            exc,
+        )
+
 
 # Workspace fingerprint sidecar — JSON recording the workspace + pid of the
 # running langgraph dev. Cross-process callers (e.g. TUI starting up while
@@ -74,7 +160,6 @@ _LOG_FILE = _PID_DIR / "langgraph_dev.log"
 # silently operating on a different workspace's files. Missing/corrupt sidecar
 # degrades gracefully to a log warning for backward compatibility with
 # langgraph devs started before this protocol existed.
-_WORKSPACE_SIDECAR = _PID_DIR / "langgraph_dev.workspace.json"
 
 
 class WorkspaceMismatchError(RuntimeError):
@@ -103,13 +188,13 @@ def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
     ``ensure_langgraph_dev``.
     """
     try:
-        _PID_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _WORKSPACE_SIDECAR.with_suffix(".json.tmp")
+        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"workspace": str(workspace_dir), "pid": pid}))
-        os.replace(tmp, _WORKSPACE_SIDECAR)
+        os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
         logger.warning(
-            "Failed to write workspace sidecar %s: %s", _WORKSPACE_SIDECAR, exc
+            "Failed to write workspace sidecar %s: %s", RUNTIME.workspace_sidecar, exc
         )
 
 
@@ -126,10 +211,10 @@ def _read_workspace_sidecar() -> dict | None:
     ``Path(...)`` and surface as an unhandled exception instead of the
     documented log-warning fallback.
     """
-    if not _WORKSPACE_SIDECAR.exists():
+    if not RUNTIME.workspace_sidecar.exists():
         return None
     try:
-        data = json.loads(_WORKSPACE_SIDECAR.read_text())
+        data = json.loads(RUNTIME.workspace_sidecar.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -141,10 +226,10 @@ def _read_workspace_sidecar() -> dict | None:
 
 
 def _unlink_workspace_sidecar() -> None:
-    """Best-effort sidecar removal — called alongside every ``_PID_FILE.unlink()``
+    """Best-effort sidecar removal — called alongside every ``RUNTIME.pid_file.unlink()``
     so the workspace fingerprint never outlives the PID file it pairs with."""
     try:
-        _WORKSPACE_SIDECAR.unlink()
+        RUNTIME.workspace_sidecar.unlink()
     except OSError:
         pass
 
@@ -156,7 +241,7 @@ def _unlink_workspace_sidecar() -> None:
 # Shell B blocks until Shell A's health-check finishes, then sees the
 # healthy server and reuses it. ``threading.RLock`` is process-local and
 # can't coordinate across CLI invocations.
-_FILE_LOCK_PATH = _PID_DIR / "langgraph_dev.lock"
+# Lock path lives on ``RUNTIME.lock_file``; timeout stays module-level.
 _FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
 
 # Module-level handle to the langgraph dev subprocess we started, if any.
@@ -168,6 +253,16 @@ _PROCESS: subprocess.Popen | None = None
 # a thread from a different workspace) and trigger a restart so the deployed
 # sub-agents' cwd / EVOSCIENTIST_WORKSPACE_DIR env match the new workspace.
 _PROCESS_WORKSPACE: Path | None = None
+
+# Byte offset into ``RUNTIME.log_file`` captured the instant before the current
+# subprocess was spawned. ``read_tunnel_url`` scans only bytes written after
+# this point so a stale ``trycloudflare.com`` URL from a previous (appended,
+# not-yet-rotated) session can never be misreported as the live tunnel.
+_LOG_OFFSET_AT_START: int = 0
+
+# Cloudflare quick-tunnel public URL, as printed by cloudflared into the
+# langgraph dev log. Mirrors langgraph_api/tunneling/cloudflare.py.
+_TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
 
 # Whether async sub-agents are usable in this process.
 #
@@ -332,7 +427,7 @@ def _list_pids_on_port(port: int) -> list[int]:
 def _kill_owned_stale_process(port: int) -> bool:
     """Kill ONLY a previously-owned langgraph dev process bound to ``port``.
 
-    "Owned" means the PID written to ``_PID_FILE`` by an earlier
+    "Owned" means the PID written to ``RUNTIME.pid_file`` by an earlier
     ``start_langgraph_dev`` invocation in this user account, AND the live
     process at that PID still has ``langgraph`` in its command line (defense
     against PID recycling). Returns True if a stale-but-owned process was
@@ -348,10 +443,10 @@ def _kill_owned_stale_process(port: int) -> bool:
          to an unrelated process between sessions (e.g., after a SIGKILL'd
          CLI left the PID file behind). The cmdline check rules that out.
     """
-    if not _PID_FILE.exists():
+    if not RUNTIME.pid_file.exists():
         return False
     try:
-        owned_pid = int(_PID_FILE.read_text().strip())
+        owned_pid = int(RUNTIME.pid_file.read_text().strip())
     except (OSError, ValueError):
         return False
 
@@ -369,7 +464,7 @@ def _kill_owned_stale_process(port: int) -> bool:
         # PID file points at a dead process — clean up the file but don't
         # try to kill anything.
         try:
-            _PID_FILE.unlink()
+            RUNTIME.pid_file.unlink()
         except OSError:
             pass
         _unlink_workspace_sidecar()
@@ -394,12 +489,12 @@ def _kill_owned_stale_process(port: int) -> bool:
             "PID file %s claims pid %d for langgraph dev, but that pid now "
             "points at a different process (cmdline=%s). Refusing to kill, "
             "removing stale PID file.",
-            _PID_FILE,
+            RUNTIME.pid_file,
             owned_pid,
             cmdline,
         )
         try:
-            _PID_FILE.unlink()
+            RUNTIME.pid_file.unlink()
         except OSError:
             pass
         _unlink_workspace_sidecar()
@@ -410,7 +505,7 @@ def _kill_owned_stale_process(port: int) -> bool:
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     try:
-        _PID_FILE.unlink()
+        RUNTIME.pid_file.unlink()
     except OSError:
         pass
     _unlink_workspace_sidecar()
@@ -441,6 +536,7 @@ def start_langgraph_dev(
     file_persistence: bool = True,
     jobs_per_worker: int = 10,
     deploy_mode: bool = False,
+    tunnel: bool = False,
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -454,6 +550,14 @@ def start_langgraph_dev(
             ``.langgraph_api/`` cache so async-task / Store / scheduler state
             survives subprocess restarts. Set False to suppress periodic
             flushes (workspace stays cleaner; state is in-memory only).
+        jobs_per_worker: Concurrent runs per worker (``--n-jobs-per-worker``).
+        deploy_mode: When True, the subprocess loads full MCP + async
+            sub-agents (``EVOSCIENTIST_DEPLOY_MODE=full``); otherwise stripped.
+        tunnel: When True, pass ``--tunnel`` so langgraph dev exposes the
+            server over a public Cloudflare quick-tunnel. The random
+            ``*.trycloudflare.com`` URL is written to the log; read it back
+            with :func:`read_tunnel_url`. SECURITY: the tunnel has no auth and
+            the deployed agent can run shell — only enable for trusted use.
 
     Returns:
         The Popen handle for the langgraph dev process.
@@ -483,7 +587,7 @@ def start_langgraph_dev(
 
     # Defensive: handle a port that's occupied but not serving /ok.
     # Three cases:
-    #   (a) Our own previous langgraph dev (PID matches _PID_FILE) — kill it.
+    #   (a) Our own previous langgraph dev (PID matches RUNTIME.pid_file) — kill it.
     #   (b) Our own previous langgraph dev exited but the kernel still holds
     #       the socket in TIME_WAIT — no live PID for lsof to match, and the
     #       PID file may already be gone (stop_langgraph_dev unlinks it). The
@@ -498,7 +602,7 @@ def start_langgraph_dev(
         if _kill_owned_stale_process(port):
             logger.warning(
                 "Cleaned up stale langgraph dev (pid from %s) on port %d",
-                _PID_FILE,
+                RUNTIME.pid_file,
                 port,
             )
             # After SIGKILL the kernel may keep the port in TIME_WAIT for
@@ -530,14 +634,26 @@ def start_langgraph_dev(
             f"or change ports with: `EvoSci config set langgraph_dev_port <other-port>`"
         )
 
-    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+    # Rotate the log if it has grown past the threshold so this session's
+    # output starts on a fresh file. Failure is non-fatal (see
+    # ``_rotate_log_if_needed``). See #209.
+    _rotate_log_if_needed(RUNTIME.log_file)
     # Open the log file once and hand it to subprocess.Popen as stdout/stderr.
     # Popen duplicates the fd into the child via fork+exec, so closing our
     # parent-side handle in the finally below releases this process's fd
     # without affecting the child. Without the close, every restart leaks
     # one fd — a problem on heavy ``/resume`` cycling that could eventually
     # exhaust the process's open-file limit.
-    log_handle = open(_LOG_FILE, "ab")  # closed in finally below
+    log_handle = open(RUNTIME.log_file, "ab")  # closed in finally below
+    # Remember where this session's output begins so ``read_tunnel_url`` only
+    # scans lines this subprocess writes — never a stale URL left in the
+    # appended-to log by a previous tunnel session.
+    global _LOG_OFFSET_AT_START
+    try:
+        _LOG_OFFSET_AT_START = RUNTIME.log_file.stat().st_size
+    except OSError:
+        _LOG_OFFSET_AT_START = 0
 
     # Propagate workspace to the subprocess so deployed sub-agents resolve
     # paths.WORKSPACE_ROOT to the same dir as the CLI's main agent. cwd alone
@@ -597,6 +713,7 @@ def start_langgraph_dev(
                 str(jobs_per_worker),
                 "--no-browser",
                 "--no-reload",
+                *(["--tunnel"] if tunnel else []),
             ],
             cwd=str(workspace_dir),
             stdout=log_handle,
@@ -611,7 +728,7 @@ def start_langgraph_dev(
             log_handle.close()
         except Exception:
             pass
-    _PID_FILE.write_text(str(proc.pid))
+    RUNTIME.pid_file.write_text(str(proc.pid))
     _write_workspace_sidecar(workspace_dir=workspace_dir, pid=proc.pid)
     global _PROCESS_WORKSPACE
     _PROCESS = proc
@@ -625,13 +742,13 @@ def start_langgraph_dev(
         if proc.poll() is not None:
             tail = ""
             try:
-                tail = _LOG_FILE.read_text()[-2000:]
+                tail = RUNTIME.log_file.read_text()[-2000:]
             except Exception:
                 pass
             # Subprocess died on its own — clear our module-level bookkeeping
-            # (``_PROCESS``, ``_PROCESS_WORKSPACE``, ``_PID_FILE``) before
+            # (``_PROCESS``, ``_PROCESS_WORKSPACE``, ``RUNTIME.pid_file``) before
             # raising. Without this, ``_PROCESS`` would keep pointing at the
-            # dead handle and ``_PID_FILE`` at a non-existent PID, leading
+            # dead handle and ``RUNTIME.pid_file`` at a non-existent PID, leading
             # the next ``ensure_langgraph_dev`` to misjudge state. Pass
             # ``proc`` directly so ``stop_langgraph_dev`` works against the
             # one we just spawned even if the global state was overwritten.
@@ -649,8 +766,42 @@ def start_langgraph_dev(
 
     stop_langgraph_dev(proc)
     raise RuntimeError(
-        f"langgraph dev did not become healthy within 60 seconds. Check {_LOG_FILE}"
+        f"langgraph dev did not become healthy within 60 seconds. Check {RUNTIME.log_file}"
     )
+
+
+def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | None:
+    """Poll the langgraph dev log for the Cloudflare quick-tunnel public URL.
+
+    Started with ``tunnel=True``, langgraph dev shells out to cloudflared,
+    which prints a random ``https://<words>.trycloudflare.com`` URL once the
+    tunnel is established — typically a few seconds after the local server is
+    already healthy. We scan only the bytes written since this subprocess
+    started (``_LOG_OFFSET_AT_START``) so a stale URL from an earlier session
+    in the same appended-to log is never returned.
+
+    Args:
+        timeout: Max seconds to wait for the URL to appear. cloudflared may
+            also need to download its binary on first use, so the default is
+            generous (langgraph_api itself waits up to 30s internally).
+        poll_interval: Seconds between log re-reads.
+
+    Returns:
+        The public tunnel URL, or ``None`` if it never appeared in time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(RUNTIME.log_file, "rb") as fh:
+                fh.seek(_LOG_OFFSET_AT_START)
+                chunk = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            chunk = ""
+        match = _TUNNEL_URL_RE.search(chunk)
+        if match:
+            return match.group(0)
+        time.sleep(poll_interval)
+    return None
 
 
 def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
@@ -712,9 +863,9 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
             if proc is _PROCESS:
                 _PROCESS = None
                 _PROCESS_WORKSPACE = None
-    if _PID_FILE.exists():
+    if RUNTIME.pid_file.exists():
         try:
-            _PID_FILE.unlink()
+            RUNTIME.pid_file.unlink()
         except OSError:
             pass
     _unlink_workspace_sidecar()
@@ -770,9 +921,9 @@ def ensure_langgraph_dev(
     #      (rapid ``/resume`` in succession, channel threads). Reentrant so
     #      the workspace-restart path can call ``stop_langgraph_dev`` from
     #      inside the critical section.
-    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with FileLock(str(_FILE_LOCK_PATH), timeout=_FILE_LOCK_TIMEOUT):
+        with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
             with _LOCK:
                 return _ensure_langgraph_dev_locked(config, workspace_dir)
     except FileLockTimeout:
@@ -781,7 +932,7 @@ def ensure_langgraph_dev(
             "Another CLI shell may be stuck during cold-start. Falling back to "
             "sync sub-agent delegation for this session.",
             _FILE_LOCK_TIMEOUT,
-            _FILE_LOCK_PATH,
+            RUNTIME.lock_file,
         )
         _ASYNC_SUBAGENTS_AVAILABLE = False
         return None

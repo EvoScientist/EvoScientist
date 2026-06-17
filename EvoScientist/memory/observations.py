@@ -12,48 +12,29 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated
 
+import yaml
 from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
+from .search import (
+    search_documents,
+)
+from .types import (
+    MemoryScope,
+    MemorySourceType,
+    MemoryType,
+    ObservationReadResult,
+    ObservationRecordResult,
+    ObservationSearchDocument,
+    ObservationSearchHit,
+    ObservationSearchMode,
+)
+
 OBSERVATION_DIR = "/observations"
-
-
-class MemoryType(StrEnum):
-    """Kinds of reusable memory an observation can represent."""
-
-    SEMANTIC = "semantic"
-    PROCEDURAL = "procedural"
-    EPISODIC = "episodic"
-
-
-class MemoryScope(StrEnum):
-    """Whether an observation is global or tied to the active project."""
-
-    GLOBAL = "global"
-    PROJECT = "project"
-
-
-class MemorySourceType(StrEnum):
-    """Where an observation came from in the agent lifecycle."""
-
-    SUBAGENT = "subagent"
-    TURN = "turn"
-
-
-class ObservationRecordResult(TypedDict):
-    """Result returned by `record_observation`."""
-
-    observation_id: str
-    path: str
-    created: bool
-    memory_type: MemoryType
-    scope: MemoryScope
-    project_id: NotRequired[str]
 
 
 class RecordObservationArgs(BaseModel):
@@ -72,30 +53,32 @@ class RecordObservationArgs(BaseModel):
     summary: str = Field(
         min_length=1,
         description=(
-            "One-line agent-generated summary used in the observation index. "
-            "Make it specific enough to decide whether to read the full file."
+            "One-line summary for the observation index. Include the concrete "
+            "pattern, trigger, or outcome a future agent would search for."
         ),
     )
     observation: str = Field(
         min_length=1,
         description=(
-            "Concise reusable memory. Do not include raw traces, long citation "
-            "dumps, or claims that are not supported by the trajectory."
+            "Concise reusable lesson, fact, or procedure. State the durable "
+            "finding and the action or interpretation it implies for future "
+            "work."
         ),
     )
     why_it_matters: str = Field(
         min_length=1,
         description=(
-            "Why this will matter in future work, including compact evidence "
-            "or provenance when relevant."
+            "Explain the future value of the observation: what mistake it "
+            "prevents, what decision it accelerates, or what behavior it should "
+            "change."
         ),
     )
     evidence: str | None = Field(
         default=None,
         description=(
-            "Optional compact support such as source URLs, arXiv IDs, artifact "
-            "paths, exact commands, or 'observed in this run'. Use this for "
-            "bibliographic, benchmark, or date-sensitive claims."
+            "Optional compact support for the observation: source URLs, arXiv "
+            "IDs, file paths, exact commands, issue IDs, commit hashes, or run "
+            "provenance."
         ),
     )
     scope: MemoryScope = Field(
@@ -106,6 +89,61 @@ class RecordObservationArgs(BaseModel):
         ),
     )
     runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None
+
+
+class SearchObservationsArgs(BaseModel):
+    """Model-facing arguments for the `search_observations` tool."""
+
+    query: str = Field(
+        min_length=1,
+        description=(
+            "Search text. In ranked mode, provide compact natural-language "
+            "keywords or short phrases that describe the issue, constraint, "
+            "procedure, or prior result to find. In regex mode, provide a "
+            "case-insensitive grep-like pattern."
+        ),
+    )
+    mode: ObservationSearchMode = Field(
+        default=ObservationSearchMode.RANKED,
+        description=(
+            "ranked interprets query as keyword text and returns relevance-"
+            "ordered observations. regex interprets query as a grep-like "
+            "pattern and falls back to literal matching when the pattern is "
+            "invalid."
+        ),
+    )
+    scope: MemoryScope | None = Field(
+        default=None,
+        description=(
+            "Optional scope filter. Use project for workspace-local notes, "
+            "global for cross-project notes, or omit to search both."
+        ),
+    )
+    memory_type: MemoryType | None = Field(
+        default=None,
+        description=(
+            "Optional type filter: procedural for commands/workarounds, "
+            "semantic for reusable facts/findings, episodic for notable events."
+        ),
+    )
+    limit: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Maximum number of matching observations to return.",
+    )
+
+
+class ReadMemoryArgs(BaseModel):
+    """Model-facing arguments for the `read_memory` tool."""
+
+    observation_id: str = Field(
+        min_length=1,
+        description=(
+            "Exact observation ID to read, such as an ID returned by "
+            "`search_observations` or listed in the inlined observation index."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -165,6 +203,183 @@ def _memory_path(
 def _json_string(value: str) -> str:
     """Render a string as a YAML-safe JSON scalar."""
     return json.dumps(value, ensure_ascii=False)
+
+
+def _read_observation_document(path: Path) -> tuple[dict[str, object], str] | None:
+    """Read an observation markdown document and parse its frontmatter."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("---\n"):
+        return None
+    try:
+        frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
+        metadata = yaml.safe_load(frontmatter)
+    except (ValueError, yaml.YAMLError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    return {key: value for key, value in metadata.items() if isinstance(key, str)}, body
+
+
+def _observation_files(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    scope: MemoryScope | None,
+) -> list[Path]:
+    """Return candidate observation files for the current project context."""
+    root = Path(memory_dir).expanduser()
+    memory_paths: list[str] = []
+    if scope in {None, MemoryScope.GLOBAL}:
+        memory_paths.append(f"{OBSERVATION_DIR}/global")
+    if scope in {None, MemoryScope.PROJECT}:
+        memory_paths.append(f"{OBSERVATION_DIR}/projects/{project_id}")
+
+    paths: list[Path] = []
+    for memory_path in memory_paths:
+        directory = root / memory_path.lstrip("/")
+        try:
+            paths.extend(sorted(directory.glob("*.md")))
+        except OSError:
+            continue
+    return paths
+
+
+def _candidate_observation_documents(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    scope: MemoryScope | None = None,
+    memory_type: MemoryType | None = None,
+) -> list[ObservationSearchDocument]:
+    """Read candidate observations for the current filters."""
+    documents: list[ObservationSearchDocument] = []
+    for path in _observation_files(
+        memory_dir=memory_dir,
+        project_id=project_id,
+        scope=scope,
+    ):
+        document = _read_observation_document(path)
+        if document is None:
+            continue
+        metadata, body = document
+        observation_id = str(metadata.get("id") or "").strip()
+        summary = str(metadata.get("summary") or "").strip()
+        memory_type_value = str(metadata.get("memory_type") or "").strip()
+        scope_value = str(metadata.get("scope") or "").strip()
+        if (
+            not observation_id
+            or not summary
+            or not memory_type_value
+            or not scope_value
+        ):
+            continue
+        try:
+            record_type = MemoryType(memory_type_value)
+            record_scope = MemoryScope(scope_value)
+        except ValueError:
+            continue
+        if memory_type is not None and record_type != memory_type:
+            continue
+
+        try:
+            memory_path = (
+                "/" + path.relative_to(Path(memory_dir).expanduser()).as_posix()
+            )
+        except ValueError:
+            continue
+        documents.append(
+            ObservationSearchDocument(
+                observation_id=observation_id,
+                path=_agent_path(memory_path),
+                memory_type=record_type,
+                scope=record_scope,
+                summary=summary,
+                body=body,
+            )
+        )
+    return documents
+
+
+def search_observation_files(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    query: str,
+    scope: MemoryScope | None = None,
+    memory_type: MemoryType | None = None,
+    limit: int = 8,
+    mode: ObservationSearchMode = ObservationSearchMode.RANKED,
+) -> list[ObservationSearchHit]:
+    """Search global/current-project observations by ranked relevance by default."""
+    query_text = query.strip()
+    if not query_text:
+        return []
+    search_mode = ObservationSearchMode(mode)
+
+    documents = _candidate_observation_documents(
+        memory_dir=memory_dir,
+        project_id=project_id,
+        scope=scope,
+        memory_type=memory_type,
+    )
+    return search_documents(
+        documents=documents,
+        query=query_text,
+        limit=limit,
+        mode=search_mode,
+    )
+
+
+def read_observation_file(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    observation_id: str,
+) -> ObservationReadResult | None:
+    """Read a full observation document by frontmatter id."""
+    requested_id = observation_id.strip()
+    if not requested_id:
+        return None
+
+    root = Path(memory_dir).expanduser()
+    for path in _observation_files(
+        memory_dir=root,
+        project_id=project_id,
+        scope=None,
+    ):
+        document = _read_observation_document(path)
+        if document is None:
+            continue
+        metadata, _body = document
+        record_id = str(metadata.get("id") or "").strip()
+        if record_id != requested_id:
+            continue
+
+        summary = str(metadata.get("summary") or "").strip()
+        memory_type_value = str(metadata.get("memory_type") or "").strip()
+        scope_value = str(metadata.get("scope") or "").strip()
+        if not summary or not memory_type_value or not scope_value:
+            return None
+        try:
+            memory_type = MemoryType(memory_type_value)
+            scope = MemoryScope(scope_value)
+            memory_path = "/" + path.relative_to(root).as_posix()
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+
+        return {
+            "observation_id": record_id,
+            "path": _agent_path(memory_path),
+            "memory_type": memory_type,
+            "scope": scope,
+            "summary": summary,
+            "text": text,
+        }
+    return None
 
 
 def _format_frontmatter(
@@ -371,6 +586,95 @@ def record_observation_file(
     if scope == MemoryScope.PROJECT:
         result["project_id"] = project_id
     return result
+
+
+def create_search_observations_tool(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+) -> BaseTool:
+    """Build the read-only `search_observations` tool for one project context."""
+
+    def _search_observations(
+        query: str,
+        mode: ObservationSearchMode = ObservationSearchMode.RANKED,
+        scope: MemoryScope | None = None,
+        memory_type: MemoryType | None = None,
+        limit: int = 8,
+    ) -> str:
+        search_mode = ObservationSearchMode(mode)
+        results = search_observation_files(
+            memory_dir=memory_dir,
+            project_id=project_id,
+            query=query,
+            scope=scope,
+            memory_type=memory_type,
+            limit=limit,
+            mode=search_mode,
+        )
+        return json.dumps(
+            {"results": results},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    return StructuredTool.from_function(
+        func=_search_observations,
+        name="search_observations",
+        description=(
+            "Search EvoMemory observation summaries and bodies with ranked "
+            "free-text retrieval. Use a few distinctive words or short phrases "
+            "that describe the issue, constraint, procedure, or prior result "
+            "to find. For exact grep-like matching, pass `mode=regex`. For "
+            "substantial coding, debugging, research, planning, or evaluation "
+            "work, use this as the memory preflight before inspecting workspace "
+            "files unless the inlined observation index already gives an exact "
+            "observation ID to read. Read promising hits with `read_memory`."
+        ),
+        args_schema=SearchObservationsArgs,
+        infer_schema=False,
+    )
+
+
+def create_read_memory_tool(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+) -> BaseTool:
+    """Build the read-only `read_memory` tool for one project context."""
+
+    def _read_memory(observation_id: str) -> str:
+        requested_id = observation_id.strip()
+        result = read_observation_file(
+            memory_dir=memory_dir,
+            project_id=project_id,
+            observation_id=requested_id,
+        )
+        if result is None:
+            return json.dumps(
+                {
+                    "error": "No observation with that ID exists in global or current-project memory.",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        return json.dumps(
+            {"text": result["text"]},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    return StructuredTool.from_function(
+        func=_read_memory,
+        name="read_memory",
+        description=(
+            "Read the full markdown for an EvoMemory observation by exact "
+            "observation ID. Use this after `search_observations` or the "
+            "inlined observation index identifies a promising memory."
+        ),
+        args_schema=ReadMemoryArgs,
+        infer_schema=False,
+    )
 
 
 def create_record_observation_tool(

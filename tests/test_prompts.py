@@ -96,26 +96,6 @@ class TestGetSystemPrompt:
             "Found `/memory/<file>` in system prompt — should be `/memories/<file>`"
         )
 
-    def test_observation_writes_can_be_removed(self):
-        result = get_system_prompt(
-            enable_observation_memory=True,
-            enable_observation_writes=False,
-        )
-
-        assert "/memories/observations/" in result
-        assert "record_observation" not in result
-        assert "Memory Evolution" not in result
-
-    def test_observation_memory_can_be_removed(self):
-        result = get_system_prompt(
-            enable_observation_memory=False,
-            enable_observation_writes=False,
-        )
-
-        assert "/memories/observations/" not in result
-        assert "record_observation" not in result
-        assert "Memory Evolution" not in result
-
 
 class TestEvoScientistIdentity:
     def test_constant_not_empty(self):
@@ -182,3 +162,24 @@ class TestShellGuidelines:
         """SHELL_GUIDELINES content should live ONLY in its own constant."""
         # Sentinel phrase unique to SHELL_GUIDELINES
         assert "Sandbox limits" not in EXPERIMENT_WORKFLOW
+
+
+class TestDangerousShellGuidelines:
+    def test_default_uses_virtual_paths(self):
+        result = get_system_prompt()
+        assert "> /output.log" in result
+        assert "DANGEROUS MODE" not in result
+
+    def test_dangerous_swaps_guidelines(self):
+        result = get_system_prompt(dangerous=True, cwd="/Users/me/ws/demo")
+        assert "DANGEROUS MODE" in result
+        assert "/Users/me/ws/demo" in result
+        # virtual-path example is gone
+        assert "> /output.log" not in result
+        # privileged-command blocklist still advertised
+        assert "sudo" in result
+        assert "rm -rf /" in result
+
+    def test_dangerous_without_cwd_falls_back(self):
+        result = get_system_prompt(dangerous=True)
+        assert "DANGEROUS MODE" in result

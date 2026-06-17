@@ -47,10 +47,14 @@ class MemoryObservationWriter(StrEnum):
             case MemoryObservationWriter.AGENT:
                 return target == MemoryObservationTarget.AGENT
             case MemoryObservationWriter.WORKER:
-                return target == MemoryObservationTarget.SUBAGENT_WORKER
+                return target in (
+                    MemoryObservationTarget.TURN_WORKER,
+                    MemoryObservationTarget.SUBAGENT_WORKER,
+                )
             case MemoryObservationWriter.ALL:
                 return target in (
                     MemoryObservationTarget.AGENT,
+                    MemoryObservationTarget.TURN_WORKER,
                     MemoryObservationTarget.SUBAGENT_WORKER,
                 )
 
@@ -198,9 +202,9 @@ class EvoScientistConfig:
     # allowed `memory_observation_writer` role below.
     memory_observations_enabled: bool = True
     # Which observation-writing path receives the `record_observation` tool:
-    # "off" disables writes; "agent" means live agents; "worker" means the
-    # subagent memory worker; "all" means live agents and the subagent memory
-    # worker. The turn memory worker remains profile-only.
+    # "off" disables writes; "agent" means live agents; "worker" means
+    # post-run memory workers; "all" means live agents and post-run memory
+    # workers.
     memory_observation_writer: MemoryObservationWriter = (
         DEFAULT_MEMORY_OBSERVATION_WRITER
     )
@@ -219,6 +223,8 @@ class EvoScientistConfig:
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
     reasoning_effort: str = "high"
+    # Opt into Anthropic prompt caching for OpenRouter anthropic/* models.
+    openrouter_anthropic_prompt_cache: bool = False
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -330,6 +336,11 @@ class EvoScientistConfig:
     auto_mode: bool = False  # Run unattended: imply auto_approve and disable ask_user
     shell_allow_list: str = ""  # Comma-separated shell command prefixes to auto-approve
 
+    # Dangerous mode: real-filesystem access (no workspace confinement). The agent
+    # operates on real absolute paths anywhere on disk; the privileged-command
+    # blocklist (sudo/chmod/dd/...) still applies. Implies auto_approve.
+    dangerous_mode: bool = False
+
     # Agent features
     enable_ask_user: bool = True  # Enable ask_user tool for agent-initiated questions
 
@@ -384,6 +395,12 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        # Dangerous mode implies auto_approve regardless of source (CLI, env,
+        # config file). Mirrors how auto_mode implies auto_approve — done here so
+        # the coupling holds even when dangerous_mode is set via `config set`.
+        if self.dangerous_mode:
+            self.auto_approve = True
+
         try:
             writer = MemoryObservationWriter(
                 str(self.memory_observation_writer).strip().lower()
@@ -428,7 +445,7 @@ class MemoryControls:
             return False
         match target:
             case MemoryObservationTarget.TURN_WORKER:
-                return self.profile_enabled
+                return self.profile_enabled or self.observation_tool_enabled(target)
             case MemoryObservationTarget.SUBAGENT_WORKER:
                 return self.profile_enabled or self.observation_tool_enabled(target)
             case MemoryObservationTarget.AGENT:
@@ -641,6 +658,10 @@ _ENV_MAPPINGS = {
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
+    "openrouter_anthropic_prompt_cache": (
+        "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
+    ),
+    "dangerous_mode": "EVOSCIENTIST_DANGEROUS_MODE",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
     "use_responses_api": "EVOSCIENTIST_USE_RESPONSES_API",
@@ -762,6 +783,20 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
+    if config.openrouter_anthropic_prompt_cache and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "true"
+    # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
+    # (warning banner, run_in_background) and is inherited by the langgraph dev
+    # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)
+    # is invisible to those consumers while the backend is already unconfined.
+    # Bidirectional: clear it when off so a re-apply with a lower config (or a
+    # stale value) can't leave the process stuck in dangerous mode.
+    if config.dangerous_mode:
+        os.environ["EVOSCIENTIST_DANGEROUS_MODE"] = "true"
+    else:
+        os.environ.pop("EVOSCIENTIST_DANGEROUS_MODE", None)
     if config.use_responses_api and not os.environ.get(
         "EVOSCIENTIST_USE_RESPONSES_API"
     ):

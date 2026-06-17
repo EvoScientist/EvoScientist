@@ -18,6 +18,7 @@ def _make_config(
     auto_approve: bool = False,
     auto_mode: bool = False,
     enable_ask_user: bool = True,
+    dangerous_mode: bool = False,
 ):
     return SimpleNamespace(
         channel_enabled="telegram",
@@ -28,6 +29,7 @@ def _make_config(
         auto_approve=auto_approve,
         auto_mode=auto_mode,
         enable_ask_user=enable_ask_user,
+        dangerous_mode=dangerous_mode,
         enable_async_subagents=False,
         memory_profile_enabled=True,
         memory_observations_enabled=True,
@@ -50,6 +52,7 @@ def _run_serve_once(
     auto_approve: bool = False,
     auto_mode: bool = False,
     ask_user: bool = False,
+    dangerous: bool = False,
 ):
     import EvoScientist.config as config_mod
 
@@ -108,6 +111,7 @@ def _run_serve_once(
         auto_approve=auto_approve,
         auto_mode=auto_mode,
         ask_user=ask_user,
+        dangerous=dangerous,
     )
     return order, captured
 
@@ -246,3 +250,17 @@ def test_serve_auto_mode_implies_auto_approve_and_disables_ask_user(
         "auto_approve": True,
         "enable_ask_user": False,
     }
+
+
+def test_serve_dangerous_sets_dangerous_mode(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(default_workdir=ws)
+
+    _, captured = _run_serve_once(
+        monkeypatch,
+        config,
+        workdir=ws,
+        dangerous=True,
+    )
+
+    assert captured["cli_overrides"] == {"dangerous_mode": True}

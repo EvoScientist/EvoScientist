@@ -10,6 +10,7 @@ endpoints) and convenient short names for common models.
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any
 
 from langchain.chat_models import init_chat_model
@@ -64,6 +65,8 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
@@ -79,6 +82,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
     ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
     # Anthropic (current generation)
+    ("claude-fable-5", "claude-fable-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
@@ -132,6 +136,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
+    ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
     ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
@@ -235,6 +240,55 @@ def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
     return [(name, model_id) for name, model_id, p in _MODEL_ENTRIES if p == provider]
 
 
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _supports_openrouter_anthropic_prompt_cache(provider: str, model_id: str) -> bool:
+    """Return whether EvoScientist should declare OpenRouter Claude caching."""
+    return provider == "openrouter" and model_id.startswith(
+        ("anthropic/", "~anthropic/")
+    )
+
+
+def _has_cache_control_override(kwargs: dict[str, Any]) -> bool:
+    """Return whether the caller already supplied cache-control settings."""
+    if "cache_control" in kwargs:
+        return True
+    model_kwargs = kwargs.get("model_kwargs")
+    if model_kwargs is None:
+        return False
+    if not isinstance(model_kwargs, dict):
+        warnings.warn(
+            "OpenRouter Anthropic prompt caching was not applied because "
+            "`model_kwargs` is not a dict; pass cache_control explicitly or use "
+            "a dict-shaped model_kwargs.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return True
+    return "cache_control" in model_kwargs
+
+
+def _apply_openrouter_anthropic_prompt_cache(
+    provider: str,
+    model_id: str,
+    kwargs: dict[str, Any],
+) -> None:
+    """Opt into OpenRouter Claude prompt caching when explicitly requested.
+
+    OpenRouter already handles implicit caching for most providers, but Claude
+    prompt caching needs Anthropic-style cache-control declaration.
+    """
+    if not _env_flag_enabled("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"):
+        return
+    if not _supports_openrouter_anthropic_prompt_cache(provider, model_id):
+        return
+    if _has_cache_control_override(kwargs):
+        return
+    kwargs.setdefault("model_kwargs", {})["cache_control"] = {"type": "ephemeral"}
+
+
 def _apply_auto_config(
     provider: str,
     model_id: str,
@@ -260,8 +314,8 @@ def _apply_auto_config(
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
             pass
-        elif model_id.endswith(("4-6", "4-7", "4-8")):
-            kwargs["thinking"] = {"type": "adaptive"}
+        elif "fable" in model_id or model_id.endswith(("4-6", "4-7", "4-8")):
+            kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
         else:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
@@ -458,6 +512,7 @@ def get_chat_model(
             kwargs["base_url"] = base_url
 
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
+    _apply_openrouter_anthropic_prompt_cache(provider, model_id, kwargs)
 
     # User-level override for the OpenAI Responses API vs Chat Completions.
     # When "false", force Chat Completions and drop reasoning (which triggers

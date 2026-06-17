@@ -29,6 +29,7 @@ def _make_config(
     log_level: str = "warning",
     langgraph_dev_jobs_per_worker: int = 10,
     langgraph_dev_file_persistence: bool = True,
+    dangerous_mode: bool = False,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -38,6 +39,7 @@ def _make_config(
         log_level=log_level,
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
         langgraph_dev_file_persistence=langgraph_dev_file_persistence,
+        dangerous_mode=dangerous_mode,
     )
 
 
@@ -72,6 +74,8 @@ def _run_deploy_once(
     cwd: str | None = None,
     port_occupied: bool = False,
     langgraph_dev_running: bool = True,  # health-check passes after start
+    tunnel: bool = False,
+    tunnel_url: str | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
     Returns a ``captured`` dict with observation points."""
@@ -122,6 +126,7 @@ def _run_deploy_once(
         file_persistence=True,
         jobs_per_worker=10,
         deploy_mode=False,
+        tunnel=False,
     ):
         captured["langgraph_dev_started"] = True
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
@@ -129,6 +134,7 @@ def _run_deploy_once(
         captured["deploy_mode_passed"] = deploy_mode
         captured["jobs_per_worker_passed"] = jobs_per_worker
         captured["file_persistence_passed"] = file_persistence
+        captured["tunnel_passed"] = tunnel
         return SimpleNamespace(pid=99999)
 
     def _fake_stop_langgraph_dev(_proc=None):
@@ -136,6 +142,10 @@ def _run_deploy_once(
 
     monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop_langgraph_dev)
+    # Never poll a real log for the tunnel URL in tests.
+    monkeypatch.setattr(
+        lgm, "read_tunnel_url", lambda *a, **k: tunnel_url, raising=False
+    )
 
     # ccproxy mocks
     from EvoScientist import ccproxy_manager as ccp
@@ -194,7 +204,7 @@ def _run_deploy_once(
     if cwd is not None:
         monkeypatch.setattr(os, "getcwd", lambda: cwd)
 
-    deploy_server.deploy(workdir=workdir, port=port, debug=debug)
+    deploy_server.deploy(workdir=workdir, port=port, debug=debug, tunnel=tunnel)
     return captured
 
 
@@ -230,6 +240,27 @@ def test_deploy_starts_langgraph_dev_with_deploy_mode_true(monkeypatch, tmp_path
     assert captured["deploy_mode_passed"] is True, (
         "deploy command MUST call start_langgraph_dev with deploy_mode=True"
     )
+
+
+def test_deploy_tunnel_default_off(monkeypatch, tmp_path):
+    """Without ``--tunnel``, start_langgraph_dev is called with tunnel=False."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["tunnel_passed"] is False
+
+
+def test_deploy_tunnel_flag_passed_through(monkeypatch, tmp_path):
+    """``--tunnel`` propagates to start_langgraph_dev(tunnel=True)."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(
+        monkeypatch,
+        config,
+        tunnel=True,
+        tunnel_url="https://demo-xyz.trycloudflare.com",
+    )
+
+    assert captured["tunnel_passed"] is True
 
 
 def test_deploy_workdir_cli_arg_beats_config(monkeypatch, tmp_path):

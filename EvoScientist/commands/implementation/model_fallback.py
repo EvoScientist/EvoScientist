@@ -8,21 +8,12 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from ..base import Argument, Command, CommandContext
+from ..base import Argument, Command, CommandContext, SubCommand
 from ..manager import manager
 
 
 class ModelFallbackCommand(Command):
-    """Manage the model fallback chain.
-
-    Subcommands:
-        add     -- Append a model (interactive picker when no args).
-        remove  -- Remove by position (interactive picker in TUI).
-        list    -- Display the current chain.
-        clear   -- Remove all entries.
-        save    -- Persist the chain to the config file.
-        help    -- Show subcommand reference.
-    """
+    """Manage the model fallback chain."""
 
     name = "/model-fallback"
     alias: ClassVar[list[str]] = ["/fallback"]
@@ -34,6 +25,14 @@ class ModelFallbackCommand(Command):
             description="add|remove|list|clear|save|help",
             required=False,
         ),
+    ]
+    subcommands: ClassVar[list[SubCommand]] = [
+        SubCommand("list", "Display the current fallback chain"),
+        SubCommand("add", "Append a model to the fallback chain"),
+        SubCommand("remove", "Remove a model by position"),
+        SubCommand("clear", "Remove all fallback entries"),
+        SubCommand("save", "Persist the chain to config"),
+        SubCommand("help", "Show subcommand reference"),
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

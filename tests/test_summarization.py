@@ -1,8 +1,10 @@
 """Tests for the summarization event pipeline and display widgets."""
 
+from langchain_core.messages import HumanMessage
+
 from EvoScientist.stream.emitter import StreamEventEmitter
-from EvoScientist.stream.events import _extract_summarization_text
 from EvoScientist.stream.state import StreamState
+from EvoScientist.stream.summarization import _extract_summarization_text
 
 # ---------------------------------------------------------------------------
 # Emitter
@@ -277,56 +279,52 @@ class TestExtractSummarizationText:
     """Content extraction from summarization chunks."""
 
     def test_string_content(self):
-        class Msg:
-            content = "hello world"
-
-        assert _extract_summarization_text(Msg()) == "hello world"
+        assert (
+            _extract_summarization_text(HumanMessage(content="hello world"))
+            == "hello world"
+        )
 
     def test_content_blocks(self):
-        class Msg:
-            def __init__(self):
-                self.content = [
-                    {"type": "text", "text": "part1"},
-                    {"type": "text", "text": "part2"},
-                ]
-
-        assert _extract_summarization_text(Msg()) == "part1part2"
+        assert (
+            _extract_summarization_text(
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": "part1"},
+                        {"type": "text", "text": "part2"},
+                    ]
+                )
+            )
+            == "part1part2"
+        )
 
     def test_content_blocks_with_index(self):
         """Content blocks may include 'index' field — should still extract text."""
 
-        class Msg:
-            def __init__(self):
-                self.content = [{"type": "text", "text": " vs", "index": 1}]
-
-        assert _extract_summarization_text(Msg()) == " vs"
+        assert (
+            _extract_summarization_text(
+                HumanMessage(content=[{"type": "text", "text": " vs", "index": 1}])
+            )
+            == " vs"
+        )
 
     def test_empty_list(self):
-        class Msg:
-            def __init__(self):
-                self.content = []
-
-        assert _extract_summarization_text(Msg()) == ""
-
-    def test_no_content_attr(self):
-        class Msg:
-            pass
-
-        assert _extract_summarization_text(Msg()) == ""
+        assert _extract_summarization_text(HumanMessage(content=[])) == ""
 
     def test_mixed_block_types(self):
-        class Msg:
-            def __init__(self):
-                self.content = [
-                    {"type": "text", "text": "hello"},
-                    {"type": "image", "url": "..."},
-                ]
-
-        assert _extract_summarization_text(Msg()) == "hello"
+        assert (
+            _extract_summarization_text(
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": "hello"},
+                        {"type": "image", "url": "..."},
+                    ]
+                )
+            )
+            == "hello"
+        )
 
     def test_string_blocks_in_list(self):
-        class Msg:
-            def __init__(self):
-                self.content = ["hello", "world"]
-
-        assert _extract_summarization_text(Msg()) == "helloworld"
+        assert (
+            _extract_summarization_text(HumanMessage(content=["hello", "world"]))
+            == "helloworld"
+        )

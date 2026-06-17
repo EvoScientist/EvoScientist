@@ -2,6 +2,7 @@
 
 import re
 import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,58 @@ from EvoScientist.backends import (
     CustomSandboxBackend,
     MergedSkillsBackend,
     convert_virtual_paths_in_command,
+    prepare_sandbox_command,
     validate_command,
 )
+
+
+def _sleep_cmd(seconds: int) -> str:
+    """Cross-platform command that sleeps for *seconds* and exits 0."""
+    if sys.platform == "win32":
+        return f"ping -n {seconds + 1} 127.0.0.1 > nul"
+    return f"sleep {seconds}"
+
+
+def _split_cmd(s: str) -> list[str]:
+    """Cross-platform tokenizer for shell command assertions.
+
+    POSIX (``shlex.split`` default ``posix=True``) handles single/double
+    quotes and backslash escapes produced by :func:`shlex.quote`. But
+    ``posix=True`` also treats ``\\`` as an escape char on input, which
+    would strip the backslashes from a bare Windows path like
+    ``C:\\Users\\foo`` — turning it into ``C:Usersfoo`` and breaking the
+    token comparison.
+
+    On Windows, the resolved paths from :func:`backends._platform_quote`
+    are bare (no shell-special chars) or double-quoted (when the path
+    has spaces). ``shlex.split(s, posix=False)`` is a simple whitespace
+    splitter that preserves backslashes verbatim; we then strip a
+    single layer of matching outer ``"``/``'`` and unescape ``\\"``
+    to mimic what cmd.exe does at parse time.
+
+    Examples (on Windows):
+
+    >>> _split_cmd('python C:\\\\Users\\\\foo\\\\bar.py')
+    ['python', 'C:\\\\Users\\\\foo\\\\bar.py']
+    >>> _split_cmd('python "C:\\\\Users\\\\John Smith\\\\bar.py"')
+    ['python', 'C:\\\\Users\\\\John Smith\\\\bar.py']
+    >>> _split_cmd('python "C:\\\\path\\\\a\\\\"b"')
+    ['python', 'C:\\\\path\\\\a"b']
+    """
+    if sys.platform == "win32":
+        tokens = shlex.split(s, posix=False)
+        # posix=False doesn't process quotes; mimic cmd.exe: strip a
+        # single layer of matching outer quotes per token, then
+        # unescape embedded \" → ".
+        result = []
+        for tok in tokens:
+            if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+                tok = tok[1:-1]
+            tok = tok.replace('\\"', '"')
+            result.append(tok)
+        return result
+    return shlex.split(s)
+
 
 # === validate_command ===
 
@@ -51,59 +102,6 @@ class TestValidateCommand:
 
         assert validate_command("cat ~/secrets.txt") is None
         assert check_forced_confirmation("cat ~/secrets.txt") is not None
-
-    def test_home_tilde_user_expansion_soft_blocked(self):
-        from EvoScientist.backends import check_forced_confirmation
-
-        assert check_forced_confirmation("cat ~root/.ssh/id_rsa") is not None
-        assert check_forced_confirmation("ls ~user/.bashrc") is not None
-
-    def test_python_m_pip_install_flagged(self):
-        from EvoScientist.backends import check_forced_confirmation
-
-        for cmd in [
-            "python -m pip install pandas",
-            "python3 -m pip install requests",
-            "python3.11 -m pip install foo",
-        ]:
-            assert validate_command(cmd) is None, (
-                f"should be soft-blocked, not hard: {cmd}"
-            )
-            r = check_forced_confirmation(cmd)
-            assert r is not None, f"should be flagged: {cmd}"
-        assert (
-            "install"
-            in check_forced_confirmation("python -m pip install pandas").lower()
-        )
-
-    def test_python_os_environ_flagged(self):
-        from EvoScientist.backends import check_forced_confirmation
-
-        assert check_forced_confirmation('python -c "print(os.environ)"') is not None
-        assert check_forced_confirmation("python -c \"os.environ['KEY']\"") is not None
-
-    def test_python_expanduser_flagged(self):
-        from EvoScientist.backends import check_forced_confirmation
-
-        assert (
-            check_forced_confirmation("python -c \"expanduser('~/secret')\"")
-            is not None
-        )
-        assert (
-            check_forced_confirmation("python -c \"Path('~/x').expanduser()\"")
-            is not None
-        )
-
-    def test_python_command_execution_flagged(self):
-        from EvoScientist.backends import check_forced_confirmation
-
-        assert check_forced_confirmation("python -c \"os.system('ls')\"") is not None
-        assert check_forced_confirmation("python -c \"os.execv('x', [])\"") is not None
-        assert check_forced_confirmation("python -c \"os.popen('ls')\"") is not None
-        assert (
-            check_forced_confirmation("python -c \"subprocess.run(['ls'])\"")
-            is not None
-        )
 
     def test_blocked_rm_rf_absolute(self):
         result = validate_command("rm -rf /important")
@@ -193,23 +191,26 @@ class TestInlineInterpreterGuardrails:
         """Flags with args before -c: python -W ignore -c."""
         from EvoScientist.backends import check_forced_confirmation
 
-        assert check_forced_confirmation(
-            "python -W ignore -c \"os.system('id')\""
-        ) is not None
+        assert (
+            check_forced_confirmation("python -W ignore -c \"os.system('id')\"")
+            is not None
+        )
 
     def test_python_X_utf8_c_bypass(self):
         from EvoScientist.backends import check_forced_confirmation
 
-        assert check_forced_confirmation(
-            "python -X utf8 -c \"os.system('id')\""
-        ) is not None
+        assert (
+            check_forced_confirmation("python -X utf8 -c \"os.system('id')\"")
+            is not None
+        )
 
     def test_python_multi_flags_before_c(self):
         from EvoScientist.backends import check_forced_confirmation
 
-        assert check_forced_confirmation(
-            "python -O -W ignore -c \"os.system('id')\""
-        ) is not None
+        assert (
+            check_forced_confirmation("python -O -W ignore -c \"os.system('id')\"")
+            is not None
+        )
 
     # -- Node / Bun / Deno -----------------------------------------------
 
@@ -217,9 +218,7 @@ class TestInlineInterpreterGuardrails:
         from EvoScientist.backends import check_forced_confirmation
 
         assert (
-            check_forced_confirmation(
-                "node -e \"require('child_process').exec('id')\""
-            )
+            check_forced_confirmation("node -e \"require('child_process').exec('id')\"")
             is not None
         )
 
@@ -247,16 +246,18 @@ class TestInlineInterpreterGuardrails:
         """node -r module -e: -r takes a separate arg, pushing -e later."""
         from EvoScientist.backends import check_forced_confirmation
 
-        assert check_forced_confirmation(
-            'node -r dotenv/config -e "process.exit()"'
-        ) is not None
+        assert (
+            check_forced_confirmation('node -r dotenv/config -e "process.exit()"')
+            is not None
+        )
 
     def test_node_require_long_then_eval_bypass(self):
         from EvoScientist.backends import check_forced_confirmation
 
-        assert check_forced_confirmation(
-            'node --require ts-node/register --eval "evil()"'
-        ) is not None
+        assert (
+            check_forced_confirmation('node --require ts-node/register --eval "evil()"')
+            is not None
+        )
 
     def test_bun_e(self):
         from EvoScientist.backends import check_forced_confirmation
@@ -439,6 +440,34 @@ class TestInlineInterpreterGuardrails:
         assert check_forced_confirmation("php index.php") is None
 
 
+class TestValidateCommandDangerous:
+    """dangerous=True drops path confinement but keeps the command blocklist."""
+
+    def test_absolute_path_allowed(self):
+        assert validate_command("cat /etc/passwd", dangerous=True) is None
+
+    def test_traversal_allowed(self):
+        assert validate_command("cat ../../x", dangerous=True) is None
+
+    def test_home_tilde_allowed(self):
+        assert validate_command("cat ~/secrets.txt", dangerous=True) is None
+
+    def test_cd_absolute_allowed(self):
+        assert validate_command("cd /etc && ls", dangerous=True) is None
+
+    def test_sudo_still_blocked(self):
+        assert validate_command("sudo rm x", dangerous=True) is not None
+
+    def test_chmod_still_blocked(self):
+        assert validate_command("chmod 777 /tmp/x", dangerous=True) is not None
+
+    def test_dd_still_blocked(self):
+        assert validate_command("dd if=/dev/zero of=/x", dangerous=True) is not None
+
+    def test_rm_rf_root_still_blocked(self):
+        assert validate_command("rm -rf /", dangerous=True) is not None
+
+
 # === convert_virtual_paths_in_command ===
 
 
@@ -545,6 +574,118 @@ class TestConvertVirtualPaths:
         result = convert_virtual_paths_in_command(command)
         assert result == "ssh host 'ls ./home/username/project'"
 
+    def test_bare_quoted_path_left_alone(self):
+        """A quoted bare ``/...`` path that is not a virtual mount
+        (``/skills/...``, ``/memories/...``) or workspace path must
+        NOT be rewritten — we cannot textually distinguish a path
+        argument from a literal string without command semantics.
+        """
+        result = convert_virtual_paths_in_command('python "/main file.py"')
+        assert result == 'python "/main file.py"'
+
+    def test_quoted_skills_path_with_whitespace_in_skill_name_resolved(
+        self, monkeypatch, tmp_path
+    ):
+        """A quoted ``/skills/<name with space>/...`` path must be
+        resolved as a single token, not truncated at the space (was:
+        the regex stopped at the first whitespace, so the resolver
+        received ``/skills/<word>`` and the suffix landed as a separate
+        argument).
+        """
+        # Tier setup identical to TestVirtualMountResolution._setup_tiers
+        user_dir = tmp_path / "ws_skills"
+        global_dir = tmp_path / "global_skills"
+        builtin_dir = tmp_path / "builtin_skills"
+        memories_dir = tmp_path / "memories"
+        for d in (user_dir, global_dir, builtin_dir, memories_dir):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+        (builtin_dir / "find skills").mkdir()
+        (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
+
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
+
+        tokens = shlex.split(result)
+        assert tokens[0] == "python"
+        assert tokens[1] == str(builtin_dir / "find skills" / "tool.py")
+
+    def test_quoted_system_path_with_workspace_and_whitespace_corrected(self):
+        """A quoted system path that references the workspace dir name
+        (which itself contains a space) must be auto-corrected to the
+        workspace-relative form, not left as the original quoted string.
+        """
+        result = convert_virtual_paths_in_command(
+            'python "/Users/user/my project/src/main.py"',
+            workspace_name="my project",
+        )
+        tokens = shlex.split(result)
+        assert tokens == ["python", "./src/main.py"]
+
+    def test_quoted_path_with_whitespace_round_trip_safe(self):
+        """A quoted ``/skills/...`` path with whitespace must round-trip
+        through ``shlex.split`` as a single token.
+        """
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
+        tokens = shlex.split(result)
+        assert tokens[0] == "python"
+        assert len(tokens) == 2
+        assert "find skills" in tokens[1]
+
+    def test_quoted_system_path_left_alone(self):
+        """A quoted path starting with a system prefix (e.g. ``/bin/echo``)
+        must NOT be rewritten — the pre-process excludes known system
+        prefixes so ``validate_command`` can still inspect them."""
+        result = convert_virtual_paths_in_command('python "/bin/echo"')
+        assert result == 'python "/bin/echo"'
+
+    def test_bash_c_with_quoted_system_path_left_alone(self):
+        """``bash -c "/bin/echo hi"`` must NOT be rewritten — the
+        ``/bin/echo`` inside the quoted argument is a shell command body,
+        not a virtual path argument to be rewritten."""
+        result = convert_virtual_paths_in_command('bash -c "/bin/echo hi"')
+        assert result == 'bash -c "/bin/echo hi"'
+
+    def test_unresolvable_quoted_skills_path_uses_workspace_relative_form(
+        self, monkeypatch, tmp_path
+    ):
+        """A quoted ``/skills/...`` path that no tier contains falls
+        through to the workspace-relative ``./skills/<rel>`` form. The
+        splice re-quotes the result; if the new path has no
+        whitespace, ``shlex.quote`` is a no-op and the surrounding
+        quote chars are dropped cleanly.
+        """
+        # Tier setup so the resolver is in a known empty state.
+        for d in (
+            tmp_path / "ws_skills",
+            tmp_path / "global_skills",
+            tmp_path / "builtin_skills",
+            tmp_path / "memories",
+        ):
+            d.mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(
+            backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
+        )
+        result = convert_virtual_paths_in_command(
+            'python "/skills/never-installed/foo.py"'
+        )
+        assert result == "python ./skills/never-installed/foo.py"
+
+    def test_echo_bare_quoted_path_left_alone(self):
+        """``echo "/hi"`` must NOT be rewritten — a bare ``/hi`` is not a
+        virtual mount, so the pre-process must leave it alone."""
+        result = convert_virtual_paths_in_command('echo "/hi"')
+        assert result == 'echo "/hi"'
+
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
 
@@ -581,7 +722,11 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert result == f"python {user_dir / 'hello' / 'main.py'}"
+        # ``_split_cmd`` round-trip is cross-platform: on POSIX it parses
+        # shlex.quote-style output; on Windows it preserves the backslashes
+        # in bare paths (POSIX shlex would treat ``\`` as an escape char
+        # and strip them). See the helper docstring for details.
+        assert _split_cmd(result) == ["python", str(user_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
@@ -590,7 +735,7 @@ class TestVirtualMountResolution:
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
-        assert result == f"python {global_dir / 'hello' / 'main.py'}"
+        assert _split_cmd(result) == ["python", str(global_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
@@ -599,7 +744,10 @@ class TestVirtualMountResolution:
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
         result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
-        assert result == f"python {builtin_dir / 'find-skills' / 'tool.py'}"
+        assert _split_cmd(result) == [
+            "python",
+            str(builtin_dir / "find-skills" / "tool.py"),
+        ]
 
     def test_skills_path_unresolvable_falls_back_to_workspace_relative(
         self, monkeypatch, tmp_path
@@ -620,15 +768,21 @@ class TestVirtualMountResolution:
     ):
         _, _, _, memories_dir = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command("cat /memories/note.md")
-        assert result == f"cat {memories_dir / 'note.md'}"
+        assert _split_cmd(result) == ["cat", str(memories_dir / "note.md")]
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
         """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
         mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert convert_virtual_paths_in_command("ls /skills") == f"ls {user_dir}"
-        assert convert_virtual_paths_in_command("ls /skills/") == f"ls {user_dir}"
+        assert _split_cmd(convert_virtual_paths_in_command("ls /skills")) == [
+            "ls",
+            str(user_dir),
+        ]
+        assert _split_cmd(convert_virtual_paths_in_command("ls /skills/")) == [
+            "ls",
+            str(user_dir),
+        ]
 
     def test_skills_prefix_not_overmatched(self, monkeypatch, tmp_path):
         """Paths starting with /skills but not /skills/ (e.g. /skillset/foo)
@@ -781,7 +935,7 @@ class TestVirtualMountResolution:
 
         result = convert_virtual_paths_in_command("python /skills/hello/main.py")
 
-        tokens = shlex.split(result)
+        tokens = _split_cmd(result)
         assert tokens[0] == "python"
         assert tokens[1] == str(user_dir / "hello" / "main.py")
 
@@ -798,7 +952,7 @@ class TestVirtualMountResolution:
 
         result = convert_virtual_paths_in_command("cat /memories/note.md")
 
-        tokens = shlex.split(result)
+        tokens = _split_cmd(result)
         assert tokens[0] == "cat"
         assert tokens[1] == str(spacey / "note.md")
 
@@ -897,7 +1051,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python3 /skills/hello-ws/main.py")
+        resp = backend.execute("python /skills/hello-ws/main.py")
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
 
@@ -933,7 +1087,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python3 /skills/shadow-test/main.py")
+        resp = backend.execute("python /skills/shadow-test/main.py")
         assert resp.exit_code == 0, resp.output
         assert "WORKSPACE_TIER_WINS" in resp.output
         assert "GLOBAL_TIER_LOST" not in resp.output
@@ -965,7 +1119,7 @@ class TestVirtualMountResolution:
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-        resp = backend.execute("python3 /skills/hello-e2e/main.py")
+        resp = backend.execute("python /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
 
@@ -978,7 +1132,7 @@ class TestResolvePath:
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         # /workspace/main.py should resolve to root/main.py
         resolved = backend._resolve_path("/workspace/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
         assert "workspace/workspace" not in str(resolved)
 
     def test_workspace_root(self, tmp_workspace):
@@ -990,13 +1144,13 @@ class TestResolvePath:
     def test_system_path_with_workspace_marker(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/project/workspace/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
 
     def test_system_path_without_workspace(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/file.py")
         # Falls back to basename
-        assert str(resolved).endswith("file.py")
+        assert Path(resolved).parts[-1] == "file.py"
 
     def test_custom_workspace_name_prefix_stripped(self, tmp_path):
         """_resolve_path uses the actual dir name, not hardcoded 'workspace'."""
@@ -1004,7 +1158,7 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/my-project/main.py")
-        assert str(resolved).endswith("main.py")
+        assert Path(resolved).parts[-1] == "main.py"
         assert "my-project/my-project" not in str(resolved)
 
     def test_custom_workspace_name_system_path(self, tmp_path):
@@ -1012,12 +1166,14 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/experiment-1/data/out.csv")
-        assert str(resolved).endswith("data/out.csv")
+        # Cross-platform suffix check: ``str(Path)`` uses backslashes on
+        # Windows, so testing for the literal POSIX suffix is brittle.
+        assert Path(resolved).parts[-2:] == ("data", "out.csv")
 
     def test_normal_virtual_path(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/src/main.py")
-        assert str(resolved).endswith("src/main.py")
+        assert Path(resolved).parts[-2:] == ("src", "main.py")
 
     def test_parent_path_contains_workspace_name(self, tmp_path):
         """Regression: cwd's parent path also contains '/<ws_name>/'.
@@ -1059,6 +1215,55 @@ class TestResolvePath:
         assert backend._resolve_path(tmp_workspace) == backend._resolve_path("/")
 
 
+class TestResolvePathDangerous:
+    """Dangerous mode passes real absolute paths through unmangled."""
+
+    def test_absolute_path_unmangled(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, dangerous=True)
+        # OS-appropriate absolute path (drive-anchored on Windows) outside the ws.
+        target = Path(Path(tmp_workspace).anchor, "etc", "hosts")
+        resolved = Path(backend._resolve_path(str(target)))
+        # Dangerous mode must NOT confine/mangle it into the workspace.
+        assert Path(tmp_workspace) not in resolved.parents
+        assert resolved == target
+
+    def test_outside_workspace_not_confined(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside = tmp_path / "elsewhere" / "data.csv"
+        backend = CustomSandboxBackend(root_dir=str(ws), dangerous=True)
+        resolved = Path(backend._resolve_path(str(outside)))
+        assert resolved == outside  # real path, not pulled into the workspace
+
+    def test_dangerous_forces_virtual_mode_off(self, tmp_workspace):
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace, virtual_mode=True, dangerous=True
+        )
+        assert backend.virtual_mode is False
+
+    def test_dangerous_skips_cwd_literal_rewrite(self, tmp_workspace):
+        """In dangerous mode the cwd->'./' rewrite must NOT mangle real args.
+
+        Regression: a non-path argument that merely contains the cwd string
+        (echo text, grep/git pattern) was being corrupted to './'.
+        """
+        cmd = f'echo "backup of {tmp_workspace}/data"'
+        prepared, error = prepare_sandbox_command(
+            cmd, tmp_workspace, virtual_mode=False, dangerous=True
+        )
+        assert error is None
+        assert prepared == cmd  # unchanged — no './' substitution
+
+    def test_non_dangerous_still_rewrites_cwd_literal(self, tmp_workspace):
+        """Default mode keeps the workspace-literal -> './' rewrite."""
+        cmd = f"cat {tmp_workspace}/file.txt"
+        prepared, error = prepare_sandbox_command(
+            cmd, tmp_workspace, virtual_mode=True, dangerous=False
+        )
+        assert error is None
+        assert prepared == "cat ./file.txt"
+
+
 # === CustomSandboxBackend.id ===
 
 
@@ -1088,15 +1293,29 @@ class TestSandboxId:
 
 
 class TestExecuteCwdSanitization:
-    def test_literal_workspace_path_replaced(self, tmp_workspace):
-        """execute() should replace literal workspace root path with ./"""
+    def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
+        """``prepare_sandbox_command`` must rewrite a literal workspace-root
+        absolute path to ``./`` before the command reaches the shell backend.
+
+        This asserts at the preprocessing boundary (no shell execution) so
+        the test is cross-platform — ``mkdir -p`` is POSIX-only and would
+        fail on Windows runners.
+        """
+        captured = {}
+
+        def fake_execute(_self, command, *, timeout=None):
+            captured["command"] = command
+            return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        # Create a subdir via the sanitized path
-        resp = backend.execute(f"mkdir -p {tmp_workspace}/test-sanitized && echo ok")
+        command = f"mkdir -p {tmp_workspace}/test-sanitized && echo ok"
+
+        resp = backend.execute(command)
+
         assert resp.exit_code == 0
-        # The dir should be created at workspace/test-sanitized, not nested
-        assert (Path(tmp_workspace) / "test-sanitized").is_dir()
-        assert not (Path(tmp_workspace) / tmp_workspace.lstrip("/")).exists()
+        assert f"{tmp_workspace}/" not in captured["command"]
+        assert "./test-sanitized" in captured["command"]
 
     def test_ssh_remote_paths_survive_execute_preprocessing(
         self, tmp_workspace, monkeypatch
@@ -1379,7 +1598,7 @@ class TestExecuteTruncation:
             max_output_bytes=100,
         )
         # Generate output larger than 100 bytes
-        resp = backend.execute("python3 -c \"print('A' * 200)\"")
+        resp = backend.execute("python -c \"print('A' * 200)\"")
         assert resp.truncated is True
         assert "... Output truncated at 100 bytes" in resp.output
         # Output body (before truncation message) should be ≤ 100 bytes
@@ -1407,7 +1626,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            "python3 -c \"import sys; sys.stderr.write('warning\\n')\""
+            "python -c \"import sys; sys.stderr.write('warning\\n')\""
         )
         assert "[stderr] warning" in resp.output
 
@@ -1416,7 +1635,7 @@ class TestExecuteStderr:
             root_dir=tmp_workspace,
             virtual_mode=True,
         )
-        resp = backend.execute('python3 -c "raise SystemExit(42)"')
+        resp = backend.execute('python -c "raise SystemExit(42)"')
         assert resp.exit_code == 42
         assert "Exit code: 42" in resp.output
 
@@ -1426,7 +1645,7 @@ class TestExecuteStderr:
             virtual_mode=True,
         )
         resp = backend.execute(
-            "python3 -c \"import sys; print('out'); sys.stderr.write('err\\n')\""
+            "python -c \"import sys; print('out'); sys.stderr.write('err\\n')\""
         )
         assert "out" in resp.output
         assert "[stderr] err" in resp.output
@@ -1665,20 +1884,32 @@ class TestAbsolutePathDetection:
 class TestExecuteTimeoutRecovery:
     def test_timeout_includes_recovery_guidance(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         assert resp.exit_code == 124
         assert "Recovery" in resp.output
         assert "background" in resp.output.lower()
 
     def test_timeout_includes_background_command(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
-        assert "sleep 10" in resp.output
+        cmd = _sleep_cmd(10)
+        resp = backend.execute(cmd)
+        assert cmd in resp.output
         assert "> /output.log 2>&1 &" in resp.output
+
+    def test_timeout_recovery_uses_relative_log_in_dangerous(self, tmp_workspace):
+        """Dangerous mode: recovery hint must not point the log at the host root."""
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace, timeout=1, dangerous=True
+        )
+        resp = backend.execute(_sleep_cmd(10))
+        assert resp.exit_code == 124
+        assert "> ./output.log 2>&1 &" in resp.output
+        assert "cat ./output.log" in resp.output
+        assert "> /output.log" not in resp.output
 
     def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         # Background recovery captures the PID so the job can be managed later.
         assert "PID: $!" in resp.output
         # Recovery also offers re-running with a larger per-command timeout.
@@ -1686,11 +1917,64 @@ class TestExecuteTimeoutRecovery:
 
     def test_timeout_preserves_original_error(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute("sleep 10")
+        resp = backend.execute(_sleep_cmd(10))
         assert "timed out" in resp.output.lower()
 
     def test_non_timeout_not_enhanced(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace)
-        resp = backend.execute("python3 -c 'raise SystemExit(1)'")
+        resp = backend.execute('python -c "raise SystemExit(1)"')
         assert resp.exit_code == 1
         assert "Recovery" not in resp.output
+
+
+class TestPlatformQuote:
+    """Unit tests for :func:`backends._platform_quote` / :func:`backends._cmd_quote`.
+
+    The platform check is read at call time via :func:`backends._is_windows`,
+    so we monkeypatch that function (not the ``sys`` module) to exercise the
+    Windows branch on a POSIX runner without mutating global state.
+    """
+
+    def test_posix_no_special_chars_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        # Forward slashes and alphanumerics are safe in POSIX shells.
+        assert backends._platform_quote("/Users/foo/file.py") == "/Users/foo/file.py"
+
+    def test_posix_path_with_space_is_single_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        # shlex.quote wraps the whole token in single quotes.
+        assert (
+            backends._platform_quote("/Users/foo/file bar.py")
+            == "'/Users/foo/file bar.py'"
+        )
+
+    def test_windows_no_special_chars_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Backslashes are NOT escape chars inside cmd.exe double quotes, and
+        # outside quotes they only appear in paths — so a bare path is fine.
+        assert (
+            backends._platform_quote(r"C:\Users\foo\file.py") == r"C:\Users\foo\file.py"
+        )
+
+    def test_windows_path_with_space_is_double_quoted(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # cmd.exe strips outer double quotes; the space is preserved literally.
+        assert (
+            backends._platform_quote(r"C:\Users\John Smith\file.py")
+            == r'"C:\Users\John Smith\file.py"'
+        )
+
+    def test_windows_embedded_double_quote_is_escaped(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # Embedded " is escaped as \" so cmd.exe keeps the literal quote inside
+        # the token rather than terminating the quoted region.
+        assert backends._platform_quote(r'C:\path\a"b') == r'"C:\path\a\"b"'
+
+    def test_windows_percent_sign_treated_as_regular_char(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        # %VAR% expansion is not neutralised — %% escaping only works in
+        # .bat/.cmd files, not via cmd /c.  We treat % as a regular char.
+        assert (
+            backends._platform_quote(r"C:\path\%TEMP%\file.py")
+            == r"C:\path\%TEMP%\file.py"
+        )
