@@ -1,7 +1,7 @@
 """LLMToolSelectorMiddleware configuration for EvoScientist.
 
 Wraps LangChain's built-in ``LLMToolSelectorMiddleware`` with project-specific
-defaults and a tracker that captures which tools were selected.
+defaults and an optional stream tracker that captures which tools were selected.
 
 The selector only activates when the agent has more than ``threshold`` tools
 (default 20).  Below that, the extra LLM call isn't worth the token savings.
@@ -78,8 +78,8 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
     Skips the selection LLM call when ``len(request.tools) <= threshold``,
     avoiding unnecessary overhead for agents with few tools.
 
-    Sets ``_selector_active`` flag during the selector's internal LLM call
-    so the streaming layer can suppress its output.
+    When stream tracking is enabled, sets ``_selector_active`` during the
+    selector's internal LLM call so the streaming layer can suppress its output.
     """
 
     name = "conditional_tool_selector"

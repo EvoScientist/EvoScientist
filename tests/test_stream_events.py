@@ -774,47 +774,6 @@ class TestV3ProtocolStreaming:
         selection = next(e for e in events if e.get("type") == "tool_selection")
         assert selection["tools"] == ["read_file"]
 
-    def test_subagent_tool_step_does_not_emit_tool_selection(self):
-        """Subagent selector state must not render the main-agent selection widget."""
-        import EvoScientist.middleware.tool_selector as selector_mod
-
-        namespace = ("task", "abc")
-        original_selected = selector_mod._current_selected_tools
-        original_total = selector_mod._total_tools_count
-        original_last = selector_mod._last_emitted_tools
-        selector_mod._current_selected_tools = ["search"]
-        selector_mod._total_tools_count = 3
-        selector_mod._last_emitted_tools = []
-        try:
-            output = ToolMessage(
-                content="Found result",
-                name="search",
-                tool_call_id="sa-tc",
-            )
-            agent = FakeV3Agent(
-                [
-                    message_delta('{"tools":["search"]}', namespace=namespace),
-                    tool_started(
-                        "search",
-                        {"query": "papers"},
-                        tool_call_id="sa-tc",
-                        namespace=namespace,
-                    ),
-                    tool_finished(output, tool_call_id="sa-tc", namespace=namespace),
-                ],
-                subagents=[FakeSubagent(namespace, "research-agent")],
-            )
-            events = collect_events(agent)
-        finally:
-            selector_mod._current_selected_tools = original_selected
-            selector_mod._total_tools_count = original_total
-            selector_mod._last_emitted_tools = original_last
-
-        assert not any(e.get("type") == "tool_selection" for e in events)
-        tool_call = next(e for e in events if e.get("type") == "subagent_tool_call")
-        assert tool_call["subagent"] == "research-agent"
-        assert tool_call["name"] == "search"
-
     def test_subagent_projection_routes_namespaced_events(self):
         """DeepAgents subagent projection supplies identity for namespaced events."""
         namespace = ("task", "abc")

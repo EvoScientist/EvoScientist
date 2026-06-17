@@ -241,10 +241,9 @@ class _V3EventProcessor:
         ):
             return []
         name = block.get("name") or ""
-        is_main_agent = subagent is None
-        if self._selector.observe_tool_block(str(name), emit_selection=is_main_agent):
+        if self._selector.observe_tool_block(str(name)):
             return []
-        events = self._selector.flush_selection(emit_selection=is_main_agent)
+        events = self._selector.flush_selection()
         tool_call = self._tool_call_from_message_block(block)
         if tool_call is None:
             return events
@@ -355,9 +354,8 @@ class _V3EventProcessor:
             return []
         event_type = data_map.get("event")
         tool_call_id = str(data_map.get("tool_call_id") or "")
-        is_main_agent = subagent is None
         if event_type == "tool-started":
-            events = self._selector.flush_selection(emit_selection=is_main_agent)
+            events = self._selector.flush_selection()
             if not tool_call_id:
                 return events
             name = str(data_map.get("tool_name") or "")
@@ -381,7 +379,7 @@ class _V3EventProcessor:
             return events
 
         if event_type in ("tool-finished", "tool-error"):
-            events = self._selector.flush_selection(emit_selection=is_main_agent)
+            events = self._selector.flush_selection()
             if not tool_call_id:
                 return events
             name, _args = self._tool_inputs.pop(
@@ -511,11 +509,7 @@ class _V3EventProcessor:
         cleaned = _strip_legacy_thinking_tags(text)
         if not cleaned or cleaned.isspace():
             return []
-        is_main_agent = subagent is None
-        suppressed, events, emit_text = self._selector.process_text(
-            cleaned,
-            emit_selection=is_main_agent,
-        )
+        suppressed, events, emit_text = self._selector.process_text(cleaned)
         if suppressed:
             return events
         if not emit_text or emit_text.isspace():
