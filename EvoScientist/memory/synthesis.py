@@ -751,7 +751,8 @@ def _synthesis_worker_url() -> str:
 
 
 def _run_id_from_response(run: Run) -> str | None:
-    run_id = run["run_id"].strip()
+    """Extract a LangGraph run id from the SDK response."""
+    run_id = run.get("run_id", "").strip()
     return run_id or None
 
 
