@@ -525,6 +525,10 @@ def test_build_synthesis_context_seeds_uncovered_observations_only(tmp_path):
         len(seed["snippet"])
         <= memory_synthesis.SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS
     )
+    # Snippet carries the observation body, never the YAML frontmatter.
+    assert "Uncovered observation body" in seed["snippet"]
+    assert not seed["snippet"].lstrip().startswith("---")
+    assert "created_at:" not in seed["snippet"]
     assert context["memory_inventory"] == {
         "active_knowledge_count": 1,
         "seed_observation_count": 2,

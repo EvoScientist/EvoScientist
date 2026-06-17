@@ -356,7 +356,7 @@ def build_synthesis_context(
                     SYNTHESIS_CONTEXT_OBSERVATION_SUMMARY_CHARS,
                 ),
                 "snippet": _truncate_text(
-                    document["text"],
+                    document_body(document["text"]),
                     SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS,
                 ),
             }
