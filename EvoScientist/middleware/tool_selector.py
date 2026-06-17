@@ -95,11 +95,17 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         self._selector_factory = selector_factory
         self._threshold = threshold
         self._always_include = always_include or frozenset()
+        # An agent's tools are fixed when its graph is compiled, so the resolved
+        # always-include set is invariant across requests for this instance.
+        self._selector_cache: dict[tuple[str, ...], AgentMiddleware] = {}
 
     def _selector_for_request(self, request: ModelRequest) -> AgentMiddleware:
-        return self._selector_factory(
-            _available_always_include(request.tools, self._always_include)
-        )
+        names = tuple(_available_always_include(request.tools, self._always_include))
+        selector = self._selector_cache.get(names)
+        if selector is None:
+            selector = self._selector_factory(list(names))
+            self._selector_cache[names] = selector
+        return selector
 
     def wrap_model_call(
         self,

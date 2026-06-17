@@ -222,6 +222,57 @@ def test_selector_always_includes_available_memory_tools():
     ]
 
 
+def test_selector_resolved_once_across_repeated_requests():
+    """Availability is compile-fixed, so the selector is built once and reused."""
+    mock_selector = MagicMock()
+    mock_selector.wrap_model_call.side_effect = lambda request, handler: handler(
+        request
+    )
+    selector_factory = MagicMock(return_value=mock_selector)
+
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=selector_factory,
+        threshold=0,
+        always_include=frozenset({"think_tool", "search_memory"}),
+    )
+    tools = [_tool("think_tool"), _tool("search_memory"), _tool("unrelated_tool")]
+
+    for _ in range(3):
+        cond.wrap_model_call(_request(tools), MagicMock())
+
+    selector_factory.assert_called_once_with(["search_memory", "think_tool"])
+    assert mock_selector.wrap_model_call.call_count == 3
+
+
+def test_selector_rebuilt_when_available_tools_differ():
+    """A different available always-include set gets its own cached selector."""
+    selector_factory = MagicMock(
+        side_effect=lambda names: MagicMock(
+            wrap_model_call=MagicMock(
+                side_effect=lambda request, handler: handler(request)
+            )
+        )
+    )
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=selector_factory,
+        threshold=0,
+        always_include=frozenset({"think_tool", "search_memory", "read_memory"}),
+    )
+
+    cond.wrap_model_call(
+        _request([_tool("think_tool"), _tool("search_memory")]), MagicMock()
+    )
+    cond.wrap_model_call(
+        _request([_tool("think_tool"), _tool("read_memory")]), MagicMock()
+    )
+
+    assert selector_factory.call_count == 2
+    assert [call.args[0] for call in selector_factory.call_args_list] == [
+        ["search_memory", "think_tool"],
+        ["read_memory", "think_tool"],
+    ]
+
+
 def test_tracker_captures_tools():
     """Tracker middleware captures tool names from request."""
     tracker = _ToolSelectionTrackerMiddleware()
