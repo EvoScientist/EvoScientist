@@ -122,11 +122,16 @@ class RadarCommand(Command):
         ctx.ui.mount_renderable(_render_radar_update(date_str, update))
 
     async def _run(self, ctx: CommandContext) -> None:
-        from ...radar import run_radar_now
+        from ...radar import is_paper_navigator_installed, run_radar_now
 
-        ctx.ui.append_system(
-            "Running Research Radar scan (3-5 arXiv searches, ~30s)..."
-        )
+        if not is_paper_navigator_installed():
+            ctx.ui.append_system(
+                "paper-navigator skill not installed. "
+                "Run: /install-skill paper-navigator",
+                style="red",
+            )
+            return
+        ctx.ui.append_system("Running Research Radar scan (takes around one minute)...")
         try:
             result = await run_radar_now()
         except Exception as exc:

@@ -15,15 +15,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-import time
-import xml.etree.ElementTree as ET
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -75,27 +72,28 @@ Your job is to:
 1. Read the user's research taste from /memories/profile/RESEARCH_TASTE.md, \
 paying special attention to the **Interests**, **Radar monitoring**, and \
 **Radar feedback** sections.
-2. Use arxiv_search to find recently published papers and preprints that \
-match the user's interests. Run 3-5 targeted searches covering different \
-facets of the user's interests. Use specific keywords and relevant arXiv \
-categories (e.g. cs.AI, cs.CL, cs.LG) for each search. Use the days \
-parameter from the input message — it tells you how far back to search \
-based on the scan schedule.
-3. Cross-reference findings against the user's observation memory to \
+2. Read the paper-navigator skill instructions at \
+/skills/paper-navigator/SKILL.md to understand available search scripts.
+3. Use the paper-navigator scripts to find recent papers matching the \
+user's interests. Prefer arxiv_monitor.py (no API key needed). Use \
+scholar_search.py only if S2_API_KEY is available. Run 3-5 targeted \
+searches with --json flag covering different facets. Pass --days from \
+the input message.
+4. Cross-reference findings against the user's observation memory to \
 understand how papers relate to their ongoing work.
-4. After completing ALL searches, produce your final answer as a single \
+5. After completing ALL searches, produce your final answer as a single \
 JSON object (no markdown fences, just raw JSON) with exactly these fields:
 {
   "papers": [{"title": "...", "url": "https://arxiv.org/abs/...", "relevance": "why it matches", "connection": "how it relates to ongoing work"}, ...],
   "trends": ["trend 1", "trend 2", ...],
   "ideas": [{"title": "...", "motivation": "...", "suggested_approach": "..."}, ...],
   "suggested_actions": ["action 1", "action 2", ...],
-  "summary_text": "# [Research Radar] ...\n\nA concise markdown digest..."
+  "summary_text": "# [Research Radar] ...\\n\\nA concise markdown digest..."
 }
 
 Include 5-10 papers, 2-4 trends, 2-3 ideas, and 3-5 suggested actions.
 Do NOT write any files. Do NOT produce the JSON until you have finished \
-all your arxiv_search calls and have actual results.
+all searches and have actual results.
 
 Guidelines:
 - Prefer papers with code, benchmarks, or clear experimental protocols.
@@ -106,195 +104,32 @@ irrelevant, skip it.
 structured fields.
 - Include [Research Radar] prefix in the summary_text title so the main \
 agent can recognize it.
-- If arxiv_search returns errors or no results, report the failure in \
+- If searches return errors or no results, report the failure in \
 summary_text so the user knows what happened.
 """
 
 
-_ARXIV_API = "https://export.arxiv.org/api/query"
-_ARXIV_NS = {
-    "atom": "http://www.w3.org/2005/Atom",
-    "arxiv": "http://arxiv.org/schemas/atom",
-}
-_ARXIV_UA = "EvoScientist-Radar/1.0 (research monitoring agent)"
+def is_paper_navigator_installed() -> bool:
+    """Check if the paper-navigator skill is available."""
+    from . import paths as _paths
 
-
-def _parse_arxiv_entries(xml_text: str) -> list[dict]:
-    """Parse arXiv Atom XML into paper dicts."""
-    root = ET.fromstring(xml_text)
-    papers = []
-    for entry in root.findall("atom:entry", _ARXIV_NS):
-        title = entry.findtext("atom:title", "", _ARXIV_NS).replace("\n", " ").strip()
-        summary = entry.findtext("atom:summary", "", _ARXIV_NS).strip()
-        published = entry.findtext("atom:published", "", _ARXIV_NS)
-        id_url = entry.findtext("atom:id", "", _ARXIV_NS)
-        arxiv_id = id_url.split("/abs/")[-1] if "/abs/" in id_url else id_url
-
-        authors = []
-        for author in entry.findall("atom:author", _ARXIV_NS):
-            name = author.findtext("atom:name", "", _ARXIV_NS)
-            if name:
-                authors.append(name)
-
-        categories = []
-        for cat in entry.findall("atom:category", _ARXIV_NS):
-            term = cat.get("term", "")
-            if term:
-                categories.append(term)
-
-        pdf_url = ""
-        for link in entry.findall("atom:link", _ARXIV_NS):
-            if link.get("title") == "pdf":
-                pdf_url = link.get("href", "")
-
-        comment_el = entry.find("arxiv:comment", _ARXIV_NS)
-        comment = (
-            comment_el.text.strip()
-            if comment_el is not None and comment_el.text
-            else ""
-        )
-
-        papers.append(
-            {
-                "arxiv_id": arxiv_id,
-                "title": title,
-                "authors": authors[:5],
-                "summary": summary[:400],
-                "categories": categories,
-                "published": published[:10] if published else "",
-                "pdf_url": pdf_url,
-                "url": f"https://arxiv.org/abs/{arxiv_id}",
-                "comment": comment,
-            }
-        )
-    return papers
-
-
-_last_arxiv_request: float = 0.0
-
-
-async def _arxiv_query(query: str, max_results: int = 50) -> list[dict]:
-    """Execute an arXiv API query and return parsed papers."""
-    global _last_arxiv_request
-    elapsed = time.monotonic() - _last_arxiv_request
-    if elapsed < 3.0:
-        await asyncio.sleep(3.0 - elapsed)
-
-    params = {
-        "search_query": query,
-        "sortBy": "submittedDate",
-        "sortOrder": "descending",
-        "max_results": min(max_results, 200),
-    }
-    headers = {"User-Agent": _ARXIV_UA}
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(_ARXIV_API, params=params, headers=headers, timeout=30)
-        _last_arxiv_request = time.monotonic()
-        resp.raise_for_status()
-        return _parse_arxiv_entries(resp.text)
-
-
-@tool(parse_docstring=True)
-async def arxiv_search(
-    keywords: str,
-    categories: str = "",
-    days: int = 14,
-    max_results: int = 30,
-) -> str:
-    """Search arXiv for recent papers by keywords and/or categories.
-
-    Uses the arXiv API directly (no API key required). Supports deep searches
-    across title and abstract with flexible word matching.
-
-    Args:
-        keywords: Comma-separated search terms (e.g. "autonomous research agents, AI scientist, scientific discovery")
-        categories: Optional comma-separated arXiv categories (e.g. "cs.AI,cs.CL,cs.LG")
-        days: Look back N days (default 14)
-        max_results: Maximum papers to return (default 30)
-
-    Returns:
-        Formatted list of matching papers with title, authors, abstract, and URLs
-    """
-    kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
-    cat_list = (
-        [c.strip() for c in categories.split(",") if c.strip()] if categories else []
-    )
-
-    end = datetime.now(UTC)
-    start = end - timedelta(days=days)
-    date_range = f"[{start.strftime('%Y%m%d')}0000 TO {end.strftime('%Y%m%d')}2359]"
-
-    # Build query parts
-    parts = []
-    if kw_list:
-        kw_parts = []
-        for kw in kw_list:
-            words = kw.split()
-            if len(words) > 1:
-                ti_clause = " AND ".join(f"ti:{w}" for w in words)
-                abs_clause = " AND ".join(f"abs:{w}" for w in words)
-                kw_parts.append(f"({ti_clause}) OR ({abs_clause})")
-            else:
-                kw_parts.append(f"ti:{kw} OR abs:{kw}")
-        parts.append("(" + " OR ".join(f"({p})" for p in kw_parts) + ")")
-
-    if cat_list:
-        cat_query = " OR ".join(f"cat:{c}" for c in cat_list)
-        parts.append(f"({cat_query})")
-
-    if not parts:
-        return "Error: provide at least keywords or categories"
-
-    connector = " AND " if kw_list and cat_list else ""
-    query = connector.join(parts) + f" AND submittedDate:{date_range}"
-
-    try:
-        papers = await _arxiv_query(query, max_results=max_results * 3)
-    except Exception as e:
-        return f"arXiv search failed: {e}"
-
-    # Client-side relevance filter for flexible matching
-    if kw_list:
-
-        def matches(paper):
-            text = (paper["title"] + " " + paper["summary"]).lower()
-            return any(all(w in text for w in kw.lower().split()) for kw in kw_list)
-
-        papers = [p for p in papers if matches(p)]
-
-    papers = papers[:max_results]
-
-    if not papers:
-        return f"No papers found for: {keywords} (last {days} days)"
-
-    result_lines = [f"Found {len(papers)} papers for: {keywords}\n"]
-    for i, p in enumerate(papers, 1):
-        authors = ", ".join(p["authors"][:3])
-        if len(p["authors"]) > 3:
-            authors += " et al."
-        cats = ", ".join(p["categories"][:3])
-        comment = f"\n  Note: {p['comment']}" if p["comment"] else ""
-        result_lines.append(
-            f"## {i}. {p['title']}\n"
-            f"**Authors:** {authors} | **Published:** {p['published']} | **Categories:** {cats}\n"
-            f"**arXiv:** {p['url']} | **PDF:** {p['pdf_url']}{comment}\n\n"
-            f"> {p['summary']}\n\n---\n"
-        )
-
-    return "\n".join(result_lines)
+    for d in (_paths.USER_SKILLS_DIR, _paths.GLOBAL_SKILLS_DIR):
+        if (Path(d) / "paper-navigator" / "SKILL.md").exists():
+            return True
+    return False
 
 
 def build_radar_graph() -> CompiledStateGraph:
-    """Build the Research Radar agent graph for deployment in langgraph dev."""
+    """Build the Research Radar agent graph."""
     from deepagents import create_deep_agent
+    from deepagents.backends import CompositeBackend, FilesystemBackend
 
     from . import paths as _paths
+    from .backends import CustomSandboxBackend, MergedSkillsBackend
     from .config.settings import MemoryControls, get_effective_config
     from .EvoScientist import _ensure_auxiliary_chat_model
     from .middleware.memory_lifecycle import (
         MemoryLifecycleRole,
-        _build_memory_worker_backend,
         _memory_worker_middleware,
     )
 
@@ -303,15 +138,34 @@ def build_radar_graph() -> CompiledStateGraph:
     memory_dir = Path(_paths.MEMORIES_DIR).expanduser()
     workspace_dir = Path(_paths.WORKSPACE_ROOT).expanduser()
 
+    if not os.environ.get("S2_API_KEY"):
+        logger.info("S2_API_KEY not set — radar will use arXiv-only search")
+
+    backend = CompositeBackend(
+        default=CustomSandboxBackend(
+            root_dir=str(workspace_dir),
+            virtual_mode=True,
+            timeout=cfg.sandbox_execute_timeout,
+        ),
+        routes={
+            "/memories/": FilesystemBackend(
+                root_dir=str(memory_dir), virtual_mode=True
+            ),
+            "/skills/": MergedSkillsBackend(
+                primary_dir=str(_paths.USER_SKILLS_DIR),
+                secondary_dir=str(Path(__file__).parent / "skills"),
+                global_dir=str(_paths.GLOBAL_SKILLS_DIR),
+            ),
+        },
+    )
+
     agent = create_deep_agent(
         name="research-radar",
         model=_ensure_auxiliary_chat_model(),
         system_prompt=_RADAR_SYSTEM_PROMPT,
-        tools=[arxiv_search],
-        backend=_build_memory_worker_backend(
-            workspace_dir=workspace_dir,
-            memory_dir=memory_dir,
-        ),
+        tools=[],
+        skills=["/skills/"],
+        backend=backend,
         middleware=_memory_worker_middleware(
             memory_dir=memory_dir,
             workspace_dir=workspace_dir,
@@ -322,7 +176,7 @@ def build_radar_graph() -> CompiledStateGraph:
         ),
         subagents=[],
     )
-    return agent.with_config({"recursion_limit": 200})
+    return agent.with_config({"recursion_limit": 500})
 
 
 def _radar_dir(memory_dir: Path | None = None) -> Path:

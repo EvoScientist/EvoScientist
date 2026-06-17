@@ -5,44 +5,10 @@ from EvoScientist.radar import (
     PaperMatch,
     RadarUpdate,
     _extract_radar_update,
-    _parse_arxiv_entries,
     _write_radar_update,
     list_radar_history,
     load_radar_update,
 )
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-SAMPLE_ARXIV_XML = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom"
-      xmlns:arxiv="http://arxiv.org/schemas/atom">
-  <entry>
-    <id>http://arxiv.org/abs/2406.12345v1</id>
-    <title>Multi-line
-Title  Test</title>
-    <summary>This is a test abstract about LLMs and retrieval.</summary>
-    <published>2026-06-10T00:00:00Z</published>
-    <author><name>Alice Smith</name></author>
-    <author><name>Bob Jones</name></author>
-    <category term="cs.AI"/>
-    <category term="cs.CL"/>
-    <link title="pdf" href="http://arxiv.org/pdf/2406.12345v1"/>
-    <arxiv:comment>12 pages, 3 figures, NeurIPS 2026</arxiv:comment>
-  </entry>
-  <entry>
-    <id>http://arxiv.org/abs/2406.99999v1</id>
-    <title>No Comment Paper</title>
-    <summary>Short.</summary>
-    <published>2026-06-11T00:00:00Z</published>
-    <author><name>Carol</name></author>
-    <category term="cs.LG"/>
-    <link href="http://arxiv.org/abs/2406.99999v1" rel="alternate"/>
-  </entry>
-</feed>
-"""
 
 
 def _sample_update(**overrides) -> RadarUpdate:
@@ -68,63 +34,6 @@ def _sample_update(**overrides) -> RadarUpdate:
     }
     defaults.update(overrides)
     return RadarUpdate(**defaults)
-
-
-# ---------------------------------------------------------------------------
-# _parse_arxiv_entries
-# ---------------------------------------------------------------------------
-
-
-class TestParseArxivEntries:
-    def test_parses_two_entries(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert len(papers) == 2
-
-    def test_extracts_arxiv_id(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[0]["arxiv_id"] == "2406.12345v1"
-
-    def test_cleans_multiline_title(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert "\n" not in papers[0]["title"]
-        assert papers[0]["title"] == "Multi-line Title  Test"
-
-    def test_extracts_authors(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[0]["authors"] == ["Alice Smith", "Bob Jones"]
-
-    def test_extracts_categories(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[0]["categories"] == ["cs.AI", "cs.CL"]
-
-    def test_extracts_pdf_url(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[0]["pdf_url"] == "http://arxiv.org/pdf/2406.12345v1"
-
-    def test_missing_pdf_url(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[1]["pdf_url"] == ""
-
-    def test_extracts_comment(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert "NeurIPS" in papers[0]["comment"]
-
-    def test_missing_comment(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[1]["comment"] == ""
-
-    def test_builds_url(self):
-        papers = _parse_arxiv_entries(SAMPLE_ARXIV_XML)
-        assert papers[0]["url"] == "https://arxiv.org/abs/2406.12345v1"
-
-    def test_empty_feed(self):
-        xml = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
-        assert _parse_arxiv_entries(xml) == []
-
-
-# ---------------------------------------------------------------------------
-# _extract_radar_update
-# ---------------------------------------------------------------------------
 
 
 class TestExtractRadarUpdate:
@@ -175,11 +84,6 @@ class TestExtractRadarUpdate:
         assert _extract_radar_update(result).summary_text == "from SR"
 
 
-# ---------------------------------------------------------------------------
-# File I/O round-trip
-# ---------------------------------------------------------------------------
-
-
 class TestFileRoundTrip:
     def test_write_list_load(self, tmp_path):
         update = _sample_update()
@@ -215,7 +119,7 @@ class TestFileRoundTrip:
 
         history = list_radar_history(memory_dir=tmp_path)
         assert len(history) == 2
-        assert history[0]["date"] > history[1]["date"]  # newest first
+        assert history[0]["date"] > history[1]["date"]
 
     def test_non_matching_filename_skipped(self, tmp_path):
         radar_dir = tmp_path / "radar"
@@ -228,8 +132,3 @@ class TestFileRoundTrip:
         radar_dir.mkdir()
         (radar_dir / "2026-06-10_120000.json").write_text("{invalid", encoding="utf-8")
         assert list_radar_history(memory_dir=tmp_path) == []
-
-
-# ---------------------------------------------------------------------------
-# _is_graph_not_registered
-# ---------------------------------------------------------------------------
