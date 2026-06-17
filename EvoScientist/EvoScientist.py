@@ -273,15 +273,10 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
 
 
 def _configured_system_prompt(cfg) -> str:
-    memory_controls = MemoryControls.from_config(cfg)
     # In dangerous mode the agent works on the real filesystem; give it the real
     # cwd so it can use absolute paths instead of the virtual `/` workspace root.
     real_cwd = str(_paths_mod.resolve_virtual_path("/")) if cfg.dangerous_mode else None
     return get_system_prompt(
-        enable_observation_memory=memory_controls.observations_enabled,
-        enable_observation_writes=memory_controls.observation_tool_enabled(
-            MemoryObservationTarget.AGENT
-        ),
         dangerous=cfg.dangerous_mode,
         cwd=real_cwd,
     )

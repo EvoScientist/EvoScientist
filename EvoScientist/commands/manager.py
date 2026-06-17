@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import shlex
 
-from .base import Command, CommandContext
+from .base import Command, CommandContext, SubCommand
 
 _logger = logging.getLogger(__name__)
 
@@ -57,6 +57,17 @@ class CommandManager:
                 results.append((cmd.name, cmd.description))
                 seen.add(cmd)
         return results
+
+    def get_subcommands(self, command_name: str) -> list[SubCommand]:
+        """Return subcommands declared by *command_name*, or empty list."""
+        cmd = self.get_command(command_name)
+        if cmd is None:
+            return []
+        return cmd.subcommands
+
+    def list_subcommands(self, command_name: str) -> list[tuple[str, str]]:
+        """Return ``(name, description)`` pairs for completion rendering."""
+        return [(sc.name, sc.description) for sc in self.get_subcommands(command_name)]
 
     def get_all_commands(self) -> list[Command]:
         """Return all registered command instances."""

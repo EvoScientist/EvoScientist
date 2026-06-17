@@ -69,6 +69,12 @@ def main():
     import os
     import warnings
 
+    # Keep MCP stdio subprocess spawning async on Windows (see #283). Must run
+    # before any event loop is created, hence at the very top of the entrypoint.
+    from .._winloop import ensure_proactor_event_loop_policy
+
+    ensure_proactor_event_loop_policy()
+
     warnings.filterwarnings("ignore", message=".*not known to support tools.*")
     warnings.filterwarnings(
         "ignore", message=".*type is unknown and inference may fail.*"

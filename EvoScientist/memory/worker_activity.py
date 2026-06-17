@@ -96,6 +96,36 @@ def memory_worker_status() -> MemoryWorkerStatusSnapshot:
         )
 
 
+def memory_worker_observed_outputs() -> MemoryWorkerStatusSnapshot:
+    """Return completed counts plus already-written outputs from active workers."""
+    with _active_lock:
+        active_workers = list(_active_runs.values())
+        profile_updates = _profile_updates
+        observations_recorded = _observations_recorded
+        counted_profile_versions = set(_counted_profile_versions)
+        counted_observation_files = set(_counted_observation_files)
+
+    profile_versions: set[tuple[str, str, str]] = set()
+    observation_files: set[tuple[str, str]] = set()
+    for worker in active_workers:
+        after = snapshot_memory_outputs(worker.memory_dir)
+        worker_profile_versions, worker_observation_files = _memory_output_delta(
+            worker.memory_dir,
+            worker.before_outputs,
+            after,
+        )
+        profile_versions.update(worker_profile_versions)
+        observation_files.update(worker_observation_files)
+
+    profile_updates += len(profile_versions - counted_profile_versions)
+    observations_recorded += len(observation_files - counted_observation_files)
+    return MemoryWorkerStatusSnapshot(
+        is_running=bool(active_workers),
+        profile_updates=profile_updates,
+        observations_recorded=observations_recorded,
+    )
+
+
 def clear_memory_worker_saved_counts() -> None:
     """Clear completed memory-save counters while preserving active workers."""
     global _observations_recorded, _profile_updates

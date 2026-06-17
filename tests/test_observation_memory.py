@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,7 @@ from langchain.agents.middleware.types import AgentState
 from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
@@ -25,7 +27,12 @@ from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    ObservationSearchMode,
+    create_read_memory_tool,
+    create_search_observations_tool,
+    read_observation_file,
     record_observation_file,
+    search_observation_files,
 )
 from EvoScientist.middleware import memory_lifecycle
 
@@ -113,6 +120,12 @@ def _record_observation_payload(
     return json.loads(payload)
 
 
+def _tool_by_name(tools: Sequence[BaseTool], name: str) -> BaseTool:
+    matches = [tool for tool in tools if tool.name == name]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     memories = tmp_path / "memories"
     summary = "Focused pytest catches local regressions before broader runs."
@@ -175,6 +188,281 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     }
 
 
+def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="GraphQL resolver aliases preserve userName fields.",
+        observation=(
+            "When GraphQL returns blank camelCase fields, inspect resolver "
+            "aliases before changing the frontend query."
+        ),
+        why_it_matters="Future profile tasks can avoid frontend-only fixes.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="CSV date normalization can change ordering.",
+        observation="Normalize date strings before sorting cross-source reports.",
+        why_it_matters="Future data tasks should avoid lexicographic date sorting.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="GraphQL userName frontend",
+        limit=5,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [first["observation_id"]]
+    assert hits[0]["path"] == first["path"]
+    assert hits[0]["memory_type"] == MemoryType.PROCEDURAL
+    assert hits[0]["scope"] == MemoryScope.GLOBAL
+    assert hits[0]["summary"] == "GraphQL resolver aliases preserve userName fields."
+    assert hits[0]["matches"] == [
+        (
+            "When GraphQL returns blank camelCase fields, inspect resolver aliases "
+            "before changing the frontend query."
+        ),
+        "Future profile tasks can avoid frontend-only fixes.",
+    ]
+    assert hits[0]["score"] > 0
+    assert (
+        search_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            query="date|sorting",
+            scope=MemoryScope.PROJECT,
+            memory_type=MemoryType.SEMANTIC,
+        )[0]["observation_id"]
+        == second["observation_id"]
+    )
+
+    tool = create_search_observations_tool(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    payload = json.loads(tool.run({"query": "GraphQL userName frontend", "limit": 5}))
+    assert list(payload) == ["results"]
+    assert payload["results"][0]["observation_id"] == first["observation_id"]
+
+
+def test_read_memory_returns_full_observation_by_id(tmp_path):
+    memories = tmp_path / "memories"
+    observation = "Read the full observation before applying a partial snippet."
+    result = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Full memory reads prevent acting on partial snippets.",
+        observation=observation,
+        why_it_matters="Future agents can inspect the full rationale before editing.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        observation_id=result["observation_id"],
+    )
+
+    assert read is not None
+    assert read["observation_id"] == result["observation_id"]
+    assert read["path"] == result["path"]
+    assert read["memory_type"] == MemoryType.PROCEDURAL
+    assert read["scope"] == MemoryScope.PROJECT
+    assert read["summary"] == "Full memory reads prevent acting on partial snippets."
+    assert read["text"].startswith("---\n")
+    assert observation in read["text"]
+
+    tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
+    payload = json.loads(tool.run({"observation_id": result["observation_id"]}))
+    assert payload == {"text": read["text"]}
+
+    missing = json.loads(tool.run({"observation_id": "../not-a-memory"}))
+    assert missing == {
+        "error": "No observation with that ID exists in global or current-project memory.",
+    }
+
+
+def test_search_observation_files_supports_keyword_or_regex_queries(tmp_path):
+    memories = tmp_path / "memories"
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Build command exits with a generic error.",
+        observation="The local build can fail with an error after dependency setup.",
+        why_it_matters="Future agents should inspect command output.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="FastAPI version conflicts can block dependency resolution.",
+        observation="FastAPI and pydantic version constraints can make installs fail.",
+        why_it_matters="Future agents should inspect package constraints.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    relevant = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Silent-failure: backend status handling hides API response errors.",
+        observation=(
+            "When HTTP response status handling treats server errors as success, "
+            "frontend error states can collapse into ordinary empty data."
+        ),
+        why_it_matters="Future agents should audit both HTTP status and UI state.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    variant_hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="blank profile silent failure empty data not onboarded",
+    )
+    focused_hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        mode=ObservationSearchMode.REGEX,
+        query="silent[- ]failure|status",
+    )
+
+    assert [hit["observation_id"] for hit in variant_hits] == [
+        relevant["observation_id"]
+    ]
+    assert [hit["observation_id"] for hit in focused_hits] == [
+        relevant["observation_id"]
+    ]
+
+
+def test_search_observation_files_handles_regex_like_literals(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Literal [bracket token appears in build logs.",
+        observation="When logs include [bracket tokens, search should not crash.",
+        why_it_matters="Malformed model regex should still behave like literal grep.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="[bracket",
+    )
+    regex_hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="[bracket",
+        mode=ObservationSearchMode.REGEX,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert [hit["observation_id"] for hit in regex_hits] == [relevant["observation_id"]]
+
+
+def test_search_observation_files_ranks_bag_of_words_queries(tmp_path):
+    memories = tmp_path / "memories"
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="CSV header normalization needs whitespace stripping.",
+        observation="Strip CSV headers before schema matching.",
+        why_it_matters="Future revenue imports may have messy column names.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+    relevant = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary=(
+            "Batch duplicate detection by batch_id grouping misses cross-ID "
+            "imports; content fingerprinting is required."
+        ),
+        observation=(
+            "Compute a stable content-fingerprint per batch from sorted "
+            "(date, amount) pairs before revenue aggregation."
+        ),
+        why_it_matters=(
+            "Future quarterly revenue reports should collapse duplicate import "
+            "batches before totals are computed."
+        ),
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="CSV duplicate batch fingerprint revenue quarterly",
+        limit=2,
+    )
+
+    assert hits[0]["observation_id"] == relevant["observation_id"]
+    assert hits[0]["score"] > hits[1]["score"]
+
+
+def test_search_observation_files_returns_no_low_confidence_fallback(tmp_path):
+    memories = tmp_path / "memories"
+    record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="CSV header normalization needs whitespace stripping.",
+        observation="Strip CSV headers before schema matching.",
+        why_it_matters="Future imports may have messy column names.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="data-agent",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="quantum thermostat",
+    )
+
+    assert hits == []
+
+
 def test_record_observation_tool_can_use_worker_config_source(tmp_path):
     from EvoScientist.middleware.memory import create_memory_middleware
 
@@ -186,7 +474,7 @@ def test_record_observation_tool_can_use_worker_config_source(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_agent="evomemory-subagent-worker",
     )
-    tool = middleware.tools[0]
+    tool = _tool_by_name(middleware.tools, "record_observation")
     payload = _record_observation_payload(
         tool,
         runtime=_tool_runtime(
@@ -232,7 +520,7 @@ def test_record_observation_tool_schema_hides_runtime(tmp_path):
         workspace_dir=workspace,
     )
 
-    tool = middleware.tools[0]
+    tool = _tool_by_name(middleware.tools, "record_observation")
     assert "runtime" in tool.get_input_schema().model_fields
     schema = tool.tool_call_schema
     assert isinstance(schema, type)
@@ -258,7 +546,7 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
         source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
     )
-    tool = middleware.tools[0]
+    tool = _tool_by_name(middleware.tools, "record_observation")
     payload = _record_observation_payload(
         tool,
         runtime=_tool_runtime(
@@ -317,6 +605,61 @@ def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
             "content": "final orchestrator text with summarized finding",
             "name": "EvoScientist",
         },
+    ]
+
+
+def test_turn_compaction_keeps_direct_tool_results_with_tool_names():
+    messages = [
+        HumanMessage("run a check"),
+        AIMessage(
+            content="",
+            name="EvoScientist",
+            tool_calls=[
+                {
+                    "name": "execute",
+                    "id": "exec-1",
+                    "args": {"command": "pytest -q"},
+                },
+                {
+                    "name": "task",
+                    "id": "task-1",
+                    "args": {"subagent_type": "code-agent", "description": "debug"},
+                },
+            ],
+        ),
+        ToolMessage("pytest passed", tool_call_id="exec-1", name="execute"),
+        ToolMessage("raw subagent result body", tool_call_id="task-1", name="task"),
+        AIMessage("final answer", name="EvoScientist"),
+    ]
+
+    compact = memory_lifecycle._compact_turn_messages(
+        messages,
+        source_agent="EvoScientist",
+    )
+
+    assert compact == [
+        {"role": "human", "content": "run a check"},
+        {
+            "role": "ai",
+            "content": "",
+            "name": "EvoScientist",
+            "tool_calls": [
+                {
+                    "name": "execute",
+                    "id": "exec-1",
+                    "args": {"command": "pytest -q"},
+                    "type": "tool_call",
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "pytest passed",
+            "name": "execute",
+            "tool_call_id": "exec-1",
+            "status": "success",
+        },
+        {"role": "ai", "content": "final answer", "name": "EvoScientist"},
     ]
 
 
@@ -494,7 +837,7 @@ def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
-def test_all_mode_skips_turn_worker_observation_tool(tmp_path):
+def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
     turn_middleware = memory_lifecycle._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
@@ -508,9 +851,15 @@ def test_all_mode_skips_turn_worker_observation_tool(tmp_path):
         observation_writer=MemoryObservationWriter.ALL,
     )
 
-    assert turn_middleware[0].tools == []
+    assert [tool.name for tool in turn_middleware[0].tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
     assert [tool.name for tool in subagent_middleware[0].tools] == [
-        "record_observation"
+        "search_observations",
+        "read_memory",
+        "record_observation",
     ]
 
 
@@ -534,9 +883,20 @@ def test_memory_worker_observation_writer_modes(tmp_path):
         observation_writer=MemoryObservationWriter.WORKER,
     )
 
-    assert agent_only[0].tools == []
-    assert [tool.name for tool in worker_subagent[0].tools] == ["record_observation"]
-    assert worker_turn[0].tools == []
+    assert [tool.name for tool in agent_only[0].tools] == [
+        "search_observations",
+        "read_memory",
+    ]
+    assert [tool.name for tool in worker_subagent[0].tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
+    assert [tool.name for tool in worker_turn[0].tools] == [
+        "search_observations",
+        "read_memory",
+        "record_observation",
+    ]
 
 
 def test_memory_worker_prompts_match_observation_tool_availability():
@@ -565,13 +925,20 @@ def test_memory_worker_prompts_match_observation_tool_availability():
         enable_profile_memory=False,
         enable_observation_tool=True,
     )
+    turn_observations_only = memory_lifecycle._memory_worker_system_prompt(
+        memory_lifecycle.MemoryLifecycleRole.TURN,
+        enable_profile_memory=False,
+        enable_observation_tool=True,
+    )
 
     assert "record_observation" not in turn_profile_only
-    assert "record_observation" not in turn_with_observation_flag
+    assert "record_observation" in turn_with_observation_flag
     assert "record_observation" not in subagent_profile_only
     assert "record_observation" in subagent_with_observations
     assert "record_observation" in subagent_observations_only
     assert "/memories/profile/" not in subagent_observations_only
+    assert "record_observation" in turn_observations_only
+    assert "/memories/profile/" not in turn_observations_only
 
 
 def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
@@ -1018,8 +1385,8 @@ def test_async_memory_worker_launch_offloads_blocking_work(
     spawned = []
     monkeypatch.setattr(
         memory_lifecycle,
-        "_spawn_memory_worker_status_task",
-        lambda *args, **kwargs: spawned.append((args, kwargs)),
+        "_spawn_memory_worker_status_thread",
+        lambda **kwargs: spawned.append(kwargs),
     )
 
     async def run():
@@ -1040,10 +1407,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
         assert worker_activity.memory_worker_status().is_running is True
         assert spawned == [
-            (
-                (fake_client,),
-                {"thread_id": "worker-thread", "run_id": "run-1"},
-            )
+            {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
         ]
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
@@ -1083,6 +1447,107 @@ def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_pat
         assert status.observations_recorded == 1
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    worker_activity.mark_memory_worker_started(
+        thread_id="active-thread",
+        run_id="active-run",
+        memory_dir=memory_dir,
+        before_outputs=before,
+    )
+    record_observation_file(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Active worker observation.",
+        observation="The active worker has already written an observation.",
+        why_it_matters="One-shot CLI waits can detect persisted worker output.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+
+    try:
+        status = worker_activity.memory_worker_observed_outputs()
+        assert status.is_running is True
+        assert status.observations_recorded == 1
+        assert status.profile_updates == 0
+        assert worker_activity.memory_worker_status().observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_one_shot_cli_wait_keeps_polling_after_observed_memory_output(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    now = 0.0
+    printed = []
+    observed_calls = 0
+
+    def fake_monotonic():
+        return now
+
+    def fake_sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def fake_observed_outputs():
+        nonlocal observed_calls
+        observed_calls += 1
+        if observed_calls < 8:
+            return worker_activity.MemoryWorkerStatusSnapshot(
+                is_running=True,
+                observations_recorded=1,
+            )
+        return worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False,
+            observations_recorded=1,
+            profile_updates=1,
+        )
+
+    monkeypatch.setattr(interactive.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(interactive.time, "sleep", fake_sleep)
+    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
+    monkeypatch.setattr(
+        worker_activity,
+        "memory_worker_observed_outputs",
+        fake_observed_outputs,
+    )
+
+    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+
+    assert observed_calls == 8
+    assert any("EvoMemory saved 1 observation(s)." in str(line) for line in printed)
+    assert any(
+        "EvoMemory saved 1 observation(s), 1 profile update(s)." in str(line)
+        for line in printed
+    )
+    assert not any("still running" in str(line) for line in printed)
+
+
+def test_one_shot_cli_wait_reports_fast_worker_output(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    printed = []
+
+    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
+    monkeypatch.setattr(
+        worker_activity,
+        "memory_worker_observed_outputs",
+        lambda: worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False,
+            observations_recorded=1,
+        ),
+    )
+
+    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+
+    assert printed == ["[dim]EvoMemory saved 1 observation(s).[/dim]"]
 
 
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):

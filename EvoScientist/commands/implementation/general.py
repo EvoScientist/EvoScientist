@@ -29,6 +29,9 @@ class HelpCommand(Command):
             if cmd.alias:
                 desc += f" (aliases: {', '.join(cmd.alias)})"
             help_text.append(f"{desc}\n", style="dim")
+            if cmd.subcommands:
+                names = ", ".join(sc.name for sc in cmd.subcommands)
+                help_text.append(f"    subcommands: {names}\n", style="dim italic")
         ctx.ui.mount_renderable(help_text)
 
 
