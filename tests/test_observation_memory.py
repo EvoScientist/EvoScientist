@@ -1976,14 +1976,31 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_synthesis_watcher_preserves_thread_when_cleanup_disabled(monkeypatch):
+def _empty_synthesis_context() -> memory_synthesis.SynthesisContext:
+    return {
+        "project_id": "P-project",
+        "uncovered_observations": [],
+        "memory_inventory": {
+            "active_knowledge_count": 0,
+            "seed_observation_count": 0,
+        },
+    }
+
+
+def test_synthesis_run_preserves_thread_when_cleanup_disabled(monkeypatch):
     deleted: list[str] = []
 
     class _Runs:
+        def create(self, **_kwargs):
+            return {"run_id": "run-1", "status": "pending"}
+
         def get(self, **_kwargs):
             return {"status": "error"}
 
     class _Threads:
+        def create(self, **_kwargs):
+            return {"thread_id": "synthesis-thread"}
+
         def delete(self, thread_id):
             deleted.append(thread_id)
 
@@ -1996,49 +2013,123 @@ def test_synthesis_watcher_preserves_thread_when_cleanup_disabled(monkeypatch):
         memory_synthesis, "_memory_worker_thread_cleanup_enabled", lambda: False
     )
 
-    memory_synthesis._watch_synthesis_run_sync(
+    outcome = memory_synthesis._submit_and_watch_synthesis_run(
         url="http://x",
-        thread_id="synthesis-thread",
-        run_id="run-1",
+        project_id="P-project",
+        context=_empty_synthesis_context(),
+        trigger="t",
     )
 
+    assert outcome is memory_synthesis._SynthesisRunOutcome.FAILED
     assert deleted == []
 
 
-def test_synthesis_watcher_poll_abort_does_not_release_active_context(
+def test_synthesis_runner_releases_context_after_exhausting_retries(
     tmp_path, monkeypatch
 ):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    before = worker_activity.snapshot_memory_outputs(memory_dir)
     worker_activity.mark_synthesis_started(
         project_id="P-project",
         context_digest="digest-1",
         memory_dir=memory_dir,
-        before_outputs=before,
+        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
     )
 
+    submits = 0
+
     class _Runs:
+        def create(self, **_kwargs):
+            nonlocal submits
+            submits += 1
+            return {"run_id": "run-1", "status": "pending"}
+
         def get(self, **_kwargs):
             raise RuntimeError("poll failed")
 
+    class _Threads:
+        def create(self, **_kwargs):
+            return {"thread_id": "synthesis-thread"}
+
+        def delete(self, thread_id):
+            pass
+
     monkeypatch.setattr(
         "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
     )
     monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_RETRY_BACKOFF_SECONDS", 0)
     monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_MAX_POLL_FAILURES", 1)
 
     try:
-        memory_synthesis._watch_synthesis_run_sync(
+        # Tracked while the retry loop is in flight.
+        assert worker_activity.memory_worker_status().synthesis_running is True
+        memory_synthesis._run_synthesis_with_retries(
             url="http://x",
-            thread_id="synthesis-thread",
-            run_id="run-1",
+            project_id="P-project",
+            context=_empty_synthesis_context(),
+            trigger="t",
             active_key=("P-project", "digest-1"),
+            max_attempts=2,
         )
+        # Retried up to the bound, then fell back to (a): released, no leak.
+        assert submits == 2
         status = worker_activity.memory_worker_status()
-        assert status.synthesis_running is True
+        assert status.synthesis_running is False
         assert status.knowledge_created == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_synthesis_runner_retries_then_stops_on_success(tmp_path, monkeypatch):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_synthesis_started(
+        project_id="P-project",
+        context_digest="digest-1",
+        memory_dir=memory_dir,
+        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
+    )
+
+    submits = 0
+
+    class _Runs:
+        def create(self, **_kwargs):
+            nonlocal submits
+            submits += 1
+            return {"run_id": "run-1", "status": "pending"}
+
+        def get(self, **_kwargs):
+            # First run errors out, the retry succeeds.
+            return {"status": "error" if submits == 1 else "success"}
+
+    class _Threads:
+        def create(self, **_kwargs):
+            return {"thread_id": "synthesis-thread"}
+
+        def delete(self, thread_id):
+            pass
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_RETRY_BACKOFF_SECONDS", 0)
+
+    try:
+        memory_synthesis._run_synthesis_with_retries(
+            url="http://x",
+            project_id="P-project",
+            context=_empty_synthesis_context(),
+            trigger="t",
+            active_key=("P-project", "digest-1"),
+            max_attempts=3,
+        )
+        # Retried once after the error, then stopped on success (no third run).
+        assert submits == 2
+        assert worker_activity.memory_worker_status().synthesis_running is False
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
 
@@ -2220,7 +2311,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_synthesis_worker_launch_uses_status_thread(tmp_path, monkeypatch):
+def test_synthesis_worker_launch_spawns_runner_thread(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     context: memory_synthesis.SynthesisContext = {
@@ -2261,17 +2352,6 @@ def test_synthesis_worker_launch_uses_status_thread(tmp_path, monkeypatch):
         lambda **_kwargs: True,
     )
 
-    class _Threads:
-        def create(self, **_kwargs):
-            return {"thread_id": "synthesis-thread"}
-
-    class _Runs:
-        def create(self, **_kwargs):
-            return {"run_id": "synthesis-run", "status": "pending"}
-
-    fake_client = SimpleNamespace(threads=_Threads(), runs=_Runs())
-    monkeypatch.setattr("langgraph_sdk.get_sync_client", lambda **_kwargs: fake_client)
-
     spawned = []
 
     def fake_spawn(**kwargs):
@@ -2283,7 +2363,7 @@ def test_synthesis_worker_launch_uses_status_thread(tmp_path, monkeypatch):
             context_digest=active_key[1],
         )
 
-    monkeypatch.setattr(memory_synthesis, "_spawn_synthesis_status_thread", fake_spawn)
+    monkeypatch.setattr(memory_synthesis, "_spawn_synthesis_runner_thread", fake_spawn)
 
     try:
         memory_synthesis._launch_synthesis_worker(
@@ -2295,8 +2375,9 @@ def test_synthesis_worker_launch_uses_status_thread(tmp_path, monkeypatch):
         assert spawned == [
             {
                 "url": "http://x",
-                "thread_id": "synthesis-thread",
-                "run_id": "synthesis-run",
+                "project_id": "P-project",
+                "context": context,
+                "trigger": "turn_memory_worker",
                 "active_key": ("P-project", context_digest),
             }
         ]

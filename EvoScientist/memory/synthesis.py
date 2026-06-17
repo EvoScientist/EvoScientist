@@ -71,6 +71,11 @@ SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS = 500
 _SYNTHESIS_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _SYNTHESIS_POLL_INTERVAL_SECONDS = 1.0
 _SYNTHESIS_MAX_POLL_FAILURES = 3
+# Bounded retries for runs that fail transiently (run error/timeout/interrupted
+# or abandoned polling). After this many attempts the context is released anyway
+# so a dead LangGraph-dev server cannot wedge synthesis tracking.
+_SYNTHESIS_MAX_RUN_ATTEMPTS = 3
+_SYNTHESIS_RETRY_BACKOFF_SECONDS = 2.0
 _active_synthesis_lock = threading.Lock()
 _active_synthesis_contexts: set[tuple[str, str]] = set()
 
@@ -825,66 +830,168 @@ def _memory_worker_thread_cleanup_enabled() -> bool:
         return True
 
 
-def _watch_synthesis_run_sync(
+class _SynthesisRunOutcome(StrEnum):
+    """Result of submitting and polling a single synthesis run."""
+
+    SUCCESS = "success"  # reached the success terminal status (writes or skip)
+    FAILED = "failed"  # non-success terminal status, or could not be submitted
+    ABORTED = "aborted"  # polling abandoned before terminal; run state unknown
+
+
+def _poll_synthesis_run(
+    client: Any,
     *,
-    url: str,
     thread_id: str,
     run_id: str,
-    active_key: tuple[str, str] | None = None,
-) -> None:
+) -> _SynthesisRunOutcome:
+    """Poll one synthesis run until it is terminal or polling is abandoned."""
+    failures = 0
+    while True:
+        try:
+            run = client.runs.get(thread_id=thread_id, run_id=run_id)
+            failures = 0
+        except Exception:
+            failures += 1
+            if failures >= _SYNTHESIS_MAX_POLL_FAILURES:
+                logger.warning(
+                    "Stopping EvoMemory synthesis status watch for %s after "
+                    "%d failed polls",
+                    run_id,
+                    failures,
+                    exc_info=True,
+                )
+                return _SynthesisRunOutcome.ABORTED
+            time.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
+            continue
+        status = _status_from_run_response(run)
+        if status in _SYNTHESIS_TERMINAL_STATUSES:
+            return (
+                _SynthesisRunOutcome.SUCCESS
+                if status == "success"
+                else _SynthesisRunOutcome.FAILED
+            )
+        time.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
+
+
+def _submit_and_watch_synthesis_run(
+    *,
+    url: str,
+    project_id: str,
+    context: SynthesisContext,
+    trigger: str,
+) -> _SynthesisRunOutcome:
+    """Submit one synthesis run and poll it to a terminal status."""
     from langgraph_sdk import get_sync_client
 
-    failures = 0
-    confirmed_finished = False
-    client = None
     try:
         client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
-        while True:
-            try:
-                run = client.runs.get(thread_id=thread_id, run_id=run_id)
-                failures = 0
-            except Exception:
-                failures += 1
-                if failures >= _SYNTHESIS_MAX_POLL_FAILURES:
-                    logger.warning(
-                        "Stopping EvoMemory synthesis status watch for %s after "
-                        "%d failed polls",
-                        run_id,
-                        failures,
-                        exc_info=True,
-                    )
-                    return
-                time.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
-                continue
-            if _status_from_run_response(run) in _SYNTHESIS_TERMINAL_STATUSES:
-                confirmed_finished = True
-                return
-            time.sleep(_SYNTHESIS_POLL_INTERVAL_SECONDS)
-    finally:
-        if confirmed_finished:
-            if client is not None:
-                _delete_synthesis_thread(client, thread_id)
-            if active_key is not None:
-                project_id, context_digest = active_key
-                _release_synthesis_context(
-                    project_id=project_id,
-                    context_digest=context_digest,
-                )
+    except Exception:
+        logger.warning("Failed to create EvoMemory synthesis client", exc_info=True)
+        return _SynthesisRunOutcome.ABORTED
+
+    thread_id: str | None = None
+    try:
+        thread = client.threads.create(graph_id=SYNTHESIS_GRAPH_ID)
+        thread_id = str(thread["thread_id"])
+        payload = _synthesis_run_kwargs(
+            project_id=project_id,
+            context=context,
+            trigger=trigger,
+        )
+        run = client.runs.create(
+            thread_id=thread_id,
+            assistant_id=payload["assistant_id"],
+            input=payload["input"],
+            metadata=payload["metadata"],
+            config=payload["config"],
+        )
+        run_id = _run_id_from_response(run)
+    except Exception:
+        logger.warning("Failed to submit EvoMemory synthesis run", exc_info=True)
+        # No live run is attached, so an empty thread is safe to drop.
+        if thread_id is not None:
+            _delete_synthesis_thread(client, thread_id)
+        return _SynthesisRunOutcome.FAILED
+
+    if run_id is None:
+        _delete_synthesis_thread(client, thread_id)
+        return _SynthesisRunOutcome.FAILED
+
+    outcome = _poll_synthesis_run(client, thread_id=thread_id, run_id=run_id)
+    # Only delete once the run is confirmed terminal — deleting a thread with a
+    # live run would break it, and an aborted poll leaves the state unknown.
+    if outcome is not _SynthesisRunOutcome.ABORTED:
+        _delete_synthesis_thread(client, thread_id)
+    return outcome
 
 
-def _spawn_synthesis_status_thread(
+def _run_synthesis_with_retries(
     *,
     url: str,
-    thread_id: str,
-    run_id: str,
-    active_key: tuple[str, str] | None = None,
+    project_id: str,
+    context: SynthesisContext,
+    trigger: str,
+    active_key: tuple[str, str],
+    max_attempts: int = _SYNTHESIS_MAX_RUN_ATTEMPTS,
+) -> None:
+    """Submit synthesis runs until one succeeds or attempts run out, then release.
+
+    A ``success`` terminal status — including a deliberate skip with no writes —
+    stops immediately and is never retried. Transient failures (run
+    error/timeout/interrupted, or abandoned polling) are retried up to
+    ``max_attempts``. Once attempts are exhausted the context is released anyway:
+    the seed observations stay on disk and searchable as raw evidence, they are
+    simply not promoted into knowledge this round.
+    """
+    release_project_id, context_digest = active_key
+    try:
+        for attempt in range(1, max_attempts + 1):
+            outcome = _submit_and_watch_synthesis_run(
+                url=url,
+                project_id=project_id,
+                context=context,
+                trigger=trigger,
+            )
+            if outcome is _SynthesisRunOutcome.SUCCESS:
+                return
+            if attempt < max_attempts:
+                logger.info(
+                    "Retrying EvoMemory synthesis for project %s "
+                    "(attempt %d/%d) after %s",
+                    project_id,
+                    attempt + 1,
+                    max_attempts,
+                    outcome.value,
+                )
+                time.sleep(_SYNTHESIS_RETRY_BACKOFF_SECONDS)
+        logger.warning(
+            "Giving up EvoMemory synthesis for project %s after %d attempts; "
+            "seed observations remain unsynthesized but searchable",
+            project_id,
+            max_attempts,
+        )
+    finally:
+        _release_synthesis_context(
+            project_id=release_project_id,
+            context_digest=context_digest,
+        )
+
+
+def _spawn_synthesis_runner_thread(
+    *,
+    url: str,
+    project_id: str,
+    context: SynthesisContext,
+    trigger: str,
+    active_key: tuple[str, str],
 ) -> None:
     thread = threading.Thread(
-        target=_watch_synthesis_run_sync,
+        target=_run_synthesis_with_retries,
         kwargs={
             "url": url,
-            "thread_id": thread_id,
-            "run_id": run_id,
+            "project_id": project_id,
+            "context": context,
+            "trigger": trigger,
             "active_key": active_key,
         },
         name="evomemory-synthesis-status",
@@ -900,9 +1007,7 @@ def _launch_synthesis_worker(
     seed_observation_ids: tuple[str, ...],
     trigger: str,
 ) -> None:
-    """Submit a background synthesis run if uncovered observations exist."""
-    from langgraph_sdk import get_sync_client
-
+    """Submit a background synthesis run if uncovered seed observations exist."""
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
     context = build_synthesis_context(
@@ -935,34 +1040,17 @@ def _launch_synthesis_worker(
         memory_dir=memory_dir,
         before_outputs=snapshot_memory_outputs(memory_dir),
     )
-    active_key: tuple[str, str] | None = (project_id, context_digest)
     try:
-        client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
-        thread = client.threads.create(graph_id=SYNTHESIS_GRAPH_ID)
-        thread_id = str(thread["thread_id"])
-        payload = _synthesis_run_kwargs(
+        _spawn_synthesis_runner_thread(
+            url=url,
             project_id=project_id,
             context=context,
             trigger=trigger,
+            active_key=(project_id, context_digest),
         )
-        run = client.runs.create(
-            thread_id=thread_id,
-            assistant_id=payload["assistant_id"],
-            input=payload["input"],
-            metadata=payload["metadata"],
-            config=payload["config"],
+    except Exception:
+        logger.warning("Failed to spawn EvoMemory synthesis runner", exc_info=True)
+        _release_synthesis_context(
+            project_id=project_id,
+            context_digest=context_digest,
         )
-        if run_id := _run_id_from_response(run):
-            _spawn_synthesis_status_thread(
-                url=url,
-                thread_id=thread_id,
-                run_id=run_id,
-                active_key=active_key,
-            )
-            active_key = None
-    finally:
-        if active_key is not None:
-            _release_synthesis_context(
-                project_id=active_key[0],
-                context_digest=active_key[1],
-            )
