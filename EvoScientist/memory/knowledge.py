@@ -41,6 +41,7 @@ from .types import (
 
 KNOWLEDGE_DIR = "/knowledge"
 SYNTHESIS_AGENT_NAME = "evomemory-synthesizer"
+KNOWLEDGE_ID_RE = re.compile(r"K-[0-9a-f]{16}")
 
 
 class SearchMemoryArgs(BaseModel):
@@ -511,8 +512,8 @@ def record_knowledge_file(
         knowledge=knowledge_text,
         supporting_observation_ids=support_ids,
     )
-    if not resolved_id.startswith("K-"):
-        raise ValueError("knowledge_id must start with K-")
+    if not KNOWLEDGE_ID_RE.fullmatch(resolved_id):
+        raise ValueError("knowledge_id must match K-[0-9a-f]{16}")
 
     memory_path = _memory_path(
         knowledge_id=resolved_id,
