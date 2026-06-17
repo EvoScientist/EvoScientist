@@ -9,7 +9,6 @@ import logging
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import (
@@ -25,6 +24,7 @@ from typing import (
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
@@ -33,16 +33,22 @@ from pydantic import BaseModel, Field
 from .. import paths as _paths
 from .knowledge import (
     SYNTHESIS_AGENT_NAME,
+    ReadMemoryArgs,
+    SearchMemoryArgs,
     archive_knowledge_file,
     knowledge_search_documents,
     read_knowledge_file,
+    read_memory_file,
     record_knowledge_file,
+    search_memory_files,
 )
-from .observations import candidate_observation_documents
+from .observations import read_observation_file
 from .types import (
     KnowledgeRecordResult,
     KnowledgeStatus,
+    MemoryLevelFilter,
     MemoryScope,
+    MemorySearchMode,
     MemoryType,
 )
 from .worker_activity import (
@@ -58,9 +64,10 @@ logger = logging.getLogger(__name__)
 
 SYNTHESIS_GRAPH_ID = "evomemory-synthesizer"
 SYNTHESIS_RECURSION_LIMIT = 100
-SYNTHESIS_CONTEXT_OBSERVATION_LIMIT = 16
-SYNTHESIS_CONTEXT_KNOWLEDGE_LIMIT = 12
 SYNTHESIS_CONTEXT_MAX_CHARS = 32_000
+SYNTHESIS_CONTEXT_OBSERVATION_SUMMARY_CHARS = 320
+SYNTHESIS_CONTEXT_OBSERVATION_CLAMPED_SUMMARY_CHARS = 120
+SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS = 500
 _SYNTHESIS_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _SYNTHESIS_POLL_INTERVAL_SECONDS = 1.0
 _SYNTHESIS_MAX_POLL_FAILURES = 3
@@ -206,44 +213,29 @@ class SynthesisRunPayload(TypedDict):
 
 
 class SynthesisObservationContext(TypedDict):
-    """Observation payload included in a bounded synthesis prompt."""
+    """Compact seed observation included in a bounded synthesis prompt."""
 
     id: str
     path: str
     memory_type: str
     scope: str
     summary: str
-    body: str
+    snippet: str
 
 
-class SynthesisKnowledgeContext(TypedDict):
-    """Knowledge payload included in a bounded synthesis prompt."""
+class SynthesisMemoryInventory(TypedDict):
+    """Compact counts that tell the synthesizer what memory exists to inspect."""
 
-    id: str
-    path: str
-    memory_type: str
-    scope: str
-    summary: str
-    supporting_observation_ids: list[str]
-    body: str
+    active_knowledge_count: int
+    seed_observation_count: int
 
 
 class SynthesisContext(TypedDict):
-    """Bounded observation/knowledge context submitted to synthesis."""
+    """Bounded seed context submitted to synthesis."""
 
     project_id: str
-    observations: list[SynthesisObservationContext]
-    existing_knowledge: list[SynthesisKnowledgeContext]
-    covered_observation_ids: list[str]
-
-
-@dataclass(frozen=True)
-class SynthesisLaunchArgs:
-    """Arguments needed to submit one background synthesis run."""
-
-    memory_dir: str | Path
-    project_id: str
-    trigger: str
+    uncovered_observations: list[SynthesisObservationContext]
+    memory_inventory: SynthesisMemoryInventory
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -300,15 +292,72 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return stripped[: max_chars - 20].rstrip() + "\n[truncated]"
 
 
+def _shrink_synthesis_context(
+    context: SynthesisContext,
+    *,
+    max_chars: int,
+) -> SynthesisContext:
+    """Shrink seed context detail without dropping seed observation ids."""
+    encoded = _pretty_json(context)
+    if len(encoded) <= max_chars:
+        return context
+
+    for observation in context["uncovered_observations"]:
+        observation["snippet"] = ""
+    encoded = _pretty_json(context)
+    if len(encoded) <= max_chars:
+        return context
+
+    for observation in context["uncovered_observations"]:
+        observation["summary"] = _truncate_text(
+            observation["summary"],
+            SYNTHESIS_CONTEXT_OBSERVATION_CLAMPED_SUMMARY_CHARS,
+        )
+    encoded = _pretty_json(context)
+    if len(encoded) <= max_chars:
+        return context
+
+    for observation in context["uncovered_observations"]:
+        observation["summary"] = ""
+    encoded = _pretty_json(context)
+
+    if len(encoded) > max_chars:
+        logger.warning(
+            "Submitting oversized EvoMemory synthesis context: %d chars for "
+            "%d seed observations after stripping snippets and summaries",
+            len(encoded),
+            len(context["uncovered_observations"]),
+        )
+    return context
+
+
+def _normalize_seed_observation_ids(
+    observation_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Strip blanks and dedupe seed observation ids in first-seen order."""
+    normalized = []
+    seen = set()
+    for observation_id in observation_ids:
+        clean_id = observation_id.strip()
+        if not clean_id or clean_id in seen:
+            continue
+        normalized.append(clean_id)
+        seen.add(clean_id)
+    return tuple(normalized)
+
+
 def build_synthesis_context(
     *,
     memory_dir: str | Path,
     project_id: str,
-    observation_limit: int = SYNTHESIS_CONTEXT_OBSERVATION_LIMIT,
-    knowledge_limit: int = SYNTHESIS_CONTEXT_KNOWLEDGE_LIMIT,
+    seed_observation_ids: tuple[str, ...],
     max_chars: int = SYNTHESIS_CONTEXT_MAX_CHARS,
 ) -> SynthesisContext | None:
-    """Build bounded observation/knowledge context for the synthesis agent."""
+    """Build bounded seed context for the synthesis agent."""
+    seed_ids = _normalize_seed_observation_ids(seed_observation_ids)
+    if not seed_ids:
+        return None
+
     knowledge_documents = knowledge_search_documents(
         memory_dir=memory_dir,
         project_id=project_id,
@@ -319,55 +368,125 @@ def build_synthesis_context(
         for document in knowledge_documents
         for observation_id in document.supporting_observation_ids
     }
-    observation_documents = [
-        document
-        for document in candidate_observation_documents(
+
+    observations: list[SynthesisObservationContext] = []
+    for observation_id in seed_ids:
+        if observation_id in covered_observation_ids:
+            continue
+        document = read_observation_file(
             memory_dir=memory_dir,
             project_id=project_id,
+            observation_id=observation_id,
         )
-        if document.observation_id not in covered_observation_ids
-    ]
-    if not observation_documents:
+        if document is None:
+            continue
+        observations.append(
+            {
+                "id": document["observation_id"],
+                "path": document["path"],
+                "memory_type": document["memory_type"].value,
+                "scope": document["scope"].value,
+                "summary": _truncate_text(
+                    document["summary"],
+                    SYNTHESIS_CONTEXT_OBSERVATION_SUMMARY_CHARS,
+                ),
+                "snippet": _truncate_text(
+                    document["text"],
+                    SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS,
+                ),
+            }
+        )
+    if not observations:
         return None
 
-    selected_observations = observation_documents[:observation_limit]
-    selected_knowledge = knowledge_documents[:knowledge_limit]
-    observations: list[SynthesisObservationContext] = [
-        {
-            "id": document.observation_id,
-            "path": document.path,
-            "memory_type": document.memory_type.value,
-            "scope": document.scope.value,
-            "summary": document.summary,
-            "body": _truncate_text(document.body, 1800),
-        }
-        for document in selected_observations
-    ]
-    existing_knowledge: list[SynthesisKnowledgeContext] = [
-        {
-            "id": document.knowledge_id,
-            "path": document.path,
-            "memory_type": document.memory_type.value,
-            "scope": document.scope.value,
-            "summary": document.summary,
-            "supporting_observation_ids": list(document.supporting_observation_ids),
-            "body": _truncate_text(document.body, 1200),
-        }
-        for document in selected_knowledge
-    ]
     context: SynthesisContext = {
         "project_id": project_id,
-        "observations": observations,
-        "existing_knowledge": existing_knowledge,
-        "covered_observation_ids": sorted(covered_observation_ids),
+        "uncovered_observations": observations,
+        "memory_inventory": {
+            "active_knowledge_count": len(knowledge_documents),
+            "seed_observation_count": len(seed_ids),
+        },
     }
-    encoded = _pretty_json(context)
-    if len(encoded) > max_chars:
-        context["observations"] = observations[: max(1, observation_limit // 2)]
-        encoded = _pretty_json(context)
-    if len(encoded) > max_chars:
-        context["existing_knowledge"] = []
-    return context
+    return _shrink_synthesis_context(context, max_chars=max_chars)
+
+
+def _tool_error(message: str) -> str:
+    return json.dumps({"error": message}, ensure_ascii=False, sort_keys=True)
+
+
+def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
+    """Build read-side memory tools for the synthesis worker graph."""
+    worker_memory_dir = Path(memory_dir).expanduser()
+
+    def _project_id() -> str | None:
+        return _config_str(_current_configurable(), "evomemory_project_id")
+
+    def _search_memory(
+        query: str,
+        mode: MemorySearchMode = MemorySearchMode.RANKED,
+        memory_level: MemoryLevelFilter = MemoryLevelFilter.ANY,
+        scope: MemoryScope | None = None,
+        memory_type: MemoryType | None = None,
+        include_archived_knowledge: bool = False,
+        limit: int = 8,
+    ) -> str:
+        project_id = _project_id()
+        if project_id is None:
+            return _tool_error("EvoMemory synthesizer missing project id.")
+        results = search_memory_files(
+            memory_dir=worker_memory_dir,
+            project_id=project_id,
+            query=query,
+            memory_level=memory_level,
+            scope=scope,
+            memory_type=memory_type,
+            include_archived_knowledge=include_archived_knowledge,
+            limit=limit,
+            mode=mode,
+        )
+        return json.dumps({"results": results}, ensure_ascii=False, sort_keys=True)
+
+    def _read_memory(memory_id: str) -> str:
+        project_id = _project_id()
+        if project_id is None:
+            return _tool_error("EvoMemory synthesizer missing project id.")
+        result = read_memory_file(
+            memory_dir=worker_memory_dir,
+            project_id=project_id,
+            memory_id=memory_id.strip(),
+        )
+        if result is None:
+            return _tool_error(
+                "No memory with that ID exists in global or current-project memory."
+            )
+        return json.dumps({"text": result["text"]}, ensure_ascii=False, sort_keys=True)
+
+    return [
+        StructuredTool.from_function(
+            func=_search_memory,
+            name="search_memory",
+            description=(
+                "Search EvoMemory from the synthesis worker. Use memory_level="
+                "knowledge before creating or updating knowledge, and "
+                "memory_level=observation when related raw evidence could affect "
+                "the synthesis decision. Read promising K-* or O-* hits with "
+                "read_memory."
+            ),
+            args_schema=SearchMemoryArgs,
+            infer_schema=False,
+        ),
+        StructuredTool.from_function(
+            func=_read_memory,
+            name="read_memory",
+            description=(
+                "Read the full markdown for an EvoMemory knowledge or observation "
+                "record by exact K-* or O-* ID. Read every observation you cite "
+                "in a synthesis decision."
+            ),
+            args_schema=ReadMemoryArgs,
+            infer_schema=False,
+        ),
+    ]
 
 
 def _synthesis_system_prompt() -> str:
@@ -376,10 +495,23 @@ def _synthesis_system_prompt() -> str:
             "You are the EvoMemory synthesis agent.",
             (
                 "Your job is to convert durable observations into compact "
-                "knowledge records. Operate only on the observations and "
-                "existing knowledge provided in the prompt. Do not continue the "
-                "user task, infer from missing trajectory context, or create "
-                "memories from vibes."
+                "knowledge records. The prompt contains a bounded seed list of "
+                "uncovered observations, not a complete memory snapshot. Treat "
+                "seed summaries and snippets as leads to inspect with memory "
+                "tools before relying on them."
+            ),
+            (
+                "Use `read_memory` to read every O-* observation you cite. Use "
+                "`search_memory(memory_level=knowledge)` before creating new "
+                "knowledge so you can update or archive existing K-* records "
+                "instead of duplicating them. Use "
+                "`search_memory(memory_level=observation)` when neighboring raw "
+                "evidence or conflicts could change the decision."
+            ),
+            (
+                "Do not continue the user task, infer from missing trajectory "
+                "context, or create memories from vibes. Base decisions only on "
+                "memory records you were given or retrieved."
             ),
             (
                 "Knowledge is an abstraction over evidence, not a restatement "
@@ -423,10 +555,16 @@ def _synthesis_system_prompt() -> str:
 def _synthesis_user_prompt(context: SynthesisContext, *, trigger: str) -> str:
     return "\n\n".join(
         [
-            "Review this bounded EvoMemory context and decide whether synthesis "
-            "maintenance is warranted.",
+            "New or still-uncovered EvoMemory observations are ready for "
+            "synthesis review. Decide whether to create, update, archive, or "
+            "skip synthesized knowledge.",
             f"Trigger: {trigger}",
-            "Context JSON:",
+            (
+                "Use memory tools to inspect full observation records and "
+                "nearby existing memory before deciding. The seed context is "
+                "bounded; absence from it does not mean absence from memory."
+            ),
+            "Seed context JSON:",
             _pretty_json(context),
         ]
     )
@@ -550,7 +688,6 @@ def build_synthesis_agent_graph(
 ) -> CompiledStateGraph:
     """Build the registered LangGraph synthesis worker."""
     from deepagents import create_deep_agent
-    from deepagents.backends import FilesystemBackend
 
     from ..EvoScientist import _ensure_auxiliary_chat_model
 
@@ -561,8 +698,7 @@ def build_synthesis_agent_graph(
         name=SYNTHESIS_AGENT_NAME,
         model=_ensure_auxiliary_chat_model(),
         system_prompt=_synthesis_system_prompt(),
-        tools=[],
-        backend=FilesystemBackend(root_dir=str(worker_memory_dir), virtual_mode=True),
+        tools=_synthesis_memory_tools(memory_dir=worker_memory_dir),
         middleware=[_SynthesisApplyMiddleware(memory_dir=worker_memory_dir)],
         subagents=[],
         response_format=ToolStrategy(
@@ -761,6 +897,7 @@ def _launch_synthesis_worker(
     *,
     memory_dir: str | Path,
     project_id: str,
+    seed_observation_ids: tuple[str, ...],
     trigger: str,
 ) -> None:
     """Submit a background synthesis run if uncovered observations exist."""
@@ -768,7 +905,11 @@ def _launch_synthesis_worker(
 
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
-    context = build_synthesis_context(memory_dir=memory_dir, project_id=project_id)
+    context = build_synthesis_context(
+        memory_dir=memory_dir,
+        project_id=project_id,
+        seed_observation_ids=seed_observation_ids,
+    )
     if context is None:
         return
 
@@ -822,84 +963,6 @@ def _launch_synthesis_worker(
     finally:
         if active_key is not None:
             _release_synthesis_context(
-                project_id=active_key[0],
-                context_digest=active_key[1],
-            )
-
-
-async def _alaunch_synthesis_worker(
-    *,
-    memory_dir: str | Path,
-    project_id: str,
-    trigger: str,
-) -> None:
-    """Submit a background synthesis run without blocking the live agent."""
-    from langgraph_sdk import get_client
-
-    from ..langgraph_dev.manager import is_langgraph_dev_running
-
-    context = await asyncio.to_thread(
-        build_synthesis_context,
-        memory_dir=memory_dir,
-        project_id=project_id,
-    )
-    if context is None:
-        return
-
-    url = _synthesis_worker_url()
-    if not await asyncio.to_thread(is_langgraph_dev_running, base_url=url):
-        logger.info("Skipping EvoMemory synthesis launch; LangGraph dev is unavailable")
-        return
-
-    context_digest = _synthesis_context_digest(context)
-    if not await asyncio.to_thread(
-        _claim_synthesis_context,
-        project_id=project_id,
-        context_digest=context_digest,
-    ):
-        logger.debug(
-            "Skipping duplicate EvoMemory synthesis launch for context %s",
-            context_digest,
-        )
-        return
-
-    before_outputs = await asyncio.to_thread(snapshot_memory_outputs, memory_dir)
-    await asyncio.to_thread(
-        mark_synthesis_started,
-        project_id=project_id,
-        context_digest=context_digest,
-        memory_dir=memory_dir,
-        before_outputs=before_outputs,
-    )
-    active_key: tuple[str, str] | None = (project_id, context_digest)
-    try:
-        client = get_client(url=url, headers={"x-auth-scheme": "langsmith"})
-        thread = await client.threads.create(graph_id=SYNTHESIS_GRAPH_ID)
-        thread_id = str(thread["thread_id"])
-        payload = _synthesis_run_kwargs(
-            project_id=project_id,
-            context=context,
-            trigger=trigger,
-        )
-        run = await client.runs.create(
-            thread_id=thread_id,
-            assistant_id=payload["assistant_id"],
-            input=payload["input"],
-            metadata=payload["metadata"],
-            config=payload["config"],
-        )
-        if run_id := _run_id_from_response(run):
-            _spawn_synthesis_status_thread(
-                url=url,
-                thread_id=thread_id,
-                run_id=run_id,
-                active_key=active_key,
-            )
-            active_key = None
-    finally:
-        if active_key is not None:
-            await asyncio.to_thread(
-                _release_synthesis_context,
                 project_id=active_key[0],
                 context_digest=active_key[1],
             )

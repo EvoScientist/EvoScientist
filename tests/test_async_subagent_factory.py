@@ -186,7 +186,6 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
     ]
     assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
     assert lifecycle_middleware._launch_memory_worker is True
-    assert lifecycle_middleware._launch_synthesis is True
 
 
 @patch(
@@ -230,7 +229,6 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
     )
     assert lifecycle_middleware._role.value == "turn"
     assert lifecycle_middleware._launch_memory_worker is True
-    assert lifecycle_middleware._launch_synthesis is True
 
 
 @patch(
@@ -274,7 +272,7 @@ def test_agent_observation_writer_schedules_synthesis_without_memory_worker(
     ]
     assert lifecycle_middleware._role.value == "turn"
     assert lifecycle_middleware._launch_memory_worker is False
-    assert lifecycle_middleware._launch_synthesis is True
+    assert lifecycle_middleware._launch_synthesis_worker is True
 
 
 # ---------------------------------------------------------------------------

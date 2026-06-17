@@ -36,11 +36,7 @@ from ..config import (
     get_effective_config,
 )
 from ..memory import MemorySourceType
-from ..memory.synthesis import (
-    SynthesisLaunchArgs,
-    _alaunch_synthesis_worker,
-    _launch_synthesis_worker,
-)
+from ..memory.synthesis import _launch_synthesis_worker
 from ..memory.worker_activity import (
     forget_memory_worker,
     mark_memory_worker_finished,
@@ -62,6 +58,16 @@ _MEMORY_WORKER_TERMINAL_STATUSES = frozenset(
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset({"execute", "task", "write_todos"})
 _MEMORY_WORKER_POLL_INTERVAL_SECONDS = 1.0
 _MEMORY_WORKER_MAX_POLL_FAILURES = 3
+
+
+@dataclass(frozen=True)
+class WorkerSynthesisLaunchArgs:
+    """Synthesis metadata carried until a memory worker has seed observations."""
+
+    memory_dir: str | Path
+    project_id: str
+    trigger: str
+    seed_observation_ids: tuple[str, ...] = ()
 
 
 class MemoryLifecycleRole(StrEnum):
@@ -147,6 +153,7 @@ class MemoryWorkerLaunchArgs(TypedDict):
     source_agent: str
     session_id: str
     trajectory: list[CompactMessage]
+    seed_observation_ids: tuple[str, ...]
 
 
 class MemoryWorkerRunPayload(TypedDict):
@@ -575,6 +582,45 @@ def _state_messages(state: AgentState[object]) -> list[BaseMessage]:
     if not isinstance(messages, list):
         return []
     return [message for message in messages if isinstance(message, BaseMessage)]
+
+
+def _dedupe_observation_ids(observation_ids: Sequence[str]) -> tuple[str, ...]:
+    """Return O-* ids in first-seen order."""
+    ids = []
+    for observation_id in observation_ids:
+        clean_id = observation_id.strip()
+        if clean_id.startswith("O-"):
+            ids.append(clean_id)
+    return tuple(dict.fromkeys(ids))
+
+
+def _created_observation_ids_from_messages(
+    messages: Sequence[BaseMessage],
+) -> tuple[str, ...]:
+    """Return ids created by record_observation calls in this run state."""
+    record_call_ids = {
+        call["id"]
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+        if call["name"] == "record_observation" and call["id"]
+    }
+    observation_ids = []
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if message.tool_call_id not in record_call_ids:
+            continue
+        try:
+            payload = json.loads(str(message.text))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("created") is not True:
+            continue
+        observation_id = str(payload.get("observation_id") or "").strip()
+        if observation_id.startswith("O-"):
+            observation_ids.append(observation_id)
+    return _dedupe_observation_ids(observation_ids)
 
 
 def _stable_json(value: object) -> str:
@@ -1073,12 +1119,21 @@ def _memory_worker_thread_cleanup_enabled() -> bool:
         return True
 
 
+def _observation_ids_from_output_paths(paths: frozenset[str]) -> tuple[str, ...]:
+    observation_ids = []
+    for path in sorted(paths):
+        observation_id = Path(path).stem
+        if observation_id.startswith("O-"):
+            observation_ids.append(observation_id)
+    return _dedupe_observation_ids(observation_ids)
+
+
 def _spawn_memory_worker_status_thread(
     *,
     url: str,
     thread_id: str,
     run_id: str,
-    synthesis_after: SynthesisLaunchArgs | None = None,
+    synthesis_after: WorkerSynthesisLaunchArgs | None = None,
 ) -> None:
     """Poll a sync-launched memory worker from a daemon thread."""
     thread = threading.Thread(
@@ -1100,7 +1155,7 @@ def _watch_memory_worker_run_sync(
     url: str,
     thread_id: str,
     run_id: str,
-    synthesis_after: SynthesisLaunchArgs | None = None,
+    synthesis_after: WorkerSynthesisLaunchArgs | None = None,
 ) -> None:
     from langgraph_sdk import get_sync_client
 
@@ -1138,21 +1193,29 @@ def _watch_memory_worker_run_sync(
             # once the run is terminal — deleting a thread with a live
             # run would break it. Crash residue is handled by the
             # restore whitelist + startup purge in sessions.py.
-            mark_memory_worker_finished(thread_id, run_id)
+            observation_paths = mark_memory_worker_finished(thread_id, run_id)
             if client is not None:
                 _delete_memory_worker_thread(client, thread_id)
             if synthesis_after is not None:
-                try:
-                    _launch_synthesis_worker(
-                        memory_dir=synthesis_after.memory_dir,
-                        project_id=synthesis_after.project_id,
-                        trigger=synthesis_after.trigger,
+                seed_observation_ids = _dedupe_observation_ids(
+                    (
+                        *synthesis_after.seed_observation_ids,
+                        *_observation_ids_from_output_paths(observation_paths),
                     )
-                except Exception:
-                    logger.warning(
-                        "Failed to launch EvoMemory synthesis worker",
-                        exc_info=True,
-                    )
+                )
+                if seed_observation_ids:
+                    try:
+                        _launch_synthesis_worker(
+                            memory_dir=synthesis_after.memory_dir,
+                            project_id=synthesis_after.project_id,
+                            seed_observation_ids=seed_observation_ids,
+                            trigger=synthesis_after.trigger,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to launch EvoMemory synthesis worker",
+                            exc_info=True,
+                        )
         else:
             forget_memory_worker(thread_id, run_id)
 
@@ -1162,14 +1225,22 @@ def _synthesis_after_worker_args(
     memory_dir: str | Path,
     project_id: str,
     role: MemoryLifecycleRole,
-) -> SynthesisLaunchArgs | None:
+    seed_observation_ids: tuple[str, ...] = (),
+) -> WorkerSynthesisLaunchArgs | None:
     """Return synthesis launch metadata when the feature is enabled."""
-    if not MemoryControls.from_config(get_effective_config()).synthesis_worker_needed:
+    memory_controls = MemoryControls.from_config(get_effective_config())
+    if not memory_controls.synthesis_worker_needed:
         return None
-    return SynthesisLaunchArgs(
+    seed_observation_ids = _dedupe_observation_ids(seed_observation_ids)
+    if not seed_observation_ids and not memory_controls.observation_tool_enabled(
+        role.observation_target
+    ):
+        return None
+    return WorkerSynthesisLaunchArgs(
         memory_dir=memory_dir,
         project_id=project_id,
         trigger=f"{role.value}_memory_worker",
+        seed_observation_ids=seed_observation_ids,
     )
 
 
@@ -1181,6 +1252,7 @@ def _launch_memory_worker(
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
+    seed_observation_ids: tuple[str, ...] = (),
 ) -> None:
     """Submit a background memory worker run to the LangGraph dev server."""
     from langgraph_sdk import get_sync_client
@@ -1221,6 +1293,7 @@ def _launch_memory_worker(
             memory_dir=memory_dir,
             project_id=project_id,
             role=role,
+            seed_observation_ids=seed_observation_ids,
         )
         try:
             _spawn_memory_worker_status_thread(
@@ -1242,6 +1315,7 @@ async def _alaunch_memory_worker(
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
+    seed_observation_ids: tuple[str, ...] = (),
 ) -> None:
     """Submit a background memory worker run without involving the live agent."""
     from langgraph_sdk import get_client
@@ -1282,6 +1356,7 @@ async def _alaunch_memory_worker(
             memory_dir=memory_dir,
             project_id=project_id,
             role=role,
+            seed_observation_ids=seed_observation_ids,
         )
         try:
             _spawn_memory_worker_status_thread(
@@ -1309,20 +1384,21 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         role: MemoryLifecycleRole,
         source_agent: str,
         launch_memory_worker: bool = True,
-        launch_synthesis: bool = False,
+        launch_synthesis_worker: bool = True,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         self._project_id = project_id
         self._role = role
         self._source_agent = source_agent
         self._launch_memory_worker = launch_memory_worker
-        self._launch_synthesis = launch_synthesis
-
-    def _synthesis_trigger(self) -> str:
-        return f"{self._role.value}_lifecycle"
+        self._launch_synthesis_worker = launch_synthesis_worker
 
     def _worker_args(
-        self, state: AgentState[object], runtime: Runtime | None
+        self,
+        state: AgentState[object],
+        runtime: Runtime | None,
+        *,
+        seed_observation_ids: tuple[str, ...] = (),
     ) -> MemoryWorkerLaunchArgs | None:
         """Build launch arguments for the current lifecycle hook."""
         session_id = _runtime_thread_id(runtime)
@@ -1340,6 +1416,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
                 "source_agent": self._source_agent,
                 "session_id": session_id,
                 "trajectory": trajectory,
+                "seed_observation_ids": seed_observation_ids,
             }
 
         trajectory = _compact_messages(_state_messages(state))
@@ -1352,30 +1429,58 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
             "source_agent": self._source_agent,
             "session_id": session_id,
             "trajectory": trajectory,
+            "seed_observation_ids": seed_observation_ids,
         }
+
+    def _launch_synthesis_from_seeds(
+        self,
+        seed_observation_ids: tuple[str, ...],
+        *,
+        trigger: str,
+    ) -> None:
+        if not seed_observation_ids:
+            return
+        _launch_synthesis_worker(
+            memory_dir=self._memory_dir,
+            project_id=self._project_id,
+            seed_observation_ids=seed_observation_ids,
+            trigger=trigger,
+        )
+
+    def _seed_observation_ids(self, messages: Sequence[BaseMessage]) -> tuple[str, ...]:
+        if not self._launch_synthesis_worker:
+            return ()
+        if self._role == MemoryLifecycleRole.TURN:
+            messages = _latest_user_turn_messages(messages)
+        return _created_observation_ids_from_messages(messages)
 
     def after_agent(
         self,
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
-        if self._launch_memory_worker and (
-            worker_args := self._worker_args(state, runtime)
-        ):
+        messages = _state_messages(state)
+        seed_observation_ids = self._seed_observation_ids(messages)
+        worker_args = self._worker_args(
+            state,
+            runtime,
+            seed_observation_ids=seed_observation_ids,
+        )
+        if self._launch_memory_worker and worker_args:
             try:
                 _launch_memory_worker(**worker_args)
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
-        elif self._launch_synthesis:
+        elif self._launch_synthesis_worker and seed_observation_ids:
             try:
-                _launch_synthesis_worker(
-                    memory_dir=self._memory_dir,
-                    project_id=self._project_id,
-                    trigger=self._synthesis_trigger(),
+                self._launch_synthesis_from_seeds(
+                    seed_observation_ids,
+                    trigger=f"{self._role.value}_agent",
                 )
             except Exception:
                 logger.warning(
-                    "Failed to launch EvoMemory synthesis worker", exc_info=True
+                    "Failed to launch EvoMemory synthesis worker",
+                    exc_info=True,
                 )
         return None
 
@@ -1384,23 +1489,29 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
-        if self._launch_memory_worker and (
-            worker_args := self._worker_args(state, runtime)
-        ):
+        messages = _state_messages(state)
+        seed_observation_ids = self._seed_observation_ids(messages)
+        worker_args = self._worker_args(
+            state,
+            runtime,
+            seed_observation_ids=seed_observation_ids,
+        )
+        if self._launch_memory_worker and worker_args:
             try:
                 await _alaunch_memory_worker(**worker_args)
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
-        elif self._launch_synthesis:
+        elif self._launch_synthesis_worker and seed_observation_ids:
             try:
-                await _alaunch_synthesis_worker(
-                    memory_dir=self._memory_dir,
-                    project_id=self._project_id,
-                    trigger=self._synthesis_trigger(),
+                await asyncio.to_thread(
+                    self._launch_synthesis_from_seeds,
+                    seed_observation_ids,
+                    trigger=f"{self._role.value}_agent",
                 )
             except Exception:
                 logger.warning(
-                    "Failed to launch EvoMemory synthesis worker", exc_info=True
+                    "Failed to launch EvoMemory synthesis worker",
+                    exc_info=True,
                 )
         return None
 
@@ -1413,7 +1524,7 @@ def create_memory_lifecycle_middleware(
     role: MemoryLifecycleRole,
     source_agent: str,
     launch_memory_worker: bool = True,
-    launch_synthesis: bool = False,
+    launch_synthesis_worker: bool = True,
 ) -> EvoMemoryLifecycleMiddleware:
     """Build the post-run EvoMemory lifecycle middleware."""
 
@@ -1426,5 +1537,5 @@ def create_memory_lifecycle_middleware(
         role=role,
         source_agent=source_agent,
         launch_memory_worker=launch_memory_worker,
-        launch_synthesis=launch_synthesis,
+        launch_synthesis_worker=launch_synthesis_worker,
     )

@@ -462,7 +462,196 @@ def test_knowledge_memory_writes_support_and_combined_search_prefers_it(tmp_path
     ]
 
 
-def test_synthesis_decision_creates_updates_and_archives_knowledge(tmp_path):
+def test_build_synthesis_context_seeds_uncovered_observations_only(tmp_path):
+    memories = tmp_path / "memories"
+    covered = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Covered observation already supports knowledge.",
+        observation="Covered observation body " + ("a" * 900),
+        why_it_matters="Existing knowledge already cites this observation.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    uncovered = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Uncovered observation should seed synthesis.",
+        observation="Uncovered observation body " + ("b" * 900),
+        why_it_matters="The synthesis worker should inspect it with read_memory.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    record_knowledge_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Existing knowledge covers one observation.",
+        knowledge="Existing knowledge should be found through search_memory.",
+        supporting_observation_ids=[covered["observation_id"]],
+        scope=MemoryScope.PROJECT,
+    )
+
+    context = memory_synthesis.build_synthesis_context(
+        memory_dir=memories,
+        project_id="P-project",
+        seed_observation_ids=(
+            f" {covered['observation_id']} ",
+            uncovered["observation_id"],
+            uncovered["observation_id"],
+            "",
+        ),
+    )
+
+    assert context is not None
+    assert set(context) == {
+        "project_id",
+        "uncovered_observations",
+        "memory_inventory",
+    }
+    assert [obs["id"] for obs in context["uncovered_observations"]] == [
+        uncovered["observation_id"]
+    ]
+    seed = context["uncovered_observations"][0]
+    assert set(seed) == {"id", "path", "memory_type", "scope", "summary", "snippet"}
+    assert "body" not in seed
+    assert (
+        len(seed["snippet"])
+        <= memory_synthesis.SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS
+    )
+    assert context["memory_inventory"] == {
+        "active_knowledge_count": 1,
+        "seed_observation_count": 2,
+    }
+
+
+def test_build_synthesis_context_shrinks_detail_without_dropping_seed_ids(
+    monkeypatch, tmp_path
+):
+    seed_ids = tuple(f"O-{index}" for index in range(6))
+
+    def fake_read_observation_file(**kwargs):
+        observation_id = kwargs["observation_id"]
+        return {
+            "observation_id": observation_id,
+            "path": f"/memories/observations/projects/P-project/{observation_id}.md",
+            "memory_type": MemoryType.SEMANTIC,
+            "scope": MemoryScope.PROJECT,
+            "summary": f"Observation {observation_id} " + ("x" * 800),
+            "text": f"Observation body {observation_id} " + ("y" * 1600),
+        }
+
+    monkeypatch.setattr(
+        memory_synthesis,
+        "knowledge_search_documents",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        memory_synthesis,
+        "read_observation_file",
+        fake_read_observation_file,
+    )
+
+    context = memory_synthesis.build_synthesis_context(
+        memory_dir=tmp_path / "memories",
+        project_id="P-project",
+        seed_observation_ids=seed_ids,
+        max_chars=2200,
+    )
+
+    assert context is not None
+    assert len(memory_synthesis._pretty_json(context)) <= 2200
+    assert [obs["id"] for obs in context["uncovered_observations"]] == list(seed_ids)
+    assert {obs["snippet"] for obs in context["uncovered_observations"]} == {""}
+    assert context["memory_inventory"]["seed_observation_count"] == len(seed_ids)
+
+
+def test_build_synthesis_context_keeps_seed_ids_when_still_oversized(
+    monkeypatch, tmp_path
+):
+    seed_ids = tuple(f"O-{index}" for index in range(4))
+
+    def fake_read_observation_file(**kwargs):
+        observation_id = kwargs["observation_id"]
+        return {
+            "observation_id": observation_id,
+            "path": f"/memories/observations/projects/P-project/{observation_id}.md",
+            "memory_type": MemoryType.SEMANTIC,
+            "scope": MemoryScope.PROJECT,
+            "summary": "summary",
+            "text": "body",
+        }
+
+    monkeypatch.setattr(
+        memory_synthesis,
+        "knowledge_search_documents",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        memory_synthesis,
+        "read_observation_file",
+        fake_read_observation_file,
+    )
+
+    context = memory_synthesis.build_synthesis_context(
+        memory_dir=tmp_path / "memories",
+        project_id="P-project",
+        seed_observation_ids=seed_ids,
+        max_chars=100,
+    )
+
+    assert context is not None
+    assert len(memory_synthesis._pretty_json(context)) > 100
+    assert [obs["id"] for obs in context["uncovered_observations"]] == list(seed_ids)
+    assert {obs["summary"] for obs in context["uncovered_observations"]} == {""}
+    assert {obs["snippet"] for obs in context["uncovered_observations"]} == {""}
+
+
+def test_synthesis_memory_tools_resolve_project_from_run_config(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    observation = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Synthesis tools read configured project memory.",
+        observation="Configured synthesis memory tools can search and read records.",
+        why_it_matters="The synthesis graph is shared across projects.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+    monkeypatch.setattr(
+        memory_synthesis,
+        "_current_configurable",
+        lambda: {"evomemory_project_id": "P-project"},
+    )
+    tools = memory_synthesis._synthesis_memory_tools(memory_dir=memories)
+    by_name = {tool.name: tool for tool in tools}
+
+    search_payload = json.loads(
+        by_name["search_memory"].run(
+            {
+                "query": "configured synthesis memory",
+                "memory_level": "observation",
+            }
+        )
+    )
+    read_payload = json.loads(
+        by_name["read_memory"].run({"memory_id": observation["observation_id"]})
+    )
+
+    assert search_payload["results"][0]["memory_id"] == observation["observation_id"]
+    assert observation["observation_id"] in read_payload["text"]
+
+
+def test_apply_synthesis_review_handles_create_update_and_archive(tmp_path):
     memories = tmp_path / "memories"
     observation = record_observation_file(
         memory_dir=memories,
@@ -928,27 +1117,94 @@ def test_turn_compaction_uses_latest_user_turn_only():
     ]
 
 
-def test_lifecycle_schedules_turn_worker_without_awaiting(
+def test_created_observation_ids_from_record_observation_results():
+    messages = [
+        AIMessage(
+            content="",
+            name="EvoScientist",
+            tool_calls=[
+                {
+                    "name": "record_observation",
+                    "id": "record-1",
+                    "args": {},
+                },
+                {
+                    "name": "execute",
+                    "id": "exec-1",
+                    "args": {},
+                },
+            ],
+        ),
+        ToolMessage(
+            json.dumps({"created": True, "observation_id": "O-live"}),
+            tool_call_id="record-1",
+            name="record_observation",
+        ),
+        ToolMessage(
+            json.dumps({"created": True, "observation_id": "O-ignore"}),
+            tool_call_id="exec-1",
+            name="execute",
+        ),
+        ToolMessage(
+            json.dumps({"created": False, "observation_id": "O-duplicate"}),
+            tool_call_id="record-1",
+            name="record_observation",
+        ),
+    ]
+
+    assert memory_lifecycle._created_observation_ids_from_messages(messages) == (
+        "O-live",
+    )
+
+
+def test_turn_lifecycle_seed_ids_ignore_prior_turn_observations(tmp_path):
+    middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_agent="EvoScientist",
+        launch_memory_worker=False,
+        launch_synthesis_worker=True,
+    )
+    messages = [
+        HumanMessage("old turn"),
+        AIMessage(
+            content="",
+            name="EvoScientist",
+            tool_calls=[
+                {
+                    "name": "record_observation",
+                    "id": "old-record",
+                    "args": {},
+                }
+            ],
+        ),
+        ToolMessage(
+            json.dumps({"created": True, "observation_id": "O-old"}),
+            tool_call_id="old-record",
+            name="record_observation",
+        ),
+        AIMessage("old done", name="EvoScientist"),
+        HumanMessage("current turn"),
+        AIMessage("current done", name="EvoScientist"),
+    ]
+
+    assert middleware._seed_observation_ids(messages) == ()
+
+
+def test_turn_lifecycle_launches_worker_with_latest_turn_only(
     tmp_path, monkeypatch, run_async
 ):
     calls = []
-    synthesis_calls = []
 
     async def fake_launch(**kwargs):
         calls.append(kwargs)
-
-    async def fake_synthesis(**kwargs):
-        synthesis_calls.append(kwargs)
 
     monkeypatch.setattr(
         memory_lifecycle,
         "_alaunch_memory_worker",
         fake_launch,
-    )
-    monkeypatch.setattr(
-        memory_lifecycle,
-        "_alaunch_synthesis_worker",
-        fake_synthesis,
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
@@ -957,7 +1213,6 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
         launch_memory_worker=True,
-        launch_synthesis=True,
     )
     runtime = _runtime("thread-1")
 
@@ -987,18 +1242,17 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         {"role": "human", "content": "hi"},
         {"role": "ai", "content": "done"},
     ]
-    assert synthesis_calls == []
+    assert calls[0]["seed_observation_ids"] == ()
 
 
-def test_lifecycle_synthesis_only_launches_directly(tmp_path, monkeypatch, run_async):
+def test_turn_lifecycle_launches_synthesis_for_live_agent_observation(
+    tmp_path, monkeypatch, run_async
+):
     worker_calls = []
     synthesis_calls = []
 
     async def fake_worker(**kwargs):
         worker_calls.append(kwargs)
-
-    async def fake_synthesis(**kwargs):
-        synthesis_calls.append(kwargs)
 
     monkeypatch.setattr(
         memory_lifecycle,
@@ -1007,8 +1261,8 @@ def test_lifecycle_synthesis_only_launches_directly(tmp_path, monkeypatch, run_a
     )
     monkeypatch.setattr(
         memory_lifecycle,
-        "_alaunch_synthesis_worker",
-        fake_synthesis,
+        "_launch_synthesis_worker",
+        lambda **kwargs: synthesis_calls.append(kwargs),
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
@@ -1017,11 +1271,32 @@ def test_lifecycle_synthesis_only_launches_directly(tmp_path, monkeypatch, run_a
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
         launch_memory_worker=False,
-        launch_synthesis=True,
+        launch_synthesis_worker=True,
     )
 
     async def run():
-        state: AgentState[object] = {"messages": []}
+        state: AgentState[object] = {
+            "messages": [
+                HumanMessage("remember this"),
+                AIMessage(
+                    content="",
+                    name="EvoScientist",
+                    tool_calls=[
+                        {
+                            "name": "record_observation",
+                            "id": "record-1",
+                            "args": {},
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    json.dumps({"created": True, "observation_id": "O-live"}),
+                    tool_call_id="record-1",
+                    name="record_observation",
+                ),
+                AIMessage("done", name="EvoScientist"),
+            ]
+        }
         await middleware.aafter_agent(state, _runtime("thread-1"))
         await asyncio.sleep(0)
 
@@ -1032,9 +1307,72 @@ def test_lifecycle_synthesis_only_launches_directly(tmp_path, monkeypatch, run_a
         {
             "memory_dir": tmp_path / "memories",
             "project_id": "P-project",
-            "trigger": "turn_lifecycle",
+            "seed_observation_ids": ("O-live",),
+            "trigger": "turn_agent",
         }
     ]
+
+
+def test_turn_lifecycle_defers_live_observation_synthesis_to_memory_worker(
+    tmp_path, monkeypatch, run_async
+):
+    worker_calls = []
+    synthesis_calls = []
+
+    async def fake_worker(**kwargs):
+        worker_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_alaunch_memory_worker",
+        fake_worker,
+    )
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_launch_synthesis_worker",
+        lambda **kwargs: synthesis_calls.append(kwargs),
+    )
+    middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_agent="EvoScientist",
+        launch_memory_worker=True,
+        launch_synthesis_worker=True,
+    )
+
+    async def run():
+        state: AgentState[object] = {
+            "messages": [
+                HumanMessage("remember this"),
+                AIMessage(
+                    content="",
+                    name="EvoScientist",
+                    tool_calls=[
+                        {
+                            "name": "record_observation",
+                            "id": "record-1",
+                            "args": {},
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    json.dumps({"created": True, "observation_id": "O-live"}),
+                    tool_call_id="record-1",
+                    name="record_observation",
+                ),
+                AIMessage("done", name="EvoScientist"),
+            ]
+        }
+        await middleware.aafter_agent(state, _runtime("thread-1"))
+        await asyncio.sleep(0)
+
+    run_async(run())
+
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["seed_observation_ids"] == ("O-live",)
+    assert synthesis_calls == []
 
 
 def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
@@ -1082,7 +1420,7 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     assert _markdown_sections(body) == {"Summary": summary}
 
 
-def test_memory_worker_run_kwargs_use_graph_id_and_source_metadata_only():
+def test_memory_worker_run_payload_uses_graph_id_and_source_metadata_only():
     trajectory: list[memory_lifecycle.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
@@ -1142,66 +1480,50 @@ def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
-def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
-    turn_middleware = memory_lifecycle._memory_worker_middleware(
+@pytest.mark.parametrize(
+    ("writer", "role", "expected_tools"),
+    [
+        (
+            MemoryObservationWriter.AGENT,
+            memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+            ["search_memory", "read_memory"],
+        ),
+        (
+            MemoryObservationWriter.WORKER,
+            memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+            ["search_memory", "read_memory", "record_observation"],
+        ),
+        (
+            MemoryObservationWriter.WORKER,
+            memory_lifecycle.MemoryLifecycleRole.TURN,
+            ["search_memory", "read_memory", "record_observation"],
+        ),
+        (
+            MemoryObservationWriter.ALL,
+            memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+            ["search_memory", "read_memory", "record_observation"],
+        ),
+        (
+            MemoryObservationWriter.ALL,
+            memory_lifecycle.MemoryLifecycleRole.TURN,
+            ["search_memory", "read_memory", "record_observation"],
+        ),
+    ],
+)
+def test_memory_worker_observation_writer_modes(
+    tmp_path,
+    writer,
+    role,
+    expected_tools,
+):
+    middleware = memory_lifecycle._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
-        observation_writer=MemoryObservationWriter.ALL,
-    )
-    subagent_middleware = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        observation_writer=MemoryObservationWriter.ALL,
-    )
-
-    assert [tool.name for tool in turn_middleware[0].tools] == [
-        "search_memory",
-        "read_memory",
-        "record_observation",
-    ]
-    assert [tool.name for tool in subagent_middleware[0].tools] == [
-        "search_memory",
-        "read_memory",
-        "record_observation",
-    ]
-
-
-def test_memory_worker_observation_writer_modes(tmp_path):
-    agent_only = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        observation_writer=MemoryObservationWriter.AGENT,
-    )
-    worker_subagent = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        observation_writer=MemoryObservationWriter.WORKER,
-    )
-    worker_turn = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
-        observation_writer=MemoryObservationWriter.WORKER,
+        role=role,
+        observation_writer=writer,
     )
 
-    assert [tool.name for tool in agent_only[0].tools] == [
-        "search_memory",
-        "read_memory",
-    ]
-    assert [tool.name for tool in worker_subagent[0].tools] == [
-        "search_memory",
-        "read_memory",
-        "record_observation",
-    ]
-    assert [tool.name for tool in worker_turn[0].tools] == [
-        "search_memory",
-        "read_memory",
-        "record_observation",
-    ]
+    assert [tool.name for tool in middleware[0].tools] == expected_tools
 
 
 def test_memory_worker_prompts_match_observation_tool_availability():
@@ -1320,35 +1642,6 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
 
 
 def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch):
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeypatch):
     """Finished workers leave no checkpoint residue: thread is deleted."""
     worker_activity.reset_memory_worker_status_for_tests()
     worker_activity.mark_memory_worker_started(
@@ -1387,7 +1680,7 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_sync_watcher_preserves_worker_thread_when_cleanup_disabled(
+def test_sync_memory_worker_watcher_preserves_thread_when_cleanup_disabled(
     tmp_path, monkeypatch
 ):
     worker_activity.reset_memory_worker_status_for_tests()
@@ -1427,7 +1720,76 @@ def test_sync_watcher_preserves_worker_thread_when_cleanup_disabled(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_sync_watcher_launches_synthesis_after_terminal_status(tmp_path, monkeypatch):
+def test_sync_memory_worker_watcher_launches_synthesis_after_terminal_status(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+    )
+    observation = record_observation_file(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Worker output seeds synthesis.",
+        observation="The completed worker wrote this observation.",
+        why_it_matters="Synthesis should inspect observations from the worker delta.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    calls = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        def delete(self, _thread_id):
+            pass
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_launch_synthesis_worker",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    synthesis_after = memory_lifecycle.WorkerSynthesisLaunchArgs(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        trigger="turn_memory_worker",
+    )
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+            synthesis_after=synthesis_after,
+        )
+        assert calls == [
+            {
+                "memory_dir": memory_dir,
+                "project_id": "P-project",
+                "seed_observation_ids": (observation["observation_id"],),
+                "trigger": "turn_memory_worker",
+            }
+        ]
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_sync_memory_worker_watcher_skips_synthesis_without_worker_observations(
+    tmp_path, monkeypatch
+):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     worker_activity.mark_memory_worker_started(
@@ -1455,10 +1817,71 @@ def test_sync_watcher_launches_synthesis_after_terminal_status(tmp_path, monkeyp
         "_launch_synthesis_worker",
         lambda **kwargs: calls.append(kwargs),
     )
-    synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
+    synthesis_after = memory_lifecycle.WorkerSynthesisLaunchArgs(
         memory_dir=memory_dir,
         project_id="P-project",
         trigger="turn_memory_worker",
+    )
+
+    try:
+        memory_lifecycle._watch_memory_worker_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+            synthesis_after=synthesis_after,
+        )
+        assert calls == []
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_sync_memory_worker_watcher_combines_deferred_live_and_worker_observations(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_memory_worker_started(
+        thread_id="worker-thread",
+        run_id="run-1",
+        memory_dir=memory_dir,
+    )
+    worker_observation = record_observation_file(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Worker output also seeds synthesis.",
+        observation="The worker wrote an additional related observation.",
+        why_it_matters="Live and worker observations should synthesize together.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    calls = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        def delete(self, _thread_id):
+            pass
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_launch_synthesis_worker",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    synthesis_after = memory_lifecycle.WorkerSynthesisLaunchArgs(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        trigger="turn_memory_worker",
+        seed_observation_ids=("O-live", worker_observation["observation_id"]),
     )
 
     try:
@@ -1472,6 +1895,10 @@ def test_sync_watcher_launches_synthesis_after_terminal_status(tmp_path, monkeyp
             {
                 "memory_dir": memory_dir,
                 "project_id": "P-project",
+                "seed_observation_ids": (
+                    "O-live",
+                    worker_observation["observation_id"],
+                ),
                 "trigger": "turn_memory_worker",
             }
         ]
@@ -1662,7 +2089,7 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
         lambda **kwargs: spawned.append(kwargs),
     )
     memory_dir = tmp_path / "memories"
-    synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
+    synthesis_after = memory_lifecycle.WorkerSynthesisLaunchArgs(
         memory_dir=memory_dir,
         project_id="P-project",
         trigger="turn_memory_worker",
@@ -1753,7 +2180,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         "_spawn_memory_worker_status_thread",
         lambda **kwargs: spawned.append(kwargs),
     )
-    synthesis_after = memory_lifecycle.SynthesisLaunchArgs(
+    synthesis_after = memory_lifecycle.WorkerSynthesisLaunchArgs(
         memory_dir=tmp_path / "memories",
         project_id="P-project",
         trigger="turn_memory_worker",
@@ -1793,25 +2220,25 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_async_synthesis_worker_launch_uses_status_thread(
-    tmp_path, monkeypatch, run_async
-):
+def test_synthesis_worker_launch_uses_status_thread(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     context: memory_synthesis.SynthesisContext = {
         "project_id": "P-project",
-        "observations": [
+        "uncovered_observations": [
             {
                 "id": "O-1",
                 "path": "/memories/observations/project/P-project/O-1.md",
                 "memory_type": MemoryType.SEMANTIC.value,
                 "scope": MemoryScope.PROJECT.value,
                 "summary": "Durable observation.",
-                "body": "Durable observation.",
+                "snippet": "Durable observation.",
             }
         ],
-        "existing_knowledge": [],
-        "covered_observation_ids": [],
+        "memory_inventory": {
+            "active_knowledge_count": 0,
+            "seed_observation_count": 1,
+        },
     }
     context_digest = memory_synthesis._synthesis_context_digest(context)
 
@@ -1835,15 +2262,15 @@ def test_async_synthesis_worker_launch_uses_status_thread(
     )
 
     class _Threads:
-        async def create(self, **_kwargs):
+        def create(self, **_kwargs):
             return {"thread_id": "synthesis-thread"}
 
     class _Runs:
-        async def create(self, **_kwargs):
+        def create(self, **_kwargs):
             return {"run_id": "synthesis-run", "status": "pending"}
 
     fake_client = SimpleNamespace(threads=_Threads(), runs=_Runs())
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_sync_client", lambda **_kwargs: fake_client)
 
     spawned = []
 
@@ -1859,12 +2286,11 @@ def test_async_synthesis_worker_launch_uses_status_thread(
     monkeypatch.setattr(memory_synthesis, "_spawn_synthesis_status_thread", fake_spawn)
 
     try:
-        run_async(
-            memory_synthesis._alaunch_synthesis_worker(
-                memory_dir=memory_dir,
-                project_id="P-project",
-                trigger="turn_memory_worker",
-            )
+        memory_synthesis._launch_synthesis_worker(
+            memory_dir=memory_dir,
+            project_id="P-project",
+            seed_observation_ids=("O-1",),
+            trigger="turn_memory_worker",
         )
         assert spawned == [
             {
@@ -1879,7 +2305,7 @@ def test_async_synthesis_worker_launch_uses_status_thread(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_path):
+def test_clear_memory_worker_saved_counts_preserves_pending_worker_delta(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
@@ -2159,7 +2585,7 @@ def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
+def test_clear_memory_worker_saved_counts_does_not_recount_credited_file(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)

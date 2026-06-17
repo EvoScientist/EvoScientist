@@ -212,14 +212,14 @@ def _active_worker_output_delta(
 def _record_memory_output_delta(
     memory_dir: str | Path,
     before: MemoryOutputSnapshot,
-) -> None:
+) -> _MemoryOutputDelta:
     global _knowledge_archived, _knowledge_created, _knowledge_updated
     global _observations_recorded, _profile_updates
 
     after = snapshot_memory_outputs(memory_dir)
     delta = _memory_output_delta(memory_dir, before, after)
     if delta.is_empty:
-        return
+        return _MemoryOutputDelta()
 
     with _active_lock:
         new_profile_versions = delta.profile_versions - _counted_profile_versions
@@ -237,6 +237,13 @@ def _record_memory_output_delta(
         _knowledge_created += len(new_knowledge_created)
         _knowledge_updated += len(new_knowledge_updated)
         _knowledge_archived += len(new_knowledge_archived)
+    return _MemoryOutputDelta(
+        profile_versions=frozenset(new_profile_versions),
+        observation_files=frozenset(new_observation_files),
+        knowledge_created=frozenset(new_knowledge_created),
+        knowledge_updated=frozenset(new_knowledge_updated),
+        knowledge_archived=frozenset(new_knowledge_archived),
+    )
 
 
 def memory_worker_status() -> MemoryWorkerStatusSnapshot:
@@ -345,13 +352,14 @@ def forget_memory_worker(thread_id: str, run_id: str) -> None:
         _active_runs.pop((thread_id, run_id), None)
 
 
-def mark_memory_worker_finished(thread_id: str, run_id: str) -> None:
+def mark_memory_worker_finished(thread_id: str, run_id: str) -> frozenset[str]:
     with _active_lock:
         worker = _active_runs.pop((thread_id, run_id), None)
     if worker is None:
-        return
+        return frozenset()
 
-    _record_memory_output_delta(worker.memory_dir, worker.before_outputs)
+    delta = _record_memory_output_delta(worker.memory_dir, worker.before_outputs)
+    return frozenset(path for _root_key, path in delta.observation_files)
 
 
 def reset_memory_worker_status_for_tests() -> None:
