@@ -31,13 +31,8 @@ from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
 
-# Module-level storage for tool selection state.
-# Updated by _ToolSelectionTrackerMiddleware; read by stream/events.py.
-# NOTE: process-global, so it is not isolated across concurrent runs and must be
-# reset between tests (see reset_tool_selection_state_for_tests + the autouse
-# conftest fixture). The durable fix is to surface this to the stream layer via a
-# custom stream event (langgraph get_stream_writer / stream_mode="custom")
-# instead of module state; tracked as a separate follow-up.
+# Module-level storage for main-agent tool-selection UI state.
+# Updated only when stream tracking is enabled; read by stream/events.py.
 _current_selected_tools: list[str] = []
 _last_emitted_tools: list[str] = []  # last selection shown to user
 _total_tools_count: int = 0  # total tools before selection
@@ -95,11 +90,13 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         threshold: int = DEFAULT_TOOL_THRESHOLD,
         *,
         always_include: frozenset[str] | None = None,
+        track_stream_selection: bool = True,
     ):
         super().__init__()
         self._selector_factory = selector_factory
         self._threshold = threshold
         self._always_include = always_include or frozenset()
+        self._track_stream_selection = track_stream_selection
         # An agent's tools are fixed when its graph is compiled, so the resolved
         # always-include set is invariant across requests for this instance.
         self._selector_cache: dict[tuple[str, ...], AgentMiddleware] = {}
@@ -120,9 +117,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         if len(request.tools or []) <= self._threshold:
             return handler(request)
 
-        global _selector_active, _total_tools_count
-        _selector_active = True
-        _total_tools_count = len(request.tools or [])
+        if self._track_stream_selection:
+            global _selector_active, _total_tools_count
+            _selector_active = True
+            _total_tools_count = len(request.tools or [])
 
         # Track whether handler was called — if so, any exception is from
         # the downstream model, not the selector, and must propagate.
@@ -130,9 +128,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
 
         def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
-            global _selector_active
             _handler_called = True
-            _selector_active = False
+            if self._track_stream_selection:
+                global _selector_active
+                _selector_active = False
             return handler(req)
 
         try:
@@ -144,10 +143,12 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
                 raise  # Error from downstream model — don't retry
             # Selector itself failed (e.g., structured output not supported).
             logger.debug("Tool selector failed, using all tools", exc_info=True)
-            _selector_active = False
+            if self._track_stream_selection:
+                _selector_active = False
             return handler(request)
         finally:
-            _selector_active = False
+            if self._track_stream_selection:
+                _selector_active = False
 
     async def awrap_model_call(
         self,
@@ -157,17 +158,19 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         if len(request.tools or []) <= self._threshold:
             return await handler(request)
 
-        global _selector_active, _total_tools_count
-        _selector_active = True
-        _total_tools_count = len(request.tools or [])
+        if self._track_stream_selection:
+            global _selector_active, _total_tools_count
+            _selector_active = True
+            _total_tools_count = len(request.tools or [])
 
         _handler_called = False
 
         async def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
-            global _selector_active
             _handler_called = True
-            _selector_active = False
+            if self._track_stream_selection:
+                global _selector_active
+                _selector_active = False
             return await handler(req)
 
         try:
@@ -178,10 +181,12 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             if _handler_called:
                 raise
             logger.debug("Tool selector failed, using all tools", exc_info=True)
-            _selector_active = False
+            if self._track_stream_selection:
+                _selector_active = False
             return await handler(request)
         finally:
-            _selector_active = False
+            if self._track_stream_selection:
+                _selector_active = False
 
 
 class _ToolSelectionTrackerMiddleware(AgentMiddleware):
@@ -223,19 +228,24 @@ def create_tool_selector_middleware(
     threshold: int = DEFAULT_TOOL_THRESHOLD,
     *,
     model: BaseChatModel | None = None,
+    track_stream_selection: bool = True,
 ):
     """Build LLMToolSelectorMiddleware + tracker with EvoScientist defaults.
 
-    Returns a list of two middleware:
+    Returns middleware for adaptive tool selection:
     1. Conditional wrapper around ``LLMToolSelectorMiddleware`` — only
        activates when ``len(tools) > threshold``
-    2. ``_ToolSelectionTrackerMiddleware`` — captures selected tool names
+    2. Optional ``_ToolSelectionTrackerMiddleware`` — captures selected tool
+       names for the main-agent stream UI when ``track_stream_selection`` is true
 
     Args:
         model: Chat model for tool selection.  If *None*, the default
             model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
             Default 20.  Set to 0 to always run selection.
+        track_stream_selection: Whether to update process-global stream/UI
+            state. Disable for async sub-agents that should still select tools
+            but should not drive the main-agent tool-selection widget.
 
     ``think_tool``, ``task``, and memory tools are always included when present
     on the request because:
@@ -276,14 +286,17 @@ def create_tool_selector_middleware(
             always_include=always_include,
         )
 
-    return [
+    middleware: list[AgentMiddleware] = [
         _ConditionalToolSelectorMiddleware(
             selector_factory=selector_factory,
             threshold=threshold,
             always_include=DEFAULT_ALWAYS_INCLUDE_TOOLS,
+            track_stream_selection=track_stream_selection,
         ),
-        _ToolSelectionTrackerMiddleware(),
     ]
+    if track_stream_selection:
+        middleware.append(_ToolSelectionTrackerMiddleware())
+    return middleware
 
 
 def reset_tool_selection_state_for_tests() -> None:

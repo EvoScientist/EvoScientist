@@ -172,6 +172,36 @@ def test_selector_active_flag():
     assert ts_mod._selector_active is False
 
 
+def test_selector_can_disable_stream_tracking():
+    """Selection can run without touching the main-agent stream/UI globals."""
+    import EvoScientist.middleware.tool_selector as ts_mod
+
+    mock_selector = MagicMock()
+
+    def fake_selector_call(request, handler):
+        assert ts_mod._selector_active is False
+        return handler(request)
+
+    mock_selector.wrap_model_call.side_effect = fake_selector_call
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=MagicMock(return_value=mock_selector),
+        threshold=5,
+        track_stream_selection=False,
+    )
+
+    ts_mod._total_tools_count = 99
+    request = MagicMock()
+    request.tools = [MagicMock() for _ in range(10)]
+    handler = MagicMock()
+
+    cond.wrap_model_call(request, handler)
+
+    mock_selector.wrap_model_call.assert_called_once()
+    handler.assert_called_once()
+    assert ts_mod._selector_active is False
+    assert ts_mod._total_tools_count == 99
+
+
 def test_selector_always_includes_available_memory_tools():
     """Adaptive selection must mark available memory tools as mandatory."""
     calls = []
