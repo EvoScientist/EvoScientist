@@ -349,8 +349,7 @@ def _inject_subagent_middleware(
                     project_id=memory_middleware.project_id,
                     role=MemoryLifecycleRole.SUBAGENT,
                     source_agent=name,
-                    launch_memory_worker=worker_needed,
-                    launch_synthesis_worker=synthesis_needed,
+                    memory_controls=memory_controls,
                 )
             )
         sa.setdefault("middleware", []).extend(middleware)
@@ -754,8 +753,7 @@ def _get_default_middleware(
                     else MemoryLifecycleRole.TURN
                 ),
                 source_agent=memory_source_agent,
-                launch_memory_worker=worker_needed,
-                launch_synthesis_worker=synthesis_needed,
+                memory_controls=memory_controls,
             )
         )
 

@@ -20,7 +20,7 @@ from langchain_core.tools import BaseTool
 from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
-from EvoScientist.config import MemoryObservationWriter
+from EvoScientist.config import MemoryControls, MemoryObservationWriter
 from EvoScientist.memory import synthesis as memory_synthesis
 from EvoScientist.memory import worker_activity
 from EvoScientist.memory.knowledge import (
@@ -51,6 +51,22 @@ from EvoScientist.memory.types import (
     MemoryType,
 )
 from EvoScientist.middleware import memory_lifecycle
+
+
+def _memory_controls(
+    *,
+    profile_enabled: bool = False,
+    observation_writer: MemoryObservationWriter = MemoryObservationWriter.ALL,
+    workers_enabled: bool = True,
+    synthesis_enabled: bool = True,
+) -> MemoryControls:
+    return MemoryControls(
+        profile_enabled=profile_enabled,
+        observations_enabled=True,
+        observation_writer=observation_writer,
+        workers_enabled=workers_enabled,
+        synthesis_enabled=synthesis_enabled,
+    )
 
 
 def _read_memory_document(path) -> tuple[dict[str, Any], str]:
@@ -1168,8 +1184,9 @@ def test_turn_lifecycle_seed_ids_ignore_prior_turn_observations(tmp_path):
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
-        launch_memory_worker=False,
-        launch_synthesis_worker=True,
+        memory_controls=_memory_controls(
+            observation_writer=MemoryObservationWriter.AGENT
+        ),
     )
     messages = [
         HumanMessage("old turn"),
@@ -1216,7 +1233,11 @@ def test_turn_lifecycle_launches_worker_with_latest_turn_only(
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
-        launch_memory_worker=True,
+        memory_controls=_memory_controls(
+            profile_enabled=True,
+            observation_writer=MemoryObservationWriter.AGENT,
+            synthesis_enabled=False,
+        ),
     )
     runtime = _runtime("thread-1")
 
@@ -1246,7 +1267,7 @@ def test_turn_lifecycle_launches_worker_with_latest_turn_only(
         {"role": "human", "content": "hi"},
         {"role": "ai", "content": "done"},
     ]
-    assert calls[0]["seed_observation_ids"] == ()
+    assert calls[0]["synthesis_after"] is None
 
 
 def test_turn_lifecycle_launches_synthesis_for_live_agent_observation(
@@ -1274,8 +1295,9 @@ def test_turn_lifecycle_launches_synthesis_for_live_agent_observation(
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
-        launch_memory_worker=False,
-        launch_synthesis_worker=True,
+        memory_controls=_memory_controls(
+            observation_writer=MemoryObservationWriter.AGENT
+        ),
     )
 
     async def run():
@@ -1342,8 +1364,9 @@ def test_turn_lifecycle_defers_live_observation_synthesis_to_memory_worker(
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
-        launch_memory_worker=True,
-        launch_synthesis_worker=True,
+        memory_controls=_memory_controls(
+            observation_writer=MemoryObservationWriter.ALL
+        ),
     )
 
     async def run():
@@ -1375,7 +1398,14 @@ def test_turn_lifecycle_defers_live_observation_synthesis_to_memory_worker(
     run_async(run())
 
     assert len(worker_calls) == 1
-    assert worker_calls[0]["seed_observation_ids"] == ("O-live",)
+    assert worker_calls[0][
+        "synthesis_after"
+    ] == memory_lifecycle.WorkerSynthesisLaunchArgs(
+        memory_dir=tmp_path / "memories",
+        project_id="P-project",
+        trigger="turn_memory_worker",
+        seed_observation_ids=("O-live",),
+    )
     assert synthesis_calls == []
 
 
@@ -2189,11 +2219,6 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
         project_id="P-project",
         trigger="turn_memory_worker",
     )
-    monkeypatch.setattr(
-        memory_lifecycle,
-        "_synthesis_after_worker_args",
-        lambda **_kwargs: synthesis_after,
-    )
 
     trajectory: list[memory_lifecycle.CompactMessage] = [
         {"role": "human", "content": "hi"}
@@ -2206,6 +2231,7 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
         source_agent="EvoScientist",
         session_id="thread-1",
         trajectory=trajectory,
+        synthesis_after=synthesis_after,
     )
 
     try:
@@ -2280,11 +2306,6 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         project_id="P-project",
         trigger="turn_memory_worker",
     )
-    monkeypatch.setattr(
-        memory_lifecycle,
-        "_synthesis_after_worker_args",
-        lambda **_kwargs: synthesis_after,
-    )
 
     async def run():
         event_loop_thread = threading.get_ident()
@@ -2295,6 +2316,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
             source_agent="EvoScientist",
             session_id="thread-1",
             trajectory=[{"role": "human", "content": "hi"}],
+            synthesis_after=synthesis_after,
         )
         return event_loop_thread
 

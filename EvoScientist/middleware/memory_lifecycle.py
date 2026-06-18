@@ -159,7 +159,7 @@ class MemoryWorkerLaunchArgs(TypedDict):
     source_agent: str
     session_id: str
     trajectory: list[CompactMessage]
-    seed_observation_ids: tuple[str, ...]
+    synthesis_after: WorkerSynthesisLaunchArgs | None
 
 
 class MemoryWorkerRunPayload(TypedDict):
@@ -1188,9 +1188,12 @@ def _synthesis_after_worker_args(
     project_id: str,
     role: MemoryLifecycleRole,
     seed_observation_ids: tuple[str, ...] = (),
+    memory_controls: MemoryControls | None = None,
 ) -> WorkerSynthesisLaunchArgs | None:
     """Return synthesis launch metadata when the feature is enabled."""
-    memory_controls = MemoryControls.from_config(get_effective_config())
+    memory_controls = memory_controls or MemoryControls.from_config(
+        get_effective_config()
+    )
     if not memory_controls.synthesis_worker_needed:
         return None
     seed_observation_ids = dedupe_ids(seed_observation_ids, require_prefix="O-")
@@ -1214,7 +1217,7 @@ def _launch_memory_worker(
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
-    seed_observation_ids: tuple[str, ...] = (),
+    synthesis_after: WorkerSynthesisLaunchArgs | None = None,
 ) -> None:
     """Submit a background memory worker run to the LangGraph dev server."""
     from langgraph_sdk import get_sync_client
@@ -1251,12 +1254,6 @@ def _launch_memory_worker(
             memory_dir=memory_dir,
             before_outputs=before_outputs,
         )
-        synthesis_after = _synthesis_after_worker_args(
-            memory_dir=memory_dir,
-            project_id=project_id,
-            role=role,
-            seed_observation_ids=seed_observation_ids,
-        )
         try:
             _spawn_memory_worker_status_thread(
                 url=url,
@@ -1277,7 +1274,7 @@ async def _alaunch_memory_worker(
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
-    seed_observation_ids: tuple[str, ...] = (),
+    synthesis_after: WorkerSynthesisLaunchArgs | None = None,
 ) -> None:
     """Submit a background memory worker run without involving the live agent."""
     from langgraph_sdk import get_client
@@ -1314,12 +1311,6 @@ async def _alaunch_memory_worker(
             memory_dir=memory_dir,
             before_outputs=before_outputs,
         )
-        synthesis_after = _synthesis_after_worker_args(
-            memory_dir=memory_dir,
-            project_id=project_id,
-            role=role,
-            seed_observation_ids=seed_observation_ids,
-        )
         try:
             _spawn_memory_worker_status_thread(
                 url=url,
@@ -1345,15 +1336,37 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         project_id: str,
         role: MemoryLifecycleRole,
         source_agent: str,
-        launch_memory_worker: bool = True,
-        launch_synthesis_worker: bool = True,
+        memory_controls: MemoryControls | None = None,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         self._project_id = project_id
         self._role = role
         self._source_agent = source_agent
-        self._launch_memory_worker = launch_memory_worker
-        self._launch_synthesis_worker = launch_synthesis_worker
+        self._memory_controls = memory_controls or MemoryControls.from_config(
+            get_effective_config()
+        )
+
+    @property
+    def _launch_memory_worker(self) -> bool:
+        return self._memory_controls.worker_needed(self._role.observation_target)
+
+    @property
+    def _launch_synthesis_worker(self) -> bool:
+        return self._memory_controls.synthesis_worker_needed
+
+    def _worker_synthesis_after(
+        self,
+        seed_observation_ids: tuple[str, ...],
+    ) -> WorkerSynthesisLaunchArgs | None:
+        if not self._launch_synthesis_worker:
+            return None
+        return _synthesis_after_worker_args(
+            memory_dir=self._memory_dir,
+            project_id=self._project_id,
+            role=self._role,
+            seed_observation_ids=seed_observation_ids,
+            memory_controls=self._memory_controls,
+        )
 
     def _worker_args(
         self,
@@ -1378,7 +1391,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
                 "source_agent": self._source_agent,
                 "session_id": session_id,
                 "trajectory": trajectory,
-                "seed_observation_ids": seed_observation_ids,
+                "synthesis_after": self._worker_synthesis_after(seed_observation_ids),
             }
 
         trajectory = _compact_messages(_state_messages(state))
@@ -1391,7 +1404,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
             "source_agent": self._source_agent,
             "session_id": session_id,
             "trajectory": trajectory,
-            "seed_observation_ids": seed_observation_ids,
+            "synthesis_after": self._worker_synthesis_after(seed_observation_ids),
         }
 
     def _launch_synthesis_from_seeds(
@@ -1485,8 +1498,7 @@ def create_memory_lifecycle_middleware(
     project_id: str,
     role: MemoryLifecycleRole,
     source_agent: str,
-    launch_memory_worker: bool = True,
-    launch_synthesis_worker: bool = True,
+    memory_controls: MemoryControls | None = None,
 ) -> EvoMemoryLifecycleMiddleware:
     """Build the post-run EvoMemory lifecycle middleware."""
 
@@ -1498,6 +1510,5 @@ def create_memory_lifecycle_middleware(
         project_id=project_id,
         role=role,
         source_agent=source_agent,
-        launch_memory_worker=launch_memory_worker,
-        launch_synthesis_worker=launch_synthesis_worker,
+        memory_controls=memory_controls,
     )
