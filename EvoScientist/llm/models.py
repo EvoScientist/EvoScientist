@@ -65,6 +65,7 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 
 # Model registry: list of (short_name, model_id, provider)
@@ -238,6 +239,10 @@ def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
         List of (short_name, model_id) tuples for the provider.
     """
     return [(name, model_id) for name, model_id, p in _MODEL_ENTRIES if p == provider]
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
 def _env_flag_disabled(name: str) -> bool:
