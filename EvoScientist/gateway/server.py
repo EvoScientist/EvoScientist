@@ -245,11 +245,14 @@ class LangGraphServerThreadStore(ThreadStore):
         rows: list[dict[str, Any]] = []
         for thread in threads:
             thread_id = thread["thread_id"]
+            metadata = _thread_metadata(thread)
             row: dict[str, Any] = {
                 "thread_id": thread_id,
                 "created_at": thread.get("created_at"),
                 "updated_at": thread.get("updated_at"),
-                "metadata": _thread_metadata(thread),
+                "workspace_dir": metadata.get("workspace_dir"),
+                "model": metadata.get("model"),
+                "metadata": metadata,
             }
             if include_message_count or include_preview:
                 messages = await self.get_thread_messages(thread_id)
