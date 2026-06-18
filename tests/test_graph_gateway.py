@@ -343,6 +343,49 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     assert threads.deleted == ["abc12345"]
 
 
+def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "abc12345",
+                "metadata": {"graph_id": "EvoScientist"},
+            }
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    result = run_async(store.resolve_thread_id_prefix("abc"))
+
+    assert result == ("abc12345", [])
+    assert threads.gets == []
+    assert len(threads.searches) == 1
+
+
+def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
+    thread_id = "019ed9e4-4253-7f62-b50f-f0470a4b3c9f"
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": thread_id,
+                "metadata": {"graph_id": "EvoScientist"},
+            }
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    result = run_async(store.resolve_thread_id_prefix(thread_id))
+
+    assert result == (thread_id, [])
+    assert threads.gets == [thread_id]
+    assert threads.searches == []
+
+
 def test_langgraph_server_thread_store_clones_thread_with_metadata():
     clone_metadata = {
         "clone_purpose": "memory_extraction",

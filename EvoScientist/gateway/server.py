@@ -82,6 +82,14 @@ def _thread_preview(messages: list[BaseMessage]) -> str:
     return ""
 
 
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
     values = state.get("values")
     if not isinstance(values, dict):
@@ -188,11 +196,12 @@ class LangGraphServerThreadStore(ThreadStore):
         thread_id_or_prefix: str,
         graph_id: str | None = None,
     ) -> tuple[str | None, list[str]]:
-        try:
-            thread = await self.client.threads.get(thread_id_or_prefix)
-            return thread["thread_id"], []
-        except NotFoundError:
-            pass
+        if _is_uuid(thread_id_or_prefix):
+            try:
+                thread = await self.client.threads.get(thread_id_or_prefix)
+                return thread["thread_id"], []
+            except NotFoundError:
+                pass
 
         threads = await self.client.threads.search(
             metadata={"graph_id": self._target_graph_id(graph_id)},
