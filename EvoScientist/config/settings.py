@@ -223,8 +223,9 @@ class EvoScientistConfig:
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
     reasoning_effort: str = "high"
-    # Opt into Anthropic prompt caching for OpenRouter anthropic/* models.
-    openrouter_anthropic_prompt_cache: bool = False
+    # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
+    # cache-write costs outweigh the benefit for a workflow.
+    openrouter_anthropic_prompt_cache: bool = True
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -773,10 +774,10 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
-    if config.openrouter_anthropic_prompt_cache and not os.environ.get(
+    if not config.openrouter_anthropic_prompt_cache and not os.environ.get(
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):
-        os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "true"
+        os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "false"
     # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)

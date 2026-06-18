@@ -440,10 +440,10 @@ class TestThirdPartyRouting:
         assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openrouter_anthropic_prompt_cache_disabled_by_default(
+    def test_openrouter_anthropic_prompt_cache_enabled_by_default(
         self, mock_init, monkeypatch
     ):
-        """OpenRouter Anthropic prompt caching should be opt-in."""
+        """OpenRouter Anthropic prompt caching should be opt-out."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
         monkeypatch.delenv(
@@ -453,25 +453,25 @@ class TestThirdPartyRouting:
         get_chat_model("claude-sonnet-4.6", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
-        assert "cache_control" not in call_kwargs
-        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openrouter_anthropic_prompt_cache_opt_in(self, mock_init, monkeypatch):
-        """The opt-in flag should declare caching for OpenRouter Claude models."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "true")
-
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
-
-        call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openrouter"
         assert call_kwargs["model"] == "anthropic/claude-sonnet-4.6"
         assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_prompt_cache_opt_in_skips_non_anthropic_openrouter(
+    def test_openrouter_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
+        """The opt-out flag should skip caching for OpenRouter Claude models."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "false")
+
+        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_prompt_cache_default_skips_non_anthropic_openrouter(
         self, mock_init, monkeypatch
     ):
         """OpenRouter models with implicit caching should be left alone."""

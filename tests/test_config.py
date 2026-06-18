@@ -120,7 +120,7 @@ class TestEvoScientistConfig:
         assert config.ui_backend == "tui"
         assert config.log_level == "warning"
         assert config.reasoning_effort == "high"
-        assert config.openrouter_anthropic_prompt_cache is False
+        assert config.openrouter_anthropic_prompt_cache is True
         assert config.memory_profile_enabled is True
         assert config.memory_observations_enabled is True
         assert config.memory_observation_writer == MemoryObservationWriter.ALL
@@ -579,22 +579,22 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.openai_auth_mode == "oauth"
 
-    def test_env_openrouter_anthropic_prompt_cache_override(
+    def test_env_openrouter_anthropic_prompt_cache_opt_out(
         self, temp_config_dir, monkeypatch
     ):
-        """Test OpenRouter Anthropic prompt cache flag from env overrides file."""
-        save_config(EvoScientistConfig(openrouter_anthropic_prompt_cache=False))
-        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "true")
+        """Test OpenRouter Anthropic prompt cache opt-out env overrides file."""
+        save_config(EvoScientistConfig(openrouter_anthropic_prompt_cache=True))
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "false")
 
         config = get_effective_config()
-        assert config.openrouter_anthropic_prompt_cache is True
+        assert config.openrouter_anthropic_prompt_cache is False
 
     def test_set_openrouter_anthropic_prompt_cache(self, temp_config_dir, clean_env):
         """Test OpenRouter Anthropic prompt cache can be set through config."""
         save_config(EvoScientistConfig())
 
-        assert set_config_value("openrouter_anthropic_prompt_cache", "true") is True
-        assert get_config_value("openrouter_anthropic_prompt_cache") is True
+        assert set_config_value("openrouter_anthropic_prompt_cache", "false") is True
+        assert get_config_value("openrouter_anthropic_prompt_cache") is False
 
 
 # =============================================================================
@@ -635,16 +635,18 @@ class TestApplyConfigToEnv:
         assert os.environ.get("OPENAI_API_KEY") is None
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") is None
 
-    def test_openrouter_anthropic_prompt_cache_applied(self, clean_env, monkeypatch):
-        """Test OpenRouter Anthropic prompt cache config is applied to env."""
+    def test_openrouter_anthropic_prompt_cache_opt_out_applied(
+        self, clean_env, monkeypatch
+    ):
+        """Test OpenRouter Anthropic prompt cache opt-out config is applied to env."""
         monkeypatch.delenv(
             "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", raising=False
         )
-        config = EvoScientistConfig(openrouter_anthropic_prompt_cache=True)
+        config = EvoScientistConfig(openrouter_anthropic_prompt_cache=False)
         apply_config_to_env(config)
 
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") == (
-            "true"
+            "false"
         )
 
     def test_dangerous_mode_round_trips_to_env(self, clean_env, monkeypatch):

@@ -65,7 +65,7 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 
-_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
@@ -240,8 +240,9 @@ def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
     return [(name, model_id) for name, model_id, p in _MODEL_ENTRIES if p == provider]
 
 
-def _env_flag_enabled(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
+def _env_flag_disabled(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() in _FALSEY_ENV_VALUES
 
 
 def _supports_openrouter_anthropic_prompt_cache(provider: str, model_id: str) -> bool:
@@ -275,12 +276,12 @@ def _apply_openrouter_anthropic_prompt_cache(
     model_id: str,
     kwargs: dict[str, Any],
 ) -> None:
-    """Opt into OpenRouter Claude prompt caching when explicitly requested.
+    """Declare OpenRouter Claude prompt caching unless explicitly disabled.
 
     OpenRouter already handles implicit caching for most providers, but Claude
     prompt caching needs Anthropic-style cache-control declaration.
     """
-    if not _env_flag_enabled("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"):
+    if _env_flag_disabled("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"):
         return
     if not _supports_openrouter_anthropic_prompt_cache(provider, model_id):
         return
