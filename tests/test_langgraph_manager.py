@@ -269,6 +269,31 @@ class TestEnsureLanggraphDev:
         start.assert_called_once()
         assert manager.is_async_subagents_available() is True
 
+    def test_skips_read_only_observation_memory_without_profile_workers(
+        self, tmp_path, runtime_paths
+    ):
+        """Read-only observation memory should not start langgraph dev."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_profile_enabled = False
+        cfg.memory_observations_enabled = True
+        cfg.memory_observation_writer = MemoryObservationWriter.OFF
+        cfg.memory_workers_enabled = True
+        cfg.memory_synthesis_enabled = True
+        cfg.langgraph_dev_port = 6174
+        cfg.langgraph_dev_file_persistence = True
+
+        with (
+            patch.object(manager, "is_langgraph_dev_running") as mock_running,
+            patch.object(manager, "start_langgraph_dev") as start,
+        ):
+            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
+
+        assert result is None
+        mock_running.assert_not_called()
+        start.assert_not_called()
+        assert manager.is_async_subagents_available() is False
+
     def test_skips_when_async_and_memory_workers_disabled(
         self, tmp_path, runtime_paths
     ):

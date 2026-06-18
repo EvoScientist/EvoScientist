@@ -467,6 +467,10 @@ class MemoryControls:
             self.workers_enabled
             and self.observations_enabled
             and self.synthesis_enabled
+            and any(
+                self.observation_tool_enabled(target)
+                for target in MemoryObservationTarget
+            )
         )
 
 

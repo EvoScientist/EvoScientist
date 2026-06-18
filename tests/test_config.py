@@ -394,6 +394,15 @@ class TestGetSetValues:
                 memory_synthesis_enabled=True,
             )
         )
+        off_controls = MemoryControls.from_config(
+            EvoScientistConfig(
+                memory_profile_enabled=False,
+                memory_observations_enabled=True,
+                memory_observation_writer=MemoryObservationWriter.OFF,
+                memory_workers_enabled=True,
+                memory_synthesis_enabled=True,
+            )
+        )
         debug_controls = MemoryControls.from_config(
             EvoScientistConfig(memory_worker_thread_cleanup_enabled=False)
         )
@@ -420,6 +429,9 @@ class TestGetSetValues:
         assert not agent_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
         assert agent_controls.synthesis_worker_needed
         assert agent_controls.observation_tool_enabled(MemoryObservationTarget.AGENT)
+        assert not off_controls.observation_tool_enabled(MemoryObservationTarget.AGENT)
+        assert not off_controls.worker_needed(MemoryObservationTarget.TURN_WORKER)
+        assert not off_controls.synthesis_worker_needed
         assert not MemoryControls.from_config(
             EvoScientistConfig(
                 memory_profile_enabled=False,
