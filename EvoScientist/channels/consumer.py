@@ -472,6 +472,8 @@ class InboundConsumer:
         session_key: str,
     ) -> None:
         """Stream agent events with HITL interrupt handling."""
+        from langgraph.types import Command
+
         stream_input: GraphRunInput = msg.content
 
         try:
@@ -603,7 +605,6 @@ class InboundConsumer:
                         interrupt_data,
                         session_key,
                     )
-                    from langgraph.types import Command
 
                     stream_input = Command(resume=result)
                     continue
@@ -614,8 +615,6 @@ class InboundConsumer:
 
                 # Session auto-approve (user previously chose "Approve all")
                 if session_key in self._auto_approve_sessions:
-                    from langgraph.types import Command
-
                     stream_input = Command(
                         resume={"decisions": [{"type": "approve"} for _ in range(n)]}
                     )
@@ -623,8 +622,6 @@ class InboundConsumer:
 
                 # Config auto-approve (auto_approve, non-execute, allow_list)
                 if _should_auto_approve(action_reqs):
-                    from langgraph.types import Command
-
                     stream_input = Command(
                         resume={"decisions": [{"type": "approve"} for _ in range(n)]}
                     )
@@ -711,8 +708,6 @@ class InboundConsumer:
 
                 if decision == "auto":
                     self._auto_approve_sessions.add(session_key)
-
-                from langgraph.types import Command
 
                 stream_input = Command(
                     resume={"decisions": [{"type": "approve"} for _ in range(n)]}
