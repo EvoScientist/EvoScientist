@@ -238,29 +238,10 @@ class LangGraphServerThreadStore(ThreadStore):
     ) -> list[dict[str, Any]]:
         target_graph_id = self._target_graph_id(graph_id)
 
-        async def _search_threads(*, limit: int, offset: int = 0) -> list[Thread]:
-            return await self.client.threads.search(
-                metadata={"graph_id": target_graph_id},
-                limit=limit,
-                offset=offset,
-                sort_by="updated_at",
-                sort_order="desc",
-            )
-
-        if limit > 0:
-            threads = await _search_threads(limit=limit)
-        else:
-            threads: list[Thread] = []
-            offset = 0
-            while True:
-                page = await _search_threads(
-                    limit=_THREAD_SEARCH_LIMIT,
-                    offset=offset,
-                )
-                threads.extend(page)
-                if len(page) < _THREAD_SEARCH_LIMIT:
-                    break
-                offset += _THREAD_SEARCH_LIMIT
+        threads = await self._search_threads(
+            target_graph_id=target_graph_id,
+            limit=limit,
+        )
         rows: list[dict[str, Any]] = []
         for thread in threads:
             thread_id = thread["thread_id"]
@@ -284,17 +265,16 @@ class LangGraphServerThreadStore(ThreadStore):
         thread_id_or_prefix: str,
         graph_id: str | None = None,
     ) -> tuple[str | None, list[str]]:
+        target_graph_id = self._target_graph_id(graph_id)
         if _is_uuid(thread_id_or_prefix):
             try:
                 thread = await self.client.threads.get(thread_id_or_prefix)
-                return thread["thread_id"], []
+                if _thread_metadata(thread).get("graph_id") == target_graph_id:
+                    return thread["thread_id"], []
             except NotFoundError:
                 pass
 
-        threads = await self.client.threads.search(
-            metadata={"graph_id": self._target_graph_id(graph_id)},
-            limit=_THREAD_SEARCH_LIMIT,
-        )
+        threads = await self._search_threads(target_graph_id=target_graph_id)
         matches = sorted(
             thread["thread_id"]
             for thread in threads
@@ -303,6 +283,49 @@ class LangGraphServerThreadStore(ThreadStore):
         if len(matches) == 1:
             return matches[0], []
         return None, matches
+
+    async def _search_threads(
+        self,
+        *,
+        target_graph_id: str,
+        limit: int | None = None,
+    ) -> list[Thread]:
+        if limit is not None and limit > 0:
+            return await self._search_thread_page(
+                target_graph_id=target_graph_id,
+                limit=limit,
+            )
+        return await self._search_all_threads(target_graph_id=target_graph_id)
+
+    async def _search_thread_page(
+        self,
+        *,
+        target_graph_id: str,
+        limit: int,
+        offset: int = 0,
+    ) -> list[Thread]:
+        return await self.client.threads.search(
+            metadata={"graph_id": target_graph_id},
+            limit=limit,
+            offset=offset,
+            sort_by="updated_at",
+            sort_order="desc",
+        )
+
+    async def _search_all_threads(self, *, target_graph_id: str) -> list[Thread]:
+        threads: list[Thread] = []
+        offset = 0
+        while True:
+            page = await self._search_thread_page(
+                target_graph_id=target_graph_id,
+                limit=_THREAD_SEARCH_LIMIT,
+                offset=offset,
+            )
+            threads.extend(page)
+            if len(page) < _THREAD_SEARCH_LIMIT:
+                break
+            offset += _THREAD_SEARCH_LIMIT
+        return threads
 
     async def get_thread_metadata(self, thread_id: str) -> dict[str, Any] | None:
         try:

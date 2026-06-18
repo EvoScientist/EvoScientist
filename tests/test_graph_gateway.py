@@ -418,6 +418,35 @@ def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():
     assert len(threads.searches) == 1
 
 
+def test_langgraph_server_thread_store_prefix_resolution_pages_all_threads():
+    rows = [
+        {
+            "thread_id": f"thread-{index}",
+            "metadata": {"graph_id": "EvoScientist"},
+        }
+        for index in range(_THREAD_SEARCH_LIMIT)
+    ]
+    rows.append(
+        {
+            "thread_id": "older-thread-match",
+            "metadata": {"graph_id": "EvoScientist"},
+        }
+    )
+    threads = FakeLangGraphThreadsClient(threads=rows)
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    result = run_async(store.resolve_thread_id_prefix("older-thread"))
+
+    assert result == ("older-thread-match", [])
+    assert [(search["limit"], search["offset"]) for search in threads.searches] == [
+        (_THREAD_SEARCH_LIMIT, 0),
+        (_THREAD_SEARCH_LIMIT, _THREAD_SEARCH_LIMIT),
+    ]
+
+
 def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
     thread_id = "019ed9e4-4253-7f62-b50f-f0470a4b3c9f"
     threads = FakeLangGraphThreadsClient(
@@ -438,6 +467,30 @@ def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
     assert result == (thread_id, [])
     assert threads.gets == [thread_id]
     assert threads.searches == []
+
+
+def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
+    thread_id = "019ed9e4-4253-7f62-b50f-f0470a4b3c9f"
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": thread_id,
+                "metadata": {"graph_id": "other-agent"},
+            }
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    result = run_async(store.resolve_thread_id_prefix(thread_id))
+
+    assert result == (None, [])
+    assert threads.gets == [thread_id]
+    assert [(search["limit"], search["offset"]) for search in threads.searches] == [
+        (_THREAD_SEARCH_LIMIT, 0)
+    ]
 
 
 def test_langgraph_server_thread_store_clones_thread_with_metadata():
