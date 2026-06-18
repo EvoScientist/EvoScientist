@@ -546,5 +546,5 @@ class FakeLangGraphClient(LangGraphClient):
 
 
 def _not_found_response() -> httpx.Response:
-    request = httpx.Request("GET", "http://test.local/not-found")
+    request = httpx.Request("GET", "https://test.local/not-found")
     return httpx.Response(404, request=request)
