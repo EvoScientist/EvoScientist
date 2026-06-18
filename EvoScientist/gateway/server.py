@@ -90,6 +90,35 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
+def _input_requested_event_from_interrupt(
+    interrupt: Mapping[str, object],
+) -> dict[str, Any]:
+    return {
+        "type": "event",
+        "method": "input.requested",
+        "params": {
+            "namespace": interrupt.get("namespace") or [],
+            "data": {
+                "interrupt_id": interrupt.get("interrupt_id")
+                or interrupt.get("id")
+                or "default",
+                "value": interrupt.get("value"),
+            },
+        },
+    }
+
+
+def _state_interrupts(state: ThreadState) -> list[Mapping[str, object]]:
+    interrupts = state.get("interrupts")
+    if not isinstance(interrupts, list):
+        return []
+    return [interrupt for interrupt in interrupts if isinstance(interrupt, Mapping)]
+
+
+def _is_interrupt_event(event: Mapping[str, object]) -> bool:
+    return event.get("type") in {"interrupt", "ask_user"}
+
+
 def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
     values = state.get("values")
     if not isinstance(values, dict):
@@ -530,6 +559,32 @@ class LangGraphServerGateway:
             return {}
         return {str(key): value for key, value in values.items()}
 
+    async def _pending_interrupt_events(
+        self,
+        stream: AsyncThreadStream,
+        thread_id: str,
+        processor: _V3EventProcessor,
+    ) -> list[GraphEvent]:
+        events: list[GraphEvent] = []
+        for interrupt in stream.interrupts:
+            events.extend(
+                await processor.process(_input_requested_event_from_interrupt(interrupt))
+            )
+
+        if events or not stream.interrupted:
+            return events
+
+        try:
+            state = await self.thread_store.client.threads.get_state(thread_id)
+        except NotFoundError:
+            return events
+
+        for interrupt in _state_interrupts(state):
+            events.extend(
+                await processor.process(_input_requested_event_from_interrupt(interrupt))
+            )
+        return events
+
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
         existing_summarization_event: Mapping[str, object] | None = None
@@ -554,6 +609,7 @@ class LangGraphServerGateway:
         try:
             async with stream:
                 await self._start_or_resume(stream, request)
+                emitted_interrupt = False
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
@@ -562,7 +618,17 @@ class LangGraphServerGateway:
                     for subagent_event in tracker.process(event_map):
                         yield subagent_event
                     for normalized in await processor.process(event_map):
+                        emitted_interrupt = emitted_interrupt or _is_interrupt_event(
+                            normalized
+                        )
                         yield normalized
+                if not emitted_interrupt:
+                    for event in await self._pending_interrupt_events(
+                        stream,
+                        request.thread_id,
+                        processor,
+                    ):
+                        yield event
         except Exception as exc:
             yield emitter.error(str(exc)).data
             raise

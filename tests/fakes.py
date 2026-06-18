@@ -368,10 +368,12 @@ class FakeLangGraphThreadStream:
         events: Iterable[dict[str, Any]] | None = None,
         *,
         interrupts: list[dict[str, Any]] | None = None,
+        interrupted: bool = False,
     ) -> None:
         self.thread_id = thread_id
         self.events = list(events or [])
         self.interrupts = interrupts or []
+        self.interrupted = interrupted
         self.run = FakeLangGraphRunModule()
         self.subscribed_channels: list[list[str]] = []
         self.entered = False

@@ -651,6 +651,81 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
     ]
 
 
+def test_langgraph_server_gateway_emits_state_interrupt_before_done():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[{"interrupt_id": "interrupt-1", "value": None}],
+        interrupted=True,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {},
+                "interrupts": [
+                    {
+                        "id": "interrupt-1",
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "name": "execute",
+                                    "args": {"command": "echo hello"},
+                                    "id": "tool-1",
+                                }
+                            ],
+                            "review_configs": [
+                                {
+                                    "action_name": "execute",
+                                    "allowed_decisions": ["approve", "reject"],
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            )
+        ]
+
+    events = run_async(_collect())
+
+    assert events == [
+        {
+            "type": "interrupt",
+            "interrupt_id": "interrupt-1",
+            "action_requests": [
+                {
+                    "name": "execute",
+                    "args": {"command": "echo hello"},
+                    "id": "tool-1",
+                }
+            ],
+            "review_configs": [
+                {
+                    "action_name": "execute",
+                    "allowed_decisions": ["approve", "reject"],
+                }
+            ],
+        },
+        {"type": "done", "content": "", "response": ""},
+    ]
+
+
 def test_langgraph_server_gateway_streams_subagent_protocol_events():
     stream = FakeLangGraphThreadStream(
         "abc12345",
