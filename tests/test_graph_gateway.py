@@ -17,6 +17,7 @@ from EvoScientist.gateway import (
     RuntimeGateways,
     create_runtime_gateways,
 )
+from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
 from EvoScientist.stream import display as display_mod
 from tests.conftest import run_async
 from tests.fakes import (
@@ -341,6 +342,53 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     assert result["exists"] is True
     assert result["deleted"] is True
     assert threads.deleted == ["abc12345"]
+
+
+def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
+    rows = [
+        {
+            "thread_id": f"thread-{index}",
+            "metadata": {"graph_id": "EvoScientist"},
+        }
+        for index in range(_THREAD_SEARCH_LIMIT + 1)
+    ]
+    threads = FakeLangGraphThreadsClient(threads=rows)
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    result = run_async(store.list_threads(limit=0))
+
+    assert [row["thread_id"] for row in result] == [
+        f"thread-{index}" for index in range(_THREAD_SEARCH_LIMIT + 1)
+    ]
+    assert [
+        (search["limit"], search["offset"]) for search in threads.searches
+    ] == [(_THREAD_SEARCH_LIMIT, 0), (_THREAD_SEARCH_LIMIT, _THREAD_SEARCH_LIMIT)]
+
+
+def test_langgraph_server_thread_store_positive_limit_uses_single_search():
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": f"thread-{index}",
+                "metadata": {"graph_id": "EvoScientist"},
+            }
+            for index in range(3)
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        base_url="http://localhost:2024",
+        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+    )
+
+    result = run_async(store.list_threads(limit=2))
+
+    assert [row["thread_id"] for row in result] == ["thread-0", "thread-1"]
+    assert [(search["limit"], search["offset"]) for search in threads.searches] == [
+        (2, 0)
+    ]
 
 
 def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():

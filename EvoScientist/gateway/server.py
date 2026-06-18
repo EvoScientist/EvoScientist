@@ -167,12 +167,31 @@ class LangGraphServerThreadStore(ThreadStore):
         include_preview: bool = False,
         graph_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        threads = await self.client.threads.search(
-            metadata={"graph_id": self._target_graph_id(graph_id)},
-            limit=limit,
-            sort_by="updated_at",
-            sort_order="desc",
-        )
+        target_graph_id = self._target_graph_id(graph_id)
+
+        async def _search_threads(*, limit: int, offset: int = 0) -> list[Thread]:
+            return await self.client.threads.search(
+                metadata={"graph_id": target_graph_id},
+                limit=limit,
+                offset=offset,
+                sort_by="updated_at",
+                sort_order="desc",
+            )
+
+        if limit > 0:
+            threads = await _search_threads(limit=limit)
+        else:
+            threads: list[Thread] = []
+            offset = 0
+            while True:
+                page = await _search_threads(
+                    limit=_THREAD_SEARCH_LIMIT,
+                    offset=offset,
+                )
+                threads.extend(page)
+                if len(page) < _THREAD_SEARCH_LIMIT:
+                    break
+                offset += _THREAD_SEARCH_LIMIT
         rows: list[dict[str, Any]] = []
         for thread in threads:
             thread_id = thread["thread_id"]
