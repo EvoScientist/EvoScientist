@@ -2114,6 +2114,44 @@ def test_synthesis_runner_aborted_poll_keeps_context_active_without_retry(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_synthesis_runner_client_creation_failure_releases_context(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    worker_activity.mark_synthesis_started(
+        project_id="P-project",
+        context_digest="digest-1",
+        memory_dir=memory_dir,
+        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
+    )
+
+    attempts = 0
+
+    def fail_get_sync_client(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("client failed")
+
+    monkeypatch.setattr("langgraph_sdk.get_sync_client", fail_get_sync_client)
+    monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_RETRY_BACKOFF_SECONDS", 0)
+
+    try:
+        assert worker_activity.memory_worker_status().synthesis_running is True
+        memory_synthesis._run_synthesis_with_retries(
+            url="http://x",
+            project_id="P-project",
+            context=_empty_synthesis_context(),
+            trigger="t",
+            active_key=("P-project", "digest-1"),
+            max_attempts=2,
+        )
+        assert attempts == 2
+        assert worker_activity.memory_worker_status().synthesis_running is False
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_synthesis_runner_retries_then_stops_on_success(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"

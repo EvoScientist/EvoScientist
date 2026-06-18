@@ -853,7 +853,7 @@ def _submit_and_watch_synthesis_run(
         client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
     except Exception:
         logger.warning("Failed to create EvoMemory synthesis client", exc_info=True)
-        return _SynthesisRunOutcome.ABORTED
+        return _SynthesisRunOutcome.FAILED
 
     thread_id: str | None = None
     try:
