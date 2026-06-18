@@ -2668,15 +2668,13 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert len(added) == 1, f"expected 1 restored thread, got {added}"
         assert added[0]["metadata"].get("title") == "hello title test"
 
-    def test_removes_ghost_entries_absent_from_sqlite(self):
-        """Stale .pckl UUID entries with no checkpoint rows are dropped.
+    def test_removes_preloaded_uuid_entries_outside_restore_scope(self):
+        """Stale and out-of-scope .pckl UUID entries are dropped.
 
-        Ghost entries point at deleted/lost state and render as empty
-        sessions (the #277 symptom). Existence is checked against ALL UUID
-        threads in the DB, not the scoped restore set: a thread whose
-        checkpoints exist but fall outside the restore scope still opens
-        fine, so it must NOT be treated as a ghost. CLI-style non-UUID
-        entries are never touched.
+        Stale UUID entries point at deleted/lost state and render as empty
+        sessions (the #277 symptom). Out-of-scope UUID entries point at another
+        workspace's state and must not remain in this server's unauthenticated
+        thread registry. CLI-style non-UUID entries are never touched.
         """
         import sys
         import uuid as _uuid_mod
@@ -2724,8 +2722,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert _uuid_mod.UUID(ghost) not in ids, f"ghost must be removed, got {ids}"
         assert ghost not in ids, f"ghost must be removed (str form), got {ids}"
         assert "notauuid" in ids, "CLI-style entries must never be touched"
-        # Out-of-scope but existing in DB: kept (state still loads when opened).
-        assert _uuid_mod.UUID(out_of_scope) in ids
+        assert _uuid_mod.UUID(out_of_scope) not in ids
+        assert out_of_scope not in ids
         # In-scope thread restored as usual.
         assert _uuid_mod.UUID(in_scope) in ids
 

@@ -1519,11 +1519,6 @@ async def _restore_webui_threads_to_global_store() -> None:
 
     try:
         rows: list[Any] = []
-        # All UUID threads that have ANY checkpoint rows — the existence
-        # check for ghost removal (deliberately unscoped: a thread whose
-        # checkpoints exist but fall outside the restore scope is not a
-        # ghost, its state still loads when opened).
-        uuid_threads_in_db: set[uuid.UUID] = set()
         # Restore scope: graph threads belonging to THIS server's workspace.
         # sessions.db is machine-global, so an unscoped restore would
         # resurrect every workspace's history into this server's thread
@@ -1573,7 +1568,6 @@ async def _restore_webui_threads_to_global_store() -> None:
                 thread_uuid = _to_uuid_safe(thread_id_str)
                 if thread_uuid is None:
                     continue
-                uuid_threads_in_db.add(thread_uuid)
                 restored_graph_id = graph_id
                 if restored_graph_id is None and agent_name == AGENT_NAME:
                     restored_graph_id = AGENT_NAME
@@ -1610,16 +1604,16 @@ async def _restore_webui_threads_to_global_store() -> None:
                     pass
             return datetime.now(UTC)
 
-        # Drop ghost entries: a .pckl-loaded UUID entry with no checkpoint
-        # rows opens as an empty session (the #277 symptom). Slice
-        # assignment mutates the live registry list.
+        # Drop stale registry entries: UUID entries outside the scoped restore
+        # set either point at missing state or another workspace's state.
+        # Slice assignment mutates the live registry list.
         store_threads: list[dict[str, Any]] = GLOBAL_STORE.get("threads", [])
         before = len(store_threads)
         store_threads[:] = [
             entry
             for entry in store_threads
             if (tid := _to_uuid_safe(entry.get("thread_id"))) is None
-            or tid in uuid_threads_in_db
+            or tid in sqlite_data
         ]
         removed = before - len(store_threads)
 
