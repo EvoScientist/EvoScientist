@@ -721,7 +721,7 @@ async def stream_agent_events(
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,
     *,
-    existing_summarization_event: Mapping[str, object] | None,
+    existing_summarization_event: Mapping[str, object] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
