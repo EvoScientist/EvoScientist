@@ -36,6 +36,7 @@ bridge/package-lock.json
 .langgraph_api/
 workspace/
 skills/
+!EvoScientist/skills/
 memory/
 !EvoScientist/memory/
 media/
