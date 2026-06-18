@@ -1332,7 +1332,6 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         self,
         *,
         memory_dir: str | Path,
-        workspace_dir: str | Path | None = None,
         project_id: str,
         role: MemoryLifecycleRole,
         source_agent: str,
@@ -1494,7 +1493,6 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
 def create_memory_lifecycle_middleware(
     memory_dir: str | None = None,
     *,
-    workspace_dir: str | Path | None = None,
     project_id: str,
     role: MemoryLifecycleRole,
     source_agent: str,
@@ -1506,7 +1504,6 @@ def create_memory_lifecycle_middleware(
         memory_dir = str(_paths.MEMORIES_DIR)
     return EvoMemoryLifecycleMiddleware(
         memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
         project_id=project_id,
         role=role,
         source_agent=source_agent,

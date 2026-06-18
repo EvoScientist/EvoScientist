@@ -345,7 +345,6 @@ def _inject_subagent_middleware(
             middleware.append(
                 create_memory_lifecycle_middleware(
                     memory_dir,
-                    workspace_dir=workspace_dir,
                     project_id=memory_middleware.project_id,
                     role=MemoryLifecycleRole.SUBAGENT,
                     source_agent=name,
@@ -745,7 +744,6 @@ def _get_default_middleware(
         mw.append(
             create_memory_lifecycle_middleware(
                 memory_dir,
-                workspace_dir=workspace_dir,
                 project_id=memory_middleware.project_id,
                 role=(
                     MemoryLifecycleRole.SUBAGENT

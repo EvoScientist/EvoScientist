@@ -1180,7 +1180,6 @@ def test_created_observation_ids_from_record_observation_results():
 def test_turn_lifecycle_seed_ids_ignore_prior_turn_observations(tmp_path):
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
@@ -1229,7 +1228,6 @@ def test_turn_lifecycle_launches_worker_with_latest_turn_only(
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
@@ -1291,7 +1289,6 @@ def test_turn_lifecycle_launches_synthesis_for_live_agent_observation(
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
@@ -1360,7 +1357,6 @@ def test_turn_lifecycle_defers_live_observation_synthesis_to_memory_worker(
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
         project_id="P-project",
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         source_agent="EvoScientist",
