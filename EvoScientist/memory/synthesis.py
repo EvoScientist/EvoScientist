@@ -900,16 +900,16 @@ def _run_synthesis_with_retries(
     active_key: tuple[str, str],
     max_attempts: int = _SYNTHESIS_MAX_RUN_ATTEMPTS,
 ) -> None:
-    """Submit synthesis runs until one succeeds or attempts run out, then release.
+    """Submit synthesis runs until one succeeds, aborts, or attempts run out.
 
     A ``success`` terminal status — including a deliberate skip with no writes —
-    stops immediately and is never retried. Transient failures (run
-    error/timeout/interrupted, or abandoned polling) are retried up to
-    ``max_attempts``. Once attempts are exhausted the context is released anyway:
-    the seed observations stay on disk and searchable as raw evidence, they are
-    simply not promoted into knowledge this round.
+    stops immediately and is never retried. Confirmed terminal failures
+    (error/timeout/interrupted) are retried up to ``max_attempts``. Abandoned
+    polling is not retried and does not release the active context because the
+    previous run may still be live and may still write knowledge.
     """
     release_project_id, context_digest = active_key
+    release_context = True
     try:
         for attempt in range(1, max_attempts + 1):
             outcome = _submit_and_watch_synthesis_run(
@@ -919,6 +919,14 @@ def _run_synthesis_with_retries(
                 trigger=trigger,
             )
             if outcome is _SynthesisRunOutcome.SUCCESS:
+                return
+            if outcome is _SynthesisRunOutcome.ABORTED:
+                release_context = False
+                logger.warning(
+                    "Abandoning EvoMemory synthesis retry for project %s; "
+                    "previous run state is unknown",
+                    project_id,
+                )
                 return
             if attempt < max_attempts:
                 logger.info(
@@ -937,10 +945,11 @@ def _run_synthesis_with_retries(
             max_attempts,
         )
     finally:
-        _release_synthesis_context(
-            project_id=release_project_id,
-            context_digest=context_digest,
-        )
+        if release_context:
+            _release_synthesis_context(
+                project_id=release_project_id,
+                context_digest=context_digest,
+            )
 
 
 def _spawn_synthesis_runner_thread(

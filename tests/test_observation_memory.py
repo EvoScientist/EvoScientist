@@ -2058,7 +2058,7 @@ def test_synthesis_run_preserves_thread_when_cleanup_disabled(monkeypatch):
     assert deleted == []
 
 
-def test_synthesis_runner_releases_context_after_exhausting_retries(
+def test_synthesis_runner_aborted_poll_keeps_context_active_without_retry(
     tmp_path, monkeypatch
 ):
     worker_activity.reset_memory_worker_status_for_tests()
@@ -2097,7 +2097,6 @@ def test_synthesis_runner_releases_context_after_exhausting_retries(
     monkeypatch.setattr(memory_synthesis, "_SYNTHESIS_MAX_POLL_FAILURES", 1)
 
     try:
-        # Tracked while the retry loop is in flight.
         assert worker_activity.memory_worker_status().synthesis_running is True
         memory_synthesis._run_synthesis_with_retries(
             url="http://x",
@@ -2107,10 +2106,9 @@ def test_synthesis_runner_releases_context_after_exhausting_retries(
             active_key=("P-project", "digest-1"),
             max_attempts=2,
         )
-        # Retried up to the bound, then fell back to (a): released, no leak.
-        assert submits == 2
+        assert submits == 1
         status = worker_activity.memory_worker_status()
-        assert status.synthesis_running is False
+        assert status.synthesis_running is True
         assert status.knowledge_created == 0
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
