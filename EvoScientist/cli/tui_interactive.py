@@ -3239,7 +3239,9 @@ def run_textual_interactive(
                         f"Thread '{thread_id}' not found. Starting new session."
                     )
             if not effective_thread_id:
-                effective_thread_id = await graph_gateway.create_thread()
+                effective_thread_id = await graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=effective_workspace)
+                )
 
             # The TUI opens instantly and starts MCP loading in the
             # background; ``on_mount`` in the app kicks off the real
