@@ -139,6 +139,7 @@ class MemoryWorkerLaunchArgs(TypedDict):
 
     role: MemoryLifecycleRole
     memory_dir: str | Path
+    workspace_dir: str | Path
     project_id: str
     source_agent: str
     session_id: str
@@ -994,13 +995,14 @@ def _runs_create_kwargs(kwargs: MemoryWorkerRunPayload) -> MemoryWorkerRunPayloa
     return cast("MemoryWorkerRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
 
 
-def _worker_workspace_dir() -> str:
-    return str(Path(_paths.WORKSPACE_ROOT).expanduser().resolve())
+def _worker_workspace_dir(workspace_dir: str | Path) -> str:
+    return str(Path(workspace_dir).expanduser().resolve())
 
 
 def _memory_worker_metadata(
     *,
     role: MemoryLifecycleRole,
+    workspace_dir: str | Path,
     project_id: str,
     source_agent: str,
     session_id: str,
@@ -1012,7 +1014,7 @@ def _memory_worker_metadata(
         "source_agent": source_agent,
         "project_id": project_id,
         "trajectory_digest": trajectory_digest,
-        "workspace_dir": _worker_workspace_dir(),
+        "workspace_dir": _worker_workspace_dir(workspace_dir),
     }
 
 
@@ -1020,6 +1022,7 @@ def _memory_worker_run_kwargs(
     *,
     role: MemoryLifecycleRole,
     thread_id: str,
+    workspace_dir: str | Path,
     project_id: str,
     source_agent: str,
     session_id: str,
@@ -1029,6 +1032,7 @@ def _memory_worker_run_kwargs(
     trajectory_digest = _trajectory_digest(trajectory)
     metadata = _memory_worker_metadata(
         role=role,
+        workspace_dir=workspace_dir,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
@@ -1211,6 +1215,7 @@ def _launch_memory_worker(
     *,
     role: MemoryLifecycleRole,
     memory_dir: str | Path,
+    workspace_dir: str | Path,
     project_id: str,
     source_agent: str,
     session_id: str,
@@ -1231,6 +1236,7 @@ def _launch_memory_worker(
     )
     metadata = _memory_worker_metadata(
         role=role,
+        workspace_dir=workspace_dir,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
@@ -1242,6 +1248,7 @@ def _launch_memory_worker(
     payload = _memory_worker_run_kwargs(
         role=role,
         thread_id=worker_thread_id,
+        workspace_dir=workspace_dir,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
@@ -1276,6 +1283,7 @@ async def _alaunch_memory_worker(
     *,
     role: MemoryLifecycleRole,
     memory_dir: str | Path,
+    workspace_dir: str | Path,
     project_id: str,
     source_agent: str,
     session_id: str,
@@ -1296,6 +1304,7 @@ async def _alaunch_memory_worker(
     )
     metadata = _memory_worker_metadata(
         role=role,
+        workspace_dir=workspace_dir,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
@@ -1307,6 +1316,7 @@ async def _alaunch_memory_worker(
     payload = _memory_worker_run_kwargs(
         role=role,
         thread_id=worker_thread_id,
+        workspace_dir=workspace_dir,
         project_id=project_id,
         source_agent=source_agent,
         session_id=session_id,
@@ -1352,6 +1362,9 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         source_agent: str,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
+        self._workspace_dir = Path(
+            _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
+        ).expanduser()
         self._project_id = project_id
         self._role = role
         self._source_agent = source_agent
@@ -1371,6 +1384,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
             return {
                 "role": MemoryLifecycleRole.TURN,
                 "memory_dir": self._memory_dir,
+                "workspace_dir": self._workspace_dir,
                 "project_id": self._project_id,
                 "source_agent": self._source_agent,
                 "session_id": session_id,
@@ -1383,6 +1397,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         return {
             "role": MemoryLifecycleRole.SUBAGENT,
             "memory_dir": self._memory_dir,
+            "workspace_dir": self._workspace_dir,
             "project_id": self._project_id,
             "source_agent": self._source_agent,
             "session_id": session_id,

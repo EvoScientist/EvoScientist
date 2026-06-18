@@ -778,7 +778,11 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
 
 
 def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monkeypatch):
-    monkeypatch.setattr(memory_lifecycle, "_worker_workspace_dir", lambda: "/tmp/ws")
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_worker_workspace_dir",
+        lambda _workspace_dir: "/tmp/ws",
+    )
     trajectory: list[memory_lifecycle.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
@@ -786,6 +790,7 @@ def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monke
     kwargs = memory_lifecycle._memory_worker_run_kwargs(
         role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
         thread_id="worker-thread",
+        workspace_dir="/active/workspace",
         project_id="P-project",
         source_agent="writing-agent",
         session_id="thread-1",
@@ -1168,6 +1173,7 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
     memory_lifecycle._launch_memory_worker(
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
         project_id="P-project",
         source_agent="EvoScientist",
         session_id="thread-1",
@@ -1178,7 +1184,11 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
 def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
-    monkeypatch.setattr(memory_lifecycle, "_worker_workspace_dir", lambda: "/tmp/ws")
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_worker_workspace_dir",
+        lambda _workspace_dir: "/tmp/ws",
+    )
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         lambda **_kwargs: True,
@@ -1204,6 +1214,7 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
     memory_lifecycle._launch_memory_worker(
         role=memory_lifecycle.MemoryLifecycleRole.TURN,
         memory_dir=memory_dir,
+        workspace_dir=tmp_path / "workspace",
         project_id="P-project",
         source_agent="EvoScientist",
         session_id="thread-1",
@@ -1252,7 +1263,11 @@ def test_async_memory_worker_launch_offloads_blocking_work(
 ):
     worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
-    monkeypatch.setattr(memory_lifecycle, "_worker_workspace_dir", lambda: "/tmp/ws")
+    monkeypatch.setattr(
+        memory_lifecycle,
+        "_worker_workspace_dir",
+        lambda _workspace_dir: "/tmp/ws",
+    )
 
     call_threads: list[tuple[str, int]] = []
 
@@ -1296,6 +1311,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         await memory_lifecycle._alaunch_memory_worker(
             role=memory_lifecycle.MemoryLifecycleRole.TURN,
             memory_dir=tmp_path / "memories",
+            workspace_dir=tmp_path / "workspace",
             project_id="P-project",
             source_agent="EvoScientist",
             session_id="thread-1",
