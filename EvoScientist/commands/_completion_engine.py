@@ -58,12 +58,20 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
         commands = cmd_manager.list_commands()
         matches = [(c, d) for c, d in commands if c.startswith(prefix)]
 
+        # Whether the typed prefix is itself a complete command name. Checked
+        # via membership rather than ``len(matches) == 1`` so a command whose
+        # name is a strict prefix of another (e.g. ``/model`` vs
+        # ``/model-fallback``) still counts as an exact match — otherwise the
+        # popup never hides on the shorter command and Enter completes instead
+        # of submitting it.
+        exact = any(c == prefix for c, _ in matches)
+
         # Exact match with no trailing space → hide
-        if len(matches) == 1 and matches[0][0] == prefix and not has_trailing_space:
+        if exact and not has_trailing_space:
             return CompletionResult(CompletionKind.EMPTY, [])
 
         # Exact match + trailing space + has subcommands → show subcommands
-        if len(matches) == 1 and matches[0][0] == prefix and has_trailing_space:
+        if exact and has_trailing_space:
             if not cmd_manager.get_subcommands(prefix):
                 return CompletionResult(CompletionKind.EMPTY, [])
             sub_items = cmd_manager.list_subcommands(cmd_name)
