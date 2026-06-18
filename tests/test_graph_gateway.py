@@ -363,9 +363,10 @@ def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
     assert [row["thread_id"] for row in result] == [
         f"thread-{index}" for index in range(_THREAD_SEARCH_LIMIT + 1)
     ]
-    assert [
-        (search["limit"], search["offset"]) for search in threads.searches
-    ] == [(_THREAD_SEARCH_LIMIT, 0), (_THREAD_SEARCH_LIMIT, _THREAD_SEARCH_LIMIT)]
+    assert [(search["limit"], search["offset"]) for search in threads.searches] == [
+        (_THREAD_SEARCH_LIMIT, 0),
+        (_THREAD_SEARCH_LIMIT, _THREAD_SEARCH_LIMIT),
+    ]
 
 
 def test_langgraph_server_thread_store_positive_limit_uses_single_search():

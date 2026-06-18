@@ -568,7 +568,9 @@ class LangGraphServerGateway:
         events: list[GraphEvent] = []
         for interrupt in stream.interrupts:
             events.extend(
-                await processor.process(_input_requested_event_from_interrupt(interrupt))
+                await processor.process(
+                    _input_requested_event_from_interrupt(interrupt)
+                )
             )
 
         if events or not stream.interrupted:
@@ -581,7 +583,9 @@ class LangGraphServerGateway:
 
         for interrupt in _state_interrupts(state):
             events.extend(
-                await processor.process(_input_requested_event_from_interrupt(interrupt))
+                await processor.process(
+                    _input_requested_event_from_interrupt(interrupt)
+                )
             )
         return events
 
