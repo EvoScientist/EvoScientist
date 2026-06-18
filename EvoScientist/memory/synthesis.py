@@ -1009,13 +1009,14 @@ def _launch_synthesis_worker(
         )
         return
 
-    mark_synthesis_started(
-        project_id=project_id,
-        context_digest=context_digest,
-        memory_dir=memory_dir,
-        before_outputs=snapshot_memory_outputs(memory_dir),
-    )
     try:
+        before_outputs = snapshot_memory_outputs(memory_dir)
+        mark_synthesis_started(
+            project_id=project_id,
+            context_digest=context_digest,
+            memory_dir=memory_dir,
+            before_outputs=before_outputs,
+        )
         _spawn_synthesis_runner_thread(
             url=url,
             project_id=project_id,

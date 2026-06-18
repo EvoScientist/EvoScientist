@@ -2410,6 +2410,87 @@ def test_synthesis_worker_launch_spawns_runner_thread(tmp_path, monkeypatch):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_synthesis_worker_launch_releases_claim_when_start_accounting_fails(
+    tmp_path, monkeypatch
+):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    context: memory_synthesis.SynthesisContext = {
+        "project_id": "P-project",
+        "uncovered_observations": [
+            {
+                "id": "O-1",
+                "path": "/memories/observations/project/P-project/O-1.md",
+                "memory_type": MemoryType.SEMANTIC.value,
+                "scope": MemoryScope.PROJECT.value,
+                "summary": "Durable observation.",
+                "snippet": "Durable observation.",
+            }
+        ],
+        "memory_inventory": {
+            "active_knowledge_count": 0,
+            "seed_observation_count": 1,
+        },
+    }
+
+    monkeypatch.setattr(memory_synthesis, "_synthesis_worker_url", lambda: "http://x")
+    monkeypatch.setattr(
+        memory_synthesis,
+        "build_synthesis_context",
+        lambda **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+        lambda **_kwargs: True,
+    )
+    spawned = []
+    monkeypatch.setattr(
+        memory_synthesis,
+        "_spawn_synthesis_runner_thread",
+        lambda **kwargs: spawned.append(kwargs),
+    )
+
+    snapshot_calls = 0
+
+    def fake_snapshot(_memory_dir):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            raise RuntimeError("snapshot failed")
+        return worker_activity.MemoryOutputSnapshot(
+            profile_files={},
+            observation_files=frozenset(),
+            knowledge_files={},
+        )
+
+    monkeypatch.setattr(memory_synthesis, "snapshot_memory_outputs", fake_snapshot)
+
+    try:
+        memory_synthesis._launch_synthesis_worker(
+            memory_dir=memory_dir,
+            project_id="P-project",
+            seed_observation_ids=("O-1",),
+            trigger="turn_memory_worker",
+        )
+        assert spawned == []
+
+        memory_synthesis._launch_synthesis_worker(
+            memory_dir=memory_dir,
+            project_id="P-project",
+            seed_observation_ids=("O-1",),
+            trigger="turn_memory_worker",
+        )
+        assert len(spawned) == 1
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+        if spawned:
+            active_key = spawned[0]["active_key"]
+            memory_synthesis._release_synthesis_context(
+                project_id=active_key[0],
+                context_digest=active_key[1],
+            )
+
+
 def test_clear_memory_worker_saved_counts_preserves_pending_worker_delta(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
