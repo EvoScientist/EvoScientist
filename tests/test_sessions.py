@@ -2249,6 +2249,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assistant_id: str | None = "aaaa-bbbb",
         graph_id: str | None = "EvoScientist",
         workspace_dir: str | None = _WS,
+        model: str | None = "test-model",
         agent_name: str | None = "EvoScientist",
         ckpt_prefix: str = "ckpt",
     ) -> None:
@@ -2272,6 +2273,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 meta_dict["graph_id"] = graph_id
             if workspace_dir is not None:
                 meta_dict["workspace_dir"] = workspace_dir
+            if model is not None:
+                meta_dict["model"] = model
             meta = json.dumps(meta_dict)
             con.execute(
                 "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
@@ -2344,6 +2347,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(added[0]["metadata"].get("assistant_id"), str)
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("model") == "test-model"
         # created_at / updated_at must be datetime objects, not ISO strings.
         # Threads.search() sorts by these fields using sorted(); mixing
         # datetime and str raises TypeError: '<' not supported.
@@ -2412,6 +2417,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert t["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(t["metadata"].get("assistant_id"), str)
         assert t["metadata"].get("graph_id") == "EvoScientist"
+        assert t["metadata"].get("workspace_dir") == self._WS
+        assert t["metadata"].get("model") == "test-model"
 
     def test_restore_includes_current_workspace_graph_threads_only(self):
         """Restore includes current-workspace graph threads only.
@@ -2472,11 +2479,21 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert restored[_uuid_mod.UUID(mine)]["metadata"].get("graph_id") == (
             "EvoScientist"
         )
+        assert restored[_uuid_mod.UUID(mine)]["metadata"].get("workspace_dir") == (
+            self._WS
+        )
+        assert restored[_uuid_mod.UUID(mine)]["metadata"].get("model") == ("test-model")
         assert restored[_uuid_mod.UUID(worker)]["metadata"].get("graph_id") == (
             "evomemory-turn-worker"
         )
+        assert restored[_uuid_mod.UUID(worker)]["metadata"].get("workspace_dir") == (
+            self._WS
+        )
         assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("graph_id") == (
             "writing-agent"
+        )
+        assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("workspace_dir") == (
+            self._WS
         )
 
     def test_cli_session_filters_exclude_non_main_graph_rows(self):
@@ -2551,6 +2568,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(cli_thread)
         # graph_id backfilled so Threads.State.get works on the CLI stub.
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("model") == "test-model"
 
     def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
         """Interop thread (CLI rows + WebUI rows under one UUID): bare
@@ -2601,6 +2620,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(tid)
         assert added[0]["metadata"].get("assistant_id") == asst
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("model") == "test-model"
 
     def test_restored_stub_gets_title_from_first_human_message(self):
         """Stubs carry metadata.title derived from the thread's first human

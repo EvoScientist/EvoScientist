@@ -94,7 +94,12 @@ class ThreadStore(Protocol):
 class GraphGateway(Protocol):
     """One authority for graph runs and thread lifecycle operations."""
 
-    async def create_thread(self, target: GraphTarget | None = None) -> str:
+    async def create_thread(
+        self,
+        target: GraphTarget | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         """Create or reserve a new thread id."""
 
     async def list_threads(

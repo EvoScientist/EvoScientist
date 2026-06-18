@@ -787,7 +787,9 @@ def cmd_interactive(
                     # input is still seeded in state["thread_id"] from init.
                     # Replace with a fresh ID so a new session isn't
                     # checkpointed under the bad prefix.
-                    state["thread_id"] = await graph_gateway.create_thread()
+                    state["thread_id"] = await graph_gateway.create_thread(
+                        GraphTarget(workspace_dir=state["workspace_dir"])
+                    )
 
             # Kick off agent construction (MCP tool enumeration is the
             # slow part) in the background so the banner and prompt can

@@ -33,6 +33,7 @@ import math
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -1479,6 +1480,15 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
         return await super().aput(config, checkpoint, metadata, new_versions)
 
 
+@dataclass(frozen=True, slots=True)
+class _RestoredThreadInfo:
+    updated_at: str | None
+    assistant_id: str | None
+    graph_id: str
+    workspace_dir: str
+    model: str | None
+
+
 async def _restore_webui_threads_to_global_store() -> None:
     """Re-populate ``GlobalStore["threads"]`` from SQLite on server startup.
 
@@ -1527,7 +1537,7 @@ async def _restore_webui_threads_to_global_store() -> None:
         # main graph only when they carry agent_name == AGENT_NAME. Rows
         # predating workspace stamping remain deliberately excluded.
         current_workspace = await _api_workspace_dir_async()
-        sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
+        sqlite_data: dict[uuid.UUID, _RestoredThreadInfo] = {}
         titles: dict[uuid.UUID, str] = {}
         db_path = str(get_db_path())
         async with aiosqlite.connect(db_path, timeout=30.0) as conn:
@@ -1547,6 +1557,7 @@ async def _restore_webui_threads_to_global_store() -> None:
                            MAX(json_extract(metadata, '$.assistant_id')) as assistant_id,
                            MAX(json_extract(metadata, '$.graph_id')) as graph_id,
                            MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir,
+                           MAX(json_extract(metadata, '$.model')) as model,
                            MAX(json_extract(metadata, '$.agent_name')) as agent_name
                     FROM checkpoints
                     WHERE thread_id LIKE '________-____-____-____-____________'
@@ -1563,6 +1574,7 @@ async def _restore_webui_threads_to_global_store() -> None:
                     assistant_id,
                     graph_id,
                     workspace_dir,
+                    model,
                     agent_name,
                 ) = row
                 thread_uuid = _to_uuid_safe(thread_id_str)
@@ -1575,10 +1587,12 @@ async def _restore_webui_threads_to_global_store() -> None:
                     continue
                 if not workspace_dir or workspace_dir != current_workspace:
                     continue
-                sqlite_data[thread_uuid] = (
-                    updated_at,
-                    assistant_id,
-                    restored_graph_id,
+                sqlite_data[thread_uuid] = _RestoredThreadInfo(
+                    updated_at=updated_at,
+                    assistant_id=assistant_id,
+                    graph_id=restored_graph_id,
+                    workspace_dir=workspace_dir,
+                    model=model,
                 )
 
             # Derive a sidebar title from each scoped thread's first human
@@ -1631,15 +1645,21 @@ async def _restore_webui_threads_to_global_store() -> None:
                 entry["thread_id"] = tid_uuid
                 changed = True
             if tid_uuid in sqlite_data:
-                _updated_at, asst_id_str, gid = sqlite_data[tid_uuid]
+                info = sqlite_data[tid_uuid]
                 meta: dict[str, Any] = entry.setdefault("metadata", {})
-                if asst_id_str and "assistant_id" not in meta:
+                if info.assistant_id and "assistant_id" not in meta:
                     # str, not uuid.UUID: the runtime stores str and search
                     # filters compare with raw == against JSON strings.
-                    meta["assistant_id"] = str(asst_id_str)
+                    meta["assistant_id"] = str(info.assistant_id)
                     changed = True
-                if gid and "graph_id" not in meta:
-                    meta["graph_id"] = gid
+                if info.graph_id and "graph_id" not in meta:
+                    meta["graph_id"] = info.graph_id
+                    changed = True
+                if meta.get("workspace_dir") != info.workspace_dir:
+                    meta["workspace_dir"] = info.workspace_dir
+                    changed = True
+                if info.model and meta.get("model") != info.model:
+                    meta["model"] = info.model
                     changed = True
                 if "title" not in meta and tid_uuid in titles:
                     meta["title"] = titles[tid_uuid]
@@ -1658,16 +1678,21 @@ async def _restore_webui_threads_to_global_store() -> None:
 
         # Append threads present in SQLite but absent from the registry.
         restored = 0
-        for thread_uuid, (updated_at, assistant_id, graph_id) in sqlite_data.items():
+        for thread_uuid, info in sqlite_data.items():
             if thread_uuid in existing_uuids:
                 continue
-            stub_metadata: dict[str, Any] = {"graph_id": graph_id}
-            if assistant_id:
+            stub_metadata: dict[str, Any] = {
+                "graph_id": info.graph_id,
+                "workspace_dir": info.workspace_dir,
+            }
+            if info.assistant_id:
                 # str, not uuid.UUID — same convention as above.
-                stub_metadata["assistant_id"] = str(assistant_id)
+                stub_metadata["assistant_id"] = str(info.assistant_id)
+            if info.model:
+                stub_metadata["model"] = info.model
             if thread_uuid in titles:
                 stub_metadata["title"] = titles[thread_uuid]
-            ts = _parse_dt(updated_at)
+            ts = _parse_dt(info.updated_at)
             stub: dict[str, Any] = {
                 "thread_id": thread_uuid,
                 "created_at": ts,

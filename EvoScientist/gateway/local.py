@@ -65,7 +65,12 @@ class LocalGraphGateway:
 
     thread_store: ThreadStore = field(default_factory=LocalThreadStore)
 
-    async def create_thread(self, target: GraphTarget | None = None) -> str:
+    async def create_thread(
+        self,
+        target: GraphTarget | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         return self.thread_store.generate_thread_id()
 
     async def list_threads(

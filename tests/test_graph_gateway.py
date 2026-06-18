@@ -294,7 +294,10 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
 
     async def _run():
         return {
-            "created": await store.create_thread(),
+            "created": await store.create_thread(
+                metadata={"model": "test-model"},
+                workspace_dir="/tmp/new-ws",
+            ),
             "threads": await store.list_threads(
                 include_message_count=True,
                 include_preview=True,
@@ -309,12 +312,14 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     result = run_async(_run())
 
     assert result["created"] == "server-thread"
-    assert threads.created == [
-        {
-            "thread_id": "server-thread",
-            "metadata": {"graph_id": "EvoScientist"},
-        }
-    ]
+    assert len(threads.created) == 1
+    assert threads.created[0]["thread_id"] == "server-thread"
+    created_metadata = threads.created[0]["metadata"]
+    assert created_metadata["graph_id"] == "EvoScientist"
+    assert created_metadata["agent_name"] == "EvoScientist"
+    assert created_metadata["workspace_dir"] == "/tmp/new-ws"
+    assert created_metadata["model"] == "test-model"
+    assert isinstance(created_metadata["updated_at"], str)
     assert result["threads"] == [
         {
             "thread_id": "abc12345",
@@ -328,7 +333,7 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
             "thread_id": "server-thread",
             "created_at": None,
             "updated_at": None,
-            "metadata": {"graph_id": "EvoScientist"},
+            "metadata": created_metadata,
             "message_count": 0,
             "preview": "",
         },
@@ -632,12 +637,18 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
 
     events = run_async(_collect())
 
-    assert threads.created == [
-        {
-            "thread_id": "abc12345",
-            "metadata": {"graph_id": "writing-agent"},
-        }
-    ]
+    assert len(threads.created) == 1
+    assert threads.created[0]["thread_id"] == "abc12345"
+    created_metadata = threads.created[0]["metadata"]
+    assert created_metadata["graph_id"] == "writing-agent"
+    assert created_metadata["workspace_dir"] == "/tmp/ws"
+    assert isinstance(created_metadata["updated_at"], str)
+    assert len(threads.metadata_updates) == 1
+    update_thread_id, update_metadata = threads.metadata_updates[0]
+    assert update_thread_id == "abc12345"
+    assert update_metadata["graph_id"] == "writing-agent"
+    assert update_metadata["workspace_dir"] == "/tmp/ws"
+    assert isinstance(update_metadata["updated_at"], str)
     assert threads.stream_calls == [("abc12345", "writing-agent")]
     assert stream.run.starts == [
         {

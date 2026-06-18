@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import BaseMessage, convert_to_messages, messages_from_dict
@@ -62,6 +63,24 @@ def _default_client_factory(
 def _thread_metadata(thread: Thread) -> dict[str, Any]:
     metadata = thread.get("metadata")
     return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _build_thread_metadata(
+    *,
+    graph_id: str,
+    workspace_dir: str | None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged = dict(metadata or {})
+    merged["graph_id"] = graph_id
+    if graph_id == DEFAULT_GRAPH_ID:
+        merged["agent_name"] = DEFAULT_GRAPH_ID
+    else:
+        merged.pop("agent_name", None)
+    if workspace_dir is not None:
+        merged["workspace_dir"] = workspace_dir
+    merged.setdefault("updated_at", datetime.now(UTC).isoformat())
+    return merged
 
 
 def _thread_preview(messages: list[BaseMessage]) -> str:
@@ -171,9 +190,21 @@ class LangGraphServerThreadStore(ThreadStore):
     def _target_graph_id(self, graph_id: str | None = None) -> str:
         return graph_id or self.graph_id
 
-    async def create_thread(self, graph_id: str | None = None) -> str:
+    async def create_thread(
+        self,
+        graph_id: str | None = None,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        workspace_dir: str | None = None,
+    ) -> str:
+        target_graph_id = self._target_graph_id(graph_id)
         thread = await self.client.threads.create(
-            graph_id=self._target_graph_id(graph_id)
+            graph_id=target_graph_id,
+            metadata=_build_thread_metadata(
+                graph_id=target_graph_id,
+                workspace_dir=workspace_dir,
+                metadata=metadata,
+            ),
         )
         return thread["thread_id"]
 
@@ -181,10 +212,19 @@ class LangGraphServerThreadStore(ThreadStore):
         self,
         thread_id: str,
         graph_id: str | None = None,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        workspace_dir: str | None = None,
     ) -> None:
+        target_graph_id = self._target_graph_id(graph_id)
         await self.client.threads.create(
             thread_id=thread_id,
-            graph_id=self._target_graph_id(graph_id),
+            graph_id=target_graph_id,
+            metadata=_build_thread_metadata(
+                graph_id=target_graph_id,
+                workspace_dir=workspace_dir,
+                metadata=metadata,
+            ),
             if_exists="do_nothing",
         )
 
@@ -417,9 +457,16 @@ class LangGraphServerGateway:
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id
 
-    async def create_thread(self, target: GraphTarget | None = None) -> str:
+    async def create_thread(
+        self,
+        target: GraphTarget | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         return await self.thread_store.create_thread(
-            graph_id=self._target_graph_id(target)
+            graph_id=self._target_graph_id(target),
+            metadata=metadata,
+            workspace_dir=target.workspace_dir if target is not None else None,
         )
 
     async def list_threads(
@@ -497,7 +544,23 @@ class LangGraphServerGateway:
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
+            metadata=request.metadata,
+            workspace_dir=(
+                request.target.workspace_dir if request.target is not None else None
+            ),
         )
+        request_workspace = (
+            request.target.workspace_dir if request.target is not None else None
+        )
+        if request.metadata or request_workspace is not None:
+            await self.thread_store.client.threads.update(
+                request.thread_id,
+                metadata=_build_thread_metadata(
+                    graph_id=self._target_graph_id(request.target),
+                    workspace_dir=request_workspace,
+                    metadata=request.metadata,
+                ),
+            )
         if _command_has_resume(request.message):
             await self._respond_to_interrupt(
                 stream,

@@ -223,7 +223,12 @@ class FakeGraphGateway(GraphGateway):
         ] = []
         self.updated_states: list[tuple[GraphTarget, str, dict[str, object]]] = []
 
-    async def create_thread(self, target: GraphTarget | None = None) -> str:
+    async def create_thread(
+        self,
+        target: GraphTarget | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         if self.generated_thread_ids:
             return self.generated_thread_ids.pop(0)
         return self.thread_store.generate_thread_id()
