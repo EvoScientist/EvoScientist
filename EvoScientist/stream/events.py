@@ -720,8 +720,6 @@ async def stream_agent_events(
     thread_id: str,
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,
-    *,
-    existing_summarization_event: Mapping[str, object] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -737,8 +735,6 @@ async def stream_agent_events(
         metadata: Optional metadata dict merged into the LangGraph config
             (e.g. agent_name, updated_at for checkpoint persistence).
         media: Optional list of local file paths for attachments.
-        existing_summarization_event: Existing persisted summarization event
-            to suppress if LangGraph replays it in stream updates.
 
     Yields:
         Event dicts: thinking, text, tool_call, tool_result,
@@ -749,6 +745,14 @@ async def stream_agent_events(
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()
+    existing_summarization_event: Mapping[str, object] | None = None
+    try:
+        snapshot = await agent.aget_state(config)
+        existing_summarization_event = _find_summarization_event_payload(
+            getattr(snapshot, "values", None)
+        )
+    except Exception:
+        pass
 
     clear_memory_worker_saved_counts()
     astream_input = await build_agent_stream_input(message, media=media)

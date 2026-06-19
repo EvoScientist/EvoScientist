@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -148,14 +148,6 @@ class LocalGraphGateway:
         request: RunRequest,
     ) -> AsyncIterator[GraphEvent]:
         from ..stream.events import stream_agent_events
-        from ..stream.summarization import _find_summarization_event_payload
-
-        existing_summarization_event: Mapping[str, object] | None = None
-        try:
-            values = await self.get_state_values(target, request.thread_id)
-            existing_summarization_event = _find_summarization_event_payload(values)
-        except Exception:
-            pass
 
         async for event in stream_agent_events(
             local_graph,
@@ -163,7 +155,6 @@ class LocalGraphGateway:
             request.thread_id,
             metadata=request.metadata,
             media=request.media,
-            existing_summarization_event=existing_summarization_event,
         ):
             yield event
 

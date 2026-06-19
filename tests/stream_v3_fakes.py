@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
@@ -21,8 +21,6 @@ def collect_events(
     agent,
     message: str = "hi",
     thread_id: str = "t1",
-    *,
-    existing_summarization_event: Mapping[str, object] | None = None,
 ):
     """Collect stream_agent_events output for synchronous tests."""
 
@@ -32,7 +30,6 @@ def collect_events(
             agent,
             message,
             thread_id,
-            existing_summarization_event=existing_summarization_event,
         ):
             events.append(ev)
         return events

@@ -352,10 +352,42 @@ class TestV3ProtocolStreaming:
             ],
             state_values=summary_event,
         )
-        events = collect_events(
-            agent,
-            existing_summarization_event=summary_event["_summarization_event"],
+        events = collect_events(agent)
+        summary_start_events = [
+            e for e in events if e.get("type") == "summarization_start"
+        ]
+        assert summary_start_events == []
+        summary_events = [e for e in events if e.get("type") == "summarization"]
+        assert summary_events == []
+
+    def test_direct_stream_loads_existing_summarization_event_when_omitted(self):
+        """Public stream_agent_events() suppresses persisted summary replays."""
+        summary_message = HumanMessage(
+            content="Here is a summary of the conversation to date:\n\nKey facts",
         )
+        summary_event = {
+            "_summarization_event": {
+                "summary_message": summary_message,
+                "cutoff_index": 12,
+                "file_path": None,
+            }
+        }
+        agent = FakeV3Agent(
+            [
+                protocol_event("updates", summary_event),
+                message_delta("real content"),
+            ],
+            state_values=summary_event,
+        )
+
+        async def _collect():
+            events = []
+            async for event in stream_agent_events(agent, "hi", "t1"):
+                events.append(event)
+            return events
+
+        events = run_async(_collect())
+
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
         ]
@@ -438,7 +470,6 @@ class TestV3ProtocolStreaming:
                     agent,
                     "run probe",
                     "live-deepagents-tool-id",
-                    existing_summarization_event=None,
                 )
             ]
 
@@ -502,7 +533,6 @@ class TestV3ProtocolStreaming:
                     agent,
                     "run echo",
                     "live-deepagents-hitl",
-                    existing_summarization_event=None,
                 )
             ]
 
@@ -566,7 +596,6 @@ class TestV3ProtocolStreaming:
                     agent,
                     message,
                     "live-deepagents-ask-user",
-                    existing_summarization_event=None,
                 )
             ]
 
@@ -640,7 +669,6 @@ class TestV3ProtocolStreaming:
                     agent,
                     "delegate",
                     "live-deepagents-subagent",
-                    existing_summarization_event=None,
                 )
             ]
 
@@ -986,7 +1014,6 @@ class TestV3ProtocolStreaming:
                 ErroringV3Agent(RuntimeError("boom")),
                 "hi",
                 "t1",
-                existing_summarization_event=None,
             ):
                 events.append(ev)
 
@@ -1003,7 +1030,6 @@ class TestV3ProtocolStreaming:
                 agent,
                 "hi",
                 "t1",
-                existing_summarization_event=None,
             )
             first = await stream.__anext__()
             await stream.aclose()
