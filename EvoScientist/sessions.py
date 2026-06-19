@@ -20,10 +20,11 @@ WebUI / langgraph-dev checkpointer:
     dev`` subprocess (deploy / WebUI / CLI-spawned) with this same SQLite
     file instead of the default pickle-based ``InMemorySaver``, whose flush
     window and pickle-compatibility failures lose session history on
-    restart (issue #277). On startup it rebuilds the in-memory thread
-    registry from SQLite. See ``_restore_webui_threads_to_global_store``
-    for the restore scope and ``_ApiPruningCheckpointer`` for the metadata
-    stamping that makes WebUI threads first-class CLI sessions.
+    restart (issue #277). On startup it purges leftover evomemory-worker
+    rows and rebuilds the in-memory thread registry from SQLite. See
+    ``_restore_webui_threads_to_global_store`` for the restore scope and
+    ``_ApiPruningCheckpointer`` for the metadata stamping that makes WebUI
+    threads first-class CLI sessions.
 """
 
 import asyncio
@@ -1449,9 +1450,10 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
 
     langgraph-api run metadata carries ``graph_id``/``assistant_id`` but not
     always the ``workspace_dir`` / ``updated_at`` keys needed to safely
-    rebuild the in-memory thread registry after server restart. Stamping all
-    graph rows with the current workspace keeps main, async-subagent, and
-    memory-worker threads restorable without exposing other workspaces.
+    rebuild the in-memory thread registry after server restart. Stamping graph
+    rows with the current workspace keeps main and async-subagent threads
+    restorable without exposing other workspaces. Memory-worker rows still get
+    workspace metadata, but remain disposable until worker cloning lands.
 
     Only the main graph receives ``agent_name``. The local CLI session
     surface still uses that ownership key, so worker/subagent graph rows must
@@ -1480,6 +1482,47 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
         return await super().aput(config, checkpoint, metadata, new_versions)
 
 
+async def _purge_internal_worker_threads() -> None:
+    """Best-effort removal of evomemory-worker checkpoint residue.
+
+    Finished workers delete their own thread (see
+    ``middleware/memory_lifecycle.py``), but a crash between run completion
+    and deletion leaves rows behind — and rows written before that cleanup
+    existed are still in the DB. Idempotent, runs on every server start,
+    and never blocks startup on failure.
+    """
+    try:
+        db_path = str(get_db_path())
+        async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+            if not await _table_exists(conn, "checkpoints"):
+                return
+            if await _table_exists(conn, "writes"):
+                await conn.execute(
+                    """
+                    DELETE FROM writes WHERE thread_id IN (
+                        SELECT DISTINCT thread_id FROM checkpoints
+                        WHERE json_extract(metadata, '$.graph_id') LIKE 'evomemory-%'
+                    )
+                    """
+                )
+            cur = await conn.execute(
+                """
+                DELETE FROM checkpoints
+                WHERE json_extract(metadata, '$.graph_id') LIKE 'evomemory-%'
+                """
+            )
+            await conn.commit()
+            if cur.rowcount:
+                _logger.info(
+                    "Purged %d leftover evomemory-worker checkpoint row(s).",
+                    cur.rowcount,
+                )
+    except Exception:
+        _logger.warning(
+            "evomemory-worker residue purge failed (non-fatal).", exc_info=True
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _RestoredThreadInfo:
     updated_at: str | None
@@ -1502,13 +1545,13 @@ async def _restore_webui_threads_to_global_store() -> None:
 
     Restore scope — UUID-format graph threads owned by this server's
     workspace (``metadata.workspace_dir`` matches). This includes the main
-    graph, async-subagent graphs, and memory-worker graphs so they remain
-    addressable through the LangGraph API after restart. The workspace filter
-    is required because sessions.db is machine-global, and an unscoped
-    restore would expose every workspace's history on the unauthenticated API
-    — worst case ``--tunnel``. CLI/TUI threads (8-char hex IDs, managed by
-    ``list_threads()``) and pre-stamping rows without ``workspace_dir`` are
-    excluded.
+    graph and async-subagent graphs. Memory-worker graphs are excluded for now:
+    they are still treated as disposable residue until worker cloning lands.
+    The workspace filter is required because sessions.db is machine-global,
+    and an unscoped restore would expose every workspace's history on the
+    unauthenticated API — worst case ``--tunnel``. CLI/TUI threads (8-char
+    hex IDs, managed by ``list_threads()``) and pre-stamping rows without
+    ``workspace_dir`` are excluded.
 
     Best-effort: any exception is logged and swallowed so a broken restore
     never prevents the ``langgraph dev`` server from starting.
@@ -1561,6 +1604,10 @@ async def _restore_webui_threads_to_global_store() -> None:
                            MAX(json_extract(metadata, '$.agent_name')) as agent_name
                     FROM checkpoints
                     WHERE thread_id LIKE '________-____-____-____-____________'
+                      AND (
+                          json_extract(metadata, '$.graph_id') IS NULL
+                          OR json_extract(metadata, '$.graph_id') NOT LIKE 'evomemory-%'
+                      )
                     GROUP BY thread_id
                     ORDER BY updated_at DESC
                 """
@@ -1754,5 +1801,6 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
         await saver.setup()
+        await _purge_internal_worker_threads()
         await _restore_webui_threads_to_global_store()
         yield saver
