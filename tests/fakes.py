@@ -12,6 +12,7 @@ from langgraph_sdk.client import LangGraphClient
 
 from EvoScientist.channels.base import Channel
 from EvoScientist.channels.bus.events import InboundMessage, OutboundMessage
+from EvoScientist.commands.base import CommandUI
 from EvoScientist.gateway import (
     GraphEvent,
     GraphGateway,
@@ -23,6 +24,97 @@ from EvoScientist.gateway import (
 )
 
 _DEFAULT_COPY_RESPONSE = object()
+
+
+class FakeCommandUI(CommandUI):
+    """Command UI test double with recorded calls and inert pickers."""
+
+    def __init__(self, *, supports_interactive: bool = True) -> None:
+        self._supports_interactive = supports_interactive
+        self.system_messages: list[str] = []
+        self.renderables: list[object] = []
+        self.started = 0
+        self.stopped = 0
+        self.updated_tokens: list[int] = []
+        self.chat_cleared = False
+        self.quit_requested = False
+        self.force_quit_requested = False
+        self.started_sessions = 0
+        self.resumed_sessions: list[tuple[str, str | None]] = []
+        self.flushes = 0
+
+    @property
+    def supports_interactive(self) -> bool:
+        return self._supports_interactive
+
+    def append_system(self, text: str, style: str = "dim") -> None:
+        self.system_messages.append(text)
+
+    def mount_renderable(self, renderable: object) -> None:
+        self.renderables.append(renderable)
+
+    async def wait_for_thread_pick(
+        self,
+        threads: list[dict],
+        current_thread: str,
+        title: str,
+    ) -> str | None:
+        return None
+
+    async def wait_for_skill_browse(
+        self,
+        index: list[dict],
+        installed_names: set[str],
+        pre_filter_tag: str,
+    ) -> list[str] | None:
+        return None
+
+    async def wait_for_mcp_browse(
+        self,
+        servers: list,
+        installed_names: set[str],
+        pre_filter_tag: str,
+    ) -> list | None:
+        return None
+
+    async def wait_for_model_pick(
+        self,
+        entries: list[tuple[str, str, str]],
+        current_model: str | None,
+        current_provider: str | None,
+    ) -> tuple[str, str] | None:
+        return None
+
+    def clear_chat(self) -> None:
+        self.chat_cleared = True
+
+    def request_quit(self) -> None:
+        self.quit_requested = True
+
+    def force_quit(self) -> None:
+        self.force_quit_requested = True
+
+    async def start_new_session(self) -> None:
+        self.started_sessions += 1
+
+    async def handle_session_resume(
+        self,
+        thread_id: str,
+        workspace_dir: str | None = None,
+    ) -> None:
+        self.resumed_sessions.append((thread_id, workspace_dir))
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+    async def start_compacting_indicator(self) -> None:
+        self.started += 1
+
+    async def stop_compacting_indicator(self) -> None:
+        self.stopped += 1
+
+    def update_status_after_compact(self, tokens_after: int) -> None:
+        self.updated_tokens.append(tokens_after)
 
 
 @dataclass
@@ -221,7 +313,7 @@ class FakeGraphGateway(GraphGateway):
         self.clone_calls: list[
             tuple[str, dict[str, Any] | None, GraphTarget | None]
         ] = []
-        self.updated_states: list[tuple[GraphTarget, str, dict[str, object]]] = []
+        self.updated_states: list[tuple[GraphTarget, str, GraphStateValues]] = []
 
     async def create_thread(
         self,
@@ -321,7 +413,7 @@ class FakeGraphGateway(GraphGateway):
         self,
         target: GraphTarget,
         thread_id: str,
-        values: dict[str, object],
+        values: GraphStateValues,
     ) -> None:
         self.updated_states.append((target, thread_id, values))
 
@@ -422,7 +514,7 @@ class FakeLangGraphThreadsClient:
         self.gets: list[str] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
-        self.state_updates: list[tuple[str, dict[str, object]]] = []
+        self.state_updates: list[tuple[str, GraphStateValues]] = []
 
     async def create(
         self,
@@ -524,7 +616,7 @@ class FakeLangGraphThreadsClient:
     async def update_state(
         self,
         thread_id: str,
-        values: dict[str, object],
+        values: GraphStateValues,
     ) -> dict[str, Any]:
         self.state_updates.append((thread_id, values))
         return {"checkpoint": {"thread_id": thread_id}}

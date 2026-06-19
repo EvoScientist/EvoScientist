@@ -610,9 +610,9 @@ def build_compact_summary_renderable(
 
 
 async def compact_conversation(
-    graph_gateway: GraphGateway | None,
-    thread_id: str | None,
-    target: GraphTarget | None,
+    graph_gateway: GraphGateway,
+    thread_id: str,
+    target: GraphTarget,
     *,
     input_tokens_hint: int | None = None,
 ) -> CompactResult:
@@ -630,9 +630,6 @@ async def compact_conversation(
 
     Returns a structured ``CompactResult``.
     """
-    if graph_gateway is None or target is None or not thread_id:
-        return CompactResult("noop", "Nothing to compact — start a conversation first.")
-
     from langchain_core.messages.utils import count_tokens_approximately
     from langchain_core.runnables import RunnableConfig
 
@@ -943,7 +940,7 @@ async def _apply_serve_resume_state(
             raise
 
     old_thread_id = runtime_state.thread_id
-    thread_changed = bool(thread_id) and thread_id != old_thread_id
+    thread_changed = thread_id != old_thread_id
     if thread_changed:
         runtime_state.set_thread_id(thread_id, channel_runtime)
 
@@ -970,7 +967,7 @@ def _make_serve_handle_session_resume_cb(
             workspace_dir=workspace_dir,
             config=config,
         )
-        if thread_id and thread_id != old_thread_id:
+        if thread_id != old_thread_id:
             runtime_state.resume_warning_thread_id = thread_id
 
     return _cb
@@ -1030,11 +1027,11 @@ def _make_serve_cmd_completed_hook(
                 config=config,
             )
         else:
-            thread_changed = bool(new_tid) and new_tid != old_thread_id
+            thread_changed = new_tid != old_thread_id
             if thread_changed:
                 runtime_state.set_thread_id(new_tid, channel_runtime)
 
-        thread_changed = bool(new_tid) and new_tid != old_thread_id
+        thread_changed = new_tid != old_thread_id
 
         # Surface the in-memory-state limitation to the channel user
         # for ``/resume`` so the missing history isn't silent.  Flush

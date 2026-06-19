@@ -82,33 +82,6 @@ def test_unresolved_slash_returns_false():
     assert handled is False
 
 
-def test_known_slash_requires_graph_gateway():
-    msg = _make_msg()
-    fake_cmd = MagicMock()
-    fake_cmd.needs_agent.return_value = False
-    with (
-        patch(
-            "EvoScientist.commands.manager.manager.resolve",
-            return_value=(fake_cmd, ["core"]),
-        ),
-        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
-    ):
-        handled = _run(
-            _dispatch_channel_slash_command(
-                msg,
-                agent="fake-agent",
-                thread_id="t1",
-                workspace_dir="/tmp",
-                checkpointer=None,
-                append_system=MagicMock(),
-            )
-        )
-
-    assert handled is True
-    mock_set_resp.assert_called_once()
-    assert "requires a graph_gateway" in mock_set_resp.call_args.args[1]
-
-
 def test_successful_slash_execution_sets_response_and_breadcrumb():
     """Known slash command: cmd_manager.execute ran, helper returns True,
     sends a confirmation to the channel user, and appends a local log line."""
@@ -222,7 +195,9 @@ def test_needs_agent_awaits_loader_and_passes_result():
         )
     assert handled is True
     await_called.assert_called_once()
-    ctx_arg = mock_execute.await_args.args[1]
+    await_args = mock_execute.await_args
+    assert await_args is not None
+    ctx_arg = await_args.args[1]
     assert ctx_arg.agent == "ready-agent"
 
 

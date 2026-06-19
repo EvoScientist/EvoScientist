@@ -34,7 +34,6 @@ from ..gateway import (
 from ..paths import DATA_DIR
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
-from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
     DANGEROUS_BANNER_LABEL,
@@ -43,6 +42,12 @@ from ._constants import (
     LOGO_LINES,
     WELCOME_SLOGANS,
     build_metadata,
+)
+from .async_notifier import (
+    AsyncTasksState,
+    consume_notifications,
+    has_pending_notifications,
+    read_async_tasks_from_gateway,
 )
 from .channel import (
     ChannelMessage,
@@ -905,7 +910,7 @@ def run_textual_interactive(
             # so that the next poll tick cannot schedule a second consumer before
             # the first one has a chance to run (fixes overlapping-turn bug).
             if (
-                async_notifier.has_pending_notifications(self._conversation_tid)
+                has_pending_notifications(self._conversation_tid)
                 and not self._busy
                 and not self._notification_consuming
             ):
@@ -925,7 +930,7 @@ def run_textual_interactive(
             target_tid = self._conversation_tid
             try:
                 try:
-                    await async_notifier.consume_notifications(
+                    await consume_notifications(
                         run_message=lambda text, notifs: self._inject_notification_tui(
                             text, notifs, target_thread_id=target_tid
                         ),
@@ -998,9 +1003,7 @@ def run_textual_interactive(
 
             self._run_task = asyncio.ensure_future(_run_and_publish())
 
-        async def _read_async_tasks_tui(
-            self, target_thread_id: str | None
-        ) -> async_notifier.AsyncTasksState:
+        async def _read_async_tasks_tui(self, target_thread_id: str) -> AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
 
             ``target_thread_id`` is captured by ``_consume_notifications_tui`` at
@@ -1008,10 +1011,10 @@ def run_textual_interactive(
             make us read the wrong thread's state.
             """
             agent = self._agent_loader.agent
-            if agent is None or not target_thread_id:
+            if agent is None:
                 return {}
             try:
-                return await async_notifier.read_async_tasks_from_gateway(
+                return await read_async_tasks_from_gateway(
                     self._graph_gateway(),
                     GraphTarget(
                         local_graph=agent,

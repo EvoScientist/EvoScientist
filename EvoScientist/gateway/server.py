@@ -153,16 +153,6 @@ def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
         )
 
 
-def _command_resume_value(message: object) -> object:
-    if not isinstance(message, Command):
-        return None
-    return message.resume
-
-
-def _command_has_resume(message: object) -> bool:
-    return isinstance(message, Command) and message.resume is not None
-
-
 @dataclass(frozen=True, slots=True)
 class LangGraphServerThreadStore(ThreadStore):
     """Thread store backed by the LangGraph server Threads API."""
@@ -365,7 +355,7 @@ class LangGraphServerThreadStore(ThreadStore):
         metadata: dict[str, Any] | None = None,
     ) -> str:
         copy_response: object = await self.client.threads.copy(source_thread_id)
-        if not isinstance(copy_response, dict):
+        if not isinstance(copy_response, Mapping):
             raise RuntimeError(
                 "LangGraph thread copy did not return a cloned thread id"
             )
@@ -587,14 +577,10 @@ class LangGraphServerGateway:
                     metadata=request.metadata,
                 ),
             )
-        if _command_has_resume(request.message):
-            await self._respond_to_interrupt(
-                stream,
-                _command_resume_value(request.message),
-            )
-            return
-
         if isinstance(request.message, Command):
+            if request.message.resume is not None:
+                await self._respond_to_interrupt(stream, request.message.resume)
+                return
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
             )
@@ -637,7 +623,7 @@ class LangGraphServerGateway:
         self,
         target: GraphTarget,
         thread_id: str,
-        values: dict[str, object],
+        values: GraphStateValues,
     ) -> None:
         await self.thread_store.client.threads.update_state(thread_id, values)
 

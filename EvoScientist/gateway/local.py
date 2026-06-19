@@ -176,16 +176,14 @@ class LocalGraphGateway:
         snapshot = await local_graph.aget_state(
             {"configurable": {"thread_id": thread_id}}
         )
-        values = getattr(snapshot, "values", None)
-        if not isinstance(values, dict):
-            return {}
-        return {str(key): value for key, value in values.items()}
+        values: GraphStateValues = snapshot.values
+        return values
 
     async def update_state_values(
         self,
         target: GraphTarget,
         thread_id: str,
-        values: dict[str, object],
+        values: GraphStateValues,
     ) -> None:
         local_graph = self._require_local_graph(target)
         await local_graph.aupdate_state(

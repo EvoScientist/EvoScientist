@@ -7,6 +7,7 @@ import random
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +35,12 @@ import EvoScientist.cli.channel as _ch_mod
 
 from ..commands.base import Command, CommandContext
 from ..commands.manager import manager as cmd_manager
-from ..gateway import GraphTarget, RuntimeGateways, create_runtime_gateways
+from ..gateway import (
+    GraphGateway,
+    GraphTarget,
+    RuntimeGateways,
+    create_runtime_gateways,
+)
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
@@ -91,6 +97,16 @@ _background_tasks: set[asyncio.Task] = set()
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
+
+
+@dataclass(frozen=True, slots=True)
+class _StartupSession:
+    """Resolved interactive startup session with a concrete active thread."""
+
+    thread_id: str
+    workspace_dir: str | None
+    resumed: bool
+
 
 # =============================================================================
 # Banner
@@ -254,6 +270,67 @@ class SlashCommandCompleter(Completer):
             )
 
 
+async def _resolve_startup_session(
+    requested_thread_id: str | None,
+    *,
+    workspace_dir: str | None,
+    graph_gateway: GraphGateway,
+    config: Any,
+) -> _StartupSession:
+    """Resolve/create the initial CLI session before shared REPL state exists."""
+    if not requested_thread_id:
+        return _StartupSession(
+            thread_id=await graph_gateway.create_thread(
+                GraphTarget(workspace_dir=workspace_dir)
+            ),
+            workspace_dir=workspace_dir,
+            resumed=False,
+        )
+
+    resolution = await graph_gateway.resolve_thread(requested_thread_id)
+    if resolution.thread_id is None:
+        if resolution.matches:
+            console.print(
+                f"[yellow]Ambiguous thread ID '{escape(requested_thread_id)}'. "
+                "Matches:[/yellow]"
+            )
+            for match in resolution.matches:
+                console.print(f"  [cyan]{match}[/cyan]")
+        else:
+            console.print(
+                f"[red]Thread '{escape(requested_thread_id)}' not found.[/red]"
+            )
+        return _StartupSession(
+            thread_id=await graph_gateway.create_thread(
+                GraphTarget(workspace_dir=workspace_dir)
+            ),
+            workspace_dir=workspace_dir,
+            resumed=False,
+        )
+
+    resolved_thread_id = resolution.thread_id
+    metadata = await graph_gateway.get_thread_metadata(resolved_thread_id)
+    resolved_workspace = (metadata or {}).get("workspace_dir") or workspace_dir
+    if resolved_workspace:
+        from ..langgraph_dev.manager import WorkspaceMismatchError
+        from .commands import _sync_background_agent_server_workspace
+
+        try:
+            await _sync_background_agent_server_workspace(
+                config,
+                workspace_dir=resolved_workspace,
+            )
+        except WorkspaceMismatchError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+
+    return _StartupSession(
+        thread_id=resolved_thread_id,
+        workspace_dir=resolved_workspace,
+        resumed=True,
+    )
+
+
 # =============================================================================
 # Interactive & single-shot modes
 # =============================================================================
@@ -381,10 +458,10 @@ def cmd_interactive(
 
     runtime_gateways = create_runtime_gateways()
     graph_gateway = runtime_gateways.graph_gateway
+    requested_thread_id = thread_id
 
     # Mutable state for async loop
     state: dict[str, Any] = {
-        "thread_id": thread_id or "",
         "workspace_dir": workspace_dir,
         "running": True,
         "resumed": False,
@@ -548,21 +625,6 @@ def cmd_interactive(
         elif event_type in ("done", "error"):
             _set_status_streaming_text("")
 
-    async def _resolve_thread_id(tid: str) -> str | None:
-        """Resolve a (possibly partial) thread ID. Returns full ID or None."""
-        resolution = await graph_gateway.resolve_thread(tid)
-        if resolution.thread_id:
-            return resolution.thread_id
-        if resolution.matches:
-            console.print(
-                f"[yellow]Ambiguous thread ID '{escape(tid)}'. Matches:[/yellow]"
-            )
-            for s in resolution.matches:
-                console.print(f"  [cyan]{s}[/cyan]")
-            return None
-        console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
-        return None
-
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
         messages = await graph_gateway.get_thread_messages(thread_id)
@@ -641,10 +703,18 @@ def cmd_interactive(
         """Async main loop with prompt_async and channel queue checking."""
         nonlocal model
         async with get_checkpointer() as checkpointer:
-            if not state["thread_id"]:
-                state["thread_id"] = await graph_gateway.create_thread(
-                    GraphTarget(workspace_dir=state["workspace_dir"])
-                )
+            startup = await _resolve_startup_session(
+                requested_thread_id,
+                workspace_dir=state["workspace_dir"],
+                graph_gateway=graph_gateway,
+                config=config,
+            )
+            state["thread_id"] = startup.thread_id
+            state["workspace_dir"] = startup.workspace_dir
+            state["resumed"] = startup.resumed
+            if startup.resumed:
+                state["status_started_at"] = datetime.now()
+                state["status_last_input_tokens"] = None
             # Lifecycle callbacks (new / resume) need ``checkpointer``
             # in scope — define the ``rich_ui`` adapter here rather than
             # at the outer function level.
@@ -749,47 +819,6 @@ def cmd_interactive(
                 on_start_new_session=_on_start_new_session,
                 on_handle_session_resume=_on_handle_session_resume,
             )
-
-            # Handle --thread-id resume
-            if thread_id:
-                resolved = await _resolve_thread_id(thread_id)
-                if resolved:
-                    meta = await graph_gateway.get_thread_metadata(resolved)
-                    ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
-                    state["thread_id"] = resolved
-                    state["resumed"] = True
-                    state["status_started_at"] = datetime.now()
-                    state["status_last_input_tokens"] = None
-                    if ws:
-                        state["workspace_dir"] = ws
-                        # CLI-startup --resume path: sync langgraph dev
-                        # subprocess to the thread's saved workspace if it
-                        # differs from the one we initially launched it with.
-                        # Show a spinner during the 10-15s restart, and run
-                        # the sync call in a worker thread so the asyncio
-                        # event loop stays responsive.
-                        from ..langgraph_dev.manager import WorkspaceMismatchError
-                        from .commands import _sync_background_agent_server_workspace
-
-                        try:
-                            await _sync_background_agent_server_workspace(
-                                config,
-                                workspace_dir=ws,
-                            )
-                        except WorkspaceMismatchError as exc:
-                            # Startup --resume into a workspace owned by
-                            # a different EvoSci process: refuse to start
-                            # the CLI so the user can resolve the conflict.
-                            console.print(f"[red]{exc}[/red]")
-                            raise typer.Exit(1) from exc
-                else:
-                    # Resolution failed (ambiguous/not-found); the user's raw
-                    # input is still seeded in state["thread_id"] from init.
-                    # Replace with a fresh ID so a new session isn't
-                    # checkpointed under the bad prefix.
-                    state["thread_id"] = await graph_gateway.create_thread(
-                        GraphTarget(workspace_dir=state["workspace_dir"])
-                    )
 
             # Kick off agent construction (MCP tool enumeration is the
             # slow part) in the background so the banner and prompt can
@@ -1098,8 +1127,11 @@ def cmd_interactive(
                 sys.stdout.write("\033[34;1m❯\033[0m ")
                 sys.stdout.flush()
 
+            async def _empty_async_tasks() -> async_notifier.AsyncTasksState:
+                return {}
+
             async def _read_current_async_tasks(
-                target_thread_id: str | None,
+                target_thread_id: str,
             ) -> async_notifier.AsyncTasksState:
                 """Snapshot async_tasks from the active agent state for dedup.
 
@@ -1109,7 +1141,7 @@ def cmd_interactive(
                 cannot make us read the wrong thread's state).
                 """
                 agent = agent_loader.agent
-                if agent is None or not target_thread_id:
+                if agent is None:
                     return {}
                 try:
                     return await async_notifier.read_async_tasks_from_gateway(
@@ -1140,6 +1172,11 @@ def cmd_interactive(
                     # would silently die otherwise (Fix #4).
                     current_tid = state.get("thread_id")
                     if async_notifier.has_pending_notifications(current_tid):
+                        read_async_tasks_state = (
+                            (lambda _tid=current_tid: _read_current_async_tasks(_tid))
+                            if current_tid
+                            else _empty_async_tasks
+                        )
                         try:
                             await async_notifier.consume_notifications(
                                 run_message=lambda text, notifs, _tid=current_tid: (
@@ -1147,9 +1184,7 @@ def cmd_interactive(
                                         text, notifs, target_thread_id=_tid
                                     )
                                 ),
-                                read_async_tasks_state=lambda _tid=current_tid: (
-                                    _read_current_async_tasks(_tid)
-                                ),
+                                read_async_tasks_state=read_async_tasks_state,
                                 current_thread_id=current_tid,
                             )
                         except Exception:

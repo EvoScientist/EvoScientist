@@ -51,12 +51,11 @@ def _drain_queue(q):
             return items
 
 
-def test_read_async_tasks_from_gateway_filters_state_values(run_async):
+def test_read_async_tasks_from_gateway_reads_state_values(run_async):
     gateway = FakeGraphGateway(
         state_values={
             "async_tasks": {
                 "task-1": {"status": "success"},
-                "task-2": "not-a-task-map",
             }
         }
     )
@@ -345,7 +344,7 @@ def test_drain_returns_all_pending_and_empties_queue():
 
 def test_dedup_skips_tasks_already_checked_after_terminal():
     """dedup_notifications skips tasks with terminal status and last_checked_at >= last_updated_at."""
-    async_tasks = {
+    async_tasks: async_notifier.AsyncTasksState = {
         "a": {
             "status": "success",
             "last_checked_at": "2026-05-06T12:01:00Z",

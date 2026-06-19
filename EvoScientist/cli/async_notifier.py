@@ -16,7 +16,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
@@ -32,7 +32,15 @@ Cancel operations transition runs into ``interrupted`` (not ``cancelled``).
 # HTTP keep-alive timeout on long static periods). Bounded to prevent an
 # unbounded loop if the server permanently misreports status.
 _MAX_RECONNECT_ATTEMPTS: Final = 10
-AsyncTasksState: TypeAlias = dict[str, dict[str, object]]
+
+
+class AsyncTaskState(TypedDict, total=False):
+    status: str
+    last_checked_at: str
+    last_updated_at: str
+
+
+AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
 
 
 @dataclass(frozen=True)
@@ -134,23 +142,14 @@ def pending_thread_ids() -> set[str]:
 async def read_async_tasks_from_gateway(
     gateway: GraphGateway,
     target: GraphTarget,
-    thread_id: str | None,
+    thread_id: str,
 ) -> AsyncTasksState:
     """Read async_tasks state through the active graph gateway."""
-    if not thread_id:
-        return {}
     try:
         values = await gateway.get_state_values(target, thread_id)
     except Exception:
         return {}
-    raw_tasks = values.get("async_tasks")
-    if not isinstance(raw_tasks, dict):
-        return {}
-    return {
-        str(task_id): {str(key): value for key, value in task.items()}
-        for task_id, task in raw_tasks.items()
-        if isinstance(task, dict)
-    }
+    return values.get("async_tasks", {})
 
 
 async def watch_run_and_notify(
@@ -390,7 +389,7 @@ def drain_notifications(
 
 def dedup_notifications(
     notifs: list[AsyncTaskNotification],
-    async_tasks: dict[str, dict] | None,
+    async_tasks: AsyncTasksState | None,
 ) -> list[AsyncTaskNotification]:
     """Filter notifications the agent has already 'seen' via prior check.
 

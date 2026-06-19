@@ -258,12 +258,12 @@ async def dispatch_channel_slash_command(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
+    graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     channel_runtime: ChannelRuntime | None = None,
-    graph_gateway: GraphGateway | None = None,
 ) -> bool:
     """Dispatch a slash command from a channel message.
 
@@ -291,8 +291,8 @@ async def dispatch_channel_slash_command(
         Headless serve passes ``None`` — ``/new`` and ``/resume`` degrade
         gracefully via the default ``ChannelCommandUI`` messages.
     graph_gateway:
-        Optional graph gateway forwarded to slash commands and channel
-        resume-history rendering.
+        Graph gateway forwarded to slash commands and channel resume-history
+        rendering.
     await_agent_ready:
         Optional async resolver that blocks until the background agent
         load finishes.  Called only when ``cmd.needs_agent(args)`` is
@@ -360,12 +360,12 @@ async def _dispatch_channel_slash_impl(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
+    graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None,
     channel_runtime: ChannelRuntime | None,
-    graph_gateway: GraphGateway | None,
 ) -> bool:
     """Inner body of ``dispatch_channel_slash_command``.
 
@@ -383,9 +383,6 @@ async def _dispatch_channel_slash_impl(
         # Unknown slash command — let the agent handle it (matches TUI).
         return False
     cmd, cmd_args = parsed
-
-    if graph_gateway is None:
-        raise RuntimeError("Channel slash dispatch requires a graph_gateway")
 
     agent_for_ctx = agent
     if cmd.needs_agent(cmd_args) and await_agent_ready is not None:
@@ -667,7 +664,7 @@ def channel_ask_user_prompt(
                         channel=msg.channel_type,
                         chat_id=msg.chat_id,
                         content=content,
-                        metadata=msg.metadata,
+                        metadata=msg.metadata or {},
                     )
                 ),
                 bus_loop,
@@ -809,7 +806,9 @@ def channel_hitl_prompt(
                         channel=msg.channel_type,
                         chat_id=msg.chat_id,
                         content=content,
-                        metadata=metadata if metadata is not None else msg.metadata,
+                        metadata=metadata
+                        if metadata is not None
+                        else msg.metadata or {},
                     )
                 ),
                 bus_loop,

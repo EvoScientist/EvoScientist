@@ -70,7 +70,7 @@ class ChannelRuntime:
     agent: Any = None
     thread_id: str | None = None
 
-    def bind(self, agent: Any, thread_id: str | None) -> None:
+    def bind(self, agent: Any, thread_id: str) -> None:
         self.agent = agent
         self.thread_id = thread_id
 

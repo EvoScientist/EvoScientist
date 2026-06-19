@@ -5,15 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import GraphTarget
 from tests.conftest import run_async as _run
-from tests.fakes import FakeGraphGateway
+from tests.fakes import FakeCommandUI, FakeGraphGateway
 
 _TARGET = GraphTarget()
 
 
 def _compact(
-    graph_gateway: FakeGraphGateway | None,
+    graph_gateway: FakeGraphGateway,
     *,
-    thread_id: str | None = "tid-1",
+    thread_id: str = "tid-1",
     input_tokens_hint: int | None = None,
 ):
     from EvoScientist.cli.commands import compact_conversation
@@ -30,16 +30,6 @@ def _compact(
 
 class TestCompactGuards:
     """Guard conditions that return early without touching the middleware."""
-
-    def test_no_agent(self):
-        result = _compact(None, thread_id="abc")
-        assert result.status == "noop"
-        assert "Nothing to compact" in result.message
-
-    def test_no_thread_id(self):
-        result = _compact(FakeGraphGateway(), thread_id=None)
-        assert result.status == "noop"
-        assert "Nothing to compact" in result.message
 
     def test_empty_messages(self):
         graph_gateway = FakeGraphGateway(state_values={"messages": []})
@@ -392,32 +382,7 @@ class TestCompactCommandUI:
         from EvoScientist.commands.base import CommandContext
         from EvoScientist.commands.implementation.session import CompactCommand
 
-        class _UI:
-            supports_interactive = True
-
-            def __init__(self) -> None:
-                self.system_messages: list[str] = []
-                self.renderables: list[object] = []
-                self.started = 0
-                self.stopped = 0
-                self.updated_tokens: list[int] = []
-
-            def append_system(self, text: str, style: str = "dim") -> None:
-                self.system_messages.append(text)
-
-            def mount_renderable(self, renderable):
-                self.renderables.append(renderable)
-
-            async def start_compacting_indicator(self) -> None:
-                self.started += 1
-
-            async def stop_compacting_indicator(self) -> None:
-                self.stopped += 1
-
-            def update_status_after_compact(self, tokens_after: int) -> None:
-                self.updated_tokens.append(tokens_after)
-
-        ui = _UI()
+        ui = FakeCommandUI()
         # input_tokens_hint must be set for update_status_after_compact to fire
         # (without it, tokens_after is message-level and the unit would be wrong)
         ctx = CommandContext(

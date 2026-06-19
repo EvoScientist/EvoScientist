@@ -82,6 +82,7 @@ def test_hook_updates_runtime_state_on_agent_swap():
 
     ctx = MagicMock()
     ctx.agent = new_agent
+    ctx.thread_id = state.thread_id
     cmd = MagicMock()
     cmd.name = "/model"
 
@@ -123,6 +124,7 @@ def test_hook_noop_when_agent_unchanged():
 
     ctx = MagicMock()
     ctx.agent = original_agent  # no swap
+    ctx.thread_id = state.thread_id
     cmd = MagicMock()
     cmd.name = "/evoskills"
 
@@ -140,6 +142,7 @@ def test_hook_noop_when_ctx_agent_is_none():
 
     ctx = MagicMock()
     ctx.agent = None
+    ctx.thread_id = state.thread_id
     cmd = MagicMock()
     cmd.name = "/whatever"
 

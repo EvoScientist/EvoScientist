@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 GraphEvent: TypeAlias = dict[str, Any]
 GraphRunInput: TypeAlias = str | Command
-GraphStateValues: TypeAlias = dict[str, object]
+GraphStateValues: TypeAlias = dict[str, Any]
 DEFAULT_GRAPH_ID = "EvoScientist"
 
 
@@ -170,6 +170,6 @@ class GraphGateway(Protocol):
         self,
         target: GraphTarget,
         thread_id: str,
-        values: dict[str, object],
+        values: GraphStateValues,
     ) -> None:
         """Update graph state values for a thread."""
