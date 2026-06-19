@@ -514,7 +514,7 @@ class FakeLangGraphThreadsClient:
         self.gets: list[str] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
-        self.state_updates: list[tuple[str, GraphStateValues]] = []
+        self.state_updates: list[tuple[str, GraphStateValues, str | None]] = []
 
     async def create(
         self,
@@ -617,8 +617,10 @@ class FakeLangGraphThreadsClient:
         self,
         thread_id: str,
         values: GraphStateValues,
+        *,
+        as_node: str | None = None,
     ) -> dict[str, Any]:
-        self.state_updates.append((thread_id, values))
+        self.state_updates.append((thread_id, values, as_node))
         return {"checkpoint": {"thread_id": thread_id}}
 
     async def delete(self, thread_id: str) -> None:

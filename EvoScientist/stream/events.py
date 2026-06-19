@@ -41,6 +41,13 @@ from .v3_payloads import (
 UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
 LangGraphStreamInput: TypeAlias = dict[str, list[dict[str, object]]] | Command
+_ValueMessageKey: TypeAlias = tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _AssistantValueMessage:
+    key: _ValueMessageKey
+    content: object
 
 
 def _is_interrupt_error_message(message: object) -> bool:
@@ -186,12 +193,16 @@ class _V3EventProcessor:
         emitter: StreamEventEmitter,
         subagents: _SubagentRegistry,
         existing_summarization_event: Mapping[str, object] | None,
+        existing_messages: object = None,
+        process_value_messages: bool = False,
     ) -> None:
         self.emitter = emitter
         self.subagents = subagents
         self._suppressed_summarization_signature = _summarization_event_signature(
             existing_summarization_event
         )
+        self._seen_value_message_keys = self._message_keys(existing_messages)
+        self._process_value_message_snapshots = process_value_messages
         self.full_response = ""
         self._summarization_in_progress = False
         self._tool_inputs: dict[
@@ -217,19 +228,81 @@ class _V3EventProcessor:
                 return []
 
         if method == "messages":
-            return self._process_message_event(_event_data(event), subagent, namespace)
+            events = self._process_message_event(
+                _event_data(event), subagent, namespace
+            )
+            if not namespace and any(item.get("type") == "text" for item in events):
+                self._process_value_message_snapshots = False
+            return events
         if method == "tools":
             return self._process_tool_event(namespace, _event_data(event), subagent)
         if method == "updates":
             return self._process_update_event(_event_data(event))
         if method == "values":
+            events: list[dict[str, Any]] = []
             params = event.get("params") or {}
             interrupts = params.get("interrupts") or ()
             if interrupts:
-                return self._process_update_event({"__interrupt__": interrupts})
+                events.extend(self._process_update_event({"__interrupt__": interrupts}))
+            if self._process_value_message_snapshots and not namespace:
+                events.extend(self._process_value_messages(_event_data(event)))
+            return events
         if method == "input.requested":
             return self._process_input_requested(event.get("params"))
         return []
+
+    @classmethod
+    def _message_keys(cls, messages: object) -> set[_ValueMessageKey]:
+        if not isinstance(messages, list):
+            return set()
+        keys: set[_ValueMessageKey] = set()
+        for message in messages:
+            if parsed := cls._assistant_value_message(message):
+                keys.add(parsed.key)
+        return keys
+
+    @staticmethod
+    def _assistant_value_message(message: object) -> _AssistantValueMessage | None:
+        message_map = _as_raw_map(message)
+        if message_map is not None:
+            raw_id = message_map.get("id")
+            raw_role = message_map.get("type") or message_map.get("role")
+            content = message_map.get("content")
+        elif isinstance(message, BaseMessage):
+            raw_id = message.id
+            raw_role = message.type
+            content = message.content
+        else:
+            return None
+
+        if raw_role not in ("ai", "assistant"):
+            return None
+        if raw_id:
+            key = ("id", str(raw_id))
+        else:
+            key = ("body", str(raw_role), repr(content))
+        return _AssistantValueMessage(key=key, content=content)
+
+    def _process_value_messages(self, data: object) -> list[dict[str, Any]]:
+        data_map = _as_raw_map(data)
+        if data_map is None:
+            return []
+        messages = data_map.get("messages")
+        if not isinstance(messages, list):
+            return []
+
+        events: list[dict[str, Any]] = []
+        for message in messages:
+            parsed = self._assistant_value_message(message)
+            if parsed is None:
+                continue
+            if parsed.key in self._seen_value_message_keys:
+                continue
+            text = _text_from_content(parsed.content)
+            if text:
+                self._seen_value_message_keys.add(parsed.key)
+                events.extend(self._emit_text(text, subagent=None))
+        return events
 
     def _process_message_event(
         self,

@@ -632,7 +632,12 @@ class LangGraphServerGateway:
         thread_id: str,
         values: GraphStateValues,
     ) -> None:
-        await self.thread_store.client.threads.update_state(thread_id, values)
+        as_node = "model" if "_summarization_event" in values else None
+        await self.thread_store.client.threads.update_state(
+            thread_id,
+            values,
+            as_node=as_node,
+        )
 
     async def _get_state_values(self, thread_id: str) -> GraphStateValues:
         state = await self.thread_store.client.threads.get_state(thread_id)
@@ -673,18 +678,26 @@ class LangGraphServerGateway:
 
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
+        state_values: GraphStateValues = {}
         existing_summarization_event: Mapping[str, object] | None = None
+        process_value_messages = True
         try:
-            values = await self._get_state_values(request.thread_id)
-            existing_summarization_event = _find_summarization_event_payload(values)
-        except Exception:
+            state_values = await self._get_state_values(request.thread_id)
+            existing_summarization_event = _find_summarization_event_payload(
+                state_values
+            )
+        except NotFoundError:
             pass
+        except Exception:
+            process_value_messages = False
 
         subagents = _SubagentRegistry()
         processor = _V3EventProcessor(
             emitter,
             subagents,
             existing_summarization_event,
+            state_values.get("messages"),
+            process_value_messages=process_value_messages,
         )
         tracker = _ServerSubagentTracker(emitter, subagents)
         stream = self.thread_store.client.threads.stream(

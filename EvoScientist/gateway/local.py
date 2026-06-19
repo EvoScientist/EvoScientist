@@ -177,9 +177,11 @@ class LocalGraphGateway:
         values: GraphStateValues,
     ) -> None:
         local_graph = self._require_local_graph(target)
+        as_node = "model" if "_summarization_event" in values else None
         await local_graph.aupdate_state(
             {"configurable": {"thread_id": thread_id}},
             values,
+            as_node=as_node,
         )
 
     def _require_local_graph(self, target: GraphTarget | None) -> CompiledStateGraph:

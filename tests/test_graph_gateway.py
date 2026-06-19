@@ -165,6 +165,7 @@ def test_local_graph_gateway_updates_state_values():
     agent.aupdate_state.assert_awaited_once_with(
         {"configurable": {"thread_id": "abc12345"}},
         {"_summarization_event": {"cutoff_index": 2}},
+        as_node="model",
     )
 
 
@@ -677,7 +678,7 @@ def test_langgraph_server_gateway_updates_state_values():
     )
 
     assert threads.state_updates == [
-        ("abc12345", {"_summarization_event": {"cutoff_index": 2}})
+        ("abc12345", {"_summarization_event": {"cutoff_index": 2}}, "model")
     ]
 
 
@@ -755,6 +756,122 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
         {"type": "text", "content": "hello"},
         {"type": "done", "content": "hello", "response": "hello"},
     ]
+
+
+_OLD_AI = {"type": "ai", "content": "old", "id": "old-ai"}
+_HUMAN = {"type": "human", "content": "hi", "id": "human-1"}
+_NEW_AI = {"type": "ai", "content": "new", "id": "new-ai"}
+
+
+def _value_snapshot(
+    messages: list[dict[str, object]],
+    *,
+    namespace: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "method": "values",
+        "params": {
+            "namespace": namespace or [],
+            "data": {"messages": messages},
+        },
+    }
+
+
+def _root_text_delta(text: str) -> dict[str, object]:
+    return {
+        "method": "messages",
+        "params": {
+            "namespace": [],
+            "data": {
+                "event": "content-block-delta",
+                "delta": {"type": "text-delta", "text": text},
+            },
+        },
+    }
+
+
+def _root_message_finish() -> dict[str, object]:
+    return {
+        "method": "messages",
+        "params": {"namespace": [], "data": {"event": "message-finish"}},
+    }
+
+
+def _collect_server_gateway_stream(
+    events: list[dict[str, object]],
+    *,
+    state_messages: list[dict[str, object]] | None = None,
+) -> list[dict[str, Any]]:
+    stream = FakeLangGraphThreadStream("abc12345", events=events)
+    state_values: dict[str, object] = {}
+    if state_messages is not None:
+        state_values["messages"] = state_messages
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": state_values}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            )
+        ]
+
+    return run_async(_collect())
+
+
+def test_langgraph_server_gateway_streams_value_message_snapshots():
+    events = _collect_server_gateway_stream(
+        [
+            _value_snapshot([_OLD_AI, _HUMAN]),
+            _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    assert events == [
+        {"type": "text", "content": "new"},
+        {"type": "done", "content": "new", "response": "new"},
+    ]
+
+
+def test_langgraph_server_gateway_values_do_not_duplicate_message_stream():
+    events = _collect_server_gateway_stream(
+        [
+            _root_text_delta("new"),
+            _root_message_finish(),
+            _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    assert events == [
+        {"type": "text", "content": "new"},
+        {"type": "done", "content": "new", "response": "new"},
+    ]
+
+
+def test_langgraph_server_gateway_ignores_non_root_value_messages():
+    events = _collect_server_gateway_stream(
+        [
+            _value_snapshot(
+                [{"type": "ai", "content": "subagent text", "id": "subagent-ai"}],
+                namespace=["research:task-1"],
+            )
+        ],
+    )
+
+    assert not any(event.get("type") == "text" for event in events)
+    assert events[-1] == {"type": "done", "content": "", "response": ""}
 
 
 def test_langgraph_server_gateway_emits_state_interrupt_before_done():
