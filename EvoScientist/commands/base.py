@@ -100,7 +100,9 @@ class Command(ABC):
     alias: ClassVar[list[str]] = []
     description: str
     arguments: ClassVar[list[Argument]] = []
+    category: ClassVar[str] = "General"
     subcommands: ClassVar[list[SubCommand]] = []
+    examples: ClassVar[list[str]] = []
     # When False, callers may dispatch this command without waiting for
     # the background agent load to finish — important so recovery
     # commands like ``/mcp add`` can run even when the MCP load is
@@ -115,6 +117,57 @@ class Command(ABC):
         ``/channel start`` vs ``/channel status``).
         """
         return self.requires_agent
+
+    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+        """Return completions for args typed after the command name.
+
+        Default walks :attr:`subcommands` for the first positional token
+        only.  Override for deeper levels (e.g. server names, thread IDs).
+        """
+        if not self.subcommands:
+            return []
+        if len(tokens) <= 1:
+            prefix = tokens[0].lower() if tokens else ""
+            matches = [
+                (sc.name, sc.description)
+                for sc in self.subcommands
+                if sc.name.startswith(prefix)
+            ]
+            # Exact match — subcommand already complete, hide popup
+            if len(matches) == 1 and matches[0][0] == prefix:
+                return []
+            return matches
+        # partial + trailing space: /mcp a  → still show "add"
+        if len(tokens) == 2 and tokens[1] == "":
+            prefix = tokens[0].lower()
+            if any(sc.name == prefix for sc in self.subcommands):
+                return []
+            return [
+                (sc.name, sc.description)
+                for sc in self.subcommands
+                if sc.name.startswith(prefix)
+            ]
+        return []
+
+    def build_help_text(self) -> str:
+        """Build inline help string for the preview pane."""
+        parts: list[str] = []
+        usage = [self.name]
+        for arg in self.arguments:
+            usage.append(f"<{arg.name}>" if arg.required else f"[{arg.name}]")
+        parts.append(" ".join(usage))
+        parts.append(self.description)
+        if self.alias:
+            parts.append(f"Aliases: {', '.join(self.alias)}")
+        if self.subcommands:
+            parts.append("")
+            for sc in self.subcommands:
+                parts.append(f"  {sc.name:<14} {sc.description}")
+        if self.examples:
+            parts.append("")
+            for ex in self.examples:
+                parts.append(f"  {ex}")
+        return "\n".join(parts)
 
     @abstractmethod
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

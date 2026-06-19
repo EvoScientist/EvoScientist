@@ -13,6 +13,7 @@ class SkillsCommand(Command):
 
     name = "/skills"
     description = "List installed skills"
+    category = "Skills"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...cli.agent import _shorten_path
@@ -65,6 +66,7 @@ class InstallSkill(Command):
 
     name: ClassVar[str] = "/install-skill"
     description: ClassVar[str] = "Add a skill from path or GitHub"
+    category: ClassVar[str] = "Skills"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="source",
@@ -142,6 +144,7 @@ class InstallSkills(Command):
     description: ClassVar[str] = (
         "Browse and install EvoSkills (optional: /evoskills <tag>)"
     )
+    category: ClassVar[str] = "Skills"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="tag", type=str, description="Tag to filter skills by", required=False
@@ -255,6 +258,7 @@ class UninstallSkill(Command):
 
     name: ClassVar[str] = "/uninstall-skill"
     description: ClassVar[str] = "Remove an installed skill"
+    category: ClassVar[str] = "Skills"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="name",

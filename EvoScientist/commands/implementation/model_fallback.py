@@ -18,6 +18,7 @@ class ModelFallbackCommand(Command):
     name = "/model-fallback"
     alias: ClassVar[list[str]] = ["/fallback"]
     description = "Manage fallback models (add/remove/list/clear)"
+    category = "Model"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="action",

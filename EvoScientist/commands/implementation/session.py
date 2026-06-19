@@ -15,6 +15,7 @@ class CompactCommand(Command):
     name = "/compact"
     description = "Compact conversation to free context"
     requires_agent = True
+    category = "Session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...cli.commands import (
@@ -71,6 +72,7 @@ class ThreadsCommand(Command):
 
     name = "/threads"
     description = "List recent sessions"
+    category = "Session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...sessions import _format_relative_time, list_threads
@@ -127,6 +129,7 @@ class ResumeCommand(Command):
 
     name = "/resume"
     description = "Resume a previous session"
+    category = "Session"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="thread_id",
@@ -207,6 +210,7 @@ class NewCommand(Command):
 
     name = "/new"
     description = "Start a new session"
+    category = "Session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         ctx.ui.start_new_session()
@@ -217,6 +221,7 @@ class ClearCommand(Command):
 
     name = "/clear"
     description = "Clear chat history"
+    category = "Session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         ctx.ui.clear_chat()
@@ -227,6 +232,7 @@ class DeleteCommand(Command):
 
     name = "/delete"
     description = "Delete a saved session"
+    category = "Session"
     arguments: ClassVar[list[Argument]] = [
         Argument(
             name="thread_id",
@@ -306,6 +312,7 @@ class ExitCommand(Command):
     name = "/exit"
     alias: ClassVar[list[str]] = ["/quit", "/q"]
     description = "Quit EvoScientist"
+    category = "Session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         ctx.ui.force_quit()

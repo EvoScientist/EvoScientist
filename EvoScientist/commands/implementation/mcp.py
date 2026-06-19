@@ -13,6 +13,7 @@ class MCPCommand(Command):
 
     name = "/mcp"
     description = "Manage MCP servers"
+    category = "MCP"
     subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("list", "List configured MCP servers"),
         SubCommand("config", "Show server configuration details"),
@@ -21,6 +22,27 @@ class MCPCommand(Command):
         SubCommand("remove", "Remove an MCP server"),
         SubCommand("install", "Browse and install MCP servers"),
     ]
+    examples: ClassVar[list[str]] = [
+        "/mcp add myserver npx @foo/bar",
+        "/mcp config myserver",
+    ]
+
+    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+        if len(tokens) <= 1:
+            return super().get_completions(tokens)
+        subcmd = tokens[0].lower()
+        if subcmd in ("config", "remove", "edit") and len(tokens) == 2:
+            try:
+                from ...mcp import load_mcp_config
+
+                config = load_mcp_config()
+                prefix = tokens[1].lower()
+                return [
+                    (name, "") for name in config if name.lower().startswith(prefix)
+                ]
+            except Exception:
+                return []
+        return super().get_completions(tokens)
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         """Dispatch to the appropriate MCP subcommand."""

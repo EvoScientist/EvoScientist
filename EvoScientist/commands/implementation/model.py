@@ -47,6 +47,11 @@ class ModelCommand(Command):
 
     name = "/model"
     description = "Switch model (--save to persist)"
+    category = "Model"
+    examples: ClassVar[list[str]] = [
+        "/model claude-sonnet-4-20250514",
+        "/model llama3 ollama --save",
+    ]
     # ``--save`` is parsed manually in ``execute`` via ``"--save" in args``;
     # ``type=bool`` below is declarative metadata, not enforced by the manager.
     arguments: ClassVar[list[Argument]] = [
