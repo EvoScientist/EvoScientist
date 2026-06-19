@@ -49,7 +49,7 @@ from .knowledge import (
     record_knowledge_file,
     search_memory_files,
 )
-from .observations import read_observation_file
+from .observations import candidate_observation_documents, read_observation_file
 from .types import (
     KnowledgeRecordResult,
     KnowledgeStatus,
@@ -75,6 +75,8 @@ SYNTHESIS_CONTEXT_MAX_CHARS = 32_000
 SYNTHESIS_CONTEXT_OBSERVATION_SUMMARY_CHARS = 320
 SYNTHESIS_CONTEXT_OBSERVATION_CLAMPED_SUMMARY_CHARS = 120
 SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS = 500
+SYNTHESIS_TOOL_DEFAULT_LIMIT = 20
+SYNTHESIS_TOOL_MAX_LIMIT = 100
 _SYNTHESIS_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _SYNTHESIS_POLL_INTERVAL_SECONDS = 1.0
 _SYNTHESIS_MAX_POLL_FAILURES = 3
@@ -202,6 +204,26 @@ SynthesisDecision: TypeAlias = Annotated[
 class SynthesisReviewDecision(BaseModel):
     """Structured synthesis review returned by the synthesis agent."""
 
+    explored_queries: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Memory search queries used while deciding the synthesis boundary."
+        ),
+    )
+    read_memory_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact K-* and O-* IDs read with read_memory before making decisions. "
+            "Every supporting O-* ID in a create/update decision must appear here."
+        ),
+    )
+    boundary_rationale: str | None = Field(
+        default=None,
+        description=(
+            "Brief explanation of how the exploration boundary was chosen, or "
+            "why more exploration was unnecessary."
+        ),
+    )
     decisions: list[SynthesisDecision] = Field(
         default_factory=list,
         description=(
@@ -225,7 +247,7 @@ class SynthesisRunPayload(TypedDict):
 
 
 class SynthesisObservationContext(TypedDict):
-    """Compact seed observation included in a bounded synthesis prompt."""
+    """Compact trigger observation included in a bounded synthesis prompt."""
 
     id: str
     path: str
@@ -233,21 +255,95 @@ class SynthesisObservationContext(TypedDict):
     scope: str
     summary: str
     snippet: str
+    covered_by_knowledge_ids: list[str]
 
 
 class SynthesisMemoryInventory(TypedDict):
     """Compact counts that tell the synthesizer what memory exists to inspect."""
 
     active_knowledge_count: int
+    archived_knowledge_count: int
+    observation_count: int
+    uncovered_observation_count: int
+    covered_observation_count: int
     seed_observation_count: int
 
 
 class SynthesisContext(TypedDict):
-    """Bounded seed context submitted to synthesis."""
+    """Bounded starting context submitted to synthesis."""
 
     project_id: str
-    uncovered_observations: list[SynthesisObservationContext]
+    review_goal: str
+    trigger_observation_ids: list[str]
+    starting_observations: list[SynthesisObservationContext]
     memory_inventory: SynthesisMemoryInventory
+
+
+class ListSynthesisObservationsArgs(BaseModel):
+    """Model-facing arguments for paginating observation memory."""
+
+    include_covered_observations: bool = Field(
+        default=False,
+        description=(
+            "Whether to include observations already cited by active knowledge. "
+            "Use true when auditing or revising an existing knowledge boundary."
+        ),
+    )
+    scope: MemoryScope | None = Field(
+        default=None,
+        description=(
+            "Optional scope filter. Omit to list both global and current-project "
+            "observations."
+        ),
+    )
+    memory_type: MemoryType | None = Field(
+        default=None,
+        description="Optional memory-type filter.",
+    )
+    limit: int = Field(
+        default=SYNTHESIS_TOOL_DEFAULT_LIMIT,
+        ge=1,
+        le=SYNTHESIS_TOOL_MAX_LIMIT,
+        description="Maximum number of observations to return in this page.",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        le=5000,
+        description="Number of observations to skip before returning this page.",
+    )
+
+
+class ListSynthesisKnowledgeArgs(BaseModel):
+    """Model-facing arguments for paginating knowledge memory."""
+
+    include_archived_knowledge: bool = Field(
+        default=False,
+        description="Whether archived knowledge records should be listed.",
+    )
+    scope: MemoryScope | None = Field(
+        default=None,
+        description=(
+            "Optional scope filter. Omit to list both global and current-project "
+            "knowledge."
+        ),
+    )
+    memory_type: MemoryType | None = Field(
+        default=None,
+        description="Optional memory-type filter.",
+    )
+    limit: int = Field(
+        default=SYNTHESIS_TOOL_DEFAULT_LIMIT,
+        ge=1,
+        le=SYNTHESIS_TOOL_MAX_LIMIT,
+        description="Maximum number of knowledge records to return in this page.",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        le=5000,
+        description="Number of knowledge records to skip before returning this page.",
+    )
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -277,18 +373,18 @@ def _shrink_synthesis_context(
     *,
     max_chars: int,
 ) -> SynthesisContext:
-    """Shrink seed context detail without dropping seed observation ids."""
+    """Shrink starting-point detail without dropping trigger observation ids."""
     encoded = pretty_json(context)
     if len(encoded) <= max_chars:
         return context
 
-    for observation in context["uncovered_observations"]:
+    for observation in context["starting_observations"]:
         observation["snippet"] = ""
     encoded = pretty_json(context)
     if len(encoded) <= max_chars:
         return context
 
-    for observation in context["uncovered_observations"]:
+    for observation in context["starting_observations"]:
         observation["summary"] = _truncate_text(
             observation["summary"],
             SYNTHESIS_CONTEXT_OBSERVATION_CLAMPED_SUMMARY_CHARS,
@@ -297,18 +393,51 @@ def _shrink_synthesis_context(
     if len(encoded) <= max_chars:
         return context
 
-    for observation in context["uncovered_observations"]:
+    for observation in context["starting_observations"]:
         observation["summary"] = ""
     encoded = pretty_json(context)
 
     if len(encoded) > max_chars:
         logger.warning(
             "Submitting oversized EvoMemory synthesis context: %d chars for "
-            "%d seed observations after stripping snippets and summaries",
+            "%d trigger observations after stripping snippets and summaries",
             len(encoded),
-            len(context["uncovered_observations"]),
+            len(context["starting_observations"]),
         )
     return context
+
+
+def _covered_observation_index(
+    knowledge_documents: list[Any],
+) -> dict[str, list[str]]:
+    covered: dict[str, list[str]] = {}
+    for document in knowledge_documents:
+        for observation_id in document.supporting_observation_ids:
+            covered.setdefault(observation_id, []).append(document.knowledge_id)
+    return covered
+
+
+def _observation_context(
+    document: Mapping[str, Any],
+    *,
+    covered_by: Mapping[str, list[str]],
+) -> SynthesisObservationContext:
+    observation_id = str(document["observation_id"])
+    return {
+        "id": observation_id,
+        "path": str(document["path"]),
+        "memory_type": MemoryType(document["memory_type"]).value,
+        "scope": MemoryScope(document["scope"]).value,
+        "summary": _truncate_text(
+            str(document["summary"]),
+            SYNTHESIS_CONTEXT_OBSERVATION_SUMMARY_CHARS,
+        ),
+        "snippet": _truncate_text(
+            document_body(str(document["text"])),
+            SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS,
+        ),
+        "covered_by_knowledge_ids": list(covered_by.get(observation_id, [])),
+    }
 
 
 def build_synthesis_context(
@@ -318,26 +447,30 @@ def build_synthesis_context(
     seed_observation_ids: tuple[str, ...],
     max_chars: int = SYNTHESIS_CONTEXT_MAX_CHARS,
 ) -> SynthesisContext | None:
-    """Build bounded seed context for the synthesis agent."""
+    """Build bounded starting context for a pull-based synthesis review."""
     seed_ids = dedupe_ids(seed_observation_ids)
-    if not seed_ids:
-        return None
 
-    knowledge_documents = knowledge_search_documents(
+    active_knowledge_documents = knowledge_search_documents(
         memory_dir=memory_dir,
         project_id=project_id,
         status=KnowledgeStatus.ACTIVE,
     )
-    covered_observation_ids = {
-        observation_id
-        for document in knowledge_documents
-        for observation_id in document.supporting_observation_ids
-    }
+    archived_knowledge_documents = knowledge_search_documents(
+        memory_dir=memory_dir,
+        project_id=project_id,
+        status=KnowledgeStatus.ARCHIVED,
+    )
+    observation_documents = candidate_observation_documents(
+        memory_dir=memory_dir,
+        project_id=project_id,
+    )
+    covered_by = _covered_observation_index(active_knowledge_documents)
+    covered_observation_count = sum(
+        1 for document in observation_documents if document.observation_id in covered_by
+    )
 
-    observations: list[SynthesisObservationContext] = []
+    starting_observations: list[SynthesisObservationContext] = []
     for observation_id in seed_ids:
-        if observation_id in covered_observation_ids:
-            continue
         document = read_observation_file(
             memory_dir=memory_dir,
             project_id=project_id,
@@ -345,30 +478,34 @@ def build_synthesis_context(
         )
         if document is None:
             continue
-        observations.append(
-            {
-                "id": document["observation_id"],
-                "path": document["path"],
-                "memory_type": document["memory_type"].value,
-                "scope": document["scope"].value,
-                "summary": _truncate_text(
-                    document["summary"],
-                    SYNTHESIS_CONTEXT_OBSERVATION_SUMMARY_CHARS,
-                ),
-                "snippet": _truncate_text(
-                    document_body(document["text"]),
-                    SYNTHESIS_CONTEXT_OBSERVATION_SNIPPET_CHARS,
-                ),
-            }
+        starting_observations.append(
+            _observation_context(document, covered_by=covered_by)
         )
-    if not observations:
+
+    uncovered_observation_count = len(observation_documents) - covered_observation_count
+    if (
+        not starting_observations
+        and uncovered_observation_count == 0
+        and not active_knowledge_documents
+        and not archived_knowledge_documents
+    ):
         return None
 
     context: SynthesisContext = {
         "project_id": project_id,
-        "uncovered_observations": observations,
+        "review_goal": (
+            "Use trigger observations as starting points, then pull from "
+            "visible EvoMemory with search/list/read tools until the synthesis "
+            "boundary is clear."
+        ),
+        "trigger_observation_ids": list(seed_ids),
+        "starting_observations": starting_observations,
         "memory_inventory": {
-            "active_knowledge_count": len(knowledge_documents),
+            "active_knowledge_count": len(active_knowledge_documents),
+            "archived_knowledge_count": len(archived_knowledge_documents),
+            "observation_count": len(observation_documents),
+            "uncovered_observation_count": uncovered_observation_count,
+            "covered_observation_count": covered_observation_count,
             "seed_observation_count": len(seed_ids),
         },
     }
@@ -377,6 +514,23 @@ def build_synthesis_context(
 
 def _tool_error(message: str) -> str:
     return json.dumps({"error": message}, ensure_ascii=False, sort_keys=True)
+
+
+def _page_payload(
+    *,
+    results: list[dict[str, object]],
+    total: int,
+    limit: int,
+    offset: int,
+) -> dict[str, object]:
+    next_offset = offset + len(results)
+    return {
+        "results": results,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": next_offset if next_offset < total else None,
+    }
 
 
 def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
@@ -393,7 +547,9 @@ def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
         scope: MemoryScope | None = None,
         memory_type: MemoryType | None = None,
         include_archived_knowledge: bool = False,
-        limit: int = 8,
+        include_covered_observations: bool = False,
+        limit: int = SYNTHESIS_TOOL_DEFAULT_LIMIT,
+        offset: int = 0,
     ) -> str:
         project_id = _project_id()
         if project_id is None:
@@ -406,10 +562,21 @@ def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
             scope=scope,
             memory_type=memory_type,
             include_archived_knowledge=include_archived_knowledge,
+            include_covered_observations=include_covered_observations,
             limit=limit,
+            offset=offset,
             mode=mode,
         )
-        return json.dumps({"results": results}, ensure_ascii=False, sort_keys=True)
+        return json.dumps(
+            {
+                "results": results,
+                "limit": limit,
+                "offset": offset,
+                "next_offset": offset + len(results) if len(results) == limit else None,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     def _read_memory(memory_id: str) -> str:
         project_id = _project_id()
@@ -426,15 +593,112 @@ def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
             )
         return json.dumps({"text": result["text"]}, ensure_ascii=False, sort_keys=True)
 
+    def _list_observations(
+        include_covered_observations: bool = False,
+        scope: MemoryScope | None = None,
+        memory_type: MemoryType | None = None,
+        limit: int = SYNTHESIS_TOOL_DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> str:
+        project_id = _project_id()
+        if project_id is None:
+            return _tool_error("EvoMemory synthesizer missing project id.")
+        active_knowledge = knowledge_search_documents(
+            memory_dir=worker_memory_dir,
+            project_id=project_id,
+            status=KnowledgeStatus.ACTIVE,
+        )
+        covered_by = _covered_observation_index(active_knowledge)
+        observations = candidate_observation_documents(
+            memory_dir=worker_memory_dir,
+            project_id=project_id,
+            scope=scope,
+            memory_type=memory_type,
+        )
+        if not include_covered_observations:
+            observations = [
+                document
+                for document in observations
+                if document.observation_id not in covered_by
+            ]
+        page = observations[offset : offset + limit]
+        results: list[dict[str, object]] = [
+            {
+                "memory_id": document.observation_id,
+                "path": document.path,
+                "memory_type": document.memory_type,
+                "scope": document.scope,
+                "summary": document.summary,
+                "covered_by_knowledge_ids": list(
+                    covered_by.get(document.observation_id, [])
+                ),
+            }
+            for document in page
+        ]
+        return json.dumps(
+            _page_payload(
+                results=results,
+                total=len(observations),
+                limit=limit,
+                offset=offset,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def _list_knowledge(
+        include_archived_knowledge: bool = False,
+        scope: MemoryScope | None = None,
+        memory_type: MemoryType | None = None,
+        limit: int = SYNTHESIS_TOOL_DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> str:
+        project_id = _project_id()
+        if project_id is None:
+            return _tool_error("EvoMemory synthesizer missing project id.")
+        knowledge = knowledge_search_documents(
+            memory_dir=worker_memory_dir,
+            project_id=project_id,
+            scope=scope,
+            memory_type=memory_type,
+            status=None if include_archived_knowledge else KnowledgeStatus.ACTIVE,
+        )
+        page = knowledge[offset : offset + limit]
+        results: list[dict[str, object]] = [
+            {
+                "memory_id": document.knowledge_id,
+                "path": document.path,
+                "memory_type": document.memory_type,
+                "scope": document.scope,
+                "summary": document.summary,
+                "status": document.status,
+                "supporting_observation_ids": list(document.supporting_observation_ids),
+            }
+            for document in page
+        ]
+        return json.dumps(
+            _page_payload(
+                results=results,
+                total=len(knowledge),
+                limit=limit,
+                offset=offset,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
     return [
         StructuredTool.from_function(
             func=_search_memory,
             name="search_memory",
             description=(
-                "Search EvoMemory from the synthesis worker. Use memory_level="
-                "knowledge before creating or updating knowledge, and "
-                "memory_level=observation when related raw evidence could affect "
-                "the synthesis decision. Read promising K-* or O-* hits with "
+                "Search EvoMemory from the synthesis worker. Results are one "
+                "page; increase offset to keep exploring beyond the first page. "
+                "Use memory_level=knowledge before creating or updating "
+                "knowledge, and memory_level=observation when related raw "
+                "evidence could affect the synthesis decision. Set "
+                "include_covered_observations=true when auditing an existing "
+                "knowledge boundary. Read promising K-* or O-* hits with "
                 "read_memory."
             ),
             args_schema=SearchMemoryArgs,
@@ -451,6 +715,30 @@ def _synthesis_memory_tools(*, memory_dir: str | Path) -> list[BaseTool]:
             args_schema=ReadMemoryArgs,
             infer_schema=False,
         ),
+        StructuredTool.from_function(
+            func=_list_observations,
+            name="list_observations",
+            description=(
+                "List visible observation memory as a paginated index. By "
+                "default this lists uncovered observations, which are not yet "
+                "cited by active knowledge. Increase offset to inspect more "
+                "observations, or set include_covered_observations=true to "
+                "audit existing knowledge support."
+            ),
+            args_schema=ListSynthesisObservationsArgs,
+            infer_schema=False,
+        ),
+        StructuredTool.from_function(
+            func=_list_knowledge,
+            name="list_knowledge",
+            description=(
+                "List visible synthesized knowledge as a paginated index. Use "
+                "this to inspect existing K-* records before creating new "
+                "knowledge, and increase offset to keep exploring."
+            ),
+            args_schema=ListSynthesisKnowledgeArgs,
+            infer_schema=False,
+        ),
     ]
 
 
@@ -459,19 +747,28 @@ def _synthesis_system_prompt() -> str:
         [
             "You are the EvoMemory synthesis agent.",
             (
-                "Your job is to convert durable observations into compact "
-                "knowledge records. The prompt contains a bounded seed list of "
-                "uncovered observations, not a complete memory snapshot. Treat "
-                "seed summaries and snippets as leads to inspect with memory "
-                "tools before relying on them."
+                "Your job is to explore EvoMemory and decide whether durable "
+                "observations justify compact knowledge records. Trigger "
+                "observations are starting points, not the synthesis boundary. "
+                "You choose the boundary by pulling memory with tools."
             ),
             (
-                "Use `read_memory` to read every O-* observation you cite. Use "
+                "Use `list_observations` to page through uncovered observations "
+                "or audit covered ones. Use `list_knowledge` and "
                 "`search_memory(memory_level=knowledge)` before creating new "
                 "knowledge so you can update or archive existing K-* records "
                 "instead of duplicating them. Use "
-                "`search_memory(memory_level=observation)` when neighboring raw "
-                "evidence or conflicts could change the decision."
+                "`search_memory(memory_level=observation)` for content-based "
+                "neighborhoods, conflicts, and older supporting evidence. "
+                "Increase offset and search alternate phrasings when the first "
+                "page is not enough."
+            ),
+            (
+                "Use `read_memory` to read every O-* observation you cite and "
+                "every K-* record you update or archive. In the final structured "
+                "response, include the queries you explored, the exact memory "
+                "IDs you read, and a short boundary_rationale. Create/update "
+                "decisions citing O-* IDs that were not read are ignored."
             ),
             (
                 "Do not continue the user task, infer from missing trajectory "
@@ -520,16 +817,17 @@ def _synthesis_system_prompt() -> str:
 def _synthesis_user_prompt(context: SynthesisContext, *, trigger: str) -> str:
     return "\n\n".join(
         [
-            "New or still-uncovered EvoMemory observations are ready for "
-            "synthesis review. Decide whether to create, update, archive, or "
-            "skip synthesized knowledge.",
+            "EvoMemory is ready for synthesis review. Decide whether to create, "
+            "update, archive, or skip synthesized knowledge after exploring the "
+            "memory base.",
             f"Trigger: {trigger}",
             (
-                "Use memory tools to inspect full observation records and "
-                "nearby existing memory before deciding. The seed context is "
-                "bounded; absence from it does not mean absence from memory."
+                "The context below is only a starting point. Use memory tools "
+                "to pull nearby observations and existing knowledge until you "
+                "can explain the synthesis boundary. Absence from this context "
+                "does not mean absence from memory."
             ),
-            "Seed context JSON:",
+            "Starting context JSON:",
             pretty_json(context),
         ]
     )
@@ -544,12 +842,25 @@ def apply_synthesis_review_decision(
 ) -> list[KnowledgeRecordResult]:
     """Apply validated synthesis decisions to knowledge markdown files."""
     results: list[KnowledgeRecordResult] = []
+    read_memory_ids = set(dedupe_ids(review.read_memory_ids))
     for decision in review.decisions:
         try:
             match decision:
                 case SynthesisSkipDecision():
                     continue
                 case SynthesisCreateDecision():
+                    unread = [
+                        observation_id
+                        for observation_id in decision.supporting_observation_ids
+                        if observation_id not in read_memory_ids
+                    ]
+                    if unread:
+                        logger.warning(
+                            "Skipping EvoMemory synthesis CREATE because support "
+                            "was not read: %s",
+                            ", ".join(unread),
+                        )
+                        continue
                     results.append(
                         record_knowledge_file(
                             memory_dir=memory_dir,
@@ -574,6 +885,19 @@ def apply_synthesis_review_decision(
                             "Skipping EvoMemory synthesis UPDATE for missing "
                             "knowledge %s",
                             decision.target_knowledge_id,
+                        )
+                        continue
+                    unread = [
+                        observation_id
+                        for observation_id in decision.supporting_observation_ids
+                        if observation_id not in read_memory_ids
+                    ]
+                    if unread:
+                        logger.warning(
+                            "Skipping EvoMemory synthesis UPDATE for %s because "
+                            "support was not read: %s",
+                            decision.target_knowledge_id,
+                            ", ".join(unread),
                         )
                         continue
                     results.append(
@@ -982,7 +1306,7 @@ def _launch_synthesis_worker(
     seed_observation_ids: tuple[str, ...],
     trigger: str,
 ) -> None:
-    """Submit a background synthesis run if uncovered seed observations exist."""
+    """Submit a background synthesis run when there is visible memory to inspect."""
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
     context = build_synthesis_context(

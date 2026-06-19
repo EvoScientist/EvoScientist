@@ -234,6 +234,7 @@ def search_observation_files(
     scope: MemoryScope | None = None,
     memory_type: MemoryType | None = None,
     limit: int = 8,
+    offset: int = 0,
     mode: MemorySearchMode = MemorySearchMode.RANKED,
 ) -> list[MemorySearchHit]:
     """Search global/current-project observations by ranked relevance by default."""
@@ -252,6 +253,7 @@ def search_observation_files(
         documents=documents,
         query=query_text,
         limit=limit,
+        offset=offset,
         mode=search_mode,
     )
 

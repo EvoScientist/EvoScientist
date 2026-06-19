@@ -469,16 +469,18 @@ def test_knowledge_memory_writes_support_and_combined_search_prefers_it(tmp_path
     assert issubclass(schema, BaseModel)
     assert sorted(schema.model_json_schema()["properties"]) == [
         "include_archived_knowledge",
+        "include_covered_observations",
         "limit",
         "memory_level",
         "memory_type",
         "mode",
+        "offset",
         "query",
         "scope",
     ]
 
 
-def test_build_synthesis_context_seeds_uncovered_observations_only(tmp_path):
+def test_build_synthesis_context_uses_seeds_as_starting_points(tmp_path):
     memories = tmp_path / "memories"
     covered = record_observation_file(
         memory_dir=memories,
@@ -504,7 +506,7 @@ def test_build_synthesis_context_seeds_uncovered_observations_only(tmp_path):
         source_session_id="thread-1",
         source_agent="code-agent",
     )
-    record_knowledge_file(
+    existing_knowledge = record_knowledge_file(
         memory_dir=memories,
         project_id="P-project",
         memory_type=MemoryType.PROCEDURAL,
@@ -528,14 +530,34 @@ def test_build_synthesis_context_seeds_uncovered_observations_only(tmp_path):
     assert context is not None
     assert set(context) == {
         "project_id",
-        "uncovered_observations",
+        "review_goal",
+        "trigger_observation_ids",
+        "starting_observations",
         "memory_inventory",
     }
-    assert [obs["id"] for obs in context["uncovered_observations"]] == [
-        uncovered["observation_id"]
+    assert context["trigger_observation_ids"] == [
+        covered["observation_id"],
+        uncovered["observation_id"],
     ]
-    seed = context["uncovered_observations"][0]
-    assert set(seed) == {"id", "path", "memory_type", "scope", "summary", "snippet"}
+    assert [obs["id"] for obs in context["starting_observations"]] == [
+        covered["observation_id"],
+        uncovered["observation_id"],
+    ]
+    covered_seed = context["starting_observations"][0]
+    assert covered_seed["covered_by_knowledge_ids"] == [
+        existing_knowledge["knowledge_id"]
+    ]
+    seed = context["starting_observations"][1]
+    assert set(seed) == {
+        "id",
+        "path",
+        "memory_type",
+        "scope",
+        "summary",
+        "snippet",
+        "covered_by_knowledge_ids",
+    }
+    assert seed["covered_by_knowledge_ids"] == []
     assert "body" not in seed
     assert (
         len(seed["snippet"])
@@ -547,6 +569,10 @@ def test_build_synthesis_context_seeds_uncovered_observations_only(tmp_path):
     assert "created_at:" not in seed["snippet"]
     assert context["memory_inventory"] == {
         "active_knowledge_count": 1,
+        "archived_knowledge_count": 0,
+        "observation_count": 2,
+        "uncovered_observation_count": 1,
+        "covered_observation_count": 1,
         "seed_observation_count": 2,
     }
 
@@ -587,8 +613,8 @@ def test_build_synthesis_context_shrinks_detail_without_dropping_seed_ids(
 
     assert context is not None
     assert len(memory_synthesis.pretty_json(context)) <= 2200
-    assert [obs["id"] for obs in context["uncovered_observations"]] == list(seed_ids)
-    assert {obs["snippet"] for obs in context["uncovered_observations"]} == {""}
+    assert [obs["id"] for obs in context["starting_observations"]] == list(seed_ids)
+    assert {obs["snippet"] for obs in context["starting_observations"]} == {""}
     assert context["memory_inventory"]["seed_observation_count"] == len(seed_ids)
 
 
@@ -628,9 +654,9 @@ def test_build_synthesis_context_keeps_seed_ids_when_still_oversized(
 
     assert context is not None
     assert len(memory_synthesis.pretty_json(context)) > 100
-    assert [obs["id"] for obs in context["uncovered_observations"]] == list(seed_ids)
-    assert {obs["summary"] for obs in context["uncovered_observations"]} == {""}
-    assert {obs["snippet"] for obs in context["uncovered_observations"]} == {""}
+    assert [obs["id"] for obs in context["starting_observations"]] == list(seed_ids)
+    assert {obs["summary"] for obs in context["starting_observations"]} == {""}
+    assert {obs["snippet"] for obs in context["starting_observations"]} == {""}
 
 
 def test_synthesis_memory_tools_resolve_project_from_run_config(tmp_path, monkeypatch):
@@ -666,8 +692,14 @@ def test_synthesis_memory_tools_resolve_project_from_run_config(tmp_path, monkey
     read_payload = json.loads(
         by_name["read_memory"].run({"memory_id": observation["observation_id"]})
     )
+    list_payload = json.loads(by_name["list_observations"].run({}))
+    knowledge_payload = json.loads(by_name["list_knowledge"].run({}))
 
     assert search_payload["results"][0]["memory_id"] == observation["observation_id"]
+    assert search_payload["offset"] == 0
+    assert list_payload["results"][0]["memory_id"] == observation["observation_id"]
+    assert list_payload["total"] == 1
+    assert knowledge_payload["results"] == []
     assert observation["observation_id"] in read_payload["text"]
 
 
@@ -686,6 +718,7 @@ def test_apply_synthesis_review_handles_create_update_and_archive(tmp_path):
         source_agent="code-agent",
     )
     review = SynthesisReviewDecision(
+        read_memory_ids=[observation["observation_id"]],
         decisions=[
             SynthesisCreateDecision(
                 action=SynthesisAction.CREATE,
@@ -701,7 +734,7 @@ def test_apply_synthesis_review_handles_create_update_and_archive(tmp_path):
                 when_to_use="Use when GraphQL camelCase fields render blank.",
                 supporting_observation_ids=[observation["observation_id"]],
             )
-        ]
+        ],
     )
 
     created = apply_synthesis_review_decision(
@@ -714,6 +747,7 @@ def test_apply_synthesis_review_handles_create_update_and_archive(tmp_path):
         memory_dir=memories,
         project_id="P-project",
         review=SynthesisReviewDecision(
+            read_memory_ids=[observation["observation_id"]],
             decisions=[
                 SynthesisUpdateDecision(
                     action=SynthesisAction.UPDATE,
@@ -728,7 +762,7 @@ def test_apply_synthesis_review_handles_create_update_and_archive(tmp_path):
                     when_to_use="Use during GraphQL blank-field debugging.",
                     supporting_observation_ids=[observation["observation_id"]],
                 )
-            ]
+            ],
         ),
     )
     archived = apply_synthesis_review_decision(
@@ -756,6 +790,44 @@ def test_apply_synthesis_review_handles_create_update_and_archive(tmp_path):
     )
     assert _stable_memory_timestamps(metadata)["status"] == "archived"
     assert _markdown_sections(body)["Archive Reason"] == "Superseded by a later rule."
+
+
+def test_apply_synthesis_review_skips_unread_support(tmp_path):
+    memories = tmp_path / "memories"
+    observation = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Unread support should not be synthesized.",
+        observation="Search snippets are not enough evidence for synthesis.",
+        why_it_matters="The synthesis worker should read cited observations first.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="code-agent",
+    )
+
+    created = apply_synthesis_review_decision(
+        memory_dir=memories,
+        project_id="P-project",
+        review=SynthesisReviewDecision(
+            read_memory_ids=[],
+            decisions=[
+                SynthesisCreateDecision(
+                    action=SynthesisAction.CREATE,
+                    rationale="The observation was only searched, not read.",
+                    summary="Read observations before synthesizing them.",
+                    memory_type=MemoryType.SEMANTIC,
+                    scope=MemoryScope.PROJECT,
+                    knowledge="Synthesis decisions must cite observations they read.",
+                    when_to_use="Use during synthesis evidence validation.",
+                    supporting_observation_ids=[observation["observation_id"]],
+                )
+            ],
+        ),
+    )
+
+    assert created == []
 
 
 def test_search_observation_files_supports_keyword_or_regex_queries(tmp_path):
@@ -2009,9 +2081,15 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
 def _empty_synthesis_context() -> memory_synthesis.SynthesisContext:
     return {
         "project_id": "P-project",
-        "uncovered_observations": [],
+        "review_goal": "Explore memory for synthesis.",
+        "trigger_observation_ids": [],
+        "starting_observations": [],
         "memory_inventory": {
             "active_knowledge_count": 0,
+            "archived_knowledge_count": 0,
+            "observation_count": 0,
+            "uncovered_observation_count": 0,
+            "covered_observation_count": 0,
             "seed_observation_count": 0,
         },
     }
@@ -2374,7 +2452,9 @@ def test_synthesis_worker_launch_spawns_runner_thread(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     context: memory_synthesis.SynthesisContext = {
         "project_id": "P-project",
-        "uncovered_observations": [
+        "review_goal": "Explore memory for synthesis.",
+        "trigger_observation_ids": ["O-1"],
+        "starting_observations": [
             {
                 "id": "O-1",
                 "path": "/memories/observations/project/P-project/O-1.md",
@@ -2382,10 +2462,15 @@ def test_synthesis_worker_launch_spawns_runner_thread(tmp_path, monkeypatch):
                 "scope": MemoryScope.PROJECT.value,
                 "summary": "Durable observation.",
                 "snippet": "Durable observation.",
+                "covered_by_knowledge_ids": [],
             }
         ],
         "memory_inventory": {
             "active_knowledge_count": 0,
+            "archived_knowledge_count": 0,
+            "observation_count": 1,
+            "uncovered_observation_count": 1,
+            "covered_observation_count": 0,
             "seed_observation_count": 1,
         },
     }
@@ -2451,7 +2536,9 @@ def test_synthesis_worker_launch_releases_claim_when_start_accounting_fails(
     memory_dir = tmp_path / "memories"
     context: memory_synthesis.SynthesisContext = {
         "project_id": "P-project",
-        "uncovered_observations": [
+        "review_goal": "Explore memory for synthesis.",
+        "trigger_observation_ids": ["O-1"],
+        "starting_observations": [
             {
                 "id": "O-1",
                 "path": "/memories/observations/project/P-project/O-1.md",
@@ -2459,10 +2546,15 @@ def test_synthesis_worker_launch_releases_claim_when_start_accounting_fails(
                 "scope": MemoryScope.PROJECT.value,
                 "summary": "Durable observation.",
                 "snippet": "Durable observation.",
+                "covered_by_knowledge_ids": [],
             }
         ],
         "memory_inventory": {
             "active_knowledge_count": 0,
+            "archived_knowledge_count": 0,
+            "observation_count": 1,
+            "uncovered_observation_count": 1,
+            "covered_observation_count": 0,
             "seed_observation_count": 1,
         },
     }

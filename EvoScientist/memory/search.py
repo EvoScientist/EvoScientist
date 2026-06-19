@@ -213,10 +213,12 @@ def _regex_matches(
     documents: Sequence[MemorySearchDocument],
     query: str,
     limit: int,
+    offset: int = 0,
 ) -> list[_SearchMatch]:
     """Search memory documents with grep-like regex semantics."""
     pattern = _compile_query_pattern(query)
     hits: list[_SearchMatch] = []
+    stop = offset + limit
     for document in documents:
         if pattern.search(_haystack(document)) is None:
             continue
@@ -230,9 +232,9 @@ def _regex_matches(
                 ),
             )
         )
-        if len(hits) >= limit:
+        if len(hits) >= stop:
             break
-    return hits
+    return hits[offset:stop]
 
 
 def _ranked_matches(
@@ -240,6 +242,7 @@ def _ranked_matches(
     documents: Sequence[MemorySearchDocument],
     query: str,
     limit: int,
+    offset: int = 0,
 ) -> list[_SearchMatch]:
     """Search memory documents with token-overlap ranking."""
     if not documents:
@@ -248,7 +251,12 @@ def _ranked_matches(
     if not query_tokens:
         return [
             _SearchMatch(document=match.document, matches=match.matches, score=0.0)
-            for match in _regex_matches(documents=documents, query=query, limit=limit)
+            for match in _regex_matches(
+                documents=documents,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
         ]
 
     idf = _token_idf(documents)
@@ -265,7 +273,7 @@ def _ranked_matches(
         for index, document in enumerate(documents)
     ]
     ranked = sorted(scored, key=lambda item: (-item[0], item[1]))
-    selected = [item for item in ranked if item[0] > 0][:limit]
+    selected = [item for item in ranked if item[0] > 0][offset : offset + limit]
 
     return [
         _SearchMatch(
@@ -286,11 +294,22 @@ def search_memory_documents(
     query: str,
     limit: int,
     mode: MemorySearchMode,
+    offset: int = 0,
 ) -> list[MemorySearchHit]:
     """Search parsed memory documents and return canonical memory hits."""
     matches = (
-        _regex_matches(documents=documents, query=query, limit=limit)
+        _regex_matches(
+            documents=documents,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
         if mode == MemorySearchMode.REGEX
-        else _ranked_matches(documents=documents, query=query, limit=limit)
+        else _ranked_matches(
+            documents=documents,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
     )
     return [_hit(match) for match in matches]

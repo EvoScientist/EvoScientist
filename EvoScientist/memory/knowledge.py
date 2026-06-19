@@ -90,11 +90,28 @@ class SearchMemoryArgs(BaseModel):
         default=False,
         description="Whether archived knowledge records may appear in results.",
     )
+    include_covered_observations: bool = Field(
+        default=False,
+        description=(
+            "When memory_level is any, include observations that are already "
+            "cited by active knowledge. Use this when auditing or revising "
+            "existing synthesis boundaries."
+        ),
+    )
     limit: int = Field(
-        default=8,
+        default=20,
         ge=1,
-        le=20,
-        description="Maximum number of matching memories to return.",
+        le=50,
+        description="Maximum number of matching memories to return in this page.",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        le=1000,
+        description=(
+            "Number of ranked or regex matches to skip before returning this "
+            "page. Increase this to keep exploring beyond the first page."
+        ),
     )
 
 
@@ -600,6 +617,7 @@ def search_knowledge_files(
     memory_type: MemoryType | None = None,
     include_archived: bool = False,
     limit: int = 8,
+    offset: int = 0,
     mode: MemorySearchMode = MemorySearchMode.RANKED,
 ) -> list[MemorySearchHit]:
     """Search global/current-project knowledge by ranked relevance by default."""
@@ -618,6 +636,7 @@ def search_knowledge_files(
         documents=documents,
         query=query_text,
         limit=limit,
+        offset=offset,
         mode=MemorySearchMode(mode),
     )
 
@@ -633,6 +652,7 @@ def search_memory_files(
     include_archived_knowledge: bool = False,
     include_covered_observations: bool = False,
     limit: int = 8,
+    offset: int = 0,
     mode: MemorySearchMode = MemorySearchMode.RANKED,
 ) -> list[MemorySearchHit]:
     """Search knowledge plus raw observations with knowledge preferred."""
@@ -682,6 +702,7 @@ def search_memory_files(
         documents=documents,
         query=query_text,
         limit=limit,
+        offset=offset,
         mode=MemorySearchMode(mode),
     )
 
@@ -745,7 +766,9 @@ def create_search_memory_tool(
         scope: MemoryScope | None = None,
         memory_type: MemoryType | None = None,
         include_archived_knowledge: bool = False,
-        limit: int = 8,
+        include_covered_observations: bool = False,
+        limit: int = 20,
+        offset: int = 0,
     ) -> str:
         results = search_memory_files(
             memory_dir=memory_dir,
@@ -755,7 +778,9 @@ def create_search_memory_tool(
             scope=scope,
             memory_type=memory_type,
             include_archived_knowledge=include_archived_knowledge,
+            include_covered_observations=include_covered_observations,
             limit=limit,
+            offset=offset,
             mode=mode,
         )
         return json.dumps({"results": results}, ensure_ascii=False, sort_keys=True)
