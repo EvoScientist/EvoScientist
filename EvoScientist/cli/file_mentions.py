@@ -462,7 +462,7 @@ def complete_file_mention(
                 rel = entry.relative_to(base)
                 suffix = "/" if entry.is_dir() else ""
                 candidates_raw.append(rel.as_posix() + suffix)
-        except OSError:
+        except (OSError, ValueError):
             return []
         return [
             (_format_mention(r), "dir" if r.endswith("/") else _type_hint(r))

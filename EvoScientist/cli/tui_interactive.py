@@ -2635,7 +2635,7 @@ def run_textual_interactive(
             prompt.focus()
 
         def action_tab_complete(self) -> None:
-            """Handle TAB: cycle completions when visible, trigger if not."""
+            """Handle TAB: apply highlighted completion, or trigger if not visible."""
             comp_widget = self.query_one("#completions", Static)
             if not (comp_widget.display and self._comp_items):
                 # Try to trigger completions from current input
