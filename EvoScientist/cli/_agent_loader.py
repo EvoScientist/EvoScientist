@@ -16,9 +16,10 @@ _logger = logging.getLogger(__name__)
 ProgressEvent = str  # "start" | "success" | "error"
 ProgressState = str  # "pending" | "ok" | "error"
 
-ProgressCallback = Callable[[ProgressEvent, str, str], None]
-FailureCallback = Callable[[BaseException], None]
 AgentT = TypeVar("AgentT")
+ProgressCallback = Callable[[ProgressEvent, str, str], None]
+SuccessCallback = Callable[[AgentT], None]
+FailureCallback = Callable[[BaseException], None]
 
 
 class MCPProgressTracker:
@@ -91,7 +92,7 @@ class BackgroundAgentLoader(Generic[AgentT]):
         loader_fn: Callable[..., AgentT],
         *,
         on_progress: ProgressCallback | None = None,
-        on_success: Callable[[AgentT], None] | None = None,
+        on_success: SuccessCallback | None = None,
         on_failure: FailureCallback | None = None,
     ) -> None:
         self._loader_fn = loader_fn
