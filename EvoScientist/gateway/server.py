@@ -17,6 +17,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
 from ..stream.events import (
     _SubagentRegistry,
@@ -145,11 +146,17 @@ def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
     raw_messages = values.get("messages")
     if not isinstance(raw_messages, list):
         return []
+    event = values.get("_summarization_event")
+    summarization_event = dict(event) if isinstance(event, Mapping) else None
+    effective_messages = _apply_summarization_event(
+        raw_messages,
+        summarization_event,
+    )
     try:
-        return list(convert_to_messages(raw_messages))
+        return list(convert_to_messages(effective_messages))
     except ValueError:
         return messages_from_dict(
-            [message for message in raw_messages if isinstance(message, dict)]
+            [message for message in effective_messages if isinstance(message, dict)]
         )
 
 

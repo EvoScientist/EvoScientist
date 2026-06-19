@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.gateway import (
     GraphTarget,
@@ -618,6 +619,42 @@ def test_langgraph_server_gateway_reads_state_values():
     values = run_async(gateway.get_state_values(GraphTarget(), "abc12345"))
 
     assert values == {"async_tasks": {"task-1": {}}}
+
+
+def test_langgraph_server_gateway_messages_apply_summarization_event():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {
+                    "messages": [
+                        HumanMessage(content="first"),
+                        AIMessage(content="second"),
+                        HumanMessage(content="third"),
+                    ],
+                    "_summarization_event": {
+                        "cutoff_index": 2,
+                        "summary_message": AIMessage(content="summary"),
+                        "file_path": None,
+                    },
+                }
+            }
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            base_url="http://localhost:2024",
+            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        )
+    )
+
+    messages = run_async(gateway.get_thread_messages("abc12345"))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], AIMessage)
+    assert messages[0].content == "summary"
+    assert isinstance(messages[1], HumanMessage)
+    assert messages[1].content == "third"
 
 
 def test_langgraph_server_gateway_updates_state_values():
