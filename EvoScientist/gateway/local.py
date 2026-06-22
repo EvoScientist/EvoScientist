@@ -149,14 +149,18 @@ class LocalGraphGateway:
     ) -> AsyncIterator[GraphEvent]:
         from ..stream.events import stream_agent_events
 
-        async for event in stream_agent_events(
+        inner = stream_agent_events(
             local_graph,
             request.message,
             request.thread_id,
             metadata=request.metadata,
             media=request.media,
-        ):
-            yield event
+        )
+        try:
+            async for event in inner:
+                yield event
+        finally:
+            await inner.aclose()
 
     async def get_state_values(
         self,

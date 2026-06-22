@@ -169,6 +169,34 @@ def test_local_graph_gateway_updates_state_values():
     )
 
 
+def test_local_stream_events_delegates_aclose_to_inner():
+    cleanup_ran = False
+
+    async def _streamer(_agent, _message, _thread_id, **_kwargs):
+        nonlocal cleanup_ran
+        try:
+            while True:
+                yield {"type": "event"}
+        finally:
+            cleanup_ran = True
+
+    async def _run():
+        gateway = LocalGraphGateway()
+        stream = gateway.stream_events(
+            RunRequest(
+                message="hi",
+                thread_id="t1",
+                target=GraphTarget(local_graph=object()),
+            )
+        )
+        await stream.__anext__()
+        await stream.aclose()
+        assert cleanup_ran is True
+
+    with patch("EvoScientist.stream.events.stream_agent_events", new=_streamer):
+        run_async(_run())
+
+
 def test_run_streaming_can_consume_injected_gateway():
     agent = MagicMock()
     gateway = FakeGraphGateway(
