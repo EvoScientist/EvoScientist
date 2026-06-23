@@ -236,7 +236,7 @@ def create_tool_selector_middleware(
         model: Chat model for tool selection.  If *None*, the default
             model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
-            Default 20.  Set to 0 to always run selection.
+            Default 26.  Set to 0 to always run selection.
         track_stream_selection: Whether to update process-global stream/UI
             state. Disable for async sub-agents that should still select tools
             but should not drive the main-agent tool-selection widget.
