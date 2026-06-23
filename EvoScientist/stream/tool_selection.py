@@ -63,6 +63,16 @@ class _ToolSelectionSuppressor:
 
         return False, events, text
 
+    def process_thinking(self, text: str) -> tuple[bool, list[dict[str, Any]]]:
+        """Suppress selector-model reasoning while preserving pending UI events."""
+        events = self._emit_selection_if_ready(text)
+        if not text:
+            return False, events
+        if self._selector_call_active():
+            self._was_active = True
+            return True, events
+        return False, events
+
     @staticmethod
     def _json_buffer_kind(text: str) -> str:
         try:
@@ -81,11 +91,19 @@ class _ToolSelectionSuppressor:
     def _selector_context_active(self) -> bool:
         if self._was_active:
             return True
+        return self._selector_call_active() or self._selection_pending()
+
+    @staticmethod
+    def _selector_call_active() -> bool:
         import EvoScientist.middleware.tool_selector as selector_mod
 
-        return bool(
-            selector_mod._selector_active or selector_mod._current_selected_tools
-        )
+        return bool(selector_mod._selector_active)
+
+    @staticmethod
+    def _selection_pending() -> bool:
+        import EvoScientist.middleware.tool_selector as selector_mod
+
+        return bool(selector_mod._current_selected_tools)
 
     def flush_selection(self) -> list[dict[str, Any]]:
         return self._emit_selection_if_ready("")

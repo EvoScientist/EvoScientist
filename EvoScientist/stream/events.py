@@ -710,7 +710,11 @@ class _V3EventProcessor:
     ) -> list[dict[str, Any]]:
         if not text or subagent is not None:
             return []
-        return [self.emitter.thinking(text).data]
+        suppressed, events = self._selector.process_thinking(text)
+        if suppressed:
+            return events
+        events.append(self.emitter.thinking(text).data)
+        return events
 
     def _emit_summarization_text(self, text: str) -> list[dict[str, Any]]:
         if not text:

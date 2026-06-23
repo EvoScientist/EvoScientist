@@ -724,7 +724,10 @@ def _get_default_middleware(
         ModelFallbackMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
-        *create_tool_selector_middleware(model=tool_selector_model),
+        *create_tool_selector_middleware(
+            model=tool_selector_model,
+            track_stream_selection=not for_async_subagent,
+        ),
         # Interpreter prompt must land before runtime/memory context, so this
         # middleware sits ahead of runtime_context in the stack.
         create_code_interpreter_middleware(

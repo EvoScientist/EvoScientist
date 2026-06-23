@@ -283,3 +283,35 @@ def test_async_subagent_mode_filters_ask_user(
         "AskUserMiddleware leaked into async sub-agent middleware — its "
         "interrupt() call deadlocks the deployed graph (no UI to resume)."
     )
+
+
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_async_subagent_disables_tool_selector_stream_tracking(
+    mock_config, mock_chat, mock_tool_selector
+):
+    """Async subagents still select tools, but must not drive main-agent UI state."""
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    _get_default_middleware(for_async_subagent=True)
+
+    mock_tool_selector.assert_called_once()
+    assert mock_tool_selector.call_args.kwargs["track_stream_selection"] is False

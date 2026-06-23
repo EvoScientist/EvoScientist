@@ -407,6 +407,61 @@ class TestV3ProtocolStreaming:
         assert len(thinking_events) == 1
         assert thinking_events[0]["content"] == "Think once."
 
+    def test_tool_selector_reasoning_delta_is_suppressed(self):
+        """Selector reasoning must not appear as main-agent thinking."""
+        import EvoScientist.middleware.tool_selector as selector_mod
+
+        original_active = selector_mod._selector_active
+        selector_mod._selector_active = True
+        try:
+            agent = FakeV3Agent(
+                [
+                    protocol_event(
+                        "messages",
+                        (
+                            {
+                                "event": "content-block-delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "reasoning-delta",
+                                    "reasoning": "selector-only thought",
+                                },
+                            },
+                            {},
+                        ),
+                    )
+                ]
+            )
+            events = collect_events(agent)
+        finally:
+            selector_mod._selector_active = original_active
+
+        assert not any(
+            e.get("type") == "thinking" and e.get("content") == "selector-only thought"
+            for e in events
+        )
+
+    def test_tool_selector_whole_message_reasoning_is_suppressed(self):
+        """Selector reasoning in whole-message payloads is also hidden."""
+        import EvoScientist.middleware.tool_selector as selector_mod
+
+        original_active = selector_mod._selector_active
+        selector_mod._selector_active = True
+        try:
+            message = AIMessage(
+                additional_kwargs={"reasoning_content": "selector whole thought"},
+                content="",
+            )
+            agent = FakeV3Agent([protocol_event("messages", (message, {}))])
+            events = collect_events(agent)
+        finally:
+            selector_mod._selector_active = original_active
+
+        assert not any(
+            e.get("type") == "thinking" and e.get("content") == "selector whole thought"
+            for e in events
+        )
+
     def test_tool_events_emit_call_and_result(self):
         """v3 tool projection events become UI tool call/result events."""
         output = ToolMessage(
