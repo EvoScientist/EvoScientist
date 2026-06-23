@@ -16,14 +16,18 @@ Usage::
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
+    AIMessage,
+    ExtendedModelResponse,
     ModelRequest,
     ModelResponse,
 )
 from langchain_core.language_models import BaseChatModel
+from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,31 @@ _selector_active: bool = False
 # Default threshold: only run tool selection when tools exceed this count.
 # Base tools are ~14; selector activates when MCP tools push count above 26.
 DEFAULT_TOOL_THRESHOLD = 26
+DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
+    {
+        "think_tool",
+        "task",
+        "read_memory",
+        "record_observation",
+        "search_observations",
+    }
+)
+
+
+def _tool_name(tool: BaseTool | dict[str, Any]) -> str | None:
+    if isinstance(tool, BaseTool):
+        return tool.name or None
+    name = tool.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _available_always_include(
+    tools: Iterable[BaseTool | dict[str, Any]],
+    candidates: frozenset[str],
+) -> list[str]:
+    """Return mandatory BaseTool names that exist on this request."""
+    available_names = {tn for tool in tools if (tn := _tool_name(tool))}
+    return sorted(candidates & available_names)
 
 
 class _ConditionalToolSelectorMiddleware(AgentMiddleware):
@@ -52,23 +81,37 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
     name = "conditional_tool_selector"
 
     def __init__(
-        self, selector: AgentMiddleware, threshold: int = DEFAULT_TOOL_THRESHOLD
+        self,
+        selector_factory: Callable[[list[str]], AgentMiddleware],
+        threshold: int = DEFAULT_TOOL_THRESHOLD,
+        *,
+        always_include: frozenset[str] | None = None,
     ):
         super().__init__()
-        self._selector = selector
+        self._selector_factory = selector_factory
         self._threshold = threshold
+        self._always_include = always_include or frozenset()
+        # Agent tools are fixed after graph construction, so the filtered
+        # always-include set is stable for this middleware instance.
+        self._selector: AgentMiddleware | None = None
+
+    def _build_selector(self, request: ModelRequest) -> AgentMiddleware:
+        if self._selector is None:
+            names = _available_always_include(request.tools, self._always_include)
+            self._selector = self._selector_factory(names)
+        return self._selector
 
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
-        if len(request.tools or []) <= self._threshold:
+    ) -> ModelResponse | AIMessage | ExtendedModelResponse:
+        if len(request.tools) <= self._threshold:
             return handler(request)
 
         global _selector_active, _total_tools_count
         _selector_active = True
-        _total_tools_count = len(request.tools or [])
+        _total_tools_count = len(request.tools)
 
         # Track whether handler was called — if so, any exception is from
         # the downstream model, not the selector, and must propagate.
@@ -82,7 +125,9 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return handler(req)
 
         try:
-            return self._selector.wrap_model_call(request, _handler_after_selection)
+            return self._build_selector(request).wrap_model_call(
+                request, _handler_after_selection
+            )
         except Exception:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
@@ -97,13 +142,13 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelResponse:
-        if len(request.tools or []) <= self._threshold:
+    ) -> ModelResponse | AIMessage | ExtendedModelResponse:
+        if len(request.tools) <= self._threshold:
             return await handler(request)
 
         global _selector_active, _total_tools_count
         _selector_active = True
-        _total_tools_count = len(request.tools or [])
+        _total_tools_count = len(request.tools)
 
         _handler_called = False
 
@@ -115,7 +160,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await handler(req)
 
         try:
-            return await self._selector.awrap_model_call(
+            return await self._build_selector(request).awrap_model_call(
                 request, _handler_after_selection
             )
         except Exception:
@@ -144,7 +189,7 @@ class _ToolSelectionTrackerMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         global _current_selected_tools
-        tools = [t.name for t in request.tools if hasattr(t, "name")]
+        tools = [name for tool in request.tools if (name := _tool_name(tool))]
         _current_selected_tools = tools
         if tools:
             logger.debug("Selected tools: %s", tools)
@@ -156,7 +201,7 @@ class _ToolSelectionTrackerMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         global _current_selected_tools
-        tools = [t.name for t in request.tools if hasattr(t, "name")]
+        tools = [name for tool in request.tools if (name := _tool_name(tool))]
         _current_selected_tools = tools
         if tools:
             logger.debug("Selected tools: %s", tools)
@@ -180,12 +225,13 @@ def create_tool_selector_middleware(
             model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
             Default 20.  Set to 0 to always run selection.
-
-    ``think_tool`` and ``task`` are always included because:
+    ``think_tool``, ``task``, and memory tools are always included because:
 
     - ``think_tool``: required every step for structured reflection
     - ``task``: core delegation mechanism; tested and confirmed the selector
       model never auto-selects it (0/5 complex queries)
+    - memory tools: referenced by memory prompts; filtering them makes the
+      agent unable to use memory even when the prompt tells it to
     """
     from langchain.agents.middleware import LLMToolSelectorMiddleware
 
@@ -197,20 +243,27 @@ def create_tool_selector_middleware(
         model = _ensure_chat_model()
     safe_model = disable_thinking(model)
 
-    selector = LLMToolSelectorMiddleware(
-        model=safe_model,
-        system_prompt=(
-            "You are selecting tools for a scientific research agent. "
-            "Tasks often involve multi-step workflows. "
-            "Select tools that cover both the immediate need and "
-            "likely follow-up steps. "
-            "If the query is broad or all tools seem relevant, "
-            "select all of them — filtering is not always necessary."
-        ),
-        always_include=["think_tool", "task"],
+    system_prompt = (
+        "You are selecting tools for a scientific research agent. "
+        "Tasks often involve multi-step workflows. "
+        "Select tools that cover both the immediate need and "
+        "likely follow-up steps. "
+        "If the query is broad or all tools seem relevant, "
+        "select all of them — filtering is not always necessary."
     )
 
+    def selector_factory(always_include: list[str]) -> AgentMiddleware:
+        return LLMToolSelectorMiddleware(
+            model=safe_model,
+            system_prompt=system_prompt,
+            always_include=always_include,
+        )
+
     return [
-        _ConditionalToolSelectorMiddleware(selector, threshold=threshold),
+        _ConditionalToolSelectorMiddleware(
+            selector_factory=selector_factory,
+            threshold=threshold,
+            always_include=DEFAULT_ALWAYS_INCLUDE_TOOLS,
+        ),
         _ToolSelectionTrackerMiddleware(),
     ]
