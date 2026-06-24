@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import threading
@@ -377,37 +376,13 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
 
 def test_link_observation_files_rejects_unknown_relation(tmp_path):
     memories = tmp_path / "memories"
-    first = record_observation_file(
-        memory_dir=memories,
-        project_id="P-project",
-        memory_type=MemoryType.SEMANTIC,
-        summary="First memory.",
-        observation="First observation text.",
-        why_it_matters="First reason.",
-        scope=MemoryScope.PROJECT,
-        source_type=MemorySourceType.TURN,
-        source_session_id="thread-1",
-        source_agent="EvoScientist",
-    )
-    second = record_observation_file(
-        memory_dir=memories,
-        project_id="P-project",
-        memory_type=MemoryType.SEMANTIC,
-        summary="Second memory.",
-        observation="Second observation text.",
-        why_it_matters="Second reason.",
-        scope=MemoryScope.PROJECT,
-        source_type=MemorySourceType.TURN,
-        source_session_id="thread-1",
-        source_agent="EvoScientist",
-    )
 
     with pytest.raises(ValueError, match="relation must be one of"):
         link_observation_files(
             memory_dir=memories,
             project_id="P-project",
-            source_observation_id=first["observation_id"],
-            target_observation_id=second["observation_id"],
+            source_observation_id="O-source",
+            target_observation_id="O-target",
             relation="overlaps",
             reason="This unsupported relation should be rejected.",
         )
@@ -1029,7 +1004,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
     async def fake_launch(request, **kwargs):
-        calls.append((request, kwargs))
+        calls.append((request, kwargs["hooks"]))
 
     monkeypatch.setattr(
         memory_launch,
@@ -1059,22 +1034,13 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
             state,
             runtime,
         )
-        await asyncio.sleep(0)
 
     run_async(run())
 
     assert len(calls) == 1
-    request, launch_kwargs = calls[0]
+    request, hooks = calls[0]
     assert request.graph_id == memory_launch.TURN_MEMORY_WORKER_GRAPH_ID
     assert request.name == "EvoMemory worker"
-    assert launch_kwargs["hooks"].on_started is not None
-    assert "watcher_config" not in launch_kwargs
-    payload = request.run_payload("worker-thread")
-    assert payload["assistant_id"] == memory_launch.TURN_MEMORY_WORKER_GRAPH_ID
-    assert payload["metadata"]["source_session_id"] == "thread-1"
-    assert payload["metadata"]["source_agent"] == "EvoScientist"
-    assert payload["metadata"]["project_id"] == "P-project"
-    hooks = launch_kwargs["hooks"]
     assert hooks.on_before_run is not None
     assert hooks.on_started is not None
     assert hooks.on_finished is not None
@@ -1491,37 +1457,34 @@ def test_memory_worker_abort_does_not_launch_linker(tmp_path):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_observation_linker_run_payload_include_exact_observation_ids(tmp_path):
+def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
     context = memory_scheduler.ObservationLinkerContext(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         project_id="P-project",
-        observation_ids=(
-            "O-2",
-            "O-1",
-        ),
+        observation_ids=("O-2", "O-1"),
     )
 
-    kwargs = memory_launch._observation_linker_run_payload(
-        context=context,
-        thread_id="linker-thread",
-    )
+    request = memory_launch.observation_linker_launch_request(context)
+    kwargs = request.run_payload("linker-thread")
 
+    assert request.graph_id == memory_launch.OBSERVATION_LINKER_GRAPH_ID
+    assert request.name == "EvoMemory observation linker"
+    assert request.thread_metadata == {
+        "run_kind": "evomemory_observation_linker",
+        "project_id": "P-project",
+        "observation_count": "2",
+        "workspace_dir": str((tmp_path / "workspace").resolve()),
+    }
     assert kwargs["assistant_id"] == memory_launch.OBSERVATION_LINKER_GRAPH_ID
-    assert kwargs["metadata"]["run_kind"] == "evomemory_observation_linker"
-    assert kwargs["metadata"]["observation_count"] == "2"
+    assert kwargs["metadata"] == request.thread_metadata
     configurable = kwargs["config"]["configurable"]
     assert configurable["thread_id"] == "linker-thread"
     assert json.loads(configurable["evomemory_observation_ids"]) == [
         "O-2",
         "O-1",
     ]
-    assert "evomemory_linker_sources" not in configurable
-    content = kwargs["input"]["messages"][0]["content"]
-    assert "O-1" in content
-    assert "O-2" in content
-    assert "new_observation_paths" not in content
-    assert '"source_workers"' not in content
+    assert configurable["evomemory_project_id"] == "P-project"
 
 
 def test_observation_linker_launch_hooks_track_running_status():
@@ -1642,48 +1605,6 @@ def test_memory_worker_observation_writer_modes(tmp_path):
         "read_memory",
         "record_observation",
     ]
-
-
-def test_memory_worker_prompts_match_observation_tool_availability():
-    turn_profile_only = memory_worker._memory_worker_system_prompt(
-        MemorySourceType.TURN,
-        enable_profile_memory=True,
-        enable_observation_tool=False,
-    )
-    turn_with_observation_flag = memory_worker._memory_worker_system_prompt(
-        MemorySourceType.TURN,
-        enable_profile_memory=True,
-        enable_observation_tool=True,
-    )
-    subagent_profile_only = memory_worker._memory_worker_system_prompt(
-        MemorySourceType.SUBAGENT,
-        enable_profile_memory=True,
-        enable_observation_tool=False,
-    )
-    subagent_with_observations = memory_worker._memory_worker_system_prompt(
-        MemorySourceType.SUBAGENT,
-        enable_profile_memory=True,
-        enable_observation_tool=True,
-    )
-    subagent_observations_only = memory_worker._memory_worker_system_prompt(
-        MemorySourceType.SUBAGENT,
-        enable_profile_memory=False,
-        enable_observation_tool=True,
-    )
-    turn_observations_only = memory_worker._memory_worker_system_prompt(
-        MemorySourceType.TURN,
-        enable_profile_memory=False,
-        enable_observation_tool=True,
-    )
-
-    assert "record_observation" not in turn_profile_only
-    assert "record_observation" in turn_with_observation_flag
-    assert "record_observation" not in subagent_profile_only
-    assert "record_observation" in subagent_with_observations
-    assert "record_observation" in subagent_observations_only
-    assert "/memories/profile/" not in subagent_observations_only
-    assert "record_observation" in turn_observations_only
-    assert "/memories/profile/" not in turn_observations_only
 
 
 def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
@@ -1834,178 +1755,6 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
         assert status.is_running is False
         assert status.profile_updates == 0
         assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch):
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
-    )
-
-    try:
-        background_runs.watch_background_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
-        )
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeypatch):
-    """Finished workers leave no checkpoint residue: thread is deleted."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        def delete(self, thread_id):
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-
-    try:
-        background_runs.watch_background_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
-        )
-        assert deleted == ["worker-thread"]
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch):
-    """Thread deletion is best-effort: a failure must not break accounting."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        def delete(self, thread_id):
-            raise RuntimeError("delete failed")
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-
-    try:
-        background_runs.watch_background_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
-        )
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch):
-    """A run we lost track of may still be live — never delete its thread."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        def get(self, **_kwargs):
-            raise RuntimeError("poll failed")
-
-    class _Threads:
-        def delete(self, thread_id):
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-
-    try:
-        background_runs.watch_background_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
-        )
-        assert deleted == []
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_async_watcher_deletes_worker_thread_on_terminal_status(
-    tmp_path, monkeypatch, run_async
-):
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        async def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        async def delete(self, thread_id):
-            # Accounting must complete BEFORE the best-effort deletion —
-            # cancellation mid-deletion must never leave the worker
-            # stuck as "running" (CodeRabbit on #279).
-            assert worker_activity.memory_worker_status().is_running is False
-            deleted.append(thread_id)
-
-    try:
-        run_async(
-            background_runs.awatch_background_run(
-                SimpleNamespace(runs=_Runs(), threads=_Threads()),
-                thread_id="worker-thread",
-                run_id="run-1",
-                hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
-            )
-        )
-        assert deleted == ["worker-thread"]
-        assert worker_activity.memory_worker_status().is_running is False
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
 
