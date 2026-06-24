@@ -153,11 +153,11 @@ class LinkObservationsArgs(BaseModel):
         description="Exact ID of the existing related observation.",
     )
     relation: ObservationRelation = Field(
-        default=ObservationRelation.RELATED,
+        default=ObservationRelation.COMPLEMENTS,
         description=(
-            "Relationship label. Use `related` for generally connected "
-            "observations, `contradicts` for incompatible claims, and "
-            "`supersedes` when the source should replace the target."
+            "Relationship label. Use `complements` when observations should "
+            "be considered together, `contradicts` for incompatible claims, "
+            "and `supersedes` when the source should replace the target."
         ),
     )
     reason: str = Field(
@@ -420,7 +420,7 @@ def create_link_observations_tool(
         source_observation_id: str,
         target_observation_id: str,
         reason: str,
-        relation: ObservationRelation = ObservationRelation.RELATED,
+        relation: ObservationRelation = ObservationRelation.COMPLEMENTS,
         bidirectional: bool = True,
         runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None,
     ) -> str:

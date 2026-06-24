@@ -39,7 +39,7 @@ class ObservationSearchMode(StrEnum):
 class ObservationRelation(StrEnum):
     """Allowed relationship labels between observations."""
 
-    RELATED = "related"
+    COMPLEMENTS = "complements"
     CONTRADICTS = "contradicts"
     SUPERSEDES = "supersedes"
 

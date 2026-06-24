@@ -99,7 +99,7 @@ def link_observation_files(
     source_observation_id: str,
     target_observation_id: str,
     reason: str,
-    relation: ObservationRelation = ObservationRelation.RELATED,
+    relation: ObservationRelation = ObservationRelation.COMPLEMENTS,
     bidirectional: bool = True,
 ) -> dict[str, object]:
     """Link two observations by amending their frontmatter metadata."""

@@ -321,7 +321,7 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
         project_id="P-project",
         source_observation_id=first["observation_id"],
         target_observation_id=second["observation_id"],
-        relation=ObservationRelation.RELATED,
+        relation=ObservationRelation.COMPLEMENTS,
         reason="Both observations describe the durable background-memory flow.",
     )
     duplicate = link_observation_files(
@@ -329,7 +329,7 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
         project_id="P-project",
         source_observation_id=first["observation_id"],
         target_observation_id=second["observation_id"],
-        relation=ObservationRelation.RELATED,
+        relation=ObservationRelation.COMPLEMENTS,
         reason="Both observations describe the durable background-memory flow.",
     )
 
@@ -339,7 +339,7 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
         "linked": True,
         "source_observation_id": first["observation_id"],
         "target_observation_id": second["observation_id"],
-        "relation": "related",
+        "relation": "complements",
         "updated_observation_ids": [
             first["observation_id"],
             second["observation_id"],
@@ -359,13 +359,13 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
     assert len(second_links) == 1
     assert first_links[0] == {
         "id": second["observation_id"],
-        "relation": "related",
+        "relation": "complements",
         "reason": "Both observations describe the durable background-memory flow.",
         "linked_at": first_links[0]["linked_at"],
     }
     assert second_links[0] == {
         "id": first["observation_id"],
-        "relation": "related",
+        "relation": "complements",
         "reason": "Both observations describe the durable background-memory flow.",
         "linked_at": first_links[0]["linked_at"],
     }
