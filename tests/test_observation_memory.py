@@ -362,14 +362,12 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
         "relation": "related",
         "reason": "Both observations describe the durable background-memory flow.",
         "linked_at": first_links[0]["linked_at"],
-        "linked_by": "evomemory-observation-linker",
     }
     assert second_links[0] == {
         "id": first["observation_id"],
         "relation": "related",
         "reason": "Both observations describe the durable background-memory flow.",
         "linked_at": first_links[0]["linked_at"],
-        "linked_by": "evomemory-observation-linker",
     }
     datetime.strptime(first_links[0]["linked_at"], "%Y-%m-%dT%H:%M:%SZ")
 
@@ -423,7 +421,6 @@ def test_link_observation_files_keeps_supersedes_directional(tmp_path):
             "relation": "supersedes",
             "reason": "The source observation replaces the target observation.",
             "linked_at": source_metadata["related_observations"][0]["linked_at"],
-            "linked_by": "evomemory-observation-linker",
         }
     ]
     assert "related_observations" not in target_metadata

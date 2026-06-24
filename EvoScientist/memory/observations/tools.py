@@ -413,7 +413,6 @@ def create_link_observations_tool(
     *,
     memory_dir: str | Path,
     project_id: str,
-    linked_by: str = "evomemory-observation-linker",
 ) -> BaseTool:
     """Build the `link_observations` tool for frontmatter-native links."""
 
@@ -436,7 +435,6 @@ def create_link_observations_tool(
             reason=reason,
             relation=relation,
             bidirectional=bidirectional,
-            linked_by=linked_by,
         )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 

@@ -54,7 +54,6 @@ def _upsert_related_observation(
     relation: str,
     reason: str,
     linked_at: str,
-    linked_by: str,
 ) -> bool:
     entries = _related_observation_entries(metadata)
     new_entry = {
@@ -62,17 +61,12 @@ def _upsert_related_observation(
         "relation": relation,
         "reason": reason,
         "linked_at": linked_at,
-        "linked_by": linked_by,
     }
     for index, entry in enumerate(entries):
         if entry["id"] != target_observation_id:
             continue
-        comparable = {
-            key: entry.get(key) for key in ("id", "relation", "reason", "linked_by")
-        }
-        expected = {
-            key: new_entry[key] for key in ("id", "relation", "reason", "linked_by")
-        }
+        comparable = {key: entry.get(key) for key in ("id", "relation", "reason")}
+        expected = {key: new_entry[key] for key in ("id", "relation", "reason")}
         if comparable == expected:
             return False
         entries[index] = new_entry
@@ -107,7 +101,6 @@ def link_observation_files(
     reason: str,
     relation: ObservationRelation = ObservationRelation.RELATED,
     bidirectional: bool = True,
-    linked_by: str = "evomemory-observation-linker",
 ) -> dict[str, object]:
     """Link two observations by amending their frontmatter metadata."""
     source_id = source_observation_id.strip()
@@ -161,7 +154,6 @@ def link_observation_files(
         relation=relation_text,
         reason=reason_text,
         linked_at=linked_at,
-        linked_by=linked_by,
     ):
         updates.append((source_id, source_path, source_metadata, source_body))
 
@@ -174,7 +166,6 @@ def link_observation_files(
             relation=relation_text,
             reason=reason_text,
             linked_at=linked_at,
-            linked_by=linked_by,
         ):
             updates.append((target_id, target_path, target_metadata, target_body))
 
