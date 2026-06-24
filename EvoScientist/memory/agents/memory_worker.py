@@ -443,6 +443,7 @@ def _memory_worker_middleware(
     from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 
     from ...middleware.memory import create_memory_middleware
+    from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
 
     memory_controls = MemoryControls(
         profile_enabled=enable_profile_memory,
@@ -454,6 +455,7 @@ def _memory_worker_middleware(
         _memory_worker_observation_target(source_type)
     )
     return [
+        ToolErrorHandlerMiddleware(),
         create_memory_middleware(
             str(memory_dir),
             workspace_dir=workspace_dir,

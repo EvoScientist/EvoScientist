@@ -1662,6 +1662,11 @@ def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
+def _memory_tool_names(middleware) -> list[str]:
+    memory_middleware = next(item for item in middleware if getattr(item, "tools", ()))
+    return [tool.name for tool in memory_middleware.tools]
+
+
 def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
     turn_middleware = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
@@ -1676,12 +1681,14 @@ def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
         observation_writer=MemoryObservationWriter.ALL,
     )
 
-    assert [tool.name for tool in turn_middleware[0].tools] == [
+    assert type(turn_middleware[0]).__name__ == "ToolErrorHandlerMiddleware"
+    assert type(subagent_middleware[0]).__name__ == "ToolErrorHandlerMiddleware"
+    assert _memory_tool_names(turn_middleware) == [
         "search_observations",
         "read_memory",
         "record_observation",
     ]
-    assert [tool.name for tool in subagent_middleware[0].tools] == [
+    assert _memory_tool_names(subagent_middleware) == [
         "search_observations",
         "read_memory",
         "record_observation",
@@ -1708,16 +1715,16 @@ def test_memory_worker_observation_writer_modes(tmp_path):
         observation_writer=MemoryObservationWriter.WORKER,
     )
 
-    assert [tool.name for tool in agent_only[0].tools] == [
+    assert _memory_tool_names(agent_only) == [
         "search_observations",
         "read_memory",
     ]
-    assert [tool.name for tool in worker_subagent[0].tools] == [
+    assert _memory_tool_names(worker_subagent) == [
         "search_observations",
         "read_memory",
         "record_observation",
     ]
-    assert [tool.name for tool in worker_turn[0].tools] == [
+    assert _memory_tool_names(worker_turn) == [
         "search_observations",
         "read_memory",
         "record_observation",

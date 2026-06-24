@@ -98,6 +98,8 @@ def build_observation_linker_graph(
     """Build the registered LangGraph observation linker."""
     from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 
+    from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
+
     memory_controls = MemoryControls.from_config(get_effective_config())
     worker_memory_dir = Path(
         _paths.MEMORIES_DIR if memory_dir is None else memory_dir
@@ -106,7 +108,8 @@ def build_observation_linker_graph(
         _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
     ).expanduser()
     middleware: list[AgentMiddleware] = [
-        _ToolExclusionMiddleware(excluded=_OBSERVATION_LINKER_EXCLUDED_TOOLS)
+        ToolErrorHandlerMiddleware(),
+        _ToolExclusionMiddleware(excluded=_OBSERVATION_LINKER_EXCLUDED_TOOLS),
     ]
     tools: list[BaseTool] = []
     if memory_controls.observations_enabled:
