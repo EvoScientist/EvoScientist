@@ -354,15 +354,11 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return True
 
     def _ensure_observation_dirs(self) -> None:
-        """Create the observation directories agents are prompted to search."""
-        for memory_path in (
-            "/observations/global",
-            f"/observations/projects/{self._project_id}",
-        ):
-            try:
-                self._file_path(memory_path).mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                logger.warning("Failed to create observation memory dir: %s", e)
+        """Create non-project observation directories agents are prompted to search."""
+        try:
+            self._file_path("/observations/global").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("Failed to create observation memory dir: %s", e)
 
     def _ensure_profile_files(self) -> list[tuple[str, str]]:
         """Create the expected profile files if needed and return their contents."""

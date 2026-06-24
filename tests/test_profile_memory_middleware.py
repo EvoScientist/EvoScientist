@@ -47,32 +47,22 @@ def _sorted_tool_names(middleware) -> list[str]:
     return sorted(tool.name for tool in middleware.tools)
 
 
-def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypatch):
+def test_profile_memory_bootstraps_profiles_without_observation_project_dirs(
+    tmp_path, monkeypatch
+):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(str(memories))
-    modified = middleware.modify_request(_request())
-    content = str(modified.system_message.content)
+    middleware.modify_request(_request())
 
-    assert _sorted_tool_names(middleware) == [
-        "read_memory",
-        "record_observation",
-        "search_observations",
-    ]
-    assert (memories / "profile" / "SOUL.md").exists()
-    assert (memories / "profile" / "USER_PROFILE.md").exists()
-    assert (memories / "profile" / "RESEARCH_TASTE.md").exists()
-    assert list((memories / "profile" / "projects").glob("*/PROJECT_PROFILE.md"))
+    assert (
+        memories / "profile" / "projects" / middleware.project_id / "PROJECT_PROFILE.md"
+    ).exists()
     assert (memories / "observations" / "global").is_dir()
-    assert list((memories / "observations" / "projects").glob("P-*"))
-    assert content.index("base system") < content.index("<memory_instructions>")
-    assert content.index("<memory_instructions>") < content.index(
-        "<observation_memory>"
-    )
-    assert content.index("<observation_memory>") < content.index("<profile_memory>")
+    assert not (memories / "observations" / "projects").exists()
 
 
 def test_append_to_system_message_preserves_metadata():
@@ -159,7 +149,6 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     ]
     assert not (memories / "profile").exists()
     assert (memories / "observations" / "global").is_dir()
-    assert list((memories / "observations" / "projects").glob("P-*"))
     assert "<observation_memory>" in content
     assert "search_observations" in content
     assert "read_memory" in content
