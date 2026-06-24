@@ -85,7 +85,7 @@ from .status_bar import (
 from .tui_interactive import run_textual_interactive
 from .tui_runtime import resolve_ui_backend, run_streaming
 
-_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 90.0
+_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
 _MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
 _MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
 
