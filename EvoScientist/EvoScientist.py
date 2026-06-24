@@ -596,9 +596,13 @@ def load_mcp_and_build_kwargs(
 
 def _get_default_backend():
     """Build the default composite backend from current paths."""
-    from deepagents.backends import CompositeBackend, FilesystemBackend
+    from deepagents.backends import CompositeBackend
 
-    from .backends import CustomSandboxBackend, MergedSkillsBackend
+    from .backends import (
+        CustomSandboxBackend,
+        MemoryFilesystemBackend,
+        MergedSkillsBackend,
+    )
 
     cfg = _ensure_config()
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
@@ -620,7 +624,7 @@ def _get_default_backend():
         global_dir=global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
-    mem_backend = FilesystemBackend(
+    mem_backend = MemoryFilesystemBackend(
         root_dir=memory_dir,
         virtual_mode=True,
     )
@@ -887,10 +891,14 @@ def create_cli_agent(
     import os as _os
 
     from deepagents import create_deep_agent
-    from deepagents.backends import CompositeBackend, FilesystemBackend
+    from deepagents.backends import CompositeBackend
 
     from . import paths as _paths
-    from .backends import CustomSandboxBackend, MergedSkillsBackend
+    from .backends import (
+        CustomSandboxBackend,
+        MemoryFilesystemBackend,
+        MergedSkillsBackend,
+    )
 
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
@@ -938,7 +946,7 @@ def create_cli_agent(
         global_dir=_global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
-    mem_backend = FilesystemBackend(
+    mem_backend = MemoryFilesystemBackend(
         root_dir=_mem_dir,
         virtual_mode=True,
     )

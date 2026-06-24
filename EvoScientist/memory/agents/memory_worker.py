@@ -417,10 +417,12 @@ def _build_memory_worker_backend(*, workspace_dir: str | Path, memory_dir: str |
     """Build a backend that can read the workspace and write memories."""
     from deepagents.backends import CompositeBackend, FilesystemBackend
 
+    from ...backends import MemoryFilesystemBackend
+
     return CompositeBackend(
         default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
         routes={
-            "/memories/": FilesystemBackend(
+            "/memories/": MemoryFilesystemBackend(
                 root_dir=str(memory_dir),
                 virtual_mode=True,
             )

@@ -55,10 +55,12 @@ def _build_observation_linker_backend(
 ):
     from deepagents.backends import CompositeBackend, FilesystemBackend
 
+    from ...backends import MemoryFilesystemBackend
+
     return CompositeBackend(
         default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
         routes={
-            "/memories/": FilesystemBackend(
+            "/memories/": MemoryFilesystemBackend(
                 root_dir=str(memory_dir),
                 virtual_mode=True,
             )
