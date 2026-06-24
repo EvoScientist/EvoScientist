@@ -25,13 +25,13 @@ from ...config import (
     MemoryObservationWriter,
     get_effective_config,
 )
-from ...gateway.async_runs import (
-    BackgroundAgentLaunchHooks,
-    BackgroundAgentLaunchRequest,
-    BackgroundAgentRun,
-    BackgroundAgentRunPayload,
-    alaunch_background_agent,
-    launch_background_agent,
+from ...gateway.background_runs import (
+    BackgroundRun,
+    BackgroundRunHooks,
+    BackgroundRunPayload,
+    BackgroundRunRequest,
+    alaunch_background_run,
+    launch_background_run,
 )
 from ..source_context import (
     MemorySourceContext,
@@ -691,12 +691,12 @@ def _current_configurable() -> Mapping[str, object]:
     return configurable if isinstance(configurable, dict) else {}
 
 
-def _runs_create_kwargs(kwargs: BackgroundAgentRunPayload) -> BackgroundAgentRunPayload:
+def _runs_create_kwargs(kwargs: BackgroundRunPayload) -> BackgroundRunPayload:
     try:
         from EvoScientist.llm.patches import _merge_runs_config_kwargs
     except Exception:
         return kwargs
-    return cast("BackgroundAgentRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
+    return cast("BackgroundRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
 
 
 def _worker_workspace_dir(workspace_dir: str | Path) -> str:
@@ -718,10 +718,10 @@ def _memory_worker_run_kwargs(
     *,
     context: MemorySourceContext,
     thread_id: str,
-) -> BackgroundAgentRunPayload:
+) -> BackgroundRunPayload:
     """Build the LangGraph SDK run payload for a memory worker."""
     metadata = _memory_worker_metadata(context)
-    payload: BackgroundAgentRunPayload = {
+    payload: BackgroundRunPayload = {
         "assistant_id": _memory_worker_graph_id(context.source_type),
         "input": {
             "messages": [
@@ -745,13 +745,13 @@ def _memory_worker_run_kwargs(
     return _runs_create_kwargs(payload)
 
 
-def _memory_worker_launch_hooks(memory_dir: str | Path) -> BackgroundAgentLaunchHooks:
+def _memory_worker_launch_hooks(memory_dir: str | Path) -> BackgroundRunHooks:
     before_outputs: dict[str, MemoryOutputSnapshot] = {}
 
     def on_before_run(_thread_id: str) -> None:
         before_outputs["value"] = snapshot_memory_outputs(memory_dir)
 
-    def on_started(run: BackgroundAgentRun) -> None:
+    def on_started(run: BackgroundRun) -> None:
         mark_memory_worker_started(
             thread_id=run.thread_id,
             run_id=run.run_id,
@@ -759,13 +759,13 @@ def _memory_worker_launch_hooks(memory_dir: str | Path) -> BackgroundAgentLaunch
             before_outputs=before_outputs.get("value"),
         )
 
-    def on_finished(run: BackgroundAgentRun) -> None:
+    def on_finished(run: BackgroundRun) -> None:
         mark_memory_worker_finished(run.thread_id, run.run_id)
 
-    def on_aborted(run: BackgroundAgentRun) -> None:
+    def on_aborted(run: BackgroundRun) -> None:
         forget_memory_worker(run.thread_id, run.run_id)
 
-    return BackgroundAgentLaunchHooks(
+    return BackgroundRunHooks(
         on_before_run=on_before_run,
         on_started=on_started,
         on_finished=on_finished,
@@ -776,13 +776,13 @@ def _memory_worker_launch_hooks(memory_dir: str | Path) -> BackgroundAgentLaunch
 
 def _memory_worker_launch_request(
     context: MemorySourceContext,
-) -> BackgroundAgentLaunchRequest:
+) -> BackgroundRunRequest:
     metadata = _memory_worker_metadata(context)
 
-    def run_payload(thread_id: str) -> BackgroundAgentRunPayload:
+    def run_payload(thread_id: str) -> BackgroundRunPayload:
         return _memory_worker_run_kwargs(context=context, thread_id=thread_id)
 
-    return BackgroundAgentLaunchRequest(
+    return BackgroundRunRequest(
         graph_id=_memory_worker_graph_id(context.source_type),
         run_payload=run_payload,
         thread_metadata=metadata,
@@ -790,10 +790,10 @@ def _memory_worker_launch_request(
     )
 
 
-def launch_memory_worker(context: MemorySourceContext) -> BackgroundAgentRun | None:
+def launch_memory_worker(context: MemorySourceContext) -> BackgroundRun | None:
     """Launch one synchronous EvoMemory worker for a lifecycle context."""
     request = _memory_worker_launch_request(context)
-    return launch_background_agent(
+    return launch_background_run(
         request,
         hooks=_memory_worker_launch_hooks(context.memory_dir),
     )
@@ -801,10 +801,10 @@ def launch_memory_worker(context: MemorySourceContext) -> BackgroundAgentRun | N
 
 async def alaunch_memory_worker(
     context: MemorySourceContext,
-) -> BackgroundAgentRun | None:
+) -> BackgroundRun | None:
     """Launch one asynchronous EvoMemory worker for a lifecycle context."""
     request = _memory_worker_launch_request(context)
-    return await alaunch_background_agent(
+    return await alaunch_background_run(
         request,
         hooks=_memory_worker_launch_hooks(context.memory_dir),
     )

@@ -22,7 +22,7 @@ from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
 from EvoScientist.config import MemoryObservationWriter
-from EvoScientist.gateway import async_runs
+from EvoScientist.gateway import background_runs
 from EvoScientist.memory import (
     source_context,
     worker_activity,
@@ -156,8 +156,8 @@ def _tool_by_name(tools: Sequence[BaseTool], name: str) -> BaseTool:
 
 def _fast_watcher_config(
     *, max_poll_failures: int = 3
-) -> async_runs.BackgroundAgentStatusWatcherConfig:
-    return async_runs.BackgroundAgentStatusWatcherConfig(
+) -> background_runs.BackgroundRunWatcherConfig:
+    return background_runs.BackgroundRunWatcherConfig(
         poll_interval_seconds=0,
         max_poll_failures=max_poll_failures,
     )
@@ -729,7 +729,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
 
     monkeypatch.setattr(
         memory_worker,
-        "alaunch_background_agent",
+        "alaunch_background_run",
         fake_launch,
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
@@ -1008,7 +1008,7 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     )
 
     try:
-        async_runs.watch_background_agent_run_sync(
+        background_runs.watch_background_run_sync(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
@@ -1043,7 +1043,7 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
 
     try:
         run_async(
-            async_runs.awatch_background_agent_run(
+            background_runs.awatch_background_run(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
@@ -1082,7 +1082,7 @@ def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
         blocker = BlockBuster(scanned_modules=[memory_worker, worker_activity])
         blocker.activate()
         try:
-            await async_runs.awatch_background_agent_run(
+            await background_runs.awatch_background_run(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
@@ -1122,7 +1122,7 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
 
     try:
         with pytest.raises(RuntimeError, match="client failed"):
-            async_runs.watch_background_agent_run_sync(
+            background_runs.watch_background_run_sync(
                 url="http://x",
                 thread_id="worker-thread",
                 run_id="run-1",
@@ -1154,7 +1154,7 @@ def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch
     )
 
     try:
-        async_runs.watch_background_agent_run_sync(
+        background_runs.watch_background_run_sync(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
@@ -1189,7 +1189,7 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
     )
 
     try:
-        async_runs.watch_background_agent_run_sync(
+        background_runs.watch_background_run_sync(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
@@ -1224,7 +1224,7 @@ def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch)
     )
 
     try:
-        async_runs.watch_background_agent_run_sync(
+        background_runs.watch_background_run_sync(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
@@ -1259,7 +1259,7 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
     )
 
     try:
-        async_runs.watch_background_agent_run_sync(
+        background_runs.watch_background_run_sync(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
@@ -1295,7 +1295,7 @@ def test_async_watcher_deletes_worker_thread_on_terminal_status(
 
     try:
         run_async(
-            async_runs.awatch_background_agent_run(
+            background_runs.awatch_background_run(
                 SimpleNamespace(runs=_Runs(), threads=_Threads()),
                 thread_id="worker-thread",
                 run_id="run-1",
@@ -1309,7 +1309,9 @@ def test_async_watcher_deletes_worker_thread_on_terminal_status(
 
 
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):
-    monkeypatch.setattr(async_runs, "default_background_agent_url", lambda: "http://x")
+    monkeypatch.setattr(
+        background_runs, "default_background_run_url", lambda: "http://x"
+    )
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         lambda **_kwargs: False,
@@ -1335,7 +1337,9 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
 
 def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
-    monkeypatch.setattr(async_runs, "default_background_agent_url", lambda: "http://x")
+    monkeypatch.setattr(
+        background_runs, "default_background_run_url", lambda: "http://x"
+    )
     monkeypatch.setattr(
         memory_worker,
         "_worker_workspace_dir",
@@ -1351,7 +1355,7 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     fake_client.runs.create.return_value = {"run_id": "run-1", "status": "pending"}
     monkeypatch.setattr("langgraph_sdk.get_sync_client", lambda **_kwargs: fake_client)
 
-    spawned: list[async_runs.BackgroundAgentRun] = []
+    spawned: list[background_runs.BackgroundRun] = []
 
     trajectory: list[source_context.CompactMessage] = [
         {"role": "human", "content": "hi"}
@@ -1364,7 +1368,7 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
         trajectory=trajectory,
     )
     request = memory_worker._memory_worker_launch_request(context)
-    async_runs.launch_background_agent(
+    background_runs.launch_background_run(
         request,
         hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
         spawn_status_watcher=spawned.append,
@@ -1414,7 +1418,9 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
 
 def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_async):
     worker_activity.reset_memory_worker_status_for_tests()
-    monkeypatch.setattr(async_runs, "default_background_agent_url", lambda: "http://x")
+    monkeypatch.setattr(
+        background_runs, "default_background_run_url", lambda: "http://x"
+    )
     monkeypatch.setattr(
         memory_worker,
         "_worker_workspace_dir",
@@ -1451,7 +1457,7 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
     fake_client = SimpleNamespace(threads=_Threads(), runs=_Runs())
     monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: fake_client)
 
-    spawned: list[async_runs.BackgroundAgentRun] = []
+    spawned: list[background_runs.BackgroundRun] = []
 
     async def run():
         event_loop_thread = threading.get_ident()
@@ -1461,7 +1467,7 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
             trajectory=[{"role": "human", "content": "hi"}],
         )
         request = memory_worker._memory_worker_launch_request(context)
-        await async_runs.alaunch_background_agent(
+        await background_runs.alaunch_background_run(
             request,
             hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
             spawn_status_watcher=spawned.append,

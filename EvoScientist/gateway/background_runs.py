@@ -1,7 +1,7 @@
-"""On-demand background LangGraph agent runs.
+"""On-demand background LangGraph runs.
 
 This module owns the generic mechanics for launching short-lived background
-agent graphs through the local ``langgraph dev`` server:
+graphs through the local ``langgraph dev`` server:
 
 * check that the server is reachable
 * create a worker thread
@@ -28,17 +28,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BACKGROUND_AGENT_TERMINAL_STATUSES = frozenset(
+DEFAULT_BACKGROUND_RUN_TERMINAL_STATUSES = frozenset(
     {"success", "error", "timeout", "interrupted"}
 )
-DEFAULT_BACKGROUND_AGENT_POLL_INTERVAL_SECONDS = 1.0
-DEFAULT_BACKGROUND_AGENT_MAX_POLL_FAILURES = 3
-DEFAULT_BACKGROUND_AGENT_HEADERS = {"x-auth-scheme": "langsmith"}
+DEFAULT_BACKGROUND_RUN_POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_BACKGROUND_RUN_MAX_POLL_FAILURES = 3
+DEFAULT_BACKGROUND_RUN_HEADERS = {"x-auth-scheme": "langsmith"}
 
-_background_agent_watcher_tasks: set[asyncio.Task[None]] = set()
+_background_run_watcher_tasks: set[asyncio.Task[None]] = set()
 
 
-class BackgroundAgentRunPayload(TypedDict):
+class BackgroundRunPayload(TypedDict):
     """Typed payload submitted to LangGraph SDK ``runs.create``."""
 
     assistant_id: str
@@ -111,24 +111,24 @@ class AsyncLangGraphClient(Protocol):
     runs: _AsyncRunsClient
 
 
-BackgroundAgentRunPayloadBuilder = Callable[[str], BackgroundAgentRunPayload]
+BackgroundRunPayloadBuilder = Callable[[str], BackgroundRunPayload]
 
 
 @dataclass(frozen=True)
-class BackgroundAgentLaunchRequest:
-    """Description of one on-demand background agent run."""
+class BackgroundRunRequest:
+    """Description of one on-demand background run."""
 
     graph_id: str
-    run_payload: BackgroundAgentRunPayloadBuilder
+    run_payload: BackgroundRunPayloadBuilder
     thread_metadata: Mapping[str, str] | None = None
     url: str | None = None
     headers: Mapping[str, str] | None = None
-    name: str = "background agent"
+    name: str = "background run"
 
 
 @dataclass(frozen=True)
-class BackgroundAgentRun:
-    """Identifiers for a submitted background agent run."""
+class BackgroundRun:
+    """Identifiers for a submitted background run."""
 
     name: str
     url: str
@@ -140,27 +140,27 @@ class BackgroundAgentRun:
 
 
 @dataclass(frozen=True)
-class BackgroundAgentLaunchHooks:
+class BackgroundRunHooks:
     """Lifecycle hooks for caller-specific accounting."""
 
     on_before_run: Callable[[str], None] | None = None
-    on_started: Callable[[BackgroundAgentRun], None] | None = None
-    on_finished: Callable[[BackgroundAgentRun], None] | None = None
-    on_aborted: Callable[[BackgroundAgentRun], None] | None = None
-    on_watcher_start_failed: Callable[[BackgroundAgentRun], None] | None = None
+    on_started: Callable[[BackgroundRun], None] | None = None
+    on_finished: Callable[[BackgroundRun], None] | None = None
+    on_aborted: Callable[[BackgroundRun], None] | None = None
+    on_watcher_start_failed: Callable[[BackgroundRun], None] | None = None
 
 
 @dataclass(frozen=True)
-class BackgroundAgentStatusWatcherConfig:
-    """Polling behavior for a background agent run."""
+class BackgroundRunWatcherConfig:
+    """Polling behavior for a background run."""
 
-    terminal_statuses: frozenset[str] = DEFAULT_BACKGROUND_AGENT_TERMINAL_STATUSES
-    poll_interval_seconds: float = DEFAULT_BACKGROUND_AGENT_POLL_INTERVAL_SECONDS
-    max_poll_failures: int = DEFAULT_BACKGROUND_AGENT_MAX_POLL_FAILURES
+    terminal_statuses: frozenset[str] = DEFAULT_BACKGROUND_RUN_TERMINAL_STATUSES
+    poll_interval_seconds: float = DEFAULT_BACKGROUND_RUN_POLL_INTERVAL_SECONDS
+    max_poll_failures: int = DEFAULT_BACKGROUND_RUN_MAX_POLL_FAILURES
     delete_thread_on_finish: bool = True
 
 
-def default_background_agent_url() -> str:
+def default_background_run_url() -> str:
     """Return the configured local ``langgraph dev`` URL."""
     from ..EvoScientist import _ensure_config
 
@@ -170,12 +170,127 @@ def default_background_agent_url() -> str:
 
 
 def _headers(headers: Mapping[str, str] | None) -> dict[str, str]:
-    return dict(DEFAULT_BACKGROUND_AGENT_HEADERS if headers is None else headers)
+    return dict(DEFAULT_BACKGROUND_RUN_HEADERS if headers is None else headers)
+
+
+def _create_thread(
+    client: SyncLangGraphClient,
+    *,
+    graph_id: str,
+    metadata: dict[str, str],
+) -> str:
+    thread = client.threads.create(graph_id=graph_id, metadata=metadata)
+    return thread["thread_id"]
+
+
+async def _acreate_thread(
+    client: AsyncLangGraphClient,
+    *,
+    graph_id: str,
+    metadata: dict[str, str],
+) -> str:
+    thread = await client.threads.create(graph_id=graph_id, metadata=metadata)
+    return thread["thread_id"]
+
+
+def _create_run(
+    client: SyncLangGraphClient,
+    *,
+    thread_id: str,
+    payload: BackgroundRunPayload,
+) -> str:
+    run = client.runs.create(
+        thread_id=thread_id,
+        assistant_id=payload["assistant_id"],
+        input=payload["input"],
+        metadata=payload["metadata"],
+        config=payload["config"],
+    )
+    return run["run_id"]
+
+
+async def _acreate_run(
+    client: AsyncLangGraphClient,
+    *,
+    thread_id: str,
+    payload: BackgroundRunPayload,
+) -> str:
+    run = await client.runs.create(
+        thread_id=thread_id,
+        assistant_id=payload["assistant_id"],
+        input=payload["input"],
+        metadata=payload["metadata"],
+        config=payload["config"],
+    )
+    return run["run_id"]
+
+
+def _get_run_status(
+    client: SyncLangGraphClient,
+    *,
+    thread_id: str,
+    run_id: str,
+) -> str:
+    run = client.runs.get(thread_id=thread_id, run_id=run_id)
+    return run["status"]
+
+
+async def _aget_run_status(
+    client: AsyncLangGraphClient,
+    *,
+    thread_id: str,
+    run_id: str,
+) -> str:
+    run = await client.runs.get(thread_id=thread_id, run_id=run_id)
+    return run["status"]
+
+
+def _delete_thread(
+    client: SyncLangGraphClient,
+    thread_id: str,
+    *,
+    name: str,
+) -> None:
+    try:
+        client.threads.delete(thread_id)
+    except Exception:
+        logger.debug("Failed to delete %s thread %s", name, thread_id, exc_info=True)
+
+
+async def _adelete_thread(
+    client: AsyncLangGraphClient,
+    thread_id: str,
+    *,
+    name: str,
+) -> None:
+    try:
+        await client.threads.delete(thread_id)
+    except Exception:
+        logger.debug("Failed to delete %s thread %s", name, thread_id, exc_info=True)
+
+
+def _background_run_handle(
+    *,
+    request: BackgroundRunRequest,
+    url: str,
+    thread_id: str,
+    run_id: str,
+    payload: BackgroundRunPayload,
+) -> BackgroundRun:
+    return BackgroundRun(
+        name=request.name,
+        url=url,
+        graph_id=request.graph_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        assistant_id=payload["assistant_id"],
+        metadata=dict(payload["metadata"]),
+    )
 
 
 def _call_hook(
-    callback: Callable[[BackgroundAgentRun], None] | None,
-    run: BackgroundAgentRun,
+    callback: Callable[[BackgroundRun], None] | None,
+    run: BackgroundRun,
     *,
     hook_name: str,
 ) -> None:
@@ -214,8 +329,8 @@ def _call_before_run_hook(
 
 
 async def _acall_hook(
-    callback: Callable[[BackgroundAgentRun], None] | None,
-    run: BackgroundAgentRun,
+    callback: Callable[[BackgroundRun], None] | None,
+    run: BackgroundRun,
     *,
     hook_name: str,
 ) -> None:
@@ -253,47 +368,21 @@ async def _acall_before_run_hook(
         raise
 
 
-def delete_background_agent_thread(
-    client: SyncLangGraphClient,
-    thread_id: str,
+def launch_background_run(
+    request: BackgroundRunRequest,
     *,
-    name: str = "background agent",
-) -> None:
-    """Best-effort delete of a finished worker thread."""
-    try:
-        client.threads.delete(thread_id)
-    except Exception:
-        logger.debug("Failed to delete %s thread %s", name, thread_id, exc_info=True)
-
-
-async def adelete_background_agent_thread(
-    client: AsyncLangGraphClient,
-    thread_id: str,
-    *,
-    name: str = "background agent",
-) -> None:
-    """Async variant of :func:`delete_background_agent_thread`."""
-    try:
-        await client.threads.delete(thread_id)
-    except Exception:
-        logger.debug("Failed to delete %s thread %s", name, thread_id, exc_info=True)
-
-
-def launch_background_agent(
-    request: BackgroundAgentLaunchRequest,
-    *,
-    hooks: BackgroundAgentLaunchHooks | None = None,
-    watcher_config: BackgroundAgentStatusWatcherConfig | None = None,
-    spawn_status_watcher: Callable[[BackgroundAgentRun], None] | None = None,
-) -> BackgroundAgentRun | None:
-    """Submit a background agent run to the local LangGraph server."""
+    hooks: BackgroundRunHooks | None = None,
+    watcher_config: BackgroundRunWatcherConfig | None = None,
+    spawn_status_watcher: Callable[[BackgroundRun], None] | None = None,
+) -> BackgroundRun | None:
+    """Submit a background run to the local LangGraph server."""
     from langgraph_sdk import get_sync_client
 
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
-    hooks = hooks or BackgroundAgentLaunchHooks()
-    watcher_config = watcher_config or BackgroundAgentStatusWatcherConfig()
-    url = request.url or default_background_agent_url()
+    hooks = hooks or BackgroundRunHooks()
+    watcher_config = watcher_config or BackgroundRunWatcherConfig()
+    url = request.url or default_background_run_url()
     if not is_langgraph_dev_running(base_url=url):
         logger.info("Skipping %s launch; LangGraph dev is unavailable", request.name)
         return None
@@ -302,40 +391,34 @@ def launch_background_agent(
         url=url,
         headers=_headers(request.headers),
     )
-    thread_metadata = dict(request.thread_metadata or {})
-    thread = client.threads.create(
+    thread_id = _create_thread(
+        client,
         graph_id=request.graph_id,
-        metadata=thread_metadata,
+        metadata=dict(request.thread_metadata or {}),
     )
-    thread_id = thread["thread_id"]
     _call_before_run_hook(
         hooks.on_before_run,
         thread_id,
         name=request.name,
     )
     payload = request.run_payload(thread_id)
-    run = client.runs.create(
+    run_id = _create_run(
+        client,
         thread_id=thread_id,
-        assistant_id=payload["assistant_id"],
-        input=payload["input"],
-        metadata=payload["metadata"],
-        config=payload["config"],
+        payload=payload,
     )
-    run_id = run["run_id"]
 
-    handle = BackgroundAgentRun(
-        name=request.name,
+    handle = _background_run_handle(
+        request=request,
         url=url,
-        graph_id=request.graph_id,
         thread_id=thread_id,
         run_id=run_id,
-        assistant_id=payload["assistant_id"],
-        metadata=dict(payload["metadata"]),
+        payload=payload,
     )
     _call_hook(hooks.on_started, handle, hook_name="on_started")
     try:
         if spawn_status_watcher is None:
-            spawn_background_agent_status_thread(
+            spawn_background_run_status_thread(
                 handle,
                 headers=request.headers,
                 hooks=hooks,
@@ -350,21 +433,21 @@ def launch_background_agent(
     return handle
 
 
-async def alaunch_background_agent(
-    request: BackgroundAgentLaunchRequest,
+async def alaunch_background_run(
+    request: BackgroundRunRequest,
     *,
-    hooks: BackgroundAgentLaunchHooks | None = None,
-    watcher_config: BackgroundAgentStatusWatcherConfig | None = None,
-    spawn_status_watcher: Callable[[BackgroundAgentRun], None] | None = None,
-) -> BackgroundAgentRun | None:
-    """Async variant of :func:`launch_background_agent`."""
+    hooks: BackgroundRunHooks | None = None,
+    watcher_config: BackgroundRunWatcherConfig | None = None,
+    spawn_status_watcher: Callable[[BackgroundRun], None] | None = None,
+) -> BackgroundRun | None:
+    """Async variant of :func:`launch_background_run`."""
     from langgraph_sdk import get_client
 
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
-    hooks = hooks or BackgroundAgentLaunchHooks()
-    watcher_config = watcher_config or BackgroundAgentStatusWatcherConfig()
-    url = request.url or default_background_agent_url()
+    hooks = hooks or BackgroundRunHooks()
+    watcher_config = watcher_config or BackgroundRunWatcherConfig()
+    url = request.url or default_background_run_url()
     if not await asyncio.to_thread(is_langgraph_dev_running, base_url=url):
         logger.info("Skipping %s launch; LangGraph dev is unavailable", request.name)
         return None
@@ -373,40 +456,34 @@ async def alaunch_background_agent(
         url=url,
         headers=_headers(request.headers),
     )
-    thread_metadata = dict(request.thread_metadata or {})
-    thread = await client.threads.create(
+    thread_id = await _acreate_thread(
+        client,
         graph_id=request.graph_id,
-        metadata=thread_metadata,
+        metadata=dict(request.thread_metadata or {}),
     )
-    thread_id = thread["thread_id"]
     await _acall_before_run_hook(
         hooks.on_before_run,
         thread_id,
         name=request.name,
     )
     payload = request.run_payload(thread_id)
-    run = await client.runs.create(
+    run_id = await _acreate_run(
+        client,
         thread_id=thread_id,
-        assistant_id=payload["assistant_id"],
-        input=payload["input"],
-        metadata=payload["metadata"],
-        config=payload["config"],
+        payload=payload,
     )
-    run_id = run["run_id"]
 
-    handle = BackgroundAgentRun(
-        name=request.name,
+    handle = _background_run_handle(
+        request=request,
         url=url,
-        graph_id=request.graph_id,
         thread_id=thread_id,
         run_id=run_id,
-        assistant_id=payload["assistant_id"],
-        metadata=dict(payload["metadata"]),
+        payload=payload,
     )
     await _acall_hook(hooks.on_started, handle, hook_name="on_started")
     try:
         if spawn_status_watcher is None:
-            spawn_background_agent_status_thread(
+            spawn_background_run_status_thread(
                 handle,
                 headers=request.headers,
                 hooks=hooks,
@@ -421,16 +498,16 @@ async def alaunch_background_agent(
     return handle
 
 
-def spawn_background_agent_status_thread(
-    run: BackgroundAgentRun,
+def spawn_background_run_status_thread(
+    run: BackgroundRun,
     *,
     headers: Mapping[str, str] | None = None,
-    hooks: BackgroundAgentLaunchHooks | None = None,
-    watcher_config: BackgroundAgentStatusWatcherConfig | None = None,
+    hooks: BackgroundRunHooks | None = None,
+    watcher_config: BackgroundRunWatcherConfig | None = None,
 ) -> None:
-    """Poll a background agent run from a daemon thread."""
+    """Poll a background run from a daemon thread."""
     thread = threading.Thread(
-        target=watch_background_agent_run_sync,
+        target=watch_background_run_sync,
         kwargs={
             "url": run.url,
             "thread_id": run.thread_id,
@@ -443,13 +520,13 @@ def spawn_background_agent_status_thread(
             "hooks": hooks,
             "watcher_config": watcher_config,
         },
-        name="evosci-background-agent-status",
+        name="evosci-background-run-status",
         daemon=True,
     )
     thread.start()
 
 
-def watch_background_agent_run_sync(
+def watch_background_run_sync(
     *,
     url: str,
     thread_id: str,
@@ -457,17 +534,17 @@ def watch_background_agent_run_sync(
     graph_id: str = "",
     assistant_id: str = "",
     metadata: Mapping[str, str] | None = None,
-    name: str = "background agent",
+    name: str = "background run",
     headers: Mapping[str, str] | None = None,
-    hooks: BackgroundAgentLaunchHooks | None = None,
-    watcher_config: BackgroundAgentStatusWatcherConfig | None = None,
+    hooks: BackgroundRunHooks | None = None,
+    watcher_config: BackgroundRunWatcherConfig | None = None,
 ) -> None:
-    """Poll a submitted background agent run until it finishes or polling aborts."""
+    """Poll a submitted background run until it finishes or polling aborts."""
     from langgraph_sdk import get_sync_client
 
-    hooks = hooks or BackgroundAgentLaunchHooks()
-    watcher_config = watcher_config or BackgroundAgentStatusWatcherConfig()
-    run_ref = BackgroundAgentRun(
+    hooks = hooks or BackgroundRunHooks()
+    watcher_config = watcher_config or BackgroundRunWatcherConfig()
+    run_ref = BackgroundRun(
         name=name,
         url=url,
         graph_id=graph_id,
@@ -483,9 +560,12 @@ def watch_background_agent_run_sync(
         client = get_sync_client(url=url, headers=_headers(headers))
         while True:
             try:
-                run = client.runs.get(thread_id=thread_id, run_id=run_id)
+                status = _get_run_status(
+                    client,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
                 failures = 0
-                status = run["status"]
             except Exception:
                 failures += 1
                 if failures >= watcher_config.max_poll_failures:
@@ -508,21 +588,21 @@ def watch_background_agent_run_sync(
         if confirmed_finished:
             _call_hook(hooks.on_finished, run_ref, hook_name="on_finished")
             if watcher_config.delete_thread_on_finish and client is not None:
-                delete_background_agent_thread(client, thread_id, name=name)
+                _delete_thread(client, thread_id, name=name)
         else:
             _call_hook(hooks.on_aborted, run_ref, hook_name="on_aborted")
 
 
-def spawn_background_agent_status_task(
+def spawn_background_run_status_task(
     client: AsyncLangGraphClient,
-    run: BackgroundAgentRun,
+    run: BackgroundRun,
     *,
-    hooks: BackgroundAgentLaunchHooks | None = None,
-    watcher_config: BackgroundAgentStatusWatcherConfig | None = None,
+    hooks: BackgroundRunHooks | None = None,
+    watcher_config: BackgroundRunWatcherConfig | None = None,
 ) -> None:
-    """Poll a background agent run without blocking the event loop."""
+    """Poll a background run without blocking the event loop."""
     task = asyncio.create_task(
-        awatch_background_agent_run(
+        awatch_background_run(
             client,
             thread_id=run.thread_id,
             run_id=run.run_id,
@@ -534,11 +614,11 @@ def spawn_background_agent_status_task(
             watcher_config=watcher_config,
         )
     )
-    _background_agent_watcher_tasks.add(task)
-    task.add_done_callback(_background_agent_watcher_tasks.discard)
+    _background_run_watcher_tasks.add(task)
+    task.add_done_callback(_background_run_watcher_tasks.discard)
 
 
-async def awatch_background_agent_run(
+async def awatch_background_run(
     client: AsyncLangGraphClient,
     *,
     thread_id: str,
@@ -546,14 +626,14 @@ async def awatch_background_agent_run(
     graph_id: str = "",
     assistant_id: str = "",
     metadata: Mapping[str, str] | None = None,
-    name: str = "background agent",
-    hooks: BackgroundAgentLaunchHooks | None = None,
-    watcher_config: BackgroundAgentStatusWatcherConfig | None = None,
+    name: str = "background run",
+    hooks: BackgroundRunHooks | None = None,
+    watcher_config: BackgroundRunWatcherConfig | None = None,
 ) -> None:
     """Async status watcher for callers that already hold an async SDK client."""
-    hooks = hooks or BackgroundAgentLaunchHooks()
-    watcher_config = watcher_config or BackgroundAgentStatusWatcherConfig()
-    run_ref = BackgroundAgentRun(
+    hooks = hooks or BackgroundRunHooks()
+    watcher_config = watcher_config or BackgroundRunWatcherConfig()
+    run_ref = BackgroundRun(
         name=name,
         url="",
         graph_id=graph_id,
@@ -567,9 +647,12 @@ async def awatch_background_agent_run(
     try:
         while True:
             try:
-                run = await client.runs.get(thread_id=thread_id, run_id=run_id)
+                status = await _aget_run_status(
+                    client,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
                 failures = 0
-                status = run["status"]
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -594,6 +677,6 @@ async def awatch_background_agent_run(
         if confirmed_finished:
             await _acall_hook(hooks.on_finished, run_ref, hook_name="on_finished")
             if watcher_config.delete_thread_on_finish:
-                await adelete_background_agent_thread(client, thread_id, name=name)
+                await _adelete_thread(client, thread_id, name=name)
         else:
             await _acall_hook(hooks.on_aborted, run_ref, hook_name="on_aborted")

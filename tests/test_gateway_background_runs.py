@@ -3,10 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import EvoScientist.gateway.async_runs as async_runs
+import EvoScientist.gateway.background_runs as background_runs
 
 
-def test_launch_background_agent_submits_run_and_invokes_hooks(monkeypatch):
+def test_launch_background_run_submits_run_and_invokes_hooks(monkeypatch):
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         lambda **_kwargs: True,
@@ -18,10 +18,10 @@ def test_launch_background_agent_submits_run_and_invokes_hooks(monkeypatch):
 
     payload_calls: list[str] = []
     before_calls: list[str] = []
-    started: list[async_runs.BackgroundAgentRun] = []
-    watchers: list[async_runs.BackgroundAgentRun] = []
+    started: list[background_runs.BackgroundRun] = []
+    watchers: list[background_runs.BackgroundRun] = []
 
-    def build_payload(thread_id: str) -> async_runs.BackgroundAgentRunPayload:
+    def build_payload(thread_id: str) -> background_runs.BackgroundRunPayload:
         payload_calls.append(thread_id)
         return {
             "assistant_id": "graph-1",
@@ -30,7 +30,7 @@ def test_launch_background_agent_submits_run_and_invokes_hooks(monkeypatch):
             "config": {"configurable": {"thread_id": thread_id}},
         }
 
-    request = async_runs.BackgroundAgentLaunchRequest(
+    request = background_runs.BackgroundRunRequest(
         graph_id="graph-1",
         run_payload=build_payload,
         thread_metadata={"thread_kind": "test"},
@@ -38,9 +38,9 @@ def test_launch_background_agent_submits_run_and_invokes_hooks(monkeypatch):
         name="test worker",
     )
 
-    handle = async_runs.launch_background_agent(
+    handle = background_runs.launch_background_run(
         request,
-        hooks=async_runs.BackgroundAgentLaunchHooks(
+        hooks=background_runs.BackgroundRunHooks(
             on_before_run=before_calls.append,
             on_started=started.append,
         ),
@@ -68,8 +68,8 @@ def test_launch_background_agent_submits_run_and_invokes_hooks(monkeypatch):
 
 
 def test_sync_status_watcher_finishes_and_deletes_thread(monkeypatch):
-    finished: list[async_runs.BackgroundAgentRun] = []
-    aborted: list[async_runs.BackgroundAgentRun] = []
+    finished: list[background_runs.BackgroundRun] = []
+    aborted: list[background_runs.BackgroundRun] = []
     deleted: list[str] = []
 
     class _Runs:
@@ -85,16 +85,16 @@ def test_sync_status_watcher_finishes_and_deletes_thread(monkeypatch):
         lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
     )
 
-    async_runs.watch_background_agent_run_sync(
+    background_runs.watch_background_run_sync(
         url="http://x",
         thread_id="thread-1",
         run_id="run-1",
         name="test worker",
-        hooks=async_runs.BackgroundAgentLaunchHooks(
+        hooks=background_runs.BackgroundRunHooks(
             on_finished=finished.append,
             on_aborted=aborted.append,
         ),
-        watcher_config=async_runs.BackgroundAgentStatusWatcherConfig(
+        watcher_config=background_runs.BackgroundRunWatcherConfig(
             poll_interval_seconds=0,
         ),
     )
@@ -105,8 +105,8 @@ def test_sync_status_watcher_finishes_and_deletes_thread(monkeypatch):
 
 
 def test_sync_status_watcher_aborts_without_deleting_on_poll_failure(monkeypatch):
-    finished: list[async_runs.BackgroundAgentRun] = []
-    aborted: list[async_runs.BackgroundAgentRun] = []
+    finished: list[background_runs.BackgroundRun] = []
+    aborted: list[background_runs.BackgroundRun] = []
     deleted: list[str] = []
 
     class _Runs:
@@ -122,16 +122,16 @@ def test_sync_status_watcher_aborts_without_deleting_on_poll_failure(monkeypatch
         lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
     )
 
-    async_runs.watch_background_agent_run_sync(
+    background_runs.watch_background_run_sync(
         url="http://x",
         thread_id="thread-1",
         run_id="run-1",
         name="test worker",
-        hooks=async_runs.BackgroundAgentLaunchHooks(
+        hooks=background_runs.BackgroundRunHooks(
             on_finished=finished.append,
             on_aborted=aborted.append,
         ),
-        watcher_config=async_runs.BackgroundAgentStatusWatcherConfig(
+        watcher_config=background_runs.BackgroundRunWatcherConfig(
             poll_interval_seconds=0,
             max_poll_failures=1,
         ),
