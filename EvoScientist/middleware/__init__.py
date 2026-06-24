@@ -24,7 +24,6 @@ from .memory import (
 )
 from .memory_lifecycle import (
     EvoMemoryLifecycleMiddleware,
-    MemoryLifecycleRole,
     create_memory_lifecycle_middleware,
 )
 from .model_fallback import ModelFallbackMiddleware, load_fallback_chain
@@ -42,7 +41,6 @@ __all__ = [
     "ContextOverflowMapperMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
-    "MemoryLifecycleRole",
     "ModelFallbackMiddleware",
     "Question",
     "RuntimeContextMiddleware",

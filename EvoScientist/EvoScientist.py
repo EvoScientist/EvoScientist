@@ -305,7 +305,6 @@ def _inject_subagent_middleware(
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
-        MemoryLifecycleRole,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -347,7 +346,7 @@ def _inject_subagent_middleware(
                     memory_dir,
                     workspace_dir=workspace_dir,
                     project_id=memory_middleware.project_id,
-                    role=MemoryLifecycleRole.SUBAGENT,
+                    source_type=MemorySourceType.SUBAGENT,
                     source_agent=name,
                 )
             )
@@ -660,7 +659,6 @@ def _get_default_middleware(
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
-        MemoryLifecycleRole,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_code_interpreter_middleware,
@@ -744,11 +742,7 @@ def _get_default_middleware(
                 memory_dir,
                 workspace_dir=workspace_dir,
                 project_id=memory_middleware.project_id,
-                role=(
-                    MemoryLifecycleRole.SUBAGENT
-                    if for_async_subagent
-                    else MemoryLifecycleRole.TURN
-                ),
+                source_type=source_type,
                 source_agent=memory_source_agent,
             )
         )

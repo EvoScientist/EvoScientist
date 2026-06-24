@@ -24,6 +24,27 @@ class MemoryOutputSnapshot:
 
 
 @dataclass(frozen=True)
+class MemoryOutputDelta:
+    """Deduped memory writes credited when a worker finishes."""
+
+    memory_dir: Path
+    profile_paths: tuple[str, ...] = ()
+    observation_paths: tuple[str, ...] = ()
+
+    @property
+    def profile_updates(self) -> int:
+        return len(self.profile_paths)
+
+    @property
+    def observations_recorded(self) -> int:
+        return len(self.observation_paths)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.profile_paths or self.observation_paths)
+
+
+@dataclass(frozen=True)
 class _ActiveMemoryWorker:
     memory_dir: Path
     before_outputs: MemoryOutputSnapshot
@@ -85,6 +106,21 @@ def _memory_output_delta(
         (root_key, path) for path in after.observation_files - before.observation_files
     }
     return profile_versions, observation_files
+
+
+def _memory_output_delta_result(
+    *,
+    memory_dir: Path,
+    profile_versions: set[tuple[str, str, str]],
+    observation_files: set[tuple[str, str]],
+) -> MemoryOutputDelta:
+    return MemoryOutputDelta(
+        memory_dir=memory_dir,
+        profile_paths=tuple(
+            sorted({path for _root_key, path, _digest in profile_versions})
+        ),
+        observation_paths=tuple(sorted(path for _root_key, path in observation_files)),
+    )
 
 
 def memory_worker_status() -> MemoryWorkerStatusSnapshot:
@@ -157,13 +193,16 @@ def forget_memory_worker(thread_id: str, run_id: str) -> None:
         _active_runs.pop((thread_id, run_id), None)
 
 
-def mark_memory_worker_finished(thread_id: str, run_id: str) -> None:
+def mark_memory_worker_finished(
+    thread_id: str,
+    run_id: str,
+) -> MemoryOutputDelta | None:
     global _observations_recorded, _profile_updates
 
     with _active_lock:
         worker = _active_runs.pop((thread_id, run_id), None)
     if worker is None:
-        return
+        return None
 
     after = snapshot_memory_outputs(worker.memory_dir)
     profile_versions, observation_files = _memory_output_delta(
@@ -172,7 +211,7 @@ def mark_memory_worker_finished(thread_id: str, run_id: str) -> None:
         after,
     )
     if not profile_versions and not observation_files:
-        return
+        return MemoryOutputDelta(memory_dir=worker.memory_dir)
 
     with _active_lock:
         new_profile_versions = profile_versions - _counted_profile_versions
@@ -181,6 +220,11 @@ def mark_memory_worker_finished(thread_id: str, run_id: str) -> None:
         _counted_observation_files.update(new_observation_files)
         _profile_updates += len(new_profile_versions)
         _observations_recorded += len(new_observation_files)
+    return _memory_output_delta_result(
+        memory_dir=worker.memory_dir,
+        profile_versions=new_profile_versions,
+        observation_files=new_observation_files,
+    )
 
 
 def reset_memory_worker_status_for_tests() -> None:

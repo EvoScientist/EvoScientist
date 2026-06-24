@@ -23,7 +23,11 @@ from pydantic import BaseModel
 
 from EvoScientist.config import MemoryObservationWriter
 from EvoScientist.gateway import async_runs
-from EvoScientist.memory import worker_activity
+from EvoScientist.memory import (
+    source_context,
+    worker_activity,
+)
+from EvoScientist.memory.agents import memory_worker
 from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
@@ -96,6 +100,29 @@ def _tool_runtime(
 
 def _runtime(thread_id: str | None = None) -> Runtime[None]:
     return Runtime(execution_info=_execution_info(thread_id))
+
+
+def _memory_source_context(
+    *,
+    memory_dir,
+    workspace_dir,
+    source_type: MemorySourceType = MemorySourceType.TURN,
+    project_id: str = "P-project",
+    source_agent: str = "EvoScientist",
+    session_id: str = "thread-1",
+    trajectory: list[source_context.CompactMessage] | None = None,
+) -> source_context.MemorySourceContext:
+    context_trajectory = trajectory or [{"role": "human", "content": "hi"}]
+    return source_context.MemorySourceContext(
+        source_type=source_type,
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+        project_id=project_id,
+        source_agent=source_agent,
+        session_id=session_id,
+        trajectory=context_trajectory,
+        trajectory_digest=source_context._trajectory_digest(context_trajectory),
+    )
 
 
 def _record_observation_payload(
@@ -603,7 +630,7 @@ def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
         ),
     ]
 
-    compact = memory_lifecycle._compact_turn_messages(
+    compact = source_context._compact_turn_messages(
         messages,
         source_agent="EvoScientist",
     )
@@ -642,7 +669,7 @@ def test_turn_compaction_keeps_direct_tool_results_with_tool_names():
         AIMessage("final answer", name="EvoScientist"),
     ]
 
-    compact = memory_lifecycle._compact_turn_messages(
+    compact = source_context._compact_turn_messages(
         messages,
         source_agent="EvoScientist",
     )
@@ -681,7 +708,7 @@ def test_turn_compaction_uses_latest_user_turn_only():
         AIMessage("current answer", name="EvoScientist"),
     ]
 
-    compact = memory_lifecycle._compact_turn_messages(
+    compact = source_context._compact_turn_messages(
         messages,
         source_agent="EvoScientist",
     )
@@ -701,7 +728,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         calls.append((request, kwargs))
 
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_worker,
         "alaunch_background_agent",
         fake_launch,
     )
@@ -709,7 +736,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         project_id="P-project",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
     )
     runtime = _runtime("thread-1")
@@ -733,12 +760,12 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
 
     assert len(calls) == 1
     request, launch_kwargs = calls[0]
-    assert request.graph_id == memory_lifecycle.TURN_MEMORY_WORKER_GRAPH_ID
+    assert request.graph_id == memory_worker.TURN_MEMORY_WORKER_GRAPH_ID
     assert request.name == "EvoMemory worker"
     assert launch_kwargs["hooks"].on_started is not None
     assert "watcher_config" not in launch_kwargs
     payload = request.run_payload("worker-thread")
-    assert payload["assistant_id"] == memory_lifecycle.TURN_MEMORY_WORKER_GRAPH_ID
+    assert payload["assistant_id"] == memory_worker.TURN_MEMORY_WORKER_GRAPH_ID
     assert payload["metadata"]["source_session_id"] == "thread-1"
     assert payload["metadata"]["source_agent"] == "EvoScientist"
     assert payload["metadata"]["project_id"] == "P-project"
@@ -747,7 +774,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
 def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     summary = "Completed the analysis."
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_worker,
         "_current_configurable",
         lambda: {
             "evomemory_source_session_id": "thread-1",
@@ -756,13 +783,13 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
             "evomemory_trajectory_digest": "digest-1",
         },
     )
-    middleware = memory_lifecycle._SubagentSummaryWriterMiddleware(
+    middleware = memory_worker._SubagentSummaryWriterMiddleware(
         memory_dir=tmp_path / "memories"
     )
 
     state: AgentState[object] = {
         "messages": [],
-        "structured_response": memory_lifecycle.SubagentMemoryDecision(summary=summary),
+        "structured_response": memory_worker.SubagentMemoryDecision(summary=summary),
     }
     middleware.after_agent(
         state,
@@ -773,7 +800,7 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     assert len(paths) == 1
     metadata, body = _read_memory_document(paths[0])
     assert _stable_created_at(metadata) == {
-        "id": memory_lifecycle._execution_summary_id(
+        "id": memory_worker._execution_summary_id(
             session_id="thread-1",
             source_agent="writing-agent",
             trajectory_digest="digest-1",
@@ -791,31 +818,33 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
 
 def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monkeypatch):
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_worker,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
-    trajectory: list[memory_lifecycle.CompactMessage] = [
+    trajectory: list[source_context.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
-
-    kwargs = memory_lifecycle._memory_worker_run_kwargs(
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        thread_id="worker-thread",
+    context = _memory_source_context(
+        memory_dir="/memories",
         workspace_dir="/active/workspace",
-        project_id="P-project",
+        source_type=MemorySourceType.SUBAGENT,
         source_agent="writing-agent",
-        session_id="thread-1",
         trajectory=trajectory,
     )
 
-    assert kwargs["assistant_id"] == memory_lifecycle.SUBAGENT_MEMORY_WORKER_GRAPH_ID
+    kwargs = memory_worker._memory_worker_run_kwargs(
+        context=context,
+        thread_id="worker-thread",
+    )
+
+    assert kwargs["assistant_id"] == memory_worker.SUBAGENT_MEMORY_WORKER_GRAPH_ID
     assert kwargs["metadata"] == {
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",
         "source_agent": "writing-agent",
         "project_id": "P-project",
-        "trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+        "trajectory_digest": source_context._trajectory_digest(trajectory),
         "workspace_dir": "/tmp/ws",
     }
     configurable = kwargs["config"]["configurable"]
@@ -828,21 +857,21 @@ def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monke
         "evomemory_source_session_id": "thread-1",
         "evomemory_source_agent": "writing-agent",
         "evomemory_project_id": "P-project",
-        "evomemory_trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+        "evomemory_trajectory_digest": source_context._trajectory_digest(trajectory),
     }
 
 
-def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
+def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
     calls = []
 
     def fake_build(**kwargs):
         calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(memory_lifecycle, "_build_memory_worker_agent", fake_build)
+    monkeypatch.setattr(memory_worker, "_build_memory_worker_agent", fake_build)
 
-    memory_lifecycle.build_memory_worker_graph(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
+    memory_worker.build_memory_worker_graph(
+        MemorySourceType.TURN,
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
     )
@@ -852,16 +881,16 @@ def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
 
 
 def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
-    turn_middleware = memory_lifecycle._memory_worker_middleware(
+    turn_middleware = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_type=MemorySourceType.TURN,
         observation_writer=MemoryObservationWriter.ALL,
     )
-    subagent_middleware = memory_lifecycle._memory_worker_middleware(
+    subagent_middleware = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        source_type=MemorySourceType.SUBAGENT,
         observation_writer=MemoryObservationWriter.ALL,
     )
 
@@ -878,22 +907,22 @@ def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
 
 
 def test_memory_worker_observation_writer_modes(tmp_path):
-    agent_only = memory_lifecycle._memory_worker_middleware(
+    agent_only = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        source_type=MemorySourceType.SUBAGENT,
         observation_writer=MemoryObservationWriter.AGENT,
     )
-    worker_subagent = memory_lifecycle._memory_worker_middleware(
+    worker_subagent = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+        source_type=MemorySourceType.SUBAGENT,
         observation_writer=MemoryObservationWriter.WORKER,
     )
-    worker_turn = memory_lifecycle._memory_worker_middleware(
+    worker_turn = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_type=MemorySourceType.TURN,
         observation_writer=MemoryObservationWriter.WORKER,
     )
 
@@ -914,33 +943,33 @@ def test_memory_worker_observation_writer_modes(tmp_path):
 
 
 def test_memory_worker_prompts_match_observation_tool_availability():
-    turn_profile_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
+    turn_profile_only = memory_worker._memory_worker_system_prompt(
+        MemorySourceType.TURN,
         enable_profile_memory=True,
         enable_observation_tool=False,
     )
-    turn_with_observation_flag = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
+    turn_with_observation_flag = memory_worker._memory_worker_system_prompt(
+        MemorySourceType.TURN,
         enable_profile_memory=True,
         enable_observation_tool=True,
     )
-    subagent_profile_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+    subagent_profile_only = memory_worker._memory_worker_system_prompt(
+        MemorySourceType.SUBAGENT,
         enable_profile_memory=True,
         enable_observation_tool=False,
     )
-    subagent_with_observations = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+    subagent_with_observations = memory_worker._memory_worker_system_prompt(
+        MemorySourceType.SUBAGENT,
         enable_profile_memory=True,
         enable_observation_tool=True,
     )
-    subagent_observations_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
+    subagent_observations_only = memory_worker._memory_worker_system_prompt(
+        MemorySourceType.SUBAGENT,
         enable_profile_memory=False,
         enable_observation_tool=True,
     )
-    turn_observations_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
+    turn_observations_only = memory_worker._memory_worker_system_prompt(
+        MemorySourceType.TURN,
         enable_profile_memory=False,
         enable_observation_tool=True,
     )
@@ -983,7 +1012,7 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_lifecycle._memory_worker_launch_hooks(memory_dir),
+            hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
             watcher_config=_fast_watcher_config(max_poll_failures=1),
         )
         status = worker_activity.memory_worker_status()
@@ -1018,7 +1047,7 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_lifecycle._memory_worker_launch_hooks(memory_dir),
+                hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
                 watcher_config=_fast_watcher_config(max_poll_failures=1),
             )
         )
@@ -1050,14 +1079,14 @@ def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
             return {"status": "success"}
 
     async def run():
-        blocker = BlockBuster(scanned_modules=[memory_lifecycle, worker_activity])
+        blocker = BlockBuster(scanned_modules=[memory_worker, worker_activity])
         blocker.activate()
         try:
             await async_runs.awatch_background_agent_run(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_lifecycle._memory_worker_launch_hooks(memory_dir),
+                hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
             )
         finally:
             blocker.deactivate()
@@ -1097,7 +1126,7 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
                 url="http://x",
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_lifecycle._memory_worker_launch_hooks(memory_dir),
+                hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
             )
         status = worker_activity.memory_worker_status()
         assert status.is_running is False
@@ -1129,7 +1158,7 @@ def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_lifecycle._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert worker_activity.memory_worker_status().is_running is False
     finally:
@@ -1164,7 +1193,7 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_lifecycle._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert deleted == ["worker-thread"]
         assert worker_activity.memory_worker_status().is_running is False
@@ -1199,7 +1228,7 @@ def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch)
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_lifecycle._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert worker_activity.memory_worker_status().is_running is False
     finally:
@@ -1234,7 +1263,7 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_lifecycle._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert deleted == []
     finally:
@@ -1270,9 +1299,7 @@ def test_async_watcher_deletes_worker_thread_on_terminal_status(
                 SimpleNamespace(runs=_Runs(), threads=_Threads()),
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_lifecycle._memory_worker_launch_hooks(
-                    tmp_path / "memories"
-                ),
+                hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
             )
         )
         assert deleted == ["worker-thread"]
@@ -1297,7 +1324,7 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         project_id="P-project",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
     )
     middleware.after_agent(
@@ -1306,11 +1333,11 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
     )
 
 
-def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
+def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(async_runs, "default_background_agent_url", lambda: "http://x")
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_worker,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -1326,22 +1353,20 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
 
     spawned: list[async_runs.BackgroundAgentRun] = []
 
-    trajectory: list[memory_lifecycle.CompactMessage] = [
+    trajectory: list[source_context.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
 
     memory_dir = tmp_path / "memories"
-    request = memory_lifecycle._memory_worker_launch_request(
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+    context = _memory_source_context(
+        memory_dir=memory_dir,
         workspace_dir=tmp_path / "workspace",
-        project_id="P-project",
-        source_agent="EvoScientist",
-        session_id="thread-1",
         trajectory=trajectory,
     )
+    request = memory_worker._memory_worker_launch_request(context)
     async_runs.launch_background_agent(
         request,
-        hooks=memory_lifecycle._memory_worker_launch_hooks(memory_dir),
+        hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
         spawn_status_watcher=spawned.append,
     )
 
@@ -1352,11 +1377,11 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
             "source_session_id": "thread-1",
             "source_agent": "EvoScientist",
             "project_id": "P-project",
-            "trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+            "trajectory_digest": source_context._trajectory_digest(trajectory),
             "workspace_dir": "/tmp/ws",
         }
         fake_client.threads.create.assert_called_once_with(
-            graph_id=memory_lifecycle.TURN_MEMORY_WORKER_GRAPH_ID,
+            graph_id=memory_worker.TURN_MEMORY_WORKER_GRAPH_ID,
             metadata=expected_metadata,
         )
         fake_client.runs.create.assert_called_once()
@@ -1374,21 +1399,24 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
         observation_path.parent.mkdir(parents=True)
         observation_path.write_text("# Observation\n", encoding="utf-8")
     finally:
-        worker_activity.mark_memory_worker_finished("worker-thread", "run-1")
+        delta = worker_activity.mark_memory_worker_finished("worker-thread", "run-1")
     status = worker_activity.memory_worker_status()
+    assert delta == worker_activity.MemoryOutputDelta(
+        memory_dir=memory_dir,
+        profile_paths=("profile/USER_PROFILE.md",),
+        observation_paths=("observations/global/O-1.md",),
+    )
     assert status.is_running is False
     assert status.profile_updates == 1
     assert status.observations_recorded == 1
     worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_async_memory_worker_launch_offloads_blocking_work(
-    tmp_path, monkeypatch, run_async
-):
+def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_async):
     worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(async_runs, "default_background_agent_url", lambda: "http://x")
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_worker,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -1410,7 +1438,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         fake_is_running,
     )
-    monkeypatch.setattr(memory_lifecycle, "snapshot_memory_outputs", fake_snapshot)
+    monkeypatch.setattr(memory_worker, "snapshot_memory_outputs", fake_snapshot)
 
     class _Threads:
         async def create(self, **_kwargs):
@@ -1427,17 +1455,15 @@ def test_async_memory_worker_launch_offloads_blocking_work(
 
     async def run():
         event_loop_thread = threading.get_ident()
-        request = memory_lifecycle._memory_worker_launch_request(
-            role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        context = _memory_source_context(
+            memory_dir=tmp_path / "memories",
             workspace_dir=tmp_path / "workspace",
-            project_id="P-project",
-            source_agent="EvoScientist",
-            session_id="thread-1",
             trajectory=[{"role": "human", "content": "hi"}],
         )
+        request = memory_worker._memory_worker_launch_request(context)
         await async_runs.alaunch_background_agent(
             request,
-            hooks=memory_lifecycle._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
             spawn_status_watcher=spawned.append,
         )
         return event_loop_thread
@@ -1611,11 +1637,16 @@ def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
 
-    worker_activity.mark_memory_worker_finished("thread-1", "run-1")
-    worker_activity.mark_memory_worker_finished("thread-2", "run-2")
+    first_delta = worker_activity.mark_memory_worker_finished("thread-1", "run-1")
+    second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
     try:
+        assert first_delta == worker_activity.MemoryOutputDelta(
+            memory_dir=memory_dir,
+            observation_paths=("observations/global/O-1.md",),
+        )
+        assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
         assert status.is_running is False
         assert status.observations_recorded == 1
     finally:
@@ -1642,13 +1673,18 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
 
-    worker_activity.mark_memory_worker_finished("thread-1", "run-1")
+    first_delta = worker_activity.mark_memory_worker_finished("thread-1", "run-1")
     assert worker_activity.memory_worker_status().observations_recorded == 1
     worker_activity.clear_memory_worker_saved_counts()
-    worker_activity.mark_memory_worker_finished("thread-2", "run-2")
+    second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
     try:
+        assert first_delta == worker_activity.MemoryOutputDelta(
+            memory_dir=memory_dir,
+            observation_paths=("observations/global/O-1.md",),
+        )
+        assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
         assert status.is_running is False
         assert status.observations_recorded == 0
     finally:

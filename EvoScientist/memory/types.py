@@ -23,7 +23,7 @@ class MemoryScope(StrEnum):
 
 
 class MemorySourceType(StrEnum):
-    """Where an observation came from in the agent lifecycle."""
+    """Where a memory observation originated."""
 
     SUBAGENT = "subagent"
     TURN = "turn"
