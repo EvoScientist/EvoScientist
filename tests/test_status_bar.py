@@ -61,6 +61,10 @@ def test_build_status_fragments_shows_memory_worker_indicator(monkeypatch):
             observations_recorded=5,
         ),
     )
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_observation_linker_status",
+        lambda: SimpleNamespace(is_running=False),
+    )
     snapshot = SessionStatusSnapshot(
         model_full="openai/gpt-6",
         model_short="gpt-6",
@@ -91,6 +95,10 @@ def test_build_status_fragments_shows_memory_worker_indicator_when_running(
             observations_recorded=0,
         ),
     )
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_observation_linker_status",
+        lambda: SimpleNamespace(is_running=False),
+    )
     snapshot = SessionStatusSnapshot(
         model_full="openai/gpt-6",
         model_short="gpt-6",
@@ -110,6 +118,41 @@ def test_build_status_fragments_shows_memory_worker_indicator_when_running(
     assert "🧠" in rendered
 
 
+def test_build_status_fragments_shows_observation_linker_indicator_when_running(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_memory_worker_status",
+        lambda: SimpleNamespace(
+            is_running=False,
+            profile_updates=0,
+            observations_recorded=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_observation_linker_status",
+        lambda: SimpleNamespace(is_running=True),
+    )
+    snapshot = SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            snapshot,
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "🔗" in rendered
+    assert "🧠" not in rendered
+
+
 def test_build_status_fragments_hides_memory_indicator_when_idle(monkeypatch):
     monkeypatch.setattr(
         "EvoScientist.cli.status_bar.get_memory_worker_status",
@@ -118,6 +161,10 @@ def test_build_status_fragments_hides_memory_indicator_when_idle(monkeypatch):
             profile_updates=0,
             observations_recorded=0,
         ),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar.get_observation_linker_status",
+        lambda: SimpleNamespace(is_running=False),
     )
     snapshot = SessionStatusSnapshot(
         model_full="openai/gpt-6",

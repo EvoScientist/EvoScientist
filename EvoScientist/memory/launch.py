@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -14,21 +15,26 @@ from ..gateway.background_runs import (
     alaunch_background_run,
     launch_background_run,
 )
+from .scheduler import ObservationLinkerContext
 from .source_context import MemorySourceContext, _trajectory_for_prompt
 from .types import MemorySourceType
 from .worker_activity import (
     MemoryOutputDelta,
     MemoryOutputSnapshot,
     forget_memory_worker,
+    forget_observation_linker,
     mark_memory_worker_finished,
     mark_memory_worker_started,
+    mark_observation_linker_started,
     snapshot_memory_outputs,
 )
 
 SUBAGENT_MEMORY_WORKER_GRAPH_ID = "evomemory-subagent-worker"
 TURN_MEMORY_WORKER_GRAPH_ID = "evomemory-turn-worker"
+OBSERVATION_LINKER_GRAPH_ID = "evomemory-observation-linker"
 
 MemoryWorkerFinishedHook = Callable[[BackgroundRun, MemoryOutputDelta | None], None]
+MemoryWorkerAbortedHook = Callable[[BackgroundRun], None]
 
 
 def _memory_worker_graph_id(source_type: MemorySourceType) -> str:
@@ -128,10 +134,98 @@ def memory_worker_launch_request(
     )
 
 
+def _observation_linker_user_prompt(context: ObservationLinkerContext) -> str:
+    payload = {
+        "project_id": context.project_id,
+        "new_observation_ids": sorted(context.observation_ids),
+    }
+    return (
+        "Link newly recorded observations to existing observation memory when "
+        "there is a strong reusable relationship.\n\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)}"
+    )
+
+
+def _observation_linker_metadata(
+    context: ObservationLinkerContext,
+) -> dict[str, str]:
+    return {
+        "run_kind": "evomemory_observation_linker",
+        "project_id": context.project_id,
+        "observation_count": str(len(context.observation_ids)),
+        "workspace_dir": str(context.workspace_dir.expanduser().resolve()),
+    }
+
+
+def _observation_linker_run_payload(
+    *,
+    context: ObservationLinkerContext,
+    thread_id: str,
+) -> BackgroundRunPayload:
+    payload: BackgroundRunPayload = {
+        "assistant_id": OBSERVATION_LINKER_GRAPH_ID,
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": _observation_linker_user_prompt(context),
+                }
+            ]
+        },
+        "metadata": _observation_linker_metadata(context),
+        "config": {
+            "configurable": {
+                "thread_id": thread_id,
+                "evomemory_project_id": context.project_id,
+                "evomemory_observation_ids": json.dumps(
+                    list(context.observation_ids),
+                    ensure_ascii=False,
+                ),
+            }
+        },
+    }
+    return _runs_create_kwargs(payload)
+
+
+def observation_linker_launch_request(
+    context: ObservationLinkerContext,
+) -> BackgroundRunRequest:
+    """Build the background run request for the observation linker."""
+
+    def run_payload(thread_id: str) -> BackgroundRunPayload:
+        return _observation_linker_run_payload(
+            context=context,
+            thread_id=thread_id,
+        )
+
+    return BackgroundRunRequest(
+        graph_id=OBSERVATION_LINKER_GRAPH_ID,
+        run_payload=run_payload,
+        thread_metadata=_observation_linker_metadata(context),
+        name="EvoMemory observation linker",
+    )
+
+
+def _observation_linker_launch_hooks() -> BackgroundRunHooks:
+    def on_started(run: BackgroundRun) -> None:
+        mark_observation_linker_started(thread_id=run.thread_id, run_id=run.run_id)
+
+    def on_stopped(run: BackgroundRun) -> None:
+        forget_observation_linker(run.thread_id, run.run_id)
+
+    return BackgroundRunHooks(
+        on_started=on_started,
+        on_finished=on_stopped,
+        on_aborted=on_stopped,
+        on_watcher_start_failed=on_stopped,
+    )
+
+
 def _memory_worker_launch_hooks(
     memory_dir: str | Path,
     *,
     on_worker_finished: MemoryWorkerFinishedHook | None = None,
+    on_worker_aborted: MemoryWorkerAbortedHook | None = None,
 ) -> BackgroundRunHooks:
     before_outputs: dict[str, MemoryOutputSnapshot] = {}
 
@@ -153,6 +247,8 @@ def _memory_worker_launch_hooks(
 
     def on_aborted(run: BackgroundRun) -> None:
         forget_memory_worker(run.thread_id, run.run_id)
+        if on_worker_aborted is not None:
+            on_worker_aborted(run)
 
     return BackgroundRunHooks(
         on_before_run=on_before_run,
@@ -167,6 +263,7 @@ def launch_memory_worker(
     context: MemorySourceContext,
     *,
     on_worker_finished: MemoryWorkerFinishedHook | None = None,
+    on_worker_aborted: MemoryWorkerAbortedHook | None = None,
 ) -> BackgroundRun | None:
     """Launch one synchronous EvoMemory worker for a source context."""
     return launch_background_run(
@@ -174,6 +271,7 @@ def launch_memory_worker(
         hooks=_memory_worker_launch_hooks(
             context.memory_dir,
             on_worker_finished=on_worker_finished,
+            on_worker_aborted=on_worker_aborted,
         ),
     )
 
@@ -182,6 +280,7 @@ async def alaunch_memory_worker(
     context: MemorySourceContext,
     *,
     on_worker_finished: MemoryWorkerFinishedHook | None = None,
+    on_worker_aborted: MemoryWorkerAbortedHook | None = None,
 ) -> BackgroundRun | None:
     """Launch one asynchronous EvoMemory worker for a source context."""
     return await alaunch_background_run(
@@ -189,5 +288,26 @@ async def alaunch_memory_worker(
         hooks=_memory_worker_launch_hooks(
             context.memory_dir,
             on_worker_finished=on_worker_finished,
+            on_worker_aborted=on_worker_aborted,
         ),
+    )
+
+
+def launch_observation_linker(
+    context: ObservationLinkerContext,
+) -> BackgroundRun | None:
+    """Launch one synchronous observation-linking pass."""
+    return launch_background_run(
+        observation_linker_launch_request(context),
+        hooks=_observation_linker_launch_hooks(),
+    )
+
+
+async def alaunch_observation_linker(
+    context: ObservationLinkerContext,
+) -> BackgroundRun | None:
+    """Launch one asynchronous observation-linking pass."""
+    return await alaunch_background_run(
+        observation_linker_launch_request(context),
+        hooks=_observation_linker_launch_hooks(),
     )

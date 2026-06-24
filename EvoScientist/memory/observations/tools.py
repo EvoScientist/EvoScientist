@@ -16,8 +16,10 @@ from ..types import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    ObservationRelation,
     ObservationSearchMode,
 )
+from .relations import link_observation_files
 from .store import (
     read_observation_file,
     record_observation_file,
@@ -130,6 +132,40 @@ class ReadMemoryArgs(BaseModel):
             "Exact observation ID to read, such as an ID returned by "
             "`search_observations` or listed in the inlined observation index."
         ),
+    )
+    runtime: Annotated[object | None, InjectedToolArg] = None
+
+
+class LinkObservationsArgs(BaseModel):
+    """Model-facing arguments for the `link_observations` tool."""
+
+    source_observation_id: str = Field(
+        min_length=1,
+        description="Exact ID of the newly recorded observation to annotate.",
+    )
+    target_observation_id: str = Field(
+        min_length=1,
+        description="Exact ID of the existing related observation.",
+    )
+    relation: ObservationRelation = Field(
+        default=ObservationRelation.RELATED,
+        description=(
+            "Relationship label. Use `related` for generally connected "
+            "observations, `contradicts` for incompatible claims, and "
+            "`supersedes` when the source should replace the target."
+        ),
+    )
+    reason: str = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "One concise sentence explaining why future agents should consider "
+            "these observations together."
+        ),
+    )
+    bidirectional: bool = Field(
+        default=True,
+        description="When true, write the same relationship to both observations.",
     )
     runtime: Annotated[object | None, InjectedToolArg] = None
 
@@ -355,5 +391,50 @@ def create_record_observation_tool(
             "tool or platform behavior unless it is project-specific."
         ),
         args_schema=RecordObservationArgs,
+        infer_schema=False,
+    )
+
+
+def create_link_observations_tool(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    linked_by: str = "evomemory-observation-linker",
+) -> BaseTool:
+    """Build the `link_observations` tool for frontmatter-native links."""
+
+    def _link_observations(
+        source_observation_id: str,
+        target_observation_id: str,
+        reason: str,
+        relation: ObservationRelation = ObservationRelation.RELATED,
+        bidirectional: bool = True,
+        runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None,
+    ) -> str:
+        effective_project_id = (
+            _runtime_config_value(runtime, "evomemory_project_id") or project_id
+        )
+        result = link_observation_files(
+            memory_dir=memory_dir,
+            project_id=effective_project_id,
+            source_observation_id=source_observation_id,
+            target_observation_id=target_observation_id,
+            reason=reason,
+            relation=relation,
+            bidirectional=bidirectional,
+            linked_by=linked_by,
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+    return StructuredTool.from_function(
+        func=_link_observations,
+        name="link_observations",
+        description=(
+            "Add or update a frontmatter `related_observations` link between "
+            "two existing EvoMemory observations. Use this only after reading "
+            "or searching enough memory to establish a strong durable "
+            "relationship; do not use it to create new observations."
+        ),
+        args_schema=LinkObservationsArgs,
         infer_schema=False,
     )

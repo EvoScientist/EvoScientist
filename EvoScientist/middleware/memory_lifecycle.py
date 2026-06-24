@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import logging
+from functools import cache
 from pathlib import Path
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langgraph.runtime import Runtime
 
 from .. import paths as _paths
-from ..memory.launch import alaunch_memory_worker, launch_memory_worker
+from ..memory.launch import (
+    alaunch_memory_worker,
+    launch_memory_worker,
+    launch_observation_linker,
+)
+from ..memory.scheduler import MemoryScheduler
 from ..memory.source_context import build_memory_source_context
 from ..memory.types import MemorySourceType
 
 logger = logging.getLogger(__name__)
+
+
+@cache
+def _default_memory_scheduler() -> MemoryScheduler:
+    return MemoryScheduler(launch_linker=launch_observation_linker)
 
 
 class EvoMemoryLifecycleMiddleware(AgentMiddleware):
@@ -29,6 +40,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         project_id: str,
         source_type: MemorySourceType,
         source_agent: str,
+        memory_scheduler: MemoryScheduler | None = None,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         self._workspace_dir = Path(
@@ -37,6 +49,11 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         self._project_id = project_id
         self._source_type = source_type
         self._source_agent = source_agent
+        self._memory_scheduler = (
+            memory_scheduler
+            if memory_scheduler is not None
+            else _default_memory_scheduler()
+        )
 
     def after_agent(
         self,
@@ -54,7 +71,11 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         )
         if context is not None:
             try:
-                launch_memory_worker(context)
+                launch_memory_worker(
+                    context,
+                    on_worker_finished=self._memory_scheduler.record_worker_finished,
+                    on_worker_aborted=self._memory_scheduler.record_worker_aborted,
+                )
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
         return None
@@ -75,7 +96,11 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         )
         if context is not None:
             try:
-                await alaunch_memory_worker(context)
+                await alaunch_memory_worker(
+                    context,
+                    on_worker_finished=self._memory_scheduler.record_worker_finished,
+                    on_worker_aborted=self._memory_scheduler.record_worker_aborted,
+                )
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
         return None
@@ -88,6 +113,7 @@ def create_memory_lifecycle_middleware(
     project_id: str,
     source_type: MemorySourceType,
     source_agent: str,
+    memory_scheduler: MemoryScheduler | None = None,
 ) -> EvoMemoryLifecycleMiddleware:
     """Build the post-run EvoMemory lifecycle middleware."""
 
@@ -99,4 +125,5 @@ def create_memory_lifecycle_middleware(
         project_id=project_id,
         source_type=source_type,
         source_agent=source_agent,
+        memory_scheduler=memory_scheduler,
     )

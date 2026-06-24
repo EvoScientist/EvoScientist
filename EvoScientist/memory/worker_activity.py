@@ -18,6 +18,13 @@ class MemoryWorkerStatusSnapshot:
 
 
 @dataclass(frozen=True)
+class ObservationLinkerStatusSnapshot:
+    """Active observation-linking work shown in the status bar."""
+
+    is_running: bool = False
+
+
+@dataclass(frozen=True)
 class MemoryOutputSnapshot:
     profile_files: dict[str, str]
     observation_files: frozenset[str]
@@ -51,11 +58,16 @@ class _ActiveMemoryWorker:
 
 
 _active_runs: dict[tuple[str, str], _ActiveMemoryWorker] = {}
+_active_linker_runs: set[tuple[str, str]] = set()
 _active_lock = threading.Lock()
 _profile_updates = 0
 _observations_recorded = 0
 _counted_profile_versions: set[tuple[str, str, str]] = set()
 _counted_observation_files: set[tuple[str, str]] = set()
+
+
+def _memory_root_key(path: str | Path) -> str:
+    return str(Path(path).expanduser().resolve())
 
 
 def _file_digest(path: Path) -> str | None:
@@ -132,6 +144,23 @@ def memory_worker_status() -> MemoryWorkerStatusSnapshot:
         )
 
 
+def observation_linker_status() -> ObservationLinkerStatusSnapshot:
+    with _active_lock:
+        return ObservationLinkerStatusSnapshot(is_running=bool(_active_linker_runs))
+
+
+def has_active_memory_workers(memory_dir: str | Path | None = None) -> bool:
+    """Return whether any memory workers are still active."""
+    with _active_lock:
+        if memory_dir is None:
+            return bool(_active_runs)
+        root_key = _memory_root_key(memory_dir)
+        return any(
+            _memory_root_key(worker.memory_dir) == root_key
+            for worker in _active_runs.values()
+        )
+
+
 def memory_worker_observed_outputs() -> MemoryWorkerStatusSnapshot:
     """Return completed counts plus already-written outputs from active workers."""
     with _active_lock:
@@ -193,6 +222,16 @@ def forget_memory_worker(thread_id: str, run_id: str) -> None:
         _active_runs.pop((thread_id, run_id), None)
 
 
+def mark_observation_linker_started(*, thread_id: str, run_id: str) -> None:
+    with _active_lock:
+        _active_linker_runs.add((thread_id, run_id))
+
+
+def forget_observation_linker(thread_id: str, run_id: str) -> None:
+    with _active_lock:
+        _active_linker_runs.discard((thread_id, run_id))
+
+
 def mark_memory_worker_finished(
     thread_id: str,
     run_id: str,
@@ -232,6 +271,7 @@ def reset_memory_worker_status_for_tests() -> None:
 
     with _active_lock:
         _active_runs.clear()
+        _active_linker_runs.clear()
         _counted_profile_versions.clear()
         _counted_observation_files.clear()
         _profile_updates = 0

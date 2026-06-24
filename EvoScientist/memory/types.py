@@ -36,6 +36,14 @@ class ObservationSearchMode(StrEnum):
     REGEX = "regex"
 
 
+class ObservationRelation(StrEnum):
+    """Allowed relationship labels between observations."""
+
+    RELATED = "related"
+    CONTRADICTS = "contradicts"
+    SUPERSEDES = "supersedes"
+
+
 class ObservationRecordResult(TypedDict):
     """Result returned by `record_observation`."""
 
