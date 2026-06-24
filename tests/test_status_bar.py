@@ -69,15 +69,15 @@ def test_build_status_fragments_shows_memory_worker_indicator(monkeypatch):
         context_percent=10,
     )
 
-    fragments = build_status_fragments(
-        snapshot,
-        datetime.now() - timedelta(minutes=3),
-        100,
+    rendered = _render_fragments(
+        build_status_fragments(
+            snapshot,
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
     )
 
-    assert any(
-        style == "class:status-bar-warn" and text.strip() for style, text in fragments
-    )
+    assert "Saved 4 profile edits, 5 observations" in rendered
 
 
 def test_build_status_fragments_shows_memory_worker_indicator_when_running(
@@ -99,15 +99,15 @@ def test_build_status_fragments_shows_memory_worker_indicator_when_running(
         context_percent=10,
     )
 
-    fragments = build_status_fragments(
-        snapshot,
-        datetime.now() - timedelta(minutes=3),
-        100,
+    rendered = _render_fragments(
+        build_status_fragments(
+            snapshot,
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
     )
 
-    assert any(
-        style == "class:status-bar-warn" and text.strip() for style, text in fragments
-    )
+    assert "🧠" in rendered
 
 
 def test_build_status_fragments_hides_memory_indicator_when_idle(monkeypatch):

@@ -11,14 +11,12 @@ import asyncio
 import hashlib
 import json
 import logging
-import threading
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict, TypeVar, cast
+from typing import NotRequired, TypedDict, TypeVar, cast
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, filter_messages
@@ -35,29 +33,29 @@ from ..config import (
     MemoryObservationWriter,
     get_effective_config,
 )
+from ..gateway.async_runs import (
+    BackgroundAgentLaunchHooks,
+    BackgroundAgentLaunchRequest,
+    BackgroundAgentRun,
+    BackgroundAgentRunPayload,
+    alaunch_background_agent,
+    launch_background_agent,
+)
 from ..memory import MemorySourceType
 from ..memory.worker_activity import (
+    MemoryOutputSnapshot,
     forget_memory_worker,
     mark_memory_worker_finished,
     mark_memory_worker_started,
     snapshot_memory_outputs,
 )
 
-if TYPE_CHECKING:
-    from langgraph_sdk.schema import Config, Input, Run, Thread
-
 logger = logging.getLogger(__name__)
 
 MEMORY_WORKER_RECURSION_LIMIT = 100
 SUBAGENT_MEMORY_WORKER_GRAPH_ID = "evomemory-subagent-worker"
 TURN_MEMORY_WORKER_GRAPH_ID = "evomemory-turn-worker"
-_MEMORY_WORKER_TERMINAL_STATUSES = frozenset(
-    {"success", "error", "timeout", "interrupted"}
-)
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset({"execute", "task", "write_todos"})
-_MEMORY_WORKER_POLL_INTERVAL_SECONDS = 1.0
-_MEMORY_WORKER_MAX_POLL_FAILURES = 3
-_memory_worker_tracker_tasks: set[asyncio.Task[None]] = set()
 
 
 class MemoryLifecycleRole(StrEnum):
@@ -144,71 +142,6 @@ class MemoryWorkerLaunchArgs(TypedDict):
     source_agent: str
     session_id: str
     trajectory: list[CompactMessage]
-
-
-class MemoryWorkerRunPayload(TypedDict):
-    """Typed payload submitted to LangGraph SDK runs.create."""
-
-    assistant_id: str
-    input: Input
-    metadata: dict[str, str]
-    config: Config
-
-
-class _SyncMemoryWorkerThreads(Protocol):
-    def create(
-        self,
-        *,
-        graph_id: str,
-        metadata: dict[str, str],
-    ) -> Thread: ...
-
-
-class _SyncMemoryWorkerRuns(Protocol):
-    def create(
-        self,
-        thread_id: str,
-        assistant_id: str,
-        *,
-        input: Input,
-        metadata: dict[str, str],
-        config: Config,
-    ) -> Run: ...
-
-    def get(self, thread_id: str, run_id: str) -> Run: ...
-
-
-class _SyncMemoryWorkerClient(Protocol):
-    threads: _SyncMemoryWorkerThreads
-    runs: _SyncMemoryWorkerRuns
-
-
-class _AsyncMemoryWorkerThreads(Protocol):
-    async def create(
-        self,
-        *,
-        graph_id: str,
-        metadata: dict[str, str],
-    ) -> Thread: ...
-
-
-class _AsyncMemoryWorkerRuns(Protocol):
-    async def create(
-        self,
-        thread_id: str,
-        assistant_id: str,
-        *,
-        input: Input,
-        metadata: dict[str, str],
-        config: Config,
-    ) -> Run: ...
-
-    async def get(self, thread_id: str, run_id: str) -> Run: ...
-
-
-class _AsyncMemoryWorkerClient(Protocol):
-    threads: _AsyncMemoryWorkerThreads
-    runs: _AsyncMemoryWorkerRuns
 
 
 @dataclass(frozen=True)
@@ -987,12 +920,12 @@ def _current_configurable() -> Mapping[str, object]:
     return configurable if isinstance(configurable, dict) else {}
 
 
-def _runs_create_kwargs(kwargs: MemoryWorkerRunPayload) -> MemoryWorkerRunPayload:
+def _runs_create_kwargs(kwargs: BackgroundAgentRunPayload) -> BackgroundAgentRunPayload:
     try:
         from EvoScientist.llm.patches import _merge_runs_config_kwargs
     except Exception:
         return kwargs
-    return cast("MemoryWorkerRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
+    return cast("BackgroundAgentRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
 
 
 def _worker_workspace_dir(workspace_dir: str | Path) -> str:
@@ -1027,7 +960,7 @@ def _memory_worker_run_kwargs(
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
-) -> MemoryWorkerRunPayload:
+) -> BackgroundAgentRunPayload:
     """Build the LangGraph SDK run payload for a memory worker."""
     trajectory_digest = _trajectory_digest(trajectory)
     metadata = _memory_worker_metadata(
@@ -1038,7 +971,7 @@ def _memory_worker_run_kwargs(
         session_id=session_id,
         trajectory_digest=trajectory_digest,
     )
-    payload: MemoryWorkerRunPayload = {
+    payload: BackgroundAgentRunPayload = {
         "assistant_id": role.graph_id,
         "input": {
             "messages": [
@@ -1066,210 +999,44 @@ def _memory_worker_run_kwargs(
     return _runs_create_kwargs(payload)
 
 
-def _memory_worker_url() -> str:
-    from ..EvoScientist import _ensure_config
+def _memory_worker_launch_hooks(memory_dir: str | Path) -> BackgroundAgentLaunchHooks:
+    before_outputs: dict[str, MemoryOutputSnapshot] = {}
 
-    cfg = _ensure_config()
-    port = int(getattr(cfg, "langgraph_dev_port", 6174))
-    return f"http://localhost:{port}"
+    def on_before_run(_thread_id: str) -> None:
+        before_outputs["value"] = snapshot_memory_outputs(memory_dir)
 
-
-def _run_id_from_response(run: object) -> str | None:
-    """Extract a LangGraph run id from the SDK response."""
-    if not isinstance(run, Mapping):
-        return None
-    run_map = cast(Mapping[str, object], run)
-    value = run_map.get("run_id") or run_map.get("id")
-    if value is None:
-        return None
-    run_id = str(value).strip()
-    return run_id or None
-
-
-def _status_from_run_response(run: object) -> str:
-    """Extract a normalized LangGraph run status."""
-    value: object | None = None
-    if isinstance(run, Mapping):
-        value = cast(Mapping[str, object], run).get("status")
-    else:
-        value = getattr(run, "status", None)
-    return str(value or "").strip().lower()
-
-
-def _delete_memory_worker_thread(client: Any, thread_id: str) -> None:
-    """Best-effort delete of a finished worker thread.
-
-    Worker conversations have no value after the run: the durable artifact
-    is the memory files they write, and worker threads are never resumed.
-    Deleting the thread drops its checkpoints from the shared sessions.db
-    so short-lived workers leave no per-turn residue behind.
-    """
-    try:
-        client.threads.delete(thread_id)
-    except Exception:
-        logger.debug(
-            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
+    def on_started(run: BackgroundAgentRun) -> None:
+        mark_memory_worker_started(
+            thread_id=run.thread_id,
+            run_id=run.run_id,
+            memory_dir=memory_dir,
+            before_outputs=before_outputs.get("value"),
         )
 
+    def on_finished(run: BackgroundAgentRun) -> None:
+        mark_memory_worker_finished(run.thread_id, run.run_id)
 
-async def _adelete_memory_worker_thread(client: Any, thread_id: str) -> None:
-    """Async variant of :func:`_delete_memory_worker_thread`."""
-    try:
-        await client.threads.delete(thread_id)
-    except Exception:
-        logger.debug(
-            "Failed to delete EvoMemory worker thread %s", thread_id, exc_info=True
-        )
+    def on_aborted(run: BackgroundAgentRun) -> None:
+        forget_memory_worker(run.thread_id, run.run_id)
 
-
-def _spawn_memory_worker_status_thread(
-    *,
-    url: str,
-    thread_id: str,
-    run_id: str,
-) -> None:
-    """Poll a sync-launched memory worker from a daemon thread."""
-    thread = threading.Thread(
-        target=_watch_memory_worker_run_sync,
-        kwargs={"url": url, "thread_id": thread_id, "run_id": run_id},
-        name="evomemory-worker-status",
-        daemon=True,
+    return BackgroundAgentLaunchHooks(
+        on_before_run=on_before_run,
+        on_started=on_started,
+        on_finished=on_finished,
+        on_aborted=on_aborted,
+        on_watcher_start_failed=on_finished,
     )
-    thread.start()
 
 
-def _watch_memory_worker_run_sync(
-    *,
-    url: str,
-    thread_id: str,
-    run_id: str,
-) -> None:
-    from langgraph_sdk import get_sync_client
-
-    failures = 0
-    worker_confirmed_finished = False
-    client = None
-    try:
-        client = get_sync_client(url=url, headers={"x-auth-scheme": "langsmith"})
-        while True:
-            try:
-                run = client.runs.get(thread_id=thread_id, run_id=run_id)
-                failures = 0
-            except Exception:
-                failures += 1
-                if failures >= _MEMORY_WORKER_MAX_POLL_FAILURES:
-                    logger.warning(
-                        "Stopping EvoMemory worker status watch for %s after "
-                        "%d failed polls",
-                        run_id,
-                        failures,
-                        exc_info=True,
-                    )
-                    return
-                time.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
-                continue
-
-            if _status_from_run_response(run) in _MEMORY_WORKER_TERMINAL_STATUSES:
-                worker_confirmed_finished = True
-                return
-            time.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
-    finally:
-        if worker_confirmed_finished:
-            # Accounting first, then best-effort deletion (mirrors the
-            # async watcher's cancellation-safe ordering). Only delete
-            # once the run is terminal — deleting a thread with a live
-            # run would break it. Crash residue is handled by the
-            # restore whitelist + startup purge in sessions.py.
-            mark_memory_worker_finished(thread_id, run_id)
-            if client is not None:
-                _delete_memory_worker_thread(client, thread_id)
-        else:
-            forget_memory_worker(thread_id, run_id)
-
-
-def _spawn_memory_worker_status_task(
-    client: _AsyncMemoryWorkerClient,
-    *,
-    thread_id: str,
-    run_id: str,
-) -> None:
-    """Poll an async-launched memory worker without blocking the agent."""
-    task = asyncio.create_task(
-        _watch_memory_worker_run_async(client, thread_id=thread_id, run_id=run_id)
-    )
-    _memory_worker_tracker_tasks.add(task)
-    task.add_done_callback(_memory_worker_tracker_tasks.discard)
-
-
-async def _watch_memory_worker_run_async(
-    client: _AsyncMemoryWorkerClient,
-    *,
-    thread_id: str,
-    run_id: str,
-) -> None:
-    failures = 0
-    worker_confirmed_finished = False
-    try:
-        while True:
-            try:
-                run = await client.runs.get(thread_id=thread_id, run_id=run_id)
-                failures = 0
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failures += 1
-                if failures >= _MEMORY_WORKER_MAX_POLL_FAILURES:
-                    logger.warning(
-                        "Stopping EvoMemory worker status watch for %s after "
-                        "%d failed polls",
-                        run_id,
-                        failures,
-                        exc_info=True,
-                    )
-                    return
-                await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
-                continue
-
-            if _status_from_run_response(run) in _MEMORY_WORKER_TERMINAL_STATUSES:
-                worker_confirmed_finished = True
-                return
-            await asyncio.sleep(_MEMORY_WORKER_POLL_INTERVAL_SECONDS)
-    finally:
-        if worker_confirmed_finished:
-            # Accounting BEFORE the best-effort deletion: if this task is
-            # cancelled mid-finally, only the deletion await is lost
-            # (startup purge covers the residue). The to_thread side
-            # effect completes even if its await is cancelled, so the
-            # worker is never stuck "running".
-            await asyncio.to_thread(mark_memory_worker_finished, thread_id, run_id)
-            await _adelete_memory_worker_thread(client, thread_id)
-        else:
-            forget_memory_worker(thread_id, run_id)
-
-
-def _launch_memory_worker(
+def _memory_worker_launch_request(
     *,
     role: MemoryLifecycleRole,
-    memory_dir: str | Path,
     workspace_dir: str | Path,
     project_id: str,
     source_agent: str,
     session_id: str,
     trajectory: list[CompactMessage],
-) -> None:
-    """Submit a background memory worker run to the LangGraph dev server."""
-    from langgraph_sdk import get_sync_client
-
-    from ..langgraph_dev.manager import is_langgraph_dev_running
-
-    url = _memory_worker_url()
-    if not is_langgraph_dev_running(base_url=url):
-        logger.info("Skipping EvoMemory worker launch; LangGraph dev is unavailable")
-        return
-
-    client: _SyncMemoryWorkerClient = get_sync_client(
-        url=url, headers={"x-auth-scheme": "langsmith"}
-    )
+) -> BackgroundAgentLaunchRequest:
     metadata = _memory_worker_metadata(
         role=role,
         workspace_dir=workspace_dir,
@@ -1278,109 +1045,24 @@ def _launch_memory_worker(
         session_id=session_id,
         trajectory_digest=_trajectory_digest(trajectory),
     )
-    thread = client.threads.create(graph_id=role.graph_id, metadata=metadata)
-    worker_thread_id = str(thread["thread_id"])
-    before_outputs = snapshot_memory_outputs(memory_dir)
-    payload = _memory_worker_run_kwargs(
-        role=role,
-        thread_id=worker_thread_id,
-        workspace_dir=workspace_dir,
-        project_id=project_id,
-        source_agent=source_agent,
-        session_id=session_id,
-        trajectory=trajectory,
-    )
-    run = client.runs.create(
-        thread_id=worker_thread_id,
-        assistant_id=payload["assistant_id"],
-        input=payload["input"],
-        metadata=payload["metadata"],
-        config=payload["config"],
-    )
-    if run_id := _run_id_from_response(run):
-        mark_memory_worker_started(
-            thread_id=worker_thread_id,
-            run_id=run_id,
-            memory_dir=memory_dir,
-            before_outputs=before_outputs,
+
+    def run_payload(thread_id: str) -> BackgroundAgentRunPayload:
+        return _memory_worker_run_kwargs(
+            role=role,
+            thread_id=thread_id,
+            workspace_dir=workspace_dir,
+            project_id=project_id,
+            source_agent=source_agent,
+            session_id=session_id,
+            trajectory=trajectory,
         )
-        try:
-            _spawn_memory_worker_status_thread(
-                url=url,
-                thread_id=worker_thread_id,
-                run_id=run_id,
-            )
-        except Exception:
-            mark_memory_worker_finished(worker_thread_id, run_id)
-            logger.warning("Failed to start EvoMemory status watcher", exc_info=True)
 
-
-async def _alaunch_memory_worker(
-    *,
-    role: MemoryLifecycleRole,
-    memory_dir: str | Path,
-    workspace_dir: str | Path,
-    project_id: str,
-    source_agent: str,
-    session_id: str,
-    trajectory: list[CompactMessage],
-) -> None:
-    """Submit a background memory worker run without involving the live agent."""
-    from langgraph_sdk import get_client
-
-    from ..langgraph_dev.manager import is_langgraph_dev_running
-
-    url = _memory_worker_url()
-    if not await asyncio.to_thread(is_langgraph_dev_running, base_url=url):
-        logger.info("Skipping EvoMemory worker launch; LangGraph dev is unavailable")
-        return
-
-    client: _AsyncMemoryWorkerClient = get_client(
-        url=url, headers={"x-auth-scheme": "langsmith"}
+    return BackgroundAgentLaunchRequest(
+        graph_id=role.graph_id,
+        run_payload=run_payload,
+        thread_metadata=metadata,
+        name="EvoMemory worker",
     )
-    metadata = _memory_worker_metadata(
-        role=role,
-        workspace_dir=workspace_dir,
-        project_id=project_id,
-        source_agent=source_agent,
-        session_id=session_id,
-        trajectory_digest=_trajectory_digest(trajectory),
-    )
-    thread = await client.threads.create(graph_id=role.graph_id, metadata=metadata)
-    worker_thread_id = str(thread["thread_id"])
-    before_outputs = await asyncio.to_thread(snapshot_memory_outputs, memory_dir)
-    payload = _memory_worker_run_kwargs(
-        role=role,
-        thread_id=worker_thread_id,
-        workspace_dir=workspace_dir,
-        project_id=project_id,
-        source_agent=source_agent,
-        session_id=session_id,
-        trajectory=trajectory,
-    )
-    run = await client.runs.create(
-        thread_id=worker_thread_id,
-        assistant_id=payload["assistant_id"],
-        input=payload["input"],
-        metadata=payload["metadata"],
-        config=payload["config"],
-    )
-    if run_id := _run_id_from_response(run):
-        mark_memory_worker_started(
-            thread_id=worker_thread_id,
-            run_id=run_id,
-            memory_dir=memory_dir,
-            before_outputs=before_outputs,
-        )
-        try:
-            _spawn_memory_worker_status_thread(
-                url=url,
-                thread_id=worker_thread_id,
-                run_id=run_id,
-            )
-        except Exception:
-            mark_memory_worker_finished(worker_thread_id, run_id)
-            logger.warning("Failed to start EvoMemory status watcher", exc_info=True)
 
 
 class EvoMemoryLifecycleMiddleware(AgentMiddleware):
@@ -1447,7 +1129,19 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
     ) -> dict[str, object] | None:
         if worker_args := self._worker_args(state, runtime):
             try:
-                _launch_memory_worker(**worker_args)
+                memory_dir = worker_args["memory_dir"]
+                request = _memory_worker_launch_request(
+                    role=worker_args["role"],
+                    workspace_dir=worker_args["workspace_dir"],
+                    project_id=worker_args["project_id"],
+                    source_agent=worker_args["source_agent"],
+                    session_id=worker_args["session_id"],
+                    trajectory=worker_args["trajectory"],
+                )
+                launch_background_agent(
+                    request,
+                    hooks=_memory_worker_launch_hooks(memory_dir),
+                )
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
         return None
@@ -1459,7 +1153,19 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
     ) -> dict[str, object] | None:
         if worker_args := self._worker_args(state, runtime):
             try:
-                await _alaunch_memory_worker(**worker_args)
+                memory_dir = worker_args["memory_dir"]
+                request = _memory_worker_launch_request(
+                    role=worker_args["role"],
+                    workspace_dir=worker_args["workspace_dir"],
+                    project_id=worker_args["project_id"],
+                    source_agent=worker_args["source_agent"],
+                    session_id=worker_args["session_id"],
+                    trajectory=worker_args["trajectory"],
+                )
+                await alaunch_background_agent(
+                    request,
+                    hooks=_memory_worker_launch_hooks(memory_dir),
+                )
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
         return None
