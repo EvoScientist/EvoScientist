@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +34,7 @@ from ..memory import (
     create_record_observation_tool,
     create_search_observations_tool,
 )
+from ..memory.project import resolve_project_id
 
 logger = logging.getLogger(__name__)
 
@@ -177,52 +177,6 @@ def _append_to_system_message(
     return system_message.model_copy(update={"content": new_blocks})
 
 
-def _short_hash(text: str, *, n: int = 16) -> str:
-    """Return a deterministic hash fragment for generated profile paths."""
-    import hashlib
-
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
-
-
-def _run_git(args: list[str], cwd: Path) -> str | None:
-    """Run a bounded git query, returning trimmed stdout when it succeeds.
-
-    Failures are treated as missing metadata so profile setup can fall back to
-    path-based ids.
-    """
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    return value or None
-
-
-def _resolve_project_id(workspace: str | Path | None = None) -> str:
-    """Return the stable id used for this workspace's project profile.
-
-    Prefer the git remote when available, then the git root, and finally the
-    workspace path.
-    """
-    root = Path(workspace or _paths.WORKSPACE_ROOT).expanduser().resolve()
-    git_root = _run_git(["rev-parse", "--show-toplevel"], root)
-    if git_root:
-        git_root_path = Path(git_root).expanduser().resolve()
-        remote = _run_git(["remote", "get-url", "origin"], git_root_path)
-        source = f"git-remote:{remote}" if remote else f"git-root:{git_root_path}"
-        return f"P-{_short_hash(source)}"
-    return f"P-{_short_hash(f'path:{root}')}"
-
-
 def _profile_specs(project_id: str) -> list[tuple[str, str]]:
     """Return the profile files owned by this middleware and their templates."""
     return [
@@ -316,7 +270,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
-        self._project_id = _resolve_project_id(workspace)
+        self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
         self._enable_observation_memory = enable_observation_memory
         self._profile_specs = _profile_specs(self._project_id)

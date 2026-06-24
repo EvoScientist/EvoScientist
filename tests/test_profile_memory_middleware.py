@@ -33,7 +33,7 @@ def _request():
 
 
 def _path_project_id(workspace) -> str:
-    return memory_module._resolve_project_id(workspace)
+    return memory_module.resolve_project_id(workspace)
 
 
 def _profile_texts(memories):
@@ -494,11 +494,11 @@ def test_profile_memory_resolves_project_id_once_per_middleware(
     workspace.mkdir()
     calls = []
 
-    def _resolve_project_id(workspace_dir):
+    def resolve_project_id(workspace_dir):
         calls.append(workspace_dir)
         return "P-cached-project"
 
-    monkeypatch.setattr(memory_module, "_resolve_project_id", _resolve_project_id)
+    monkeypatch.setattr(memory_module, "resolve_project_id", resolve_project_id)
 
     middleware = memory_module.create_memory_middleware(
         str(memories), workspace_dir=str(workspace), max_inline_profile_chars=10

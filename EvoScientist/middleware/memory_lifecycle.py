@@ -9,7 +9,7 @@ from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langgraph.runtime import Runtime
 
 from .. import paths as _paths
-from ..memory.agents import alaunch_memory_worker, launch_memory_worker
+from ..memory.launch import alaunch_memory_worker, launch_memory_worker
 from ..memory.source_context import build_memory_source_context
 from ..memory.types import MemorySourceType
 

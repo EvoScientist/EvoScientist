@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import BaseMessage, convert_to_messages, messages_from_dict
 from langgraph.types import Command
-from langgraph_sdk import get_client
 from langgraph_sdk._async.stream import AsyncThreadStream
 from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
@@ -46,19 +45,6 @@ _RUN_SUBSCRIBE_CHANNELS = [
     "lifecycle",
     "input",
 ]
-
-
-LangGraphClientFactory = Callable[
-    [str, Mapping[str, str] | None],
-    LangGraphClient,
-]
-
-
-def _default_client_factory(
-    base_url: str,
-    headers: Mapping[str, str] | None,
-) -> LangGraphClient:
-    return get_client(url=base_url, headers=headers)
 
 
 def _thread_metadata(thread: Thread) -> dict[str, Any]:
@@ -164,22 +150,8 @@ def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
 class LangGraphServerThreadStore(ThreadStore):
     """Thread store backed by the LangGraph server Threads API."""
 
-    base_url: str
+    client: LangGraphClient
     graph_id: str = DEFAULT_GRAPH_ID
-    headers: Mapping[str, str] | None = None
-    client_factory: LangGraphClientFactory = _default_client_factory
-    _client: LangGraphClient = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "_client",
-            self.client_factory(self.base_url, self.headers),
-        )
-
-    @property
-    def client(self) -> LangGraphClient:
-        return self._client
 
     def generate_thread_id(self) -> str:
         return str(uuid.uuid4())

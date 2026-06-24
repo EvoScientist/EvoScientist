@@ -24,6 +24,9 @@ from pydantic import BaseModel
 from EvoScientist.config import MemoryObservationWriter
 from EvoScientist.gateway import background_runs
 from EvoScientist.memory import (
+    launch as memory_launch,
+)
+from EvoScientist.memory import (
     source_context,
     worker_activity,
 )
@@ -728,7 +731,7 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         calls.append((request, kwargs))
 
     monkeypatch.setattr(
-        memory_worker,
+        memory_launch,
         "alaunch_background_run",
         fake_launch,
     )
@@ -760,12 +763,12 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
 
     assert len(calls) == 1
     request, launch_kwargs = calls[0]
-    assert request.graph_id == memory_worker.TURN_MEMORY_WORKER_GRAPH_ID
+    assert request.graph_id == memory_launch.TURN_MEMORY_WORKER_GRAPH_ID
     assert request.name == "EvoMemory worker"
     assert launch_kwargs["hooks"].on_started is not None
     assert "watcher_config" not in launch_kwargs
     payload = request.run_payload("worker-thread")
-    assert payload["assistant_id"] == memory_worker.TURN_MEMORY_WORKER_GRAPH_ID
+    assert payload["assistant_id"] == memory_launch.TURN_MEMORY_WORKER_GRAPH_ID
     assert payload["metadata"]["source_session_id"] == "thread-1"
     assert payload["metadata"]["source_agent"] == "EvoScientist"
     assert payload["metadata"]["project_id"] == "P-project"
@@ -816,9 +819,11 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     assert _markdown_sections(body) == {"Summary": summary}
 
 
-def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monkeypatch):
+def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
+    monkeypatch,
+):
     monkeypatch.setattr(
-        memory_worker,
+        memory_launch,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -833,12 +838,12 @@ def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monke
         trajectory=trajectory,
     )
 
-    kwargs = memory_worker._memory_worker_run_kwargs(
+    kwargs = memory_launch._memory_worker_run_payload(
         context=context,
         thread_id="worker-thread",
     )
 
-    assert kwargs["assistant_id"] == memory_worker.SUBAGENT_MEMORY_WORKER_GRAPH_ID
+    assert kwargs["assistant_id"] == memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID
     assert kwargs["metadata"] == {
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",
@@ -1012,7 +1017,7 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
+            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
             watcher_config=_fast_watcher_config(max_poll_failures=1),
         )
         status = worker_activity.memory_worker_status()
@@ -1047,7 +1052,7 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
+                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
                 watcher_config=_fast_watcher_config(max_poll_failures=1),
             )
         )
@@ -1079,14 +1084,14 @@ def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
             return {"status": "success"}
 
     async def run():
-        blocker = BlockBuster(scanned_modules=[memory_worker, worker_activity])
+        blocker = BlockBuster(scanned_modules=[memory_launch, worker_activity])
         blocker.activate()
         try:
             await background_runs.awatch_background_run(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
+                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
             )
         finally:
             blocker.deactivate()
@@ -1126,7 +1131,7 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
                 url="http://x",
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
+                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
             )
         status = worker_activity.memory_worker_status()
         assert status.is_running is False
@@ -1158,7 +1163,7 @@ def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert worker_activity.memory_worker_status().is_running is False
     finally:
@@ -1193,7 +1198,7 @@ def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeyp
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert deleted == ["worker-thread"]
         assert worker_activity.memory_worker_status().is_running is False
@@ -1228,7 +1233,7 @@ def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch)
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert worker_activity.memory_worker_status().is_running is False
     finally:
@@ -1263,7 +1268,7 @@ def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
-            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
         )
         assert deleted == []
     finally:
@@ -1299,7 +1304,7 @@ def test_async_watcher_deletes_worker_thread_on_terminal_status(
                 SimpleNamespace(runs=_Runs(), threads=_Threads()),
                 thread_id="worker-thread",
                 run_id="run-1",
-                hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
+                hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
             )
         )
         assert deleted == ["worker-thread"]
@@ -1341,7 +1346,7 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
         background_runs, "default_background_run_url", lambda: "http://x"
     )
     monkeypatch.setattr(
-        memory_worker,
+        memory_launch,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -1367,10 +1372,10 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
         workspace_dir=tmp_path / "workspace",
         trajectory=trajectory,
     )
-    request = memory_worker._memory_worker_launch_request(context)
+    request = memory_launch.memory_worker_launch_request(context)
     background_runs.launch_background_run(
         request,
-        hooks=memory_worker._memory_worker_launch_hooks(memory_dir),
+        hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
         spawn_status_watcher=spawned.append,
     )
 
@@ -1385,7 +1390,7 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
             "workspace_dir": "/tmp/ws",
         }
         fake_client.threads.create.assert_called_once_with(
-            graph_id=memory_worker.TURN_MEMORY_WORKER_GRAPH_ID,
+            graph_id=memory_launch.TURN_MEMORY_WORKER_GRAPH_ID,
             metadata=expected_metadata,
         )
         fake_client.runs.create.assert_called_once()
@@ -1422,7 +1427,7 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
         background_runs, "default_background_run_url", lambda: "http://x"
     )
     monkeypatch.setattr(
-        memory_worker,
+        memory_launch,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -1444,7 +1449,7 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         fake_is_running,
     )
-    monkeypatch.setattr(memory_worker, "snapshot_memory_outputs", fake_snapshot)
+    monkeypatch.setattr(memory_launch, "snapshot_memory_outputs", fake_snapshot)
 
     class _Threads:
         async def create(self, **_kwargs):
@@ -1466,10 +1471,10 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
             workspace_dir=tmp_path / "workspace",
             trajectory=[{"role": "human", "content": "hi"}],
         )
-        request = memory_worker._memory_worker_launch_request(context)
+        request = memory_launch.memory_worker_launch_request(context)
         await background_runs.alaunch_background_run(
             request,
-            hooks=memory_worker._memory_worker_launch_hooks(tmp_path / "memories"),
+            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
             spawn_status_watcher=spawned.append,
         )
         return event_loop_thread

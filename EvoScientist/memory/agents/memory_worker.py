@@ -1,4 +1,4 @@
-"""EvoMemory background worker graph and launch wiring."""
+"""EvoMemory background worker graph construction."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TypeVar
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langgraph.config import get_config
@@ -25,41 +25,12 @@ from ...config import (
     MemoryObservationWriter,
     get_effective_config,
 )
-from ...gateway.background_runs import (
-    BackgroundRun,
-    BackgroundRunHooks,
-    BackgroundRunPayload,
-    BackgroundRunRequest,
-    alaunch_background_run,
-    launch_background_run,
-)
-from ..source_context import (
-    MemorySourceContext,
-    _trajectory_for_prompt,
-)
 from ..types import MemorySourceType
-from ..worker_activity import (
-    MemoryOutputSnapshot,
-    forget_memory_worker,
-    mark_memory_worker_finished,
-    mark_memory_worker_started,
-    snapshot_memory_outputs,
-)
 
 logger = logging.getLogger(__name__)
 
 MEMORY_WORKER_RECURSION_LIMIT = 100
-SUBAGENT_MEMORY_WORKER_GRAPH_ID = "evomemory-subagent-worker"
-TURN_MEMORY_WORKER_GRAPH_ID = "evomemory-turn-worker"
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset({"execute", "task", "write_todos"})
-
-
-def _memory_worker_graph_id(source_type: MemorySourceType) -> str:
-    match source_type:
-        case MemorySourceType.TURN:
-            return TURN_MEMORY_WORKER_GRAPH_ID
-        case MemorySourceType.SUBAGENT:
-            return SUBAGENT_MEMORY_WORKER_GRAPH_ID
 
 
 def _memory_worker_observation_target(
@@ -74,24 +45,6 @@ def _memory_worker_observation_target(
 
 def _memory_worker_agent_name(source_type: MemorySourceType) -> str:
     return f"evomemory-{source_type.value}-worker"
-
-
-def _memory_worker_user_prompt(context: MemorySourceContext) -> str:
-    match context.source_type:
-        case MemorySourceType.TURN:
-            return (
-                "Review this completed orchestrator turn.\n\n"
-                f"Source agent: {context.source_agent}\n"
-                f"Source session: {context.session_id}\n\n"
-                f"Turn trajectory:\n{_trajectory_for_prompt(context.trajectory)}"
-            )
-        case MemorySourceType.SUBAGENT:
-            return (
-                "Review this completed subagent run.\n\n"
-                f"Source agent: {context.source_agent}\n"
-                f"Source session: {context.session_id}\n\n"
-                f"Trajectory:\n{_trajectory_for_prompt(context.trajectory)}"
-            )
 
 
 @dataclass(frozen=True)
@@ -689,122 +642,3 @@ def _current_configurable() -> Mapping[str, object]:
         return {}
     configurable = config.get("configurable", {})
     return configurable if isinstance(configurable, dict) else {}
-
-
-def _runs_create_kwargs(kwargs: BackgroundRunPayload) -> BackgroundRunPayload:
-    try:
-        from EvoScientist.llm.patches import _merge_runs_config_kwargs
-    except Exception:
-        return kwargs
-    return cast("BackgroundRunPayload", _merge_runs_config_kwargs(dict(kwargs)))
-
-
-def _worker_workspace_dir(workspace_dir: str | Path) -> str:
-    return str(Path(workspace_dir).expanduser().resolve())
-
-
-def _memory_worker_metadata(context: MemorySourceContext) -> dict[str, str]:
-    return {
-        "run_kind": f"evomemory_{context.source_type.value}_worker",
-        "source_session_id": context.session_id,
-        "source_agent": context.source_agent,
-        "project_id": context.project_id,
-        "trajectory_digest": context.trajectory_digest,
-        "workspace_dir": _worker_workspace_dir(context.workspace_dir),
-    }
-
-
-def _memory_worker_run_kwargs(
-    *,
-    context: MemorySourceContext,
-    thread_id: str,
-) -> BackgroundRunPayload:
-    """Build the LangGraph SDK run payload for a memory worker."""
-    metadata = _memory_worker_metadata(context)
-    payload: BackgroundRunPayload = {
-        "assistant_id": _memory_worker_graph_id(context.source_type),
-        "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": _memory_worker_user_prompt(context),
-                }
-            ]
-        },
-        "metadata": metadata,
-        "config": {
-            "configurable": {
-                "thread_id": thread_id,
-                "evomemory_source_session_id": context.session_id,
-                "evomemory_source_agent": context.source_agent,
-                "evomemory_project_id": context.project_id,
-                "evomemory_trajectory_digest": context.trajectory_digest,
-            }
-        },
-    }
-    return _runs_create_kwargs(payload)
-
-
-def _memory_worker_launch_hooks(memory_dir: str | Path) -> BackgroundRunHooks:
-    before_outputs: dict[str, MemoryOutputSnapshot] = {}
-
-    def on_before_run(_thread_id: str) -> None:
-        before_outputs["value"] = snapshot_memory_outputs(memory_dir)
-
-    def on_started(run: BackgroundRun) -> None:
-        mark_memory_worker_started(
-            thread_id=run.thread_id,
-            run_id=run.run_id,
-            memory_dir=memory_dir,
-            before_outputs=before_outputs.get("value"),
-        )
-
-    def on_finished(run: BackgroundRun) -> None:
-        mark_memory_worker_finished(run.thread_id, run.run_id)
-
-    def on_aborted(run: BackgroundRun) -> None:
-        forget_memory_worker(run.thread_id, run.run_id)
-
-    return BackgroundRunHooks(
-        on_before_run=on_before_run,
-        on_started=on_started,
-        on_finished=on_finished,
-        on_aborted=on_aborted,
-        on_watcher_start_failed=on_finished,
-    )
-
-
-def _memory_worker_launch_request(
-    context: MemorySourceContext,
-) -> BackgroundRunRequest:
-    metadata = _memory_worker_metadata(context)
-
-    def run_payload(thread_id: str) -> BackgroundRunPayload:
-        return _memory_worker_run_kwargs(context=context, thread_id=thread_id)
-
-    return BackgroundRunRequest(
-        graph_id=_memory_worker_graph_id(context.source_type),
-        run_payload=run_payload,
-        thread_metadata=metadata,
-        name="EvoMemory worker",
-    )
-
-
-def launch_memory_worker(context: MemorySourceContext) -> BackgroundRun | None:
-    """Launch one synchronous EvoMemory worker for a lifecycle context."""
-    request = _memory_worker_launch_request(context)
-    return launch_background_run(
-        request,
-        hooks=_memory_worker_launch_hooks(context.memory_dir),
-    )
-
-
-async def alaunch_memory_worker(
-    context: MemorySourceContext,
-) -> BackgroundRun | None:
-    """Launch one asynchronous EvoMemory worker for a lifecycle context."""
-    request = _memory_worker_launch_request(context)
-    return await alaunch_background_run(
-        request,
-        hooks=_memory_worker_launch_hooks(context.memory_dir),
-    )
