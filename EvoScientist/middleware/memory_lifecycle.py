@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import cache
 from pathlib import Path
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 @cache
-def _default_memory_scheduler() -> MemoryScheduler:
+def default_memory_scheduler() -> MemoryScheduler:
     return MemoryScheduler(launch_linker=launch_observation_linker)
 
 
@@ -52,7 +53,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         self._memory_scheduler = (
             memory_scheduler
             if memory_scheduler is not None
-            else _default_memory_scheduler()
+            else default_memory_scheduler()
         )
 
     def after_agent(
@@ -71,13 +72,18 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         )
         if context is not None:
             try:
-                launch_memory_worker(
+                run = launch_memory_worker(
                     context,
                     on_worker_finished=self._memory_scheduler.record_worker_finished,
                     on_worker_aborted=self._memory_scheduler.record_worker_aborted,
                 )
+                if run is None:
+                    self._memory_scheduler.flush_ready()
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
+                self._memory_scheduler.flush_ready()
+        else:
+            self._memory_scheduler.flush_ready()
         return None
 
     async def aafter_agent(
@@ -96,13 +102,18 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         )
         if context is not None:
             try:
-                await alaunch_memory_worker(
+                run = await alaunch_memory_worker(
                     context,
                     on_worker_finished=self._memory_scheduler.record_worker_finished,
                     on_worker_aborted=self._memory_scheduler.record_worker_aborted,
                 )
+                if run is None:
+                    await asyncio.to_thread(self._memory_scheduler.flush_ready)
             except Exception:
                 logger.warning("Failed to launch EvoMemory worker", exc_info=True)
+                await asyncio.to_thread(self._memory_scheduler.flush_ready)
+        else:
+            await asyncio.to_thread(self._memory_scheduler.flush_ready)
         return None
 
 

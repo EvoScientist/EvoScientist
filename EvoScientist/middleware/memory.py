@@ -30,11 +30,13 @@ from ..memory import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    ObservationRecordResult,
     create_read_memory_tool,
     create_record_observation_tool,
     create_search_observations_tool,
 )
 from ..memory.project import resolve_project_id
+from ..memory.scheduler import MemoryScheduler, ObservationLinkerContext
 
 logger = logging.getLogger(__name__)
 
@@ -267,12 +269,15 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_profile_memory: bool = True,
         enable_observation_memory: bool = True,
         enable_observation_tool: bool = True,
+        memory_scheduler: MemoryScheduler | None = None,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
+        self._workspace_dir = workspace
         self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
         self._enable_observation_memory = enable_observation_memory
+        self._memory_scheduler = memory_scheduler
         self._profile_specs = _profile_specs(self._project_id)
         pointer_lines = ["Profile files are available at:"]
         pointer_lines.extend(
@@ -304,6 +309,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                     project_id=self._project_id,
                     source_type=source_type,
                     source_agent=source_agent,
+                    on_observation_recorded=self._record_observation_created,
                 )
             )
         self._observation_index_records = []
@@ -317,6 +323,19 @@ class EvoMemoryMiddleware(AgentMiddleware):
     def project_id(self) -> str:
         """Stable project id used for this middleware's project memory paths."""
         return self._project_id
+
+    def _record_observation_created(self, result: ObservationRecordResult) -> None:
+        if self._memory_scheduler is None:
+            return
+        project_id = str(result.get("project_id") or self._project_id)
+        self._memory_scheduler.record_observation_created(
+            ObservationLinkerContext(
+                memory_dir=self._memory_dir,
+                workspace_dir=self._workspace_dir,
+                project_id=project_id,
+                observation_ids=(result["observation_id"],),
+            )
+        )
 
     def _file_path(self, memory_path: str) -> Path:
         """Resolve a memory-relative path against the memory directory."""
@@ -797,6 +816,7 @@ def create_memory_middleware(
     enable_profile_memory: bool = True,
     enable_observation_memory: bool = True,
     enable_observation_tool: bool = True,
+    memory_scheduler: MemoryScheduler | None = None,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
 
@@ -812,4 +832,5 @@ def create_memory_middleware(
         enable_profile_memory=enable_profile_memory,
         enable_observation_memory=enable_observation_memory,
         enable_observation_tool=enable_observation_tool,
+        memory_scheduler=memory_scheduler,
     )

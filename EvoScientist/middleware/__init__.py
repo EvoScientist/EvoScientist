@@ -25,6 +25,7 @@ from .memory import (
 from .memory_lifecycle import (
     EvoMemoryLifecycleMiddleware,
     create_memory_lifecycle_middleware,
+    default_memory_scheduler,
 )
 from .model_fallback import ModelFallbackMiddleware, load_fallback_chain
 from .runtime_context import RuntimeContextMiddleware, create_runtime_context_middleware
@@ -52,6 +53,7 @@ __all__ = [
     "create_memory_middleware",
     "create_runtime_context_middleware",
     "create_tool_selector_middleware",
+    "default_memory_scheduler",
     "disable_thinking",
     "load_fallback_chain",
 ]

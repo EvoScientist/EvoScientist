@@ -104,6 +104,20 @@ class MemoryScheduler:
             observation_ids.append(observation_id)
         return tuple(observation_ids)
 
+    def record_observation_created(self, context: ObservationLinkerContext) -> None:
+        """Queue directly written observations for the next ready linker batch."""
+        key = _BatchKey(
+            memory_dir=_root_key(context.memory_dir),
+            workspace_dir=_root_key(context.workspace_dir),
+            project_id=context.project_id,
+        )
+        with self._lock:
+            self._pending.setdefault(key, set()).update(context.observation_ids)
+
+    def flush_ready(self) -> None:
+        """Launch any pending linker batches that are no longer blocked."""
+        self._launch_ready(self._drain_ready())
+
     def record_worker_finished(
         self,
         run: BackgroundRun,
@@ -129,11 +143,7 @@ class MemoryScheduler:
         ready_batches: list[tuple[_BatchKey, set[str]]],
     ) -> tuple[ObservationLinkerContext, ...]:
         ready_contexts = []
-        for key, observation_paths in ready_batches:
-            observation_ids = self._observation_ids_for_paths(
-                memory_dir=key.memory_dir,
-                observation_paths=observation_paths,
-            )
+        for key, observation_ids in ready_batches:
             if not observation_ids:
                 continue
             ready_contexts.append(
@@ -141,7 +151,7 @@ class MemoryScheduler:
                     memory_dir=Path(key.memory_dir),
                     workspace_dir=Path(key.workspace_dir),
                     project_id=key.project_id,
-                    observation_ids=observation_ids,
+                    observation_ids=tuple(sorted(observation_ids)),
                 )
             )
 
@@ -162,7 +172,11 @@ class MemoryScheduler:
             if delta is not None and delta.observation_paths:
                 key = _batch_key_from_worker_run(run, delta)
                 if key is not None:
-                    self._pending.setdefault(key, set()).update(delta.observation_paths)
+                    observation_ids = self._observation_ids_for_paths(
+                        memory_dir=key.memory_dir,
+                        observation_paths=set(delta.observation_paths),
+                    )
+                    self._pending.setdefault(key, set()).update(observation_ids)
 
             ready_batches = self._ready_batches_locked()
 

@@ -310,11 +310,13 @@ def _inject_subagent_middleware(
         create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_runtime_context_middleware,
+        default_memory_scheduler,
     )
 
     cfg = cfg if cfg is not None else _ensure_config()
     memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    memory_scheduler = default_memory_scheduler()
     for sa in subs:
         name = str(sa.get("name") or "sub-agent")
         source_type = MemorySourceType.SUBAGENT
@@ -328,6 +330,7 @@ def _inject_subagent_middleware(
             enable_observation_tool=memory_controls.observation_tool_enabled(
                 MemoryObservationTarget.AGENT
             ),
+            memory_scheduler=memory_scheduler,
         )
         middleware = [
             # Subagents share the main agent's model: use the threaded
@@ -348,6 +351,7 @@ def _inject_subagent_middleware(
                     project_id=memory_middleware.project_id,
                     source_type=MemorySourceType.SUBAGENT,
                     source_agent=name,
+                    memory_scheduler=memory_scheduler,
                 )
             )
         sa.setdefault("middleware", []).extend(middleware)
@@ -667,6 +671,7 @@ def _get_default_middleware(
         create_memory_middleware,
         create_runtime_context_middleware,
         create_tool_selector_middleware,
+        default_memory_scheduler,
         load_fallback_chain,
     )
 
@@ -679,6 +684,7 @@ def _get_default_middleware(
         MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
     )
     memory_controls = MemoryControls.from_config(cfg)
+    memory_scheduler = default_memory_scheduler()
     worker_target = (
         MemoryObservationTarget.SUBAGENT_WORKER
         if for_async_subagent
@@ -698,6 +704,7 @@ def _get_default_middleware(
         enable_observation_tool=memory_controls.observation_tool_enabled(
             MemoryObservationTarget.AGENT
         ),
+        memory_scheduler=memory_scheduler,
     )
     # Main-agent tool selection may use the auxiliary model; async sub-agents
     # keep the main model (they do real work, not a one-off helper call).
@@ -744,6 +751,7 @@ def _get_default_middleware(
                 project_id=memory_middleware.project_id,
                 source_type=source_type,
                 source_agent=memory_source_agent,
+                memory_scheduler=memory_scheduler,
             )
         )
 

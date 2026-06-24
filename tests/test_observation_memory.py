@@ -939,6 +939,74 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
     }
 
 
+def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
+    from EvoScientist.middleware.memory import create_memory_middleware
+
+    worker_activity.reset_memory_worker_status_for_tests()
+    memory_dir = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+    middleware = create_memory_middleware(
+        str(memory_dir),
+        workspace_dir=workspace,
+        memory_scheduler=coordinator,
+    )
+    tool = _tool_by_name(middleware.tools, "record_observation")
+
+    try:
+        payload = _record_observation_payload(
+            tool,
+            runtime=_tool_runtime(tool, thread_id="source-thread"),
+            memory_type=MemoryType.PROCEDURAL,
+            summary="Direct observations link after worker finish.",
+            observation=(
+                "Direct main-agent observations should be linked after the "
+                "post-turn memory worker phase finishes."
+            ),
+            why_it_matters=(
+                "The linker should see direct writes even when the worker "
+                "does not create another observation."
+            ),
+            scope=MemoryScope.PROJECT,
+        )
+        assert payload["created"] is True
+        assert launched == []
+
+        hooks = memory_launch._memory_worker_launch_hooks(
+            memory_dir,
+            on_worker_finished=coordinator.record_worker_finished,
+        )
+        assert hooks.on_before_run is not None
+        assert hooks.on_started is not None
+        assert hooks.on_finished is not None
+        hooks.on_before_run("worker-thread")
+        worker_run = _memory_worker_run(
+            thread_id="worker-thread",
+            run_id="worker-run",
+            workspace_dir=str(workspace),
+            project_id=middleware.project_id,
+        )
+        hooks.on_started(worker_run)
+        assert launched == []
+
+        hooks.on_finished(worker_run)
+
+        assert launched == [
+            memory_scheduler.ObservationLinkerContext(
+                memory_dir=memory_dir,
+                workspace_dir=workspace,
+                project_id=middleware.project_id,
+                observation_ids=(payload["observation_id"],),
+            )
+        ]
+        status = worker_activity.memory_worker_status()
+        assert status.observations_recorded == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
     messages = [
         HumanMessage("please delegate"),
@@ -1313,17 +1381,14 @@ def test_memory_worker_linker_waits_for_active_workers_and_batches_observations(
             )
         )
 
-        assert launched == [
-            memory_scheduler.ObservationLinkerContext(
-                memory_dir=memory_dir,
-                workspace_dir=workspace_dir,
-                project_id="P-project",
-                observation_ids=(
-                    first_observation["observation_id"],
-                    second_observation["observation_id"],
-                ),
-            )
-        ]
+        assert len(launched) == 1
+        assert launched[0].memory_dir == memory_dir
+        assert launched[0].workspace_dir == workspace_dir
+        assert launched[0].project_id == "P-project"
+        assert set(launched[0].observation_ids) == {
+            first_observation["observation_id"],
+            second_observation["observation_id"],
+        }
         assert worker_activity.memory_worker_status().observations_recorded == 2
     finally:
         worker_activity.reset_memory_worker_status_for_tests()

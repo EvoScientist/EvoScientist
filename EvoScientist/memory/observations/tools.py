@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -16,6 +17,7 @@ from ..types import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    ObservationRecordResult,
     ObservationRelation,
     ObservationSearchMode,
 )
@@ -25,6 +27,9 @@ from .store import (
     record_observation_file,
     search_observation_files,
 )
+
+logger = logging.getLogger(__name__)
+ObservationRecordedHook = Callable[[ObservationRecordResult], None]
 
 
 class RecordObservationArgs(BaseModel):
@@ -349,6 +354,7 @@ def create_record_observation_tool(
     source_type: MemorySourceType,
     source_agent: str,
     source_tool_call_id: str | None = None,
+    on_observation_recorded: ObservationRecordedHook | None = None,
 ) -> BaseTool:
     """Build the `record_observation` tool for one agent context."""
 
@@ -383,6 +389,11 @@ def create_record_observation_tool(
             source_tool_call_id=context.record_tool_call_id,
             record_worker_agent=context.record_worker_agent,
         )
+        if result["created"] and on_observation_recorded is not None:
+            try:
+                on_observation_recorded(result)
+            except Exception:
+                logger.warning("Failed to schedule observation linking", exc_info=True)
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
     return StructuredTool.from_function(
