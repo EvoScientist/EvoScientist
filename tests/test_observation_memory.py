@@ -2126,21 +2126,19 @@ def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_one_shot_cli_wait_keeps_polling_after_observed_memory_output(monkeypatch):
-    from EvoScientist.cli import interactive
-
+def test_memory_pipeline_wait_keeps_polling_after_observed_memory_output():
     now = 0.0
-    printed = []
+    saved_counts = []
     observed_calls = 0
 
-    def fake_monotonic():
+    def monotonic():
         return now
 
-    def fake_sleep(seconds):
+    def sleep(seconds):
         nonlocal now
         now += seconds
 
-    def fake_observed_outputs():
+    def get_worker_status():
         nonlocal observed_calls
         observed_calls += 1
         if observed_calls < 8:
@@ -2154,44 +2152,124 @@ def test_one_shot_cli_wait_keeps_polling_after_observed_memory_output(monkeypatc
             profile_updates=1,
         )
 
-    monkeypatch.setattr(interactive.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(interactive.time, "sleep", fake_sleep)
-    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
-    monkeypatch.setattr(
-        worker_activity,
-        "memory_worker_observed_outputs",
-        fake_observed_outputs,
-    )
-
-    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
-
-    assert observed_calls == 8
-    assert any("EvoMemory saved 1 observation(s)." in str(line) for line in printed)
-    assert any(
-        "EvoMemory saved 1 observation(s), 1 profile update(s)." in str(line)
-        for line in printed
-    )
-    assert not any("still running" in str(line) for line in printed)
-
-
-def test_one_shot_cli_wait_reports_fast_worker_output(monkeypatch):
-    from EvoScientist.cli import interactive
-
-    printed = []
-
-    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
-    monkeypatch.setattr(
-        worker_activity,
-        "memory_worker_observed_outputs",
-        lambda: worker_activity.MemoryWorkerStatusSnapshot(
-            is_running=False,
-            observations_recorded=1,
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=get_worker_status,
+        get_linker_status=worker_activity.ObservationLinkerStatusSnapshot,
+        monotonic=monotonic,
+        sleep=sleep,
+        on_saved=lambda status: saved_counts.append(
+            (status.observations_recorded, status.profile_updates)
         ),
     )
 
-    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+    assert waited_until_idle is True
+    assert observed_calls == 9
+    assert saved_counts == [(1, 0), (1, 1)]
 
-    assert printed == ["[dim]EvoMemory saved 1 observation(s).[/dim]"]
+
+def test_memory_pipeline_wait_reports_fast_worker_output():
+    saved_counts = []
+
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=lambda: worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False,
+            observations_recorded=1,
+        ),
+        get_linker_status=worker_activity.ObservationLinkerStatusSnapshot,
+        on_saved=lambda status: saved_counts.append(
+            (status.observations_recorded, status.profile_updates)
+        ),
+    )
+
+    assert waited_until_idle is True
+    assert saved_counts == [(1, 0)]
+
+
+def test_memory_pipeline_waits_for_observation_linker():
+    now = 0.0
+    waiting_phases = []
+    linker_calls = 0
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def get_linker_status():
+        nonlocal linker_calls
+        linker_calls += 1
+        return worker_activity.ObservationLinkerStatusSnapshot(
+            is_running=linker_calls < 3
+        )
+
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=lambda: worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False
+        ),
+        get_linker_status=get_linker_status,
+        monotonic=monotonic,
+        sleep=sleep,
+        on_waiting=waiting_phases.append,
+    )
+
+    assert waited_until_idle is True
+    assert linker_calls >= 3
+    assert waiting_phases == ["linker", "linker"]
+
+
+def test_memory_pipeline_wait_gives_linker_its_own_timeout_after_worker():
+    now = 0.0
+    timed_out_phases = []
+    worker_calls = 0
+    linker_calls = 0
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def get_worker_status():
+        nonlocal worker_calls
+        worker_calls += 1
+        return worker_activity.MemoryWorkerStatusSnapshot(is_running=worker_calls < 20)
+
+    def get_linker_status():
+        nonlocal linker_calls
+        if worker_calls < 20:
+            return worker_activity.ObservationLinkerStatusSnapshot(is_running=False)
+        linker_calls += 1
+        return worker_activity.ObservationLinkerStatusSnapshot(
+            is_running=linker_calls < 4
+        )
+
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=get_worker_status,
+        get_linker_status=get_linker_status,
+        monotonic=monotonic,
+        sleep=sleep,
+        on_timeout=timed_out_phases.append,
+    )
+
+    assert waited_until_idle is True
+    assert worker_calls >= 20
+    assert linker_calls >= 4
+    assert timed_out_phases == []
 
 
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):

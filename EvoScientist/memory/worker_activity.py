@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+MemoryActivityPhase = Literal["worker", "linker"]
 
 
 @dataclass(frozen=True)
@@ -189,6 +194,90 @@ def memory_worker_observed_outputs() -> MemoryWorkerStatusSnapshot:
         profile_updates=profile_updates,
         observations_recorded=observations_recorded,
     )
+
+
+def wait_for_memory_pipeline_idle(
+    *,
+    timeout_seconds: float,
+    poll_seconds: float,
+    output_grace_seconds: float,
+    on_saved: Callable[[MemoryWorkerStatusSnapshot], None] | None = None,
+    on_waiting: Callable[[MemoryActivityPhase], None] | None = None,
+    on_timeout: Callable[[MemoryActivityPhase], None] | None = None,
+    get_worker_status: Callable[[], MemoryWorkerStatusSnapshot] = (
+        memory_worker_observed_outputs
+    ),
+    get_linker_status: Callable[[], ObservationLinkerStatusSnapshot] = (
+        observation_linker_status
+    ),
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Poll until the memory worker/linker pipeline is idle.
+
+    Returns ``True`` when all tracked memory work is idle, ``False`` when
+    status polling fails or the active phase exceeds its timeout.
+    """
+    deadline = monotonic() + timeout_seconds
+    saved_announced = False
+    announced_saved_counts: tuple[int, int] | None = None
+    output_seen_at: float | None = None
+    observed_status: MemoryWorkerStatusSnapshot | None = None
+    saw_active_memory_work = False
+    idle_after_active_memory_work = False
+    active_phase: MemoryActivityPhase | None = None
+
+    def emit_saved(status: MemoryWorkerStatusSnapshot) -> None:
+        nonlocal announced_saved_counts
+        saved_counts = (status.observations_recorded, status.profile_updates)
+        if saved_counts == (0, 0) or saved_counts == announced_saved_counts:
+            return
+        if on_saved is not None:
+            on_saved(status)
+        announced_saved_counts = saved_counts
+
+    while True:
+        now = monotonic()
+        try:
+            observed = get_worker_status()
+            linker_status = get_linker_status()
+        except Exception:
+            return False
+
+        memory_work_is_running = observed.is_running or linker_status.is_running
+        if not memory_work_is_running:
+            if saw_active_memory_work and not idle_after_active_memory_work:
+                idle_after_active_memory_work = True
+                sleep(poll_seconds)
+                continue
+            emit_saved(observed)
+            return True
+
+        saw_active_memory_work = True
+        idle_after_active_memory_work = False
+        current_phase: MemoryActivityPhase = (
+            "worker" if observed.is_running else "linker"
+        )
+        if current_phase != active_phase:
+            active_phase = current_phase
+            deadline = now + timeout_seconds
+
+        if observed.observations_recorded or observed.profile_updates:
+            if output_seen_at is None:
+                output_seen_at = now
+            observed_status = observed
+            if now - output_seen_at >= output_grace_seconds and not saved_announced:
+                emit_saved(observed_status)
+                saved_announced = True
+
+        if now >= deadline:
+            if on_timeout is not None:
+                on_timeout(current_phase)
+            return False
+
+        if on_waiting is not None:
+            on_waiting(current_phase)
+        sleep(poll_seconds)
 
 
 def clear_memory_worker_saved_counts() -> None:
