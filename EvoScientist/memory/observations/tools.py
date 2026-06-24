@@ -165,7 +165,10 @@ class LinkObservationsArgs(BaseModel):
     )
     bidirectional: bool = Field(
         default=True,
-        description="When true, write the same relationship to both observations.",
+        description=(
+            "When true, write symmetric relationships to both observations. "
+            "`supersedes` is directional and remains source-to-target only."
+        ),
     )
     runtime: Annotated[object | None, InjectedToolArg] = None
 

@@ -374,6 +374,61 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
     datetime.strptime(first_links[0]["linked_at"], "%Y-%m-%dT%H:%M:%SZ")
 
 
+def test_link_observation_files_keeps_supersedes_directional(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="New memory replaces older guidance.",
+        observation="Use the newer observation as the current guidance.",
+        why_it_matters="Future agents should prefer the replacement guidance.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    target = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Older guidance is superseded.",
+        observation="This older observation should no longer be preferred.",
+        why_it_matters="Future agents need to avoid stale guidance.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+
+    result = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=source["observation_id"],
+        target_observation_id=target["observation_id"],
+        relation=ObservationRelation.SUPERSEDES,
+        reason="The source observation replaces the target observation.",
+    )
+
+    source_metadata, _source_body = _read_memory_document(
+        memories / source["path"].removeprefix("/memories/")
+    )
+    target_metadata, _target_body = _read_memory_document(
+        memories / target["path"].removeprefix("/memories/")
+    )
+    assert result["updated_observation_ids"] == [source["observation_id"]]
+    assert source_metadata["related_observations"] == [
+        {
+            "id": target["observation_id"],
+            "relation": "supersedes",
+            "reason": "The source observation replaces the target observation.",
+            "linked_at": source_metadata["related_observations"][0]["linked_at"],
+            "linked_by": "evomemory-observation-linker",
+        }
+    ]
+    assert "related_observations" not in target_metadata
+
+
 def test_link_observation_files_rejects_unknown_relation(tmp_path):
     memories = tmp_path / "memories"
 

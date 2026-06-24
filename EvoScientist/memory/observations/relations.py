@@ -43,6 +43,10 @@ def _relation_value(value: ObservationRelation | str) -> str:
         raise ValueError(f"relation must be one of: {allowed}") from exc
 
 
+def _can_write_reverse_relation(relation: str) -> bool:
+    return relation != ObservationRelation.SUPERSEDES.value
+
+
 def _upsert_related_observation(
     metadata: dict[str, object],
     *,
@@ -161,7 +165,7 @@ def link_observation_files(
     ):
         updates.append((source_id, source_path, source_metadata, source_body))
 
-    if bidirectional:
+    if bidirectional and _can_write_reverse_relation(relation_text):
         assert target_document is not None
         target_path, target_metadata, target_body = target_document
         if _upsert_related_observation(
