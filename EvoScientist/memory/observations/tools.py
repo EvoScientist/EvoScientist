@@ -185,9 +185,6 @@ class _ObservationContext:
     project_id: str
     source_session_id: str
     source_agent: str
-    source_trajectory_digest: str | None
-    record_tool_call_id: str | None
-    record_worker_agent: str
 
 
 def _runtime_config_value(runtime: ToolRuntime | None, key: str) -> str | None:
@@ -215,14 +212,7 @@ def _runtime_session_id(runtime: ToolRuntime | None) -> str:
         thread_id = _runtime_config_value(runtime, "thread_id")
         if thread_id:
             return thread_id
-    return "unknown"
-
-
-def _runtime_tool_call_id(runtime: ToolRuntime | None) -> str | None:
-    """Extract the active tool call id from runtime metadata when present."""
-    if runtime is None or not runtime.tool_call_id:
-        return None
-    return str(runtime.tool_call_id)
+    raise RuntimeError("record_observation requires a source session id")
 
 
 def _resolve_observation_context(
@@ -230,7 +220,6 @@ def _resolve_observation_context(
     *,
     project_id: str,
     source_agent: str,
-    source_tool_call_id: str | None,
 ) -> _ObservationContext:
     """Resolve required observation metadata from fixed values and runtime."""
     return _ObservationContext(
@@ -238,13 +227,6 @@ def _resolve_observation_context(
         source_session_id=_runtime_session_id(runtime),
         source_agent=_runtime_config_value(runtime, "evomemory_source_agent")
         or source_agent,
-        source_trajectory_digest=_runtime_config_value(
-            runtime, "evomemory_trajectory_digest"
-        ),
-        record_tool_call_id=source_tool_call_id
-        if source_tool_call_id is not None
-        else _runtime_tool_call_id(runtime),
-        record_worker_agent=source_agent,
     )
 
 
@@ -353,7 +335,6 @@ def create_record_observation_tool(
     project_id: str,
     source_type: MemorySourceType,
     source_agent: str,
-    source_tool_call_id: str | None = None,
     on_observation_recorded: ObservationRecordedHook | None = None,
 ) -> BaseTool:
     """Build the `record_observation` tool for one agent context."""
@@ -371,7 +352,6 @@ def create_record_observation_tool(
             runtime,
             project_id=project_id,
             source_agent=source_agent,
-            source_tool_call_id=source_tool_call_id,
         )
         result = record_observation_file(
             memory_dir=memory_dir,
@@ -385,9 +365,6 @@ def create_record_observation_tool(
             source_type=source_type,
             source_session_id=context.source_session_id,
             source_agent=context.source_agent,
-            source_trajectory_digest=context.source_trajectory_digest,
-            source_tool_call_id=context.record_tool_call_id,
-            record_worker_agent=context.record_worker_agent,
         )
         if result["created"] and on_observation_recorded is not None:
             try:

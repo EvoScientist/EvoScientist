@@ -242,8 +242,6 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_session_id="thread-1",
         source_agent="code-agent",
-        source_tool_call_id="tool-1",
-        record_worker_agent="evomemory-subagent-worker",
     )
     second = record_observation_file(
         memory_dir=memories,
@@ -257,8 +255,6 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_session_id="thread-1",
         source_agent="code-agent",
-        source_tool_call_id="tool-1",
-        record_worker_agent="evomemory-subagent-worker",
     )
 
     path = memories / first["path"].removeprefix("/memories/")
@@ -276,7 +272,11 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
         "memory_type": "procedural",
         "scope": "project",
         "project_id": "P-project",
-        "source": {"type": "subagent", "agent": "code-agent"},
+        "source": {
+            "type": "subagent",
+            "agent": "code-agent",
+            "session_id": "thread-1",
+        },
     }
     assert _markdown_sections(body) == {
         "Observation": observation,
@@ -937,7 +937,11 @@ def test_record_observation_tool_can_use_worker_config_source(tmp_path):
         "memory_type": "procedural",
         "scope": "project",
         "project_id": "P-project",
-        "source": {"type": "subagent", "agent": "writing-agent"},
+        "source": {
+            "type": "subagent",
+            "agent": "writing-agent",
+            "session_id": "thread-source",
+        },
     }
 
 
@@ -1000,7 +1004,11 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
         "summary": "Injected runtime metadata survives tool validation.",
         "memory_type": "semantic",
         "scope": "global",
-        "source": {"type": "turn", "agent": "EvoScientist"},
+        "source": {
+            "type": "turn",
+            "agent": "EvoScientist",
+            "session_id": "thread-from-runtime",
+        },
     }
 
 

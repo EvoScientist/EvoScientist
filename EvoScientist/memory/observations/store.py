@@ -300,6 +300,7 @@ def _format_frontmatter(
     scope: MemoryScope,
     source_type: MemorySourceType,
     source_agent: str,
+    source_session_id: str,
     project_id: str,
 ) -> str:
     """Build the frontmatter block for an observation file."""
@@ -320,6 +321,7 @@ def _format_frontmatter(
             f"  agent: {_json_string(source_agent)}",
         ]
     )
+    lines.append(f"  session_id: {_json_string(source_session_id.strip())}")
     lines.append("---")
     return "\n".join(lines)
 
@@ -336,6 +338,7 @@ def _format_observation_markdown(
     scope: MemoryScope,
     source_type: MemorySourceType,
     source_agent: str,
+    source_session_id: str,
     project_id: str,
 ) -> str:
     """Render a complete observation markdown document."""
@@ -347,6 +350,7 @@ def _format_observation_markdown(
         scope=scope,
         source_type=source_type,
         source_agent=source_agent,
+        source_session_id=source_session_id,
         project_id=project_id,
     )
     body = (
@@ -373,9 +377,6 @@ def record_observation_file(
     source_type: MemorySourceType,
     source_session_id: str,
     source_agent: str,
-    source_trajectory_digest: str | None = None,
-    source_tool_call_id: str | None = None,
-    record_worker_agent: str | None = None,
     evidence: str | None = None,
 ) -> ObservationRecordResult:
     """Create an observation markdown file unless an equivalent one exists.
@@ -394,6 +395,8 @@ def record_observation_file(
         raise ValueError("observation must not be empty")
     if not why_text:
         raise ValueError("why_it_matters must not be empty")
+    if not source_session_id.strip():
+        raise ValueError("source_session_id must not be empty")
 
     observation_id = _observation_id(
         memory_type=memory_type,
@@ -421,6 +424,7 @@ def record_observation_file(
             scope=scope,
             source_type=source_type,
             source_agent=source_agent,
+            source_session_id=source_session_id,
             project_id=project_id,
         )
         path.parent.mkdir(parents=True, exist_ok=True)

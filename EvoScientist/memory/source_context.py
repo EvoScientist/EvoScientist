@@ -200,7 +200,7 @@ def _runtime_thread_id(runtime: Runtime | None) -> str:
     """Return the active LangGraph thread id when available."""
     if runtime and runtime.execution_info and runtime.execution_info.thread_id:
         return str(runtime.execution_info.thread_id)
-    return "unknown"
+    raise RuntimeError("memory source context requires a runtime thread id")
 
 
 def _short_hash(text: str) -> str:
