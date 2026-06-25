@@ -168,15 +168,19 @@ class MemoryScheduler:
         run: BackgroundRun,
         delta: MemoryOutputDelta | None,
     ) -> tuple[ObservationLinkerContext, ...]:
+        key: _BatchKey | None = None
+        observation_ids: tuple[str, ...] = ()
+        if delta is not None and delta.observation_paths:
+            key = _batch_key_from_worker_run(run, delta)
+            if key is not None:
+                observation_ids = self._observation_ids_for_paths(
+                    memory_dir=key.memory_dir,
+                    observation_paths=set(delta.observation_paths),
+                )
+
         with self._lock:
-            if delta is not None and delta.observation_paths:
-                key = _batch_key_from_worker_run(run, delta)
-                if key is not None:
-                    observation_ids = self._observation_ids_for_paths(
-                        memory_dir=key.memory_dir,
-                        observation_paths=set(delta.observation_paths),
-                    )
-                    self._pending.setdefault(key, set()).update(observation_ids)
+            if key is not None and observation_ids:
+                self._pending.setdefault(key, set()).update(observation_ids)
 
             ready_batches = self._ready_batches_locked()
 
