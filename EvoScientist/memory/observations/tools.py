@@ -165,14 +165,17 @@ class LinkObservationsArgs(BaseModel):
         max_length=500,
         description=(
             "One concise sentence explaining why future agents should consider "
-            "these observations together."
+            "these observations together. For bidirectional links, write a "
+            "relationship-level reason that remains true from either "
+            "observation's perspective."
         ),
     )
     bidirectional: bool = Field(
         default=True,
         description=(
-            "When true, write symmetric relationships to both observations. "
-            "`supersedes` is directional and remains source-to-target only."
+            "When true, write symmetric relationships to both observations. Use "
+            "false when the reason is directional. `supersedes` is directional "
+            "and remains source-to-target only."
         ),
     )
     runtime: Annotated[object | None, InjectedToolArg] = None
