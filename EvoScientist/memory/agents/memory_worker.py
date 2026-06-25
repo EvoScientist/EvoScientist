@@ -413,23 +413,6 @@ def _write_subagent_summary(
     return f"/memories{memory_path}"
 
 
-def _build_memory_worker_backend(*, workspace_dir: str | Path, memory_dir: str | Path):
-    """Build a backend that can read the workspace and write memories."""
-    from deepagents.backends import CompositeBackend, FilesystemBackend
-
-    from ...backends import MemoryFilesystemBackend
-
-    return CompositeBackend(
-        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
-        routes={
-            "/memories/": MemoryFilesystemBackend(
-                root_dir=str(memory_dir),
-                virtual_mode=True,
-            )
-        },
-    )
-
-
 def _memory_worker_middleware(
     *,
     memory_dir: str | Path,
@@ -486,6 +469,7 @@ def _build_memory_worker_agent(
     """Create a background memory worker agent for one lifecycle hook."""
     from deepagents import create_deep_agent
 
+    from ...backends import build_memory_agent_backend
     from ...EvoScientist import _ensure_auxiliary_chat_model
 
     agent = create_deep_agent(
@@ -495,7 +479,7 @@ def _build_memory_worker_agent(
         model=_ensure_auxiliary_chat_model(),
         system_prompt=system_prompt,
         tools=[],
-        backend=_build_memory_worker_backend(
+        backend=build_memory_agent_backend(
             workspace_dir=workspace_dir,
             memory_dir=memory_dir,
         ),

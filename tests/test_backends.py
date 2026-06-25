@@ -867,6 +867,30 @@ class TestMemoryFilesystemBackend:
         assert not (tmp_path / "profile" / "NEW.md").exists()
         assert not (tmp_path / "observations" / "projects" / "P-1" / "O-1.md").exists()
 
+    def test_build_memory_agent_backend_routes_guarded_memories(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        memories = tmp_path / "memories"
+        workspace.mkdir()
+        memories.mkdir()
+        (workspace / "README.md").write_text("workspace text", encoding="utf-8")
+
+        backend = backends.build_memory_agent_backend(
+            workspace_dir=workspace,
+            memory_dir=memories,
+        )
+
+        read_result = backend.read("/README.md")
+        text = (
+            read_result
+            if isinstance(read_result, str)
+            else getattr(read_result, "content", str(read_result))
+        )
+        blocked_write = backend.write("/memories/observations/global/O-1.md", "raw")
+
+        assert "workspace text" in text
+        assert blocked_write.error == MemoryFilesystemBackend._RAW_WRITE_ERROR
+        assert not (memories / "observations" / "global" / "O-1.md").exists()
+
 
 # === CustomSandboxBackend._resolve_path ===
 

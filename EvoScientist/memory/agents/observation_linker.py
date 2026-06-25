@@ -47,26 +47,6 @@ def _observation_linker_system_prompt() -> str:
     )
 
 
-def _build_observation_linker_backend(
-    *,
-    workspace_dir: str | Path,
-    memory_dir: str | Path,
-):
-    from deepagents.backends import CompositeBackend, FilesystemBackend
-
-    from ...backends import MemoryFilesystemBackend
-
-    return CompositeBackend(
-        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
-        routes={
-            "/memories/": MemoryFilesystemBackend(
-                root_dir=str(memory_dir),
-                virtual_mode=True,
-            )
-        },
-    )
-
-
 def _observation_linker_tools(
     *,
     memory_dir: str | Path,
@@ -116,6 +96,7 @@ def build_observation_linker_graph(
 
     from deepagents import create_deep_agent
 
+    from ...backends import build_memory_agent_backend
     from ...EvoScientist import _ensure_auxiliary_chat_model
 
     agent = create_deep_agent(
@@ -123,7 +104,7 @@ def build_observation_linker_graph(
         model=_ensure_auxiliary_chat_model(),
         system_prompt=_observation_linker_system_prompt(),
         tools=tools,
-        backend=_build_observation_linker_backend(
+        backend=build_memory_agent_backend(
             workspace_dir=worker_workspace_dir,
             memory_dir=worker_memory_dir,
         ),

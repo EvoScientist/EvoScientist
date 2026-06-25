@@ -852,6 +852,21 @@ class MemoryFilesystemBackend(FilesystemBackend):
         ]
 
 
+def build_memory_agent_backend(*, workspace_dir: str | Path, memory_dir: str | Path):
+    """Build the workspace backend with guarded `/memories/` routing."""
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
+        routes={
+            "/memories/": MemoryFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            )
+        },
+    )
+
+
 class MergedSkillsBackend(BackendProtocol):
     """Skills backend that merges up to three skill directories.
 
