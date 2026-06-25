@@ -14,5 +14,8 @@
     },
     "config": {
         "recursion_limit": 1000000
+    },
+    "http": {
+        "app": "EvoScientist.langgraph_dev.http:app"
     }
 }
