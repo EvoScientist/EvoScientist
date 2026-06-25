@@ -524,6 +524,71 @@ def test_read_and_search_surface_related_observations(tmp_path):
     assert search_payload["results"][0]["related_observations"] == expected_json_related
 
 
+def test_read_and_search_resolve_related_observations_from_other_projects(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-current",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Global linker practice applies across projects.",
+        observation="Global observations may link to project-specific follow-ups.",
+        why_it_matters="Related observations should remain visible from other projects.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    target = record_observation_file(
+        memory_dir=memories,
+        project_id="P-other",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Other project follow-up explains the linker practice.",
+        observation="A separate project can hold the concrete follow-up observation.",
+        why_it_matters="Global observations should surface explicitly linked project memories.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-2",
+        source_agent="EvoScientist",
+    )
+    link_observation_files(
+        memory_dir=memories,
+        project_id="P-other",
+        source_observation_id=source["observation_id"],
+        target_observation_id=target["observation_id"],
+        relation=ObservationRelation.COMPLEMENTS,
+        reason="The other project gives a concrete follow-up for the global practice.",
+        bidirectional=False,
+    )
+
+    expected_related = [
+        {
+            "observation_id": target["observation_id"],
+            "path": target["path"],
+            "memory_type": MemoryType.SEMANTIC,
+            "scope": MemoryScope.PROJECT,
+            "summary": "Other project follow-up explains the linker practice.",
+            "relation": ObservationRelation.COMPLEMENTS,
+            "reason": (
+                "The other project gives a concrete follow-up for the global practice."
+            ),
+        }
+    ]
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-current",
+        observation_id=source["observation_id"],
+    )
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-current",
+        query="global linker practice",
+    )
+
+    assert read is not None
+    assert read["related_observations"] == expected_related
+    assert hits[0]["related_observations"] == expected_related
+
+
 def test_malformed_observation_frontmatter_is_skipped(tmp_path):
     memories = tmp_path / "memories"
     valid = record_observation_file(

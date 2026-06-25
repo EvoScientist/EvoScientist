@@ -245,6 +245,14 @@ def _observation_files(
     return paths
 
 
+def _all_observation_files(root: Path) -> list[Path]:
+    observation_root = root / OBSERVATION_DIR.lstrip("/")
+    try:
+        return sorted(path for path in observation_root.rglob("*.md") if path.is_file())
+    except OSError:
+        return []
+
+
 def _resolve_related_observations(
     entries: list[RelatedObservationEntry],
     *,
@@ -298,8 +306,29 @@ def _parse_observation_search_document(
 
 def _resolve_document_links(
     parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
+    *,
+    root: Path,
 ) -> list[ObservationSearchDocument]:
     documents_by_id = {document.observation_id: document for document, _ in parsed}
+    missing_related_ids = {
+        entry.id
+        for _document, entries in parsed
+        for entry in entries
+        if entry.id not in documents_by_id
+    }
+    if missing_related_ids:
+        for path in _all_observation_files(root):
+            if not missing_related_ids:
+                break
+            parsed_document = _parse_observation_search_document(root=root, path=path)
+            if parsed_document is None:
+                continue
+            document, _entries = parsed_document
+            if document.observation_id not in missing_related_ids:
+                continue
+            documents_by_id[document.observation_id] = document
+            missing_related_ids.remove(document.observation_id)
+
     return [
         replace(
             document,
@@ -333,7 +362,7 @@ def _candidate_observation_documents(
 
     # Resolve links before filtering by memory_type so a procedural hit can still
     # surface a linked semantic observation, and vice versa.
-    documents = _resolve_document_links(parsed)
+    documents = _resolve_document_links(parsed, root=root)
     if memory_type is not None:
         return [
             document for document in documents if document.memory_type == memory_type
