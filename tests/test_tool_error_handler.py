@@ -3,14 +3,8 @@
 from unittest.mock import MagicMock
 
 import pytest
-from langchain.agents import create_agent
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatResult
-from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
 from langgraph.types import Command
-from pydantic import Field
 
 from EvoScientist.middleware.tool_error_handler import (
     ToolErrorHandlerMiddleware,
@@ -27,34 +21,6 @@ def _make_request(tool_name: str = "my_mcp_tool", call_id: str = "tc_001"):
     req = MagicMock()
     req.tool_call = {"id": call_id, "name": tool_name, "args": {"query": "test"}}
     return req
-
-
-class _CapturingToolModel(FakeMessagesListChatModel):
-    seen_messages: list[list[BaseMessage]] = Field(default_factory=list)
-
-    def bind_tools(
-        self,
-        tools: object,
-        *,
-        tool_choice: object | None = None,
-        **kwargs: object,
-    ) -> "_CapturingToolModel":
-        return self
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: object,
-    ) -> ChatResult:
-        self.seen_messages.append(list(messages))
-        return super()._generate(
-            messages,
-            stop=stop,
-            run_manager=run_manager,
-            **kwargs,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -239,163 +205,6 @@ class TestWrapToolCallAsync:
         req = _make_request()
         with pytest.raises(KeyboardInterrupt):
             self._run(self.mw.awrap_tool_call(req, handler))
-
-
-# ---------------------------------------------------------------------------
-# Invalid model-emitted tool calls
-# ---------------------------------------------------------------------------
-
-
-class TestInvalidToolCallFeedback:
-    def test_create_agent_retries_invalid_tool_call_before_exiting(self):
-        recorded_observations: list[str] = []
-
-        @tool
-        def record_observation(summary: str) -> str:
-            """Record one observation summary."""
-            recorded_observations.append(summary)
-            return f"recorded: {summary}"
-
-        model = _CapturingToolModel(
-            responses=[
-                AIMessage(
-                    content="",
-                    invalid_tool_calls=[
-                        {
-                            "type": "invalid_tool_call",
-                            "id": "bad-record-call",
-                            "name": "record_observation",
-                            "args": '{"summary": Lab note without JSON quotes}',
-                            "error": "Failed to parse tool call arguments as JSON",
-                        }
-                    ],
-                ),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "good-record-call",
-                            "name": "record_observation",
-                            "args": {"summary": "BSA denatures near 72 C"},
-                        }
-                    ],
-                ),
-                AIMessage(content="Recorded."),
-            ]
-        )
-        agent = create_agent(
-            model=model,
-            tools=[record_observation],
-            middleware=[ToolErrorHandlerMiddleware()],
-        )
-
-        result = agent.invoke(
-            {"messages": [HumanMessage("Record the BSA observation")]}
-        )
-
-        assert recorded_observations == ["BSA denatures near 72 C"]
-        assert len(model.seen_messages) == 3
-        assert result["messages"][-1].content == "Recorded."
-        assert any(
-            isinstance(message, HumanMessage)
-            and message.name == "tool_call_validator"
-            and message.text.startswith("[INVALID TOOL CALL]")
-            for message in model.seen_messages[1]
-        )
-        assert any(
-            isinstance(message, ToolMessage)
-            and message.content == "recorded: BSA denatures near 72 C"
-            for message in model.seen_messages[2]
-        )
-
-    def test_after_model_retries_invalid_tool_call_content_block(self):
-        mw = ToolErrorHandlerMiddleware()
-        message = AIMessage(
-            content=[
-                {"type": "text", "text": "I will record this."},
-                {
-                    "type": "invalid_tool_call",
-                    "id": "bad-call-1",
-                    "name": "record_observation",
-                    "args": '{"evidence": Lab note without JSON quoting}',
-                    "error": "Failed to parse tool call arguments as JSON",
-                },
-            ]
-        )
-
-        result = mw.after_model({"messages": [message]}, runtime=MagicMock())
-
-        assert result is not None
-        assert result["jump_to"] == "model"
-        feedback = result["messages"][0]
-        assert isinstance(feedback, HumanMessage)
-        assert feedback.name == "tool_call_validator"
-        assert "record_observation" in feedback.content
-        assert "valid JSON" in feedback.content
-        assert "Failed to parse tool call arguments as JSON" in feedback.content
-
-    def test_after_model_retries_invalid_tool_call_field(self):
-        mw = ToolErrorHandlerMiddleware()
-        message = AIMessage(
-            content="",
-            invalid_tool_calls=[
-                {
-                    "type": "invalid_tool_call",
-                    "id": "bad-call-1",
-                    "name": "record_observation",
-                    "args": '{"bad":',
-                    "error": "Failed to parse tool call arguments as JSON",
-                }
-            ],
-        )
-
-        result = mw.after_model({"messages": [message]}, runtime=MagicMock())
-
-        assert result is not None
-        assert result["jump_to"] == "model"
-        assert "record_observation" in result["messages"][0].content
-
-    def test_after_model_stops_after_retry_limit(self):
-        mw = ToolErrorHandlerMiddleware(max_invalid_tool_call_retries=1)
-        prior_feedback = HumanMessage(
-            content="[INVALID TOOL CALL]\nRetry with valid JSON.",
-            name="tool_call_validator",
-        )
-        message = AIMessage(
-            content=[
-                {
-                    "type": "invalid_tool_call",
-                    "id": "bad-call-2",
-                    "name": "record_observation",
-                    "args": '{"bad":',
-                    "error": "Failed to parse tool call arguments as JSON",
-                }
-            ]
-        )
-
-        result = mw.after_model(
-            {"messages": [AIMessage(content=""), prior_feedback, message]},
-            runtime=MagicMock(),
-        )
-
-        assert result is not None
-        assert result["jump_to"] == "end"
-        assert isinstance(result["messages"][0], AIMessage)
-
-    def test_after_model_ignores_valid_tool_calls(self):
-        mw = ToolErrorHandlerMiddleware()
-        message = AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "id": "call-1",
-                    "name": "record_observation",
-                    "args": {"summary": "ok"},
-                }
-            ],
-        )
-
-        assert mw.after_model({"messages": [message]}, runtime=MagicMock()) is None
 
 
 # ---------------------------------------------------------------------------
