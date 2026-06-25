@@ -373,6 +373,69 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
     datetime.strptime(first_links[0]["linked_at"], "%Y-%m-%dT%H:%M:%SZ")
 
 
+def test_link_observation_files_serializes_concurrent_frontmatter_updates(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Source observation for concurrent links.",
+        observation="Several linker workers may update this observation.",
+        why_it_matters="Concurrent linkers must not lose frontmatter updates.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    targets = [
+        record_observation_file(
+            memory_dir=memories,
+            project_id="P-project",
+            memory_type=MemoryType.SEMANTIC,
+            summary=f"Target observation {index}.",
+            observation=f"Concurrent target observation {index}.",
+            why_it_matters=f"Target {index} should remain linked.",
+            scope=MemoryScope.PROJECT,
+            source_type=MemorySourceType.TURN,
+            source_session_id="thread-1",
+            source_agent="EvoScientist",
+        )
+        for index in range(12)
+    ]
+    barrier = threading.Barrier(len(targets))
+    errors: list[Exception] = []
+
+    def link_target(index: int, target: dict[str, Any]) -> None:
+        try:
+            barrier.wait(timeout=5)
+            link_observation_files(
+                memory_dir=memories,
+                project_id="P-project",
+                source_observation_id=source["observation_id"],
+                target_observation_id=target["observation_id"],
+                relation=ObservationRelation.COMPLEMENTS,
+                reason=f"Target {index} is relevant to the shared source.",
+                bidirectional=False,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=link_target, args=(index, target))
+        for index, target in enumerate(targets)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    source_path = memories / source["path"].removeprefix("/memories/")
+    source_metadata, _source_body = _read_memory_document(source_path)
+    linked_ids = {entry["id"] for entry in source_metadata["related_observations"]}
+    assert linked_ids == {target["observation_id"] for target in targets}
+
+
 def test_read_and_search_surface_related_observations(tmp_path):
     memories = tmp_path / "memories"
     source = record_observation_file(

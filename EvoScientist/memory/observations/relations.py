@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from .store import (
     related_observation_entries,
     write_observation_document,
 )
+
+_link_write_lock = threading.Lock()
 
 
 def _relation_value(value: ObservationRelation | str) -> str:
@@ -84,67 +87,70 @@ def link_observation_files(
     if not reason_text:
         raise ValueError("reason must not be empty")
 
-    source_document = observation_document_by_id(
-        memory_dir=memory_dir,
-        project_id=project_id,
-        observation_id=source_id,
-    )
-    target_document = observation_document_by_id(
-        memory_dir=memory_dir,
-        project_id=project_id,
-        observation_id=target_id,
-    )
-    missing = [
-        observation_id
-        for observation_id, document in (
-            (source_id, source_document),
-            (target_id, target_document),
+    with _link_write_lock:
+        source_document = observation_document_by_id(
+            memory_dir=memory_dir,
+            project_id=project_id,
+            observation_id=source_id,
         )
-        if document is None
-    ]
-    if missing:
-        return {
-            "linked": False,
-            "source_observation_id": source_id,
-            "target_observation_id": target_id,
-            "relation": relation_text,
-            "updated_observation_ids": [],
-            "missing_observation_ids": missing,
-        }
+        target_document = observation_document_by_id(
+            memory_dir=memory_dir,
+            project_id=project_id,
+            observation_id=target_id,
+        )
+        missing = [
+            observation_id
+            for observation_id, document in (
+                (source_id, source_document),
+                (target_id, target_document),
+            )
+            if document is None
+        ]
+        if missing:
+            return {
+                "linked": False,
+                "source_observation_id": source_id,
+                "target_observation_id": target_id,
+                "relation": relation_text,
+                "updated_observation_ids": [],
+                "missing_observation_ids": missing,
+            }
 
-    linked_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    updates: list[tuple[str, Path, ObservationFrontmatter, str]] = []
-    assert source_document is not None
-    source_path, source_metadata, source_body = source_document
-    if _upsert_related_observation(
-        source_metadata,
-        target_observation_id=target_id,
-        relation=relation_text,
-        reason=reason_text,
-        linked_at=linked_at,
-    ):
-        updates.append((source_id, source_path, source_metadata, source_body))
-
-    if bidirectional and _can_write_reverse_relation(relation_text):
-        assert target_document is not None
-        target_path, target_metadata, target_body = target_document
+        linked_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        updates: list[tuple[str, Path, ObservationFrontmatter, str]] = []
+        assert source_document is not None
+        source_path, source_metadata, source_body = source_document
         if _upsert_related_observation(
-            target_metadata,
-            target_observation_id=source_id,
+            source_metadata,
+            target_observation_id=target_id,
             relation=relation_text,
             reason=reason_text,
             linked_at=linked_at,
         ):
-            updates.append((target_id, target_path, target_metadata, target_body))
+            updates.append((source_id, source_path, source_metadata, source_body))
 
-    for _observation_id, path, metadata, body in updates:
-        write_observation_document(path, metadata=metadata, body=body)
+        if bidirectional and _can_write_reverse_relation(relation_text):
+            assert target_document is not None
+            target_path, target_metadata, target_body = target_document
+            if _upsert_related_observation(
+                target_metadata,
+                target_observation_id=source_id,
+                relation=relation_text,
+                reason=reason_text,
+                linked_at=linked_at,
+            ):
+                updates.append((target_id, target_path, target_metadata, target_body))
 
-    return {
-        "linked": bool(updates),
-        "source_observation_id": source_id,
-        "target_observation_id": target_id,
-        "relation": relation_text,
-        "updated_observation_ids": [observation_id for observation_id, *_ in updates],
-        "missing_observation_ids": [],
-    }
+        for _observation_id, path, metadata, body in updates:
+            write_observation_document(path, metadata=metadata, body=body)
+
+        return {
+            "linked": bool(updates),
+            "source_observation_id": source_id,
+            "target_observation_id": target_id,
+            "relation": relation_text,
+            "updated_observation_ids": [
+                observation_id for observation_id, *_ in updates
+            ],
+            "missing_observation_ids": [],
+        }
