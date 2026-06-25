@@ -171,10 +171,10 @@ def _json_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def read_observation_document(
+def _read_observation_document_with_text(
     path: str | Path,
-) -> tuple[ObservationFrontmatter, str] | None:
-    """Read an observation markdown document and parse its frontmatter."""
+) -> tuple[ObservationFrontmatter, str, str] | None:
+    """Read an observation markdown document, body, and original text."""
     document_path = Path(path).expanduser()
     try:
         text = document_path.read_text(encoding="utf-8")
@@ -187,6 +187,17 @@ def read_observation_document(
         metadata = ObservationFrontmatter.model_validate(yaml.safe_load(frontmatter))
     except (ValueError, ValidationError, yaml.YAMLError):
         return None
+    return metadata, body, text
+
+
+def read_observation_document(
+    path: str | Path,
+) -> tuple[ObservationFrontmatter, str] | None:
+    """Read an observation markdown document and parse its frontmatter."""
+    document = _read_observation_document_with_text(path)
+    if document is None:
+        return None
+    metadata, body, _text = document
     return metadata, body
 
 
@@ -282,10 +293,10 @@ def _parse_observation_search_document(
     root: Path,
     path: Path,
 ) -> tuple[ObservationSearchDocument, list[RelatedObservationEntry]] | None:
-    document = read_observation_document(path)
+    document = _read_observation_document_with_text(path)
     if document is None:
         return None
-    metadata, body = document
+    metadata, body, text = document
     try:
         memory_path = "/" + path.relative_to(root).as_posix()
     except ValueError:
@@ -299,6 +310,7 @@ def _parse_observation_search_document(
             scope=metadata.scope,
             summary=metadata.summary,
             body=body,
+            text=text,
         ),
         related_observation_entries(metadata),
     )
@@ -419,20 +431,13 @@ def read_observation_file(
     ):
         if document.observation_id != requested_id:
             continue
-        memory_path = document.path.removeprefix("/memories/")
-        path = root / memory_path
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            return None
-
         result: ObservationReadResult = {
             "observation_id": document.observation_id,
             "path": document.path,
             "memory_type": document.memory_type,
             "scope": document.scope,
             "summary": document.summary,
-            "text": text,
+            "text": document.text,
         }
         if document.related_observations:
             result["related_observations"] = list(document.related_observations)

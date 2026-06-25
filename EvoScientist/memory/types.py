@@ -77,6 +77,7 @@ class ObservationSearchDocument:
     scope: MemoryScope
     summary: str
     body: str
+    text: str
     related_observations: tuple[RelatedObservationResult, ...] = ()
 
 
