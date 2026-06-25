@@ -38,7 +38,7 @@ TURN_MEMORY_WORKER_GRAPH_ID = "evomemory-turn-worker"
 OBSERVATION_LINKER_GRAPH_ID = "evomemory-observation-linker"
 
 MemoryWorkerFinishedHook = Callable[[BackgroundRun, MemoryOutputDelta | None], None]
-MemoryWorkerAbortedHook = Callable[[BackgroundRun], None]
+MemoryWorkerAbortedHook = Callable[[BackgroundRun, MemoryOutputDelta | None], None]
 
 
 def _observation_linking_enabled() -> bool:
@@ -275,16 +275,20 @@ def _memory_worker_launch_hooks(
             on_worker_finished(run, delta)
 
     def on_aborted(run: BackgroundRun) -> None:
-        forget_memory_worker(run.thread_id, run.run_id)
+        delta = mark_memory_worker_finished(run.thread_id, run.run_id)
         if on_worker_aborted is not None:
-            on_worker_aborted(run)
+            on_worker_aborted(run, delta)
+
+    def on_status_unknown(run: BackgroundRun) -> None:
+        forget_memory_worker(run.thread_id, run.run_id)
 
     return BackgroundRunHooks(
         on_before_run=on_before_run,
         on_started=on_started,
         on_finished=on_finished,
         on_aborted=on_aborted,
-        on_watcher_start_failed=on_finished,
+        on_status_unknown=on_status_unknown,
+        on_watcher_start_failed=on_status_unknown,
     )
 
 

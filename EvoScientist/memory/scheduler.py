@@ -127,9 +127,14 @@ class MemoryScheduler:
         contexts = self._record_finished_and_drain_ready(run=run, delta=delta)
         self._launch_ready(contexts)
 
-    def record_worker_aborted(self, _run: BackgroundRun) -> None:
-        """Drain pending linker batches after a tracked worker is abandoned."""
-        self._launch_ready(self._drain_ready())
+    def record_worker_aborted(
+        self,
+        run: BackgroundRun,
+        delta: MemoryOutputDelta | None,
+    ) -> None:
+        """Queue persisted observations from an abandoned worker."""
+        contexts = self._record_finished_and_drain_ready(run=run, delta=delta)
+        self._launch_ready(contexts)
 
     def _ready_batches_locked(self) -> list[tuple[_BatchKey, set[str]]]:
         ready_batches = []

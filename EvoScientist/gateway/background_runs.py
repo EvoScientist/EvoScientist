@@ -147,6 +147,7 @@ class BackgroundRunHooks:
     on_started: Callable[[BackgroundRun], None] | None = None
     on_finished: Callable[[BackgroundRun], None] | None = None
     on_aborted: Callable[[BackgroundRun], None] | None = None
+    on_status_unknown: Callable[[BackgroundRun], None] | None = None
     on_watcher_start_failed: Callable[[BackgroundRun], None] | None = None
 
 
@@ -607,7 +608,11 @@ def watch_background_run_sync(
             if watcher_config.delete_thread_on_finish and client is not None:
                 _delete_thread(client, thread_id, name=name)
         else:
-            _call_hook(hooks.on_aborted, run_ref, hook_name="on_aborted")
+            _call_hook(
+                hooks.on_status_unknown or hooks.on_aborted,
+                run_ref,
+                hook_name="on_status_unknown",
+            )
 
 
 def spawn_background_run_status_task(
@@ -703,4 +708,8 @@ async def awatch_background_run(
             if watcher_config.delete_thread_on_finish:
                 await _adelete_thread(client, thread_id, name=name)
         else:
-            await _acall_hook(hooks.on_aborted, run_ref, hook_name="on_aborted")
+            await _acall_hook(
+                hooks.on_status_unknown or hooks.on_aborted,
+                run_ref,
+                hook_name="on_status_unknown",
+            )

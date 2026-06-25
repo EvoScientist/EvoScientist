@@ -1887,33 +1887,46 @@ def test_memory_worker_finish_does_not_launch_linker_for_profile_only_delta(
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_memory_worker_abort_does_not_launch_linker(tmp_path):
+def test_memory_worker_abort_queues_written_observations_for_linking(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
     worker_activity.mark_memory_worker_started(
         thread_id="worker-thread",
         run_id="run-1",
         memory_dir=memory_dir,
+        before_outputs=before,
     )
-    observation_path = memory_dir / "observations" / "global" / "O-1.md"
-    observation_path.parent.mkdir(parents=True)
-    observation_path.write_text("# Observation\n", encoding="utf-8")
+    observation = _record_test_observation(memory_dir)
 
     try:
         hooks = memory_launch._memory_worker_launch_hooks(
             memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
+            on_worker_aborted=coordinator.record_worker_aborted,
         )
         assert hooks.on_aborted is not None
-        hooks.on_aborted(_memory_worker_run(run_id="run-1"))
+        hooks.on_aborted(
+            _memory_worker_run(
+                run_id="run-1",
+                workspace_dir=str(workspace_dir),
+            )
+        )
 
-        assert launched == []
+        assert launched == [
+            memory_scheduler.ObservationLinkerContext(
+                memory_dir=memory_dir,
+                workspace_dir=workspace_dir,
+                project_id="P-project",
+                observation_ids=(observation["observation_id"],),
+            )
+        ]
         status = worker_activity.memory_worker_status()
         assert status.is_running is False
-        assert status.observations_recorded == 0
+        assert status.observations_recorded == 1
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
 
