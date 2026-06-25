@@ -810,7 +810,11 @@ def _get_default_agent():
         if not cfg.auto_approve:
             mw.append(
                 HumanInTheLoopMiddleware(
-                    interrupt_on={"execute": True, "run_in_background": True}
+                    interrupt_on={
+                        "execute": True,
+                        "run_in_background": True,
+                        "schedule_task": True,
+                    }
                 )
             )
 
@@ -964,7 +968,11 @@ def create_cli_agent(
     if not cfg.auto_approve:
         mw.append(
             HumanInTheLoopMiddleware(
-                interrupt_on={"execute": True, "run_in_background": True}
+                interrupt_on={
+                    "execute": True,
+                    "run_in_background": True,
+                    "schedule_task": True,
+                }
             )
         )
 

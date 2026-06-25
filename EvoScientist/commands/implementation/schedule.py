@@ -70,8 +70,10 @@ class ScheduleCommand(Command):
 
     async def _add(self, ctx: CommandContext, crons, rest: list[str]) -> None:
         # Cron may arrive as 5 separate tokens (unquoted) or 1 token (shlex-quoted).
-        if rest and rest[0].count(" ") == 4:  # quoted 5-field cron
-            schedule, prompt_tokens = rest[0], rest[1:]
+        # Split on any whitespace so extra spaces don't break detection; the
+        # backend rejects genuinely malformed expressions.
+        if rest and len(rest[0].split()) == 5:  # quoted 5-field cron
+            schedule, prompt_tokens = " ".join(rest[0].split()), rest[1:]
         elif len(rest) >= 5:  # 5 separate cron fields
             schedule, prompt_tokens = " ".join(rest[:5]), rest[5:]
         else:

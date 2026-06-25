@@ -84,7 +84,7 @@ def test_append_to_system_message_preserves_metadata():
         response_metadata={"provider": "test"},
     )
 
-    updated = memory_module._append_to_system_message(
+    updated = memory_module.append_to_system_message(
         system_message,
         "memory context",
     )

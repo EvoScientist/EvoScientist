@@ -14,7 +14,6 @@ def _patch_client(monkeypatch):
             "schedule": "*/10 * * * *",
             "metadata": {"run_kind": "scheduled_task", "name": "weather"},
         },
-        {"cron_id": "c-2", "schedule": "0 9 * * *", "metadata": {}},  # not ours
     ]
     monkeypatch.setattr(crons, "_client", lambda: fake)
     monkeypatch.setattr(crons, "_default_timezone", lambda: "Europe/London")
@@ -40,12 +39,16 @@ def test_create_schedule_targets_scheduler(monkeypatch):
     assert kw["timezone"] == "Europe/London"
 
 
-def test_list_schedules_filters_to_ours(monkeypatch):
+def test_list_schedules_uses_server_side_filter(monkeypatch):
     crons, fake = _patch_client(monkeypatch)
     out = crons.list_schedules()
-    assert [c["cron_id"] for c in out] == ["c-1"]  # c-2 filtered out
-    # Must pass an explicit high limit so users with >10 schedules see them all.
-    fake.crons.search.assert_called_once_with(limit=1000)
+    assert [c["cron_id"] for c in out] == ["c-1"]
+    # Filtered server-side by run_kind metadata (no client filter); high limit so
+    # users with >10 schedules still see them all.
+    fake.crons.search.assert_called_once_with(
+        metadata={"run_kind": crons.SCHEDULED_RUN_KIND},
+        limit=1000,
+    )
 
 
 def test_delete_and_set_enabled(monkeypatch):

@@ -12,7 +12,10 @@ multiple clients at one hand-started server they will share the same cron store.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from langgraph_sdk.schema import Cron, Run
 
 SCHEDULER_GRAPH_ID = "scheduler"
 SCHEDULED_RUN_KIND = "scheduled_task"
@@ -49,10 +52,6 @@ def _default_timezone() -> str | None:
         return None
 
 
-def _as_dict(rec: Any) -> dict[str, Any]:
-    return rec if isinstance(rec, dict) else dict(rec)
-
-
 def is_available() -> bool:
     """True when the langgraph dev backend (which fires crons) is reachable."""
     from ..langgraph_dev.manager import is_langgraph_dev_running
@@ -62,29 +61,32 @@ def is_available() -> bool:
 
 def create_schedule(
     *, name: str, schedule: str, prompt: str, timezone: str | None = None
-) -> dict[str, Any]:
+) -> Cron:
     """Create a recurring scheduled task on the scheduler graph."""
     # Crons are stored in the langgraph-dev process's .langgraph_api store, not
     # tagged by workspace. Isolation is process-level (see module docstring).
-    cron = _client().crons.create(
+    return _client().crons.create(
         assistant_id=SCHEDULER_GRAPH_ID,
         schedule=schedule,
         input={"messages": [{"role": "user", "content": prompt}]},
         metadata={"run_kind": SCHEDULED_RUN_KIND, "name": name, "prompt": prompt},
         timezone=timezone or _default_timezone(),
     )
-    return _as_dict(cron)
 
 
-def list_schedules() -> list[dict[str, Any]]:
-    """Return only EvoScientist scheduled tasks (filtered by run_kind metadata)."""
-    out = _client().crons.search(limit=1000)
-    recs = [_as_dict(c) for c in out]
-    return [
-        c
-        for c in recs
-        if (c.get("metadata") or {}).get("run_kind") == SCHEDULED_RUN_KIND
-    ]
+def list_schedules() -> list[Cron]:
+    """Return only EvoScientist scheduled tasks.
+
+    Filtered server-side by ``run_kind`` metadata (the cron backend matches by
+    metadata containment), so we never page through unrelated crons; ``limit`` is
+    a ceiling on OUR schedules (far below 1000 in practice). We filter on metadata
+    rather than ``assistant_id`` because the stored ``assistant_id`` is a resolved
+    UUID, not the ``scheduler`` graph name we create with.
+    """
+    return _client().crons.search(
+        metadata={"run_kind": SCHEDULED_RUN_KIND},
+        limit=1000,
+    )
 
 
 def delete_schedule(cron_id: str) -> None:
@@ -92,19 +94,19 @@ def delete_schedule(cron_id: str) -> None:
     _client().crons.delete(cron_id)
 
 
-def set_enabled(cron_id: str, enabled: bool) -> dict[str, Any]:
+def set_enabled(cron_id: str, enabled: bool) -> Cron:
     """Enable or disable a scheduled task by cron id."""
-    return _as_dict(_client().crons.update(cron_id, enabled=enabled))
+    return _client().crons.update(cron_id, enabled=enabled)
 
 
-def run_now(prompt: str) -> dict[str, Any]:
+def run_now(prompt: str) -> Run:
     """Fire a one-off scheduler run immediately (for ``/schedule run``).
 
     Output goes wherever the task's prompt specifies; there is no push notification.
     """
     client = _client()
-    thread = _as_dict(client.threads.create(graph_id=SCHEDULER_GRAPH_ID))
-    run = client.runs.create(
+    thread = client.threads.create(graph_id=SCHEDULER_GRAPH_ID)
+    return client.runs.create(
         thread_id=str(thread["thread_id"]),
         assistant_id=SCHEDULER_GRAPH_ID,
         input={"messages": [{"role": "user", "content": prompt}]},
@@ -114,4 +116,3 @@ def run_now(prompt: str) -> dict[str, Any]:
             "prompt": prompt,
         },
     )
-    return _as_dict(run)

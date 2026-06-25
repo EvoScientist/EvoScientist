@@ -19,8 +19,9 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
+
+from .utils import append_to_system_message
 
 _CACHE_TTL_SECONDS = 15.0
 
@@ -106,6 +107,9 @@ def cancel_scheduled_task(cron_id: str) -> str:
 
     if not crons.is_available():
         return "Scheduler unavailable: the langgraph dev backend is not running."
+    if not cron_id.strip():
+        # Empty prefix would match (and delete) the only cron — refuse it.
+        return "Provide the id (or a prefix) of the task to cancel."
     try:
         rows = crons.list_schedules()
         # B2: collect ALL prefix matches before acting to detect ambiguity.
@@ -125,17 +129,6 @@ def cancel_scheduled_task(cron_id: str) -> str:
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
-
-
-def _append_to_system_message(
-    system_message: SystemMessage | None, text: str
-) -> SystemMessage:
-    """Append a text block to a system message, preserving existing blocks."""
-    existing = list(system_message.content_blocks) if system_message else []
-    blocks = [*existing, {"type": "text", "text": text}]
-    if system_message is None:
-        return SystemMessage(content=blocks)
-    return system_message.model_copy(update={"content": blocks})
 
 
 class SchedulerMiddleware(AgentMiddleware):
@@ -199,7 +192,7 @@ class SchedulerMiddleware(AgentMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         injection = self._injection(self._cached_schedules_block())
-        new_system = _append_to_system_message(request.system_message, injection)
+        new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
     def wrap_model_call(
@@ -219,7 +212,7 @@ class SchedulerMiddleware(AgentMiddleware):
         block = await asyncio.to_thread(self._cached_schedules_block)
         injection = self._injection(block)
         request = request.override(
-            system_message=_append_to_system_message(request.system_message, injection)
+            system_message=append_to_system_message(request.system_message, injection)
         )
         return await handler(request)
 

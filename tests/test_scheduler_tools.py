@@ -105,3 +105,20 @@ def test_cancel_ambiguous_prefix_aborts_without_deleting():
         out = cancel_scheduled_task.invoke({"cron_id": "abc"})
     mk.assert_not_called()
     assert "Multiple" in out
+
+
+def test_cancel_empty_cron_id_refuses_without_deleting():
+    """Empty cron_id would match (and delete) the only cron — must refuse early."""
+    from EvoScientist.middleware.scheduler import cancel_scheduled_task
+
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch(
+            "EvoScientist.cron.schedule.list_schedules",
+            return_value=[{"cron_id": "only-one"}],
+        ),
+        patch("EvoScientist.cron.schedule.delete_schedule") as mk,
+    ):
+        out = cancel_scheduled_task.invoke({"cron_id": "   "})
+    mk.assert_not_called()
+    assert "Provide" in out
