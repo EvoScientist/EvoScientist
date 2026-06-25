@@ -20,7 +20,7 @@ from langchain_core.tools import BaseTool
 from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
-from EvoScientist.config import MemoryObservationWriter
+from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
 from EvoScientist.gateway import background_runs
 from EvoScientist.memory import (
     launch as memory_launch,
@@ -1670,6 +1670,55 @@ def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
         "O-1",
     ]
     assert configurable["evomemory_project_id"] == "P-project"
+
+
+def test_observation_linker_does_not_launch_when_observations_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    context = memory_scheduler.ObservationLinkerContext(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        observation_ids=("O-1",),
+    )
+    monkeypatch.setattr(
+        memory_launch,
+        "get_effective_config",
+        lambda: EvoScientistConfig(memory_observations_enabled=False),
+    )
+    launch_call = MagicMock()
+    monkeypatch.setattr(memory_launch, "launch_background_run", launch_call)
+
+    run = memory_launch.launch_observation_linker(context)
+
+    assert run is None
+    launch_call.assert_not_called()
+
+
+def test_async_observation_linker_does_not_launch_when_observations_disabled(
+    tmp_path,
+    monkeypatch,
+    run_async,
+):
+    context = memory_scheduler.ObservationLinkerContext(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        observation_ids=("O-1",),
+    )
+    monkeypatch.setattr(
+        memory_launch,
+        "get_effective_config",
+        lambda: EvoScientistConfig(memory_observations_enabled=False),
+    )
+    launch_call = MagicMock()
+    monkeypatch.setattr(memory_launch, "alaunch_background_run", launch_call)
+
+    run = run_async(memory_launch.alaunch_observation_linker(context))
+
+    assert run is None
+    launch_call.assert_not_called()
 
 
 def test_observation_linker_launch_hooks_track_running_status(tmp_path):

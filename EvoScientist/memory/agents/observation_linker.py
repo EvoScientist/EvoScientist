@@ -10,7 +10,6 @@ from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
 from ... import paths as _paths
-from ...config import MemoryControls, get_effective_config
 from ..observations import (
     create_link_observations_tool,
     create_read_memory_tool,
@@ -100,7 +99,6 @@ def build_observation_linker_graph(
 
     from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
 
-    memory_controls = MemoryControls.from_config(get_effective_config())
     worker_memory_dir = Path(
         _paths.MEMORIES_DIR if memory_dir is None else memory_dir
     ).expanduser()
@@ -111,13 +109,10 @@ def build_observation_linker_graph(
         ToolErrorHandlerMiddleware(),
         _ToolExclusionMiddleware(excluded=_OBSERVATION_LINKER_EXCLUDED_TOOLS),
     ]
-    tools: list[BaseTool] = []
-    if memory_controls.observations_enabled:
-        observation_tools = _observation_linker_tools(
-            memory_dir=worker_memory_dir,
-            workspace_dir=worker_workspace_dir,
-        )
-        tools.extend(observation_tools)
+    tools = _observation_linker_tools(
+        memory_dir=worker_memory_dir,
+        workspace_dir=worker_workspace_dir,
+    )
 
     from deepagents import create_deep_agent
 

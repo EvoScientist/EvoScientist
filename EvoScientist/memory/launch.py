@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from ..config import MemoryControls, get_effective_config
 from ..gateway.background_runs import (
     BackgroundRun,
     BackgroundRunHooks,
@@ -38,6 +39,10 @@ OBSERVATION_LINKER_GRAPH_ID = "evomemory-observation-linker"
 
 MemoryWorkerFinishedHook = Callable[[BackgroundRun, MemoryOutputDelta | None], None]
 MemoryWorkerAbortedHook = Callable[[BackgroundRun], None]
+
+
+def _observation_linking_enabled() -> bool:
+    return MemoryControls.from_config(get_effective_config()).observations_enabled
 
 
 def _memory_worker_graph_id(source_type: MemorySourceType) -> str:
@@ -317,6 +322,8 @@ def launch_observation_linker(
     context: ObservationLinkerContext,
 ) -> BackgroundRun | None:
     """Launch one synchronous observation-linking pass."""
+    if not _observation_linking_enabled():
+        return None
     return launch_background_run(
         observation_linker_launch_request(context),
         hooks=_observation_linker_launch_hooks(context.memory_dir),
@@ -327,6 +334,8 @@ async def alaunch_observation_linker(
     context: ObservationLinkerContext,
 ) -> BackgroundRun | None:
     """Launch one asynchronous observation-linking pass."""
+    if not _observation_linking_enabled():
+        return None
     return await alaunch_background_run(
         observation_linker_launch_request(context),
         hooks=_observation_linker_launch_hooks(context.memory_dir),
