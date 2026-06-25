@@ -142,6 +142,23 @@ def test_build_status_fragments_shows_observation_linker_indicator_when_running(
     assert "🧠" not in rendered
 
 
+def test_build_status_fragments_shows_linked_relation_count(
+    reset_memory_activity,
+):
+    worker_activity.mark_observation_relations_linked(1)
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            _default_snapshot(),
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "Created 1 memory link" in rendered
+    assert "🔗" not in rendered
+
+
 def test_build_status_fragments_hides_memory_indicator_when_idle(
     reset_memory_activity,
 ):

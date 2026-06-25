@@ -220,6 +220,11 @@ def _memory_activity_label(
     if saved:
         parts.append(f"Saved {', '.join(saved)}")
 
+    if linker_status is not None and linker_status.relations_linked:
+        parts.append(
+            f"Created {_plural(linker_status.relations_linked, 'memory link')}"
+        )
+
     return " ".join(parts)
 
 

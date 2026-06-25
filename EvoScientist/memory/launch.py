@@ -21,12 +21,15 @@ from .types import MemorySourceType
 from .worker_activity import (
     MemoryOutputDelta,
     MemoryOutputSnapshot,
+    ObservationRelationSnapshot,
     forget_memory_worker,
     forget_observation_linker,
     mark_memory_worker_finished,
     mark_memory_worker_started,
+    mark_observation_linker_finished,
     mark_observation_linker_started,
     snapshot_memory_outputs,
+    snapshot_observation_relations,
 )
 
 SUBAGENT_MEMORY_WORKER_GRAPH_ID = "evomemory-subagent-worker"
@@ -206,18 +209,35 @@ def observation_linker_launch_request(
     )
 
 
-def _observation_linker_launch_hooks() -> BackgroundRunHooks:
-    def on_started(run: BackgroundRun) -> None:
-        mark_observation_linker_started(thread_id=run.thread_id, run_id=run.run_id)
+def _observation_linker_launch_hooks(memory_dir: str | Path) -> BackgroundRunHooks:
+    before_relations: dict[str, ObservationRelationSnapshot] = {}
 
-    def on_stopped(run: BackgroundRun) -> None:
+    def on_before_run(_thread_id: str) -> None:
+        before_relations["value"] = snapshot_observation_relations(memory_dir)
+
+    def on_started(run: BackgroundRun) -> None:
+        mark_observation_linker_started(
+            thread_id=run.thread_id,
+            run_id=run.run_id,
+            before_relations=before_relations.get("value"),
+        )
+
+    def on_finished(run: BackgroundRun) -> None:
+        mark_observation_linker_finished(
+            run.thread_id,
+            run.run_id,
+            memory_dir=memory_dir,
+        )
+
+    def on_aborted(run: BackgroundRun) -> None:
         forget_observation_linker(run.thread_id, run.run_id)
 
     return BackgroundRunHooks(
+        on_before_run=on_before_run,
         on_started=on_started,
-        on_finished=on_stopped,
-        on_aborted=on_stopped,
-        on_watcher_start_failed=on_stopped,
+        on_finished=on_finished,
+        on_aborted=on_aborted,
+        on_watcher_start_failed=on_aborted,
     )
 
 
@@ -299,7 +319,7 @@ def launch_observation_linker(
     """Launch one synchronous observation-linking pass."""
     return launch_background_run(
         observation_linker_launch_request(context),
-        hooks=_observation_linker_launch_hooks(),
+        hooks=_observation_linker_launch_hooks(context.memory_dir),
     )
 
 
@@ -309,5 +329,5 @@ async def alaunch_observation_linker(
     """Launch one asynchronous observation-linking pass."""
     return await alaunch_background_run(
         observation_linker_launch_request(context),
-        hooks=_observation_linker_launch_hooks(),
+        hooks=_observation_linker_launch_hooks(context.memory_dir),
     )

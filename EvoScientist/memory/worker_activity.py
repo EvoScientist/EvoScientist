@@ -5,12 +5,16 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import yaml
+
 MemoryActivityPhase = Literal["worker", "linker"]
+ObservationRelationKey = tuple[str, str, str, str]
+ObservationRelationSnapshot = frozenset[ObservationRelationKey]
 
 
 @dataclass(frozen=True)
@@ -24,9 +28,10 @@ class MemoryWorkerStatusSnapshot:
 
 @dataclass(frozen=True)
 class ObservationLinkerStatusSnapshot:
-    """Active observation-linking work shown in the status bar."""
+    """Observation-linking work shown in the status bar."""
 
     is_running: bool = False
+    relations_linked: int = 0
 
 
 @dataclass(frozen=True)
@@ -63,10 +68,11 @@ class _ActiveMemoryWorker:
 
 
 _active_runs: dict[tuple[str, str], _ActiveMemoryWorker] = {}
-_active_linker_runs: set[tuple[str, str]] = set()
+_active_linker_runs: dict[tuple[str, str], ObservationRelationSnapshot] = {}
 _active_lock = threading.Lock()
 _profile_updates = 0
 _observations_recorded = 0
+_relations_linked = 0
 _counted_profile_versions: set[tuple[str, str, str]] = set()
 _counted_observation_files: set[tuple[str, str]] = set()
 
@@ -80,6 +86,76 @@ def _file_digest(path: Path) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def _observation_frontmatter(path: Path) -> dict[str, object]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    if not text.startswith("---\n"):
+        return {}
+    try:
+        frontmatter, _body = text[4:].split("\n---", 1)
+    except ValueError:
+        return {}
+    try:
+        loaded = yaml.safe_load(frontmatter) or {}
+    except yaml.YAMLError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _observation_relation_key(
+    *,
+    source_id: str,
+    target_id: str,
+    relation: str,
+    reason: str,
+) -> ObservationRelationKey:
+    if relation in {"complements", "contradicts"}:
+        left, right = sorted((source_id, target_id))
+        return (left, right, relation, reason)
+    return (source_id, target_id, relation, reason)
+
+
+def snapshot_observation_relations(
+    memory_dir: str | Path,
+) -> ObservationRelationSnapshot:
+    root = Path(memory_dir).expanduser()
+    observation_root = root / "observations"
+    relation_keys: set[ObservationRelationKey] = set()
+    if not observation_root.exists():
+        return frozenset()
+
+    for path in observation_root.rglob("*.md"):
+        if not path.is_file():
+            continue
+        metadata = _observation_frontmatter(path)
+        source_id_value = metadata.get("id")
+        source_id = str(source_id_value or path.stem).strip()
+        if not source_id:
+            continue
+        related = metadata.get("related_observations")
+        if not isinstance(related, list):
+            continue
+        for item in related:
+            if not isinstance(item, Mapping):
+                continue
+            target_id = str(item.get("id") or "").strip()
+            relation = str(item.get("relation") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            if not target_id or not relation:
+                continue
+            relation_keys.add(
+                _observation_relation_key(
+                    source_id=source_id,
+                    target_id=target_id,
+                    relation=relation,
+                    reason=reason,
+                )
+            )
+    return frozenset(relation_keys)
 
 
 def snapshot_memory_outputs(memory_dir: str | Path) -> MemoryOutputSnapshot:
@@ -151,7 +227,10 @@ def memory_worker_status() -> MemoryWorkerStatusSnapshot:
 
 def observation_linker_status() -> ObservationLinkerStatusSnapshot:
     with _active_lock:
-        return ObservationLinkerStatusSnapshot(is_running=bool(_active_linker_runs))
+        return ObservationLinkerStatusSnapshot(
+            is_running=bool(_active_linker_runs),
+            relations_linked=_relations_linked,
+        )
 
 
 def has_active_memory_workers(memory_dir: str | Path | None = None) -> bool:
@@ -280,13 +359,14 @@ def wait_for_memory_pipeline_idle(
         sleep(poll_seconds)
 
 
-def clear_memory_worker_saved_counts() -> None:
-    """Clear completed memory-save counters while preserving active workers."""
-    global _observations_recorded, _profile_updates
+def clear_completed_memory_activity_counts() -> None:
+    """Clear completed memory-activity counters while preserving active runs."""
+    global _observations_recorded, _profile_updates, _relations_linked
 
     with _active_lock:
         _profile_updates = 0
         _observations_recorded = 0
+        _relations_linked = 0
 
 
 def mark_memory_worker_started(
@@ -311,14 +391,45 @@ def forget_memory_worker(thread_id: str, run_id: str) -> None:
         _active_runs.pop((thread_id, run_id), None)
 
 
-def mark_observation_linker_started(*, thread_id: str, run_id: str) -> None:
+def mark_observation_linker_started(
+    *,
+    thread_id: str,
+    run_id: str,
+    before_relations: ObservationRelationSnapshot | None = None,
+) -> None:
     with _active_lock:
-        _active_linker_runs.add((thread_id, run_id))
+        _active_linker_runs[(thread_id, run_id)] = before_relations or frozenset()
+
+
+def mark_observation_relations_linked(count: int) -> None:
+    global _relations_linked
+
+    if count <= 0:
+        return
+    with _active_lock:
+        _relations_linked += count
+
+
+def mark_observation_linker_finished(
+    thread_id: str,
+    run_id: str,
+    *,
+    memory_dir: str | Path,
+) -> int:
+    with _active_lock:
+        before_relations = _active_linker_runs.pop((thread_id, run_id), None)
+    if before_relations is None:
+        return 0
+
+    after_relations = snapshot_observation_relations(memory_dir)
+    linked_count = len(after_relations - before_relations)
+    mark_observation_relations_linked(linked_count)
+    return linked_count
 
 
 def forget_observation_linker(thread_id: str, run_id: str) -> None:
     with _active_lock:
-        _active_linker_runs.discard((thread_id, run_id))
+        _active_linker_runs.pop((thread_id, run_id), None)
 
 
 def mark_memory_worker_finished(
@@ -356,7 +467,7 @@ def mark_memory_worker_finished(
 
 
 def reset_memory_worker_status_for_tests() -> None:
-    global _observations_recorded, _profile_updates
+    global _observations_recorded, _profile_updates, _relations_linked
 
     with _active_lock:
         _active_runs.clear()
@@ -365,3 +476,4 @@ def reset_memory_worker_status_for_tests() -> None:
         _counted_observation_files.clear()
         _profile_updates = 0
         _observations_recorded = 0
+        _relations_linked = 0

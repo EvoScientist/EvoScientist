@@ -493,6 +493,74 @@ def test_link_observations_tool_uses_runtime_project_id(tmp_path):
     assert metadata["related_observations"][0]["id"] == second["observation_id"]
 
 
+def test_observation_linker_finish_counts_successful_relations_once(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Linked relation counts are status-bar outcomes.",
+        observation="Successful link_observations calls should count relations.",
+        why_it_matters="The status bar should report durable link outcomes.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Duplicate relation calls should be no-ops.",
+        observation="Duplicate link_observations calls should not recount links.",
+        why_it_matters="Relation counts should reflect actual metadata updates.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    run = background_runs.BackgroundRun(
+        name="EvoMemory observation linker",
+        url="http://x",
+        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        thread_id="linker-thread",
+        run_id="linker-run",
+        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        metadata={},
+    )
+    hooks = memory_launch._observation_linker_launch_hooks(memories)
+
+    try:
+        assert hooks.on_before_run is not None
+        assert hooks.on_started is not None
+        assert hooks.on_finished is not None
+        hooks.on_before_run(run.thread_id)
+        hooks.on_started(run)
+        first_payload = link_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            source_observation_id=first["observation_id"],
+            target_observation_id=second["observation_id"],
+            reason="Both validate status counting for durable links.",
+        )
+        duplicate_payload = link_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            source_observation_id=first["observation_id"],
+            target_observation_id=second["observation_id"],
+            reason="Both validate status counting for durable links.",
+        )
+        hooks.on_finished(run)
+        status = worker_activity.observation_linker_status()
+
+        assert first_payload["linked"] is True
+        assert duplicate_payload["linked"] is False
+        assert status.relations_linked == 1
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
     memories = tmp_path / "memories"
     observation = record_observation_file(
@@ -1604,7 +1672,7 @@ def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
     assert configurable["evomemory_project_id"] == "P-project"
 
 
-def test_observation_linker_launch_hooks_track_running_status():
+def test_observation_linker_launch_hooks_track_running_status(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     run = background_runs.BackgroundRun(
         name="EvoMemory observation linker",
@@ -1617,7 +1685,7 @@ def test_observation_linker_launch_hooks_track_running_status():
     )
 
     try:
-        hooks = memory_launch._observation_linker_launch_hooks()
+        hooks = memory_launch._observation_linker_launch_hooks(tmp_path / "memories")
         assert hooks.on_started is not None
         assert hooks.on_finished is not None
         hooks.on_started(run)
@@ -2061,7 +2129,7 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
         worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_path):
+def test_completed_memory_activity_clear_preserves_pending_worker_delta(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
@@ -2080,9 +2148,11 @@ def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_pat
         run_id="active-run",
         memory_dir=memory_dir,
     )
+    worker_activity.mark_observation_relations_linked(1)
 
-    worker_activity.clear_memory_worker_saved_counts()
+    worker_activity.clear_completed_memory_activity_counts()
     assert worker_activity.memory_worker_status().is_running is True
+    assert worker_activity.observation_linker_status().relations_linked == 0
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
@@ -2334,7 +2404,7 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
 
     first_delta = worker_activity.mark_memory_worker_finished("thread-1", "run-1")
     assert worker_activity.memory_worker_status().observations_recorded == 1
-    worker_activity.clear_memory_worker_saved_counts()
+    worker_activity.clear_completed_memory_activity_counts()
     second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
