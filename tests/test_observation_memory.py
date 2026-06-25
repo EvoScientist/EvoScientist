@@ -831,6 +831,72 @@ def test_observation_linker_finish_counts_successful_relations_once(tmp_path):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_observation_linker_finish_does_not_count_reason_only_updates(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Relation identity ignores rationale text.",
+        observation="Changing a relation reason is not a newly created link.",
+        why_it_matters="The status bar should not inflate memory-link counts.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Existing relation can receive a better rationale.",
+        observation="Linker reruns may refine the reason for an existing relation.",
+        why_it_matters="Refined metadata should not look like a new edge.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Initial rationale for the existing relation.",
+    )
+    run = background_runs.BackgroundRun(
+        name="EvoMemory observation linker",
+        url="http://x",
+        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        thread_id="linker-thread",
+        run_id="linker-run",
+        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        metadata={},
+    )
+    hooks = memory_launch._observation_linker_launch_hooks(memories)
+
+    try:
+        assert hooks.on_before_run is not None
+        assert hooks.on_started is not None
+        assert hooks.on_finished is not None
+        hooks.on_before_run(run.thread_id)
+        hooks.on_started(run)
+        payload = link_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            source_observation_id=first["observation_id"],
+            target_observation_id=second["observation_id"],
+            reason="Updated rationale for the existing relation.",
+        )
+        hooks.on_finished(run)
+
+        assert payload["linked"] is True
+        assert worker_activity.observation_linker_status().relations_linked == 0
+    finally:
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
     memories = tmp_path / "memories"
     observation = record_observation_file(

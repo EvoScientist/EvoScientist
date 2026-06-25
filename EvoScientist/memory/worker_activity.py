@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import Literal
 
 from .observations.store import read_observation_document, related_observation_entries
+from .types import ObservationRelation
 
 MemoryActivityPhase = Literal["worker", "linker"]
-ObservationRelationKey = tuple[str, str, str, str]
+ObservationRelationKey = tuple[str, str, ObservationRelation]
 ObservationRelationSnapshot = frozenset[ObservationRelationKey]
+_SYMMETRIC_OBSERVATION_RELATIONS = frozenset(
+    {ObservationRelation.COMPLEMENTS, ObservationRelation.CONTRADICTS}
+)
 
 
 @dataclass(frozen=True)
@@ -97,13 +101,12 @@ def _observation_relation_key(
     *,
     source_id: str,
     target_id: str,
-    relation: str,
-    reason: str,
+    relation: ObservationRelation,
 ) -> ObservationRelationKey:
-    if relation in {"complements", "contradicts"}:
+    if relation in _SYMMETRIC_OBSERVATION_RELATIONS:
         left, right = sorted((source_id, target_id))
-        return (left, right, relation, reason)
-    return (source_id, target_id, relation, reason)
+        return (left, right, relation)
+    return (source_id, target_id, relation)
 
 
 def snapshot_observation_relations(
@@ -127,16 +130,13 @@ def snapshot_observation_relations(
             continue
         for item in related_observation_entries(metadata):
             target_id = item.id.strip()
-            relation = item.relation.value
-            reason = item.reason.strip()
-            if not target_id or not relation:
+            if not target_id:
                 continue
             relation_keys.add(
                 _observation_relation_key(
                     source_id=source_id,
                     target_id=target_id,
-                    relation=relation,
-                    reason=reason,
+                    relation=item.relation,
                 )
             )
     return frozenset(relation_keys)
