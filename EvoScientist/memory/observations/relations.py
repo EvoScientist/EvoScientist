@@ -2,37 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-import yaml
-
 from ..types import ObservationRelation
-from .store import observation_document_by_id
-
-
-def _related_observation_entries(
-    metadata: Mapping[str, object],
-) -> list[dict[str, str]]:
-    value = metadata.get("related_observations")
-    if not isinstance(value, list):
-        return []
-
-    entries: list[dict[str, str]] = []
-    for item in value:
-        if not isinstance(item, Mapping):
-            continue
-        related_id = str(item.get("id") or "").strip()
-        if not related_id:
-            continue
-        entry = {"id": related_id}
-        for key in ("relation", "reason", "linked_at", "linked_by"):
-            field_value = item.get(key)
-            if isinstance(field_value, str) and field_value.strip():
-                entry[key] = field_value.strip()
-        entries.append(entry)
-    return entries
+from .store import (
+    ObservationFrontmatter,
+    RelatedObservationEntry,
+    observation_document_by_id,
+    related_observation_entries,
+    write_observation_document,
+)
 
 
 def _relation_value(value: ObservationRelation | str) -> str:
@@ -48,15 +28,15 @@ def _can_write_reverse_relation(relation: str) -> bool:
 
 
 def _upsert_related_observation(
-    metadata: dict[str, object],
+    metadata: ObservationFrontmatter,
     *,
     target_observation_id: str,
     relation: str,
     reason: str,
     linked_at: str,
 ) -> bool:
-    entries = _related_observation_entries(metadata)
-    new_entry = {
+    entries = related_observation_entries(metadata)
+    new_entry: RelatedObservationEntry = {
         "id": target_observation_id,
         "relation": relation,
         "reason": reason,
@@ -65,9 +45,11 @@ def _upsert_related_observation(
     for index, entry in enumerate(entries):
         if entry["id"] != target_observation_id:
             continue
-        comparable = {key: entry.get(key) for key in ("id", "relation", "reason")}
-        expected = {key: new_entry[key] for key in ("id", "relation", "reason")}
-        if comparable == expected:
+        if (
+            entry["id"] == new_entry["id"]
+            and entry["relation"] == new_entry["relation"]
+            and entry["reason"] == new_entry["reason"]
+        ):
             return False
         entries[index] = new_entry
         metadata["related_observations"] = entries
@@ -76,20 +58,6 @@ def _upsert_related_observation(
     entries.append(new_entry)
     metadata["related_observations"] = entries
     return True
-
-
-def _write_observation_document(
-    path: Path,
-    *,
-    metadata: Mapping[str, object],
-    body: str,
-) -> None:
-    frontmatter = yaml.safe_dump(
-        dict(metadata),
-        allow_unicode=True,
-        sort_keys=False,
-    )
-    path.write_text(f"---\n{frontmatter}---\n{body}", encoding="utf-8")
 
 
 def link_observation_files(
@@ -145,7 +113,7 @@ def link_observation_files(
         }
 
     linked_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    updates: list[tuple[str, Path, dict[str, object], str]] = []
+    updates: list[tuple[str, Path, ObservationFrontmatter, str]] = []
     assert source_document is not None
     source_path, source_metadata, source_body = source_document
     if _upsert_related_observation(
@@ -170,7 +138,7 @@ def link_observation_files(
             updates.append((target_id, target_path, target_metadata, target_body))
 
     for _observation_id, path, metadata, body in updates:
-        _write_observation_document(path, metadata=metadata, body=body)
+        write_observation_document(path, metadata=metadata, body=body)
 
     return {
         "linked": bool(updates),

@@ -10,11 +10,15 @@ from ..types import (
 from .relations import link_observation_files
 from .store import (
     OBSERVATION_DIR,
+    ObservationFrontmatter,
+    RelatedObservationEntry,
     observation_document_by_id,
+    read_observation_document,
     read_observation_file,
     read_observation_id_from_path,
     record_observation_file,
     search_observation_files,
+    write_observation_document,
 )
 from .tools import (
     LinkObservationsArgs,
@@ -33,10 +37,12 @@ __all__ = [
     "MemoryScope",
     "MemorySourceType",
     "MemoryType",
+    "ObservationFrontmatter",
     "ObservationRelation",
     "ObservationSearchMode",
     "ReadMemoryArgs",
     "RecordObservationArgs",
+    "RelatedObservationEntry",
     "SearchObservationsArgs",
     "create_link_observations_tool",
     "create_read_memory_tool",
@@ -44,8 +50,10 @@ __all__ = [
     "create_search_observations_tool",
     "link_observation_files",
     "observation_document_by_id",
+    "read_observation_document",
     "read_observation_file",
     "read_observation_id_from_path",
     "record_observation_file",
     "search_observation_files",
+    "write_observation_document",
 ]

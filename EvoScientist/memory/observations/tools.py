@@ -313,11 +313,10 @@ def create_read_memory_tool(
                 ensure_ascii=False,
                 sort_keys=True,
             )
-        return json.dumps(
-            {"text": result["text"]},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        payload: dict[str, object] = {"text": result["text"]}
+        if "related_observations" in result:
+            payload["related_observations"] = result["related_observations"]
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
     return StructuredTool.from_function(
         func=_read_memory,

@@ -372,6 +372,94 @@ def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
     datetime.strptime(first_links[0]["linked_at"], "%Y-%m-%dT%H:%M:%SZ")
 
 
+def test_read_and_search_surface_related_observations(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Gateway memory workers preserve launch metadata.",
+        observation="Use the gateway service when launching memory workers.",
+        why_it_matters="Future launchers should reuse the same async-run plumbing.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    target = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Observation links should be visible during retrieval.",
+        observation="Related observations need to surface in memory tool results.",
+        why_it_matters="Future agents can use existing links without parsing YAML.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=source["observation_id"],
+        target_observation_id=target["observation_id"],
+        relation=ObservationRelation.COMPLEMENTS,
+        reason="Launch metadata and retrieval visibility describe the same memory pipeline.",
+    )
+    expected_related = [
+        {
+            "observation_id": target["observation_id"],
+            "path": target["path"],
+            "memory_type": MemoryType.SEMANTIC,
+            "scope": MemoryScope.PROJECT,
+            "summary": "Observation links should be visible during retrieval.",
+            "relation": ObservationRelation.COMPLEMENTS,
+            "reason": (
+                "Launch metadata and retrieval visibility describe the same "
+                "memory pipeline."
+            ),
+        }
+    ]
+
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        observation_id=source["observation_id"],
+    )
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="gateway memory workers launch metadata",
+    )
+
+    assert read is not None
+    assert read["related_observations"] == expected_related
+    assert hits[0]["observation_id"] == source["observation_id"]
+    assert hits[0]["related_observations"] == expected_related
+
+    read_tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
+    read_payload = json.loads(
+        read_tool.run({"observation_id": source["observation_id"]})
+    )
+    search_tool = create_search_observations_tool(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    search_payload = json.loads(
+        search_tool.run({"query": "gateway memory workers launch metadata"})
+    )
+    expected_json_related = [
+        {
+            **expected_related[0],
+            "memory_type": "semantic",
+            "scope": "project",
+            "relation": "complements",
+        }
+    ]
+    assert read_payload["related_observations"] == expected_json_related
+    assert search_payload["results"][0]["related_observations"] == expected_json_related
+
+
 def test_link_observation_files_keeps_supersedes_directional(tmp_path):
     memories = tmp_path / "memories"
     source = record_observation_file(

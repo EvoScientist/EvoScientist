@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import yaml
+from .observations.store import read_observation_document, related_observation_entries
 
 MemoryActivityPhase = Literal["worker", "linker"]
 ObservationRelationKey = tuple[str, str, str, str]
@@ -92,24 +92,6 @@ def _relative_memory_path(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _observation_frontmatter(path: Path) -> dict[str, object]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    if not text.startswith("---\n"):
-        return {}
-    try:
-        frontmatter, _body = text[4:].split("\n---", 1)
-    except ValueError:
-        return {}
-    try:
-        loaded = yaml.safe_load(frontmatter) or {}
-    except yaml.YAMLError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
 def _observation_relation_key(
     *,
     source_id: str,
@@ -135,20 +117,17 @@ def snapshot_observation_relations(
     for path in observation_root.rglob("*.md"):
         if not path.is_file():
             continue
-        metadata = _observation_frontmatter(path)
-        source_id_value = metadata.get("id")
-        source_id = str(source_id_value or path.stem).strip()
+        document = read_observation_document(path)
+        if document is None:
+            continue
+        metadata, _body = document
+        source_id = metadata["id"].strip()
         if not source_id:
             continue
-        related = metadata.get("related_observations")
-        if not isinstance(related, list):
-            continue
-        for item in related:
-            if not isinstance(item, Mapping):
-                continue
-            target_id = str(item.get("id") or "").strip()
-            relation = str(item.get("relation") or "").strip()
-            reason = str(item.get("reason") or "").strip()
+        for item in related_observation_entries(metadata):
+            target_id = item["id"].strip()
+            relation = item["relation"].strip()
+            reason = item["reason"].strip()
             if not target_id or not relation:
                 continue
             relation_keys.add(

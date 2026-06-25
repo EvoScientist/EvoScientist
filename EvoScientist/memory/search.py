@@ -201,6 +201,8 @@ def _regex_search_documents(
                 pattern=pattern,
             ),
         }
+        if document.related_observations:
+            hit["related_observations"] = list(document.related_observations)
         hits.append(hit)
         if len(hits) >= limit:
             break
@@ -253,6 +255,8 @@ def _ranked_search_documents(
             ),
             "score": round(score, 2),
         }
+        if document.related_observations:
+            hit["related_observations"] = list(document.related_observations)
         hits.append(hit)
     return hits
 

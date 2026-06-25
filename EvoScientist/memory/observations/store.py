@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 import yaml
 
@@ -23,12 +25,29 @@ from ..types import (
     MemoryType,
     ObservationReadResult,
     ObservationRecordResult,
+    ObservationRelation,
     ObservationSearchDocument,
     ObservationSearchHit,
     ObservationSearchMode,
+    RelatedObservationResult,
 )
 
 OBSERVATION_DIR = "/observations"
+
+
+class RelatedObservationEntry(TypedDict):
+    id: str
+    relation: str
+    reason: str
+    linked_at: str
+
+
+class ObservationFrontmatter(TypedDict):
+    id: str
+    summary: str
+    memory_type: str
+    scope: str
+    related_observations: NotRequired[list[RelatedObservationEntry]]
 
 
 def _normalize(text: str) -> str:
@@ -78,32 +97,58 @@ def _json_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _read_observation_document(path: Path) -> tuple[dict[str, object], str] | None:
+def read_observation_document(
+    path: str | Path,
+) -> tuple[ObservationFrontmatter, str] | None:
     """Read an observation markdown document and parse its frontmatter."""
+    document_path = Path(path).expanduser()
     try:
-        text = path.read_text(encoding="utf-8")
+        text = document_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     if not text.startswith("---\n"):
         return None
     try:
         frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
-        metadata = yaml.safe_load(frontmatter)
+        metadata: ObservationFrontmatter = yaml.safe_load(frontmatter)
     except (ValueError, yaml.YAMLError):
         return None
     if not isinstance(metadata, dict):
         return None
-    return {key: value for key, value in metadata.items() if isinstance(key, str)}, body
+    return metadata, body
+
+
+def write_observation_document(
+    path: str | Path,
+    *,
+    metadata: ObservationFrontmatter,
+    body: str,
+) -> None:
+    """Write an observation markdown document with frontmatter."""
+    frontmatter = yaml.safe_dump(
+        dict(metadata),
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    Path(path).write_text(f"---\n{frontmatter}---\n{body}", encoding="utf-8")
 
 
 def read_observation_id_from_path(path: str | Path) -> str | None:
     """Read an observation id from a concrete markdown file path."""
-    document = _read_observation_document(Path(path).expanduser())
+    document = read_observation_document(path)
     if document is None:
         return None
     metadata, _body = document
-    observation_id = str(metadata.get("id") or "").strip()
-    return observation_id or None
+    return metadata["id"].strip()
+
+
+def related_observation_entries(
+    metadata: ObservationFrontmatter,
+) -> list[RelatedObservationEntry]:
+    """Return related-observation frontmatter entries."""
+    if "related_observations" not in metadata:
+        return []
+    return list(metadata["related_observations"])
 
 
 def _observation_files(
@@ -130,6 +175,75 @@ def _observation_files(
     return paths
 
 
+def _resolve_related_observations(
+    entries: list[RelatedObservationEntry],
+    *,
+    documents_by_id: dict[str, ObservationSearchDocument],
+) -> tuple[RelatedObservationResult, ...]:
+    related_observations: list[RelatedObservationResult] = []
+    for entry in entries:
+        related_id = entry["id"]
+        if related_id not in documents_by_id:
+            continue
+        target = documents_by_id[related_id]
+        related: RelatedObservationResult = {
+            "observation_id": target.observation_id,
+            "path": target.path,
+            "memory_type": target.memory_type,
+            "scope": target.scope,
+            "summary": target.summary,
+            "relation": ObservationRelation(entry["relation"]),
+            "reason": entry["reason"],
+        }
+        related_observations.append(related)
+    return tuple(related_observations)
+
+
+def _parse_observation_search_document(
+    *,
+    root: Path,
+    path: Path,
+) -> tuple[ObservationSearchDocument, list[RelatedObservationEntry]] | None:
+    document = read_observation_document(path)
+    if document is None:
+        return None
+    metadata, body = document
+    try:
+        record_type = MemoryType(metadata["memory_type"])
+        record_scope = MemoryScope(metadata["scope"])
+        memory_path = "/" + path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+    return (
+        ObservationSearchDocument(
+            observation_id=metadata["id"],
+            path=_agent_path(memory_path),
+            memory_type=record_type,
+            scope=record_scope,
+            summary=metadata["summary"],
+            body=body,
+        ),
+        related_observation_entries(metadata),
+    )
+
+
+def _resolve_document_links(
+    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
+) -> list[ObservationSearchDocument]:
+    documents_by_id = {document.observation_id: document for document, _ in parsed}
+    return [
+        replace(
+            document,
+            related_observations=_resolve_related_observations(
+                entries,
+                documents_by_id=documents_by_id,
+            ),
+        )
+        for document, entries in parsed
+    ]
+
+
 def _candidate_observation_documents(
     *,
     memory_dir: str | Path,
@@ -138,51 +252,24 @@ def _candidate_observation_documents(
     memory_type: MemoryType | None = None,
 ) -> list[ObservationSearchDocument]:
     """Read candidate observations for the current filters."""
-    documents: list[ObservationSearchDocument] = []
+    root = Path(memory_dir).expanduser()
+    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
     for path in _observation_files(
-        memory_dir=memory_dir,
+        memory_dir=root,
         project_id=project_id,
         scope=scope,
     ):
-        document = _read_observation_document(path)
-        if document is None:
-            continue
-        metadata, body = document
-        observation_id = str(metadata.get("id") or "").strip()
-        summary = str(metadata.get("summary") or "").strip()
-        memory_type_value = str(metadata.get("memory_type") or "").strip()
-        scope_value = str(metadata.get("scope") or "").strip()
-        if (
-            not observation_id
-            or not summary
-            or not memory_type_value
-            or not scope_value
-        ):
-            continue
-        try:
-            record_type = MemoryType(memory_type_value)
-            record_scope = MemoryScope(scope_value)
-        except ValueError:
-            continue
-        if memory_type is not None and record_type != memory_type:
-            continue
+        parsed_document = _parse_observation_search_document(root=root, path=path)
+        if parsed_document is not None:
+            parsed.append(parsed_document)
 
-        try:
-            memory_path = (
-                "/" + path.relative_to(Path(memory_dir).expanduser()).as_posix()
-            )
-        except ValueError:
-            continue
-        documents.append(
-            ObservationSearchDocument(
-                observation_id=observation_id,
-                path=_agent_path(memory_path),
-                memory_type=record_type,
-                scope=record_scope,
-                summary=summary,
-                body=body,
-            )
-        )
+    # Resolve links before filtering by memory_type so a procedural hit can still
+    # surface a linked semantic observation, and vice versa.
+    documents = _resolve_document_links(parsed)
+    if memory_type is not None:
+        return [
+            document for document in documents if document.memory_type == memory_type
+        ]
     return documents
 
 
@@ -228,40 +315,31 @@ def read_observation_file(
         return None
 
     root = Path(memory_dir).expanduser()
-    for path in _observation_files(
+    for document in _candidate_observation_documents(
         memory_dir=root,
         project_id=project_id,
         scope=None,
     ):
-        document = _read_observation_document(path)
-        if document is None:
+        if document.observation_id != requested_id:
             continue
-        metadata, _body = document
-        record_id = str(metadata.get("id") or "").strip()
-        if record_id != requested_id:
-            continue
-
-        summary = str(metadata.get("summary") or "").strip()
-        memory_type_value = str(metadata.get("memory_type") or "").strip()
-        scope_value = str(metadata.get("scope") or "").strip()
-        if not summary or not memory_type_value or not scope_value:
-            return None
+        memory_path = document.path.removeprefix("/memories/")
+        path = root / memory_path
         try:
-            memory_type = MemoryType(memory_type_value)
-            scope = MemoryScope(scope_value)
-            memory_path = "/" + path.relative_to(root).as_posix()
             text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError, ValueError):
+        except (OSError, UnicodeDecodeError):
             return None
 
-        return {
-            "observation_id": record_id,
-            "path": _agent_path(memory_path),
-            "memory_type": memory_type,
-            "scope": scope,
-            "summary": summary,
+        result: ObservationReadResult = {
+            "observation_id": document.observation_id,
+            "path": document.path,
+            "memory_type": document.memory_type,
+            "scope": document.scope,
+            "summary": document.summary,
             "text": text,
         }
+        if document.related_observations:
+            result["related_observations"] = list(document.related_observations)
+        return result
     return None
 
 
@@ -270,7 +348,7 @@ def observation_document_by_id(
     memory_dir: str | Path,
     project_id: str,
     observation_id: str,
-) -> tuple[Path, dict[str, object], str] | None:
+) -> tuple[Path, ObservationFrontmatter, str] | None:
     """Return the stored document tuple for one observation id."""
     requested_id = observation_id.strip()
     if not requested_id:
@@ -282,11 +360,11 @@ def observation_document_by_id(
         project_id=project_id,
         scope=None,
     ):
-        document = _read_observation_document(path)
+        document = read_observation_document(path)
         if document is None:
             continue
         metadata, body = document
-        if str(metadata.get("id") or "").strip() == requested_id:
+        if metadata["id"] == requested_id:
             return path, metadata, body
     return None
 

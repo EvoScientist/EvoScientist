@@ -55,6 +55,18 @@ class ObservationRecordResult(TypedDict):
     project_id: NotRequired[str]
 
 
+class RelatedObservationResult(TypedDict):
+    """One resolved observation relationship exposed to memory tools."""
+
+    observation_id: str
+    path: str
+    memory_type: MemoryType
+    scope: MemoryScope
+    summary: str
+    relation: NotRequired[ObservationRelation]
+    reason: NotRequired[str]
+
+
 @dataclass(frozen=True)
 class ObservationSearchDocument:
     """Parsed observation document ready for search."""
@@ -65,6 +77,7 @@ class ObservationSearchDocument:
     scope: MemoryScope
     summary: str
     body: str
+    related_observations: tuple[RelatedObservationResult, ...] = ()
 
 
 class ObservationSearchHit(TypedDict):
@@ -76,6 +89,7 @@ class ObservationSearchHit(TypedDict):
     scope: MemoryScope
     summary: str
     matches: list[str]
+    related_observations: NotRequired[list[RelatedObservationResult]]
     score: NotRequired[float]
 
 
@@ -88,3 +102,4 @@ class ObservationReadResult(TypedDict):
     scope: MemoryScope
     summary: str
     text: str
+    related_observations: NotRequired[list[RelatedObservationResult]]
