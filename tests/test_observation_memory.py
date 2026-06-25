@@ -2640,6 +2640,49 @@ def test_memory_pipeline_waits_for_observation_linker():
     assert waiting_phases == ["linker", "linker"]
 
 
+def test_memory_pipeline_waits_while_observation_linker_is_launching(tmp_path):
+    worker_activity.reset_memory_worker_status_for_tests()
+    entered_launch = threading.Event()
+    release_launch = threading.Event()
+    waiting_phases: list[worker_activity.MemoryActivityPhase] = []
+
+    def launch_linker(_context: memory_scheduler.ObservationLinkerContext):
+        entered_launch.set()
+        release_launch.wait(timeout=5)
+
+    def on_waiting(phase: worker_activity.MemoryActivityPhase) -> None:
+        waiting_phases.append(phase)
+        release_launch.set()
+
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launch_linker)
+    coordinator.record_observation_created(
+        memory_scheduler.ObservationLinkerContext(
+            memory_dir=tmp_path / "memories",
+            workspace_dir=tmp_path / "workspace",
+            project_id="P-project",
+            observation_ids=("O-1",),
+        )
+    )
+    flush_thread = threading.Thread(target=coordinator.flush_ready)
+    flush_thread.start()
+
+    try:
+        assert entered_launch.wait(timeout=1)
+        waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+            timeout_seconds=1,
+            poll_seconds=0.01,
+            output_grace_seconds=0,
+            on_waiting=on_waiting,
+        )
+
+        assert waited_until_idle is True
+        assert waiting_phases == ["linker"]
+    finally:
+        release_launch.set()
+        flush_thread.join(timeout=1)
+        worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_memory_pipeline_wait_gives_linker_its_own_timeout_after_worker():
     now = 0.0
     timed_out_phases = []

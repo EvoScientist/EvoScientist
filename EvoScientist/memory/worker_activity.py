@@ -69,6 +69,7 @@ class _ActiveMemoryWorker:
 
 _active_runs: dict[tuple[str, str], _ActiveMemoryWorker] = {}
 _active_linker_runs: dict[tuple[str, str], ObservationRelationSnapshot] = {}
+_linker_launches_in_progress = 0
 _active_lock = threading.Lock()
 _profile_updates = 0
 _observations_recorded = 0
@@ -211,7 +212,7 @@ def memory_worker_status() -> MemoryWorkerStatusSnapshot:
 def observation_linker_status() -> ObservationLinkerStatusSnapshot:
     with _active_lock:
         return ObservationLinkerStatusSnapshot(
-            is_running=bool(_active_linker_runs),
+            is_running=bool(_active_linker_runs) or _linker_launches_in_progress > 0,
             relations_linked=_relations_linked,
         )
 
@@ -384,6 +385,20 @@ def mark_observation_linker_started(
         _active_linker_runs[(thread_id, run_id)] = before_relations or frozenset()
 
 
+def mark_observation_linker_launch_started() -> None:
+    global _linker_launches_in_progress
+
+    with _active_lock:
+        _linker_launches_in_progress += 1
+
+
+def mark_observation_linker_launch_finished() -> None:
+    global _linker_launches_in_progress
+
+    with _active_lock:
+        _linker_launches_in_progress = max(0, _linker_launches_in_progress - 1)
+
+
 def mark_observation_relations_linked(count: int) -> None:
     global _relations_linked
 
@@ -450,11 +465,13 @@ def mark_memory_worker_finished(
 
 
 def reset_memory_worker_status_for_tests() -> None:
+    global _linker_launches_in_progress
     global _observations_recorded, _profile_updates, _relations_linked
 
     with _active_lock:
         _active_runs.clear()
         _active_linker_runs.clear()
+        _linker_launches_in_progress = 0
         _counted_profile_versions.clear()
         _counted_observation_files.clear()
         _profile_updates = 0

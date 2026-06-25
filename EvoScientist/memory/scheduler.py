@@ -11,7 +11,12 @@ from typing import NamedTuple
 
 from ..gateway.background_runs import BackgroundRun
 from .observations import read_observation_id_from_path
-from .worker_activity import MemoryOutputDelta, has_active_memory_workers
+from .worker_activity import (
+    MemoryOutputDelta,
+    has_active_memory_workers,
+    mark_observation_linker_launch_finished,
+    mark_observation_linker_launch_started,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +84,13 @@ class MemoryScheduler:
         contexts: tuple[ObservationLinkerContext, ...],
     ) -> None:
         for context in contexts:
+            mark_observation_linker_launch_started()
             try:
                 self._launch_linker(context)
             except Exception:
                 logger.warning("Failed to launch observation linker", exc_info=True)
+            finally:
+                mark_observation_linker_launch_finished()
 
     def _observation_ids_for_paths(
         self,
