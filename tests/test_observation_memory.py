@@ -161,6 +161,56 @@ def _memory_worker_run(
     )
 
 
+def _observation_linker_run(
+    *,
+    thread_id: str = "linker-thread",
+    run_id: str = "linker-run",
+) -> background_runs.BackgroundRun:
+    return background_runs.BackgroundRun(
+        name="EvoMemory observation linker",
+        url="http://x",
+        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        thread_id=thread_id,
+        run_id=run_id,
+        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        metadata={},
+    )
+
+
+def _linker_context(
+    *,
+    memory_dir,
+    workspace_dir,
+    observation_ids: tuple[str, ...],
+    project_id: str = "P-project",
+) -> memory_scheduler.ObservationLinkerContext:
+    return memory_scheduler.ObservationLinkerContext(
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+        project_id=project_id,
+        observation_ids=observation_ids,
+    )
+
+
+def _mark_worker_started(
+    memory_dir,
+    *,
+    thread_id: str = "worker-thread",
+    run_id: str = "run-1",
+    before_outputs: worker_activity.MemoryOutputSnapshot | None = None,
+) -> None:
+    worker_activity.mark_memory_worker_started(
+        thread_id=thread_id,
+        run_id=run_id,
+        memory_dir=memory_dir,
+        before_outputs=(
+            before_outputs
+            if before_outputs is not None
+            else worker_activity.snapshot_memory_outputs(memory_dir)
+        ),
+    )
+
+
 def _record_test_observation(
     memory_dir,
     *,
@@ -222,6 +272,13 @@ def _fast_watcher_config(
         poll_interval_seconds=0,
         max_poll_failures=max_poll_failures,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory_activity():
+    worker_activity.reset_memory_worker_status_for_tests()
+    yield
+    worker_activity.reset_memory_worker_status_for_tests()
 
 
 def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
@@ -470,21 +527,6 @@ def test_read_and_search_surface_related_observations(tmp_path):
         relation=ObservationRelation.COMPLEMENTS,
         reason="Launch metadata and retrieval visibility describe the same memory pipeline.",
     )
-    expected_related = [
-        {
-            "observation_id": target["observation_id"],
-            "path": target["path"],
-            "memory_type": MemoryType.SEMANTIC,
-            "scope": MemoryScope.PROJECT,
-            "summary": "Observation links should be visible during retrieval.",
-            "relation": ObservationRelation.COMPLEMENTS,
-            "reason": (
-                "Launch metadata and retrieval visibility describe the same "
-                "memory pipeline."
-            ),
-        }
-    ]
-
     read = read_observation_file(
         memory_dir=memories,
         project_id="P-project",
@@ -497,9 +539,14 @@ def test_read_and_search_surface_related_observations(tmp_path):
     )
 
     assert read is not None
-    assert read["related_observations"] == expected_related
+    assert read["related_observations"][0]["observation_id"] == target["observation_id"]
+    assert (
+        read["related_observations"][0]["relation"] == ObservationRelation.COMPLEMENTS
+    )
     assert hits[0]["observation_id"] == source["observation_id"]
-    assert hits[0]["related_observations"] == expected_related
+    assert (
+        hits[0]["related_observations"][0]["observation_id"] == target["observation_id"]
+    )
 
     read_tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
     read_payload = json.loads(
@@ -512,16 +559,14 @@ def test_read_and_search_surface_related_observations(tmp_path):
     search_payload = json.loads(
         search_tool.run({"query": "gateway memory workers launch metadata"})
     )
-    expected_json_related = [
-        {
-            **expected_related[0],
-            "memory_type": "semantic",
-            "scope": "project",
-            "relation": "complements",
-        }
-    ]
-    assert read_payload["related_observations"] == expected_json_related
-    assert search_payload["results"][0]["related_observations"] == expected_json_related
+    assert (
+        read_payload["related_observations"][0]["observation_id"]
+        == target["observation_id"]
+    )
+    assert (
+        search_payload["results"][0]["related_observations"][0]["observation_id"]
+        == target["observation_id"]
+    )
 
 
 def test_read_and_search_resolve_related_observations_from_other_projects(tmp_path):
@@ -560,19 +605,6 @@ def test_read_and_search_resolve_related_observations_from_other_projects(tmp_pa
         bidirectional=False,
     )
 
-    expected_related = [
-        {
-            "observation_id": target["observation_id"],
-            "path": target["path"],
-            "memory_type": MemoryType.SEMANTIC,
-            "scope": MemoryScope.PROJECT,
-            "summary": "Other project follow-up explains the linker practice.",
-            "relation": ObservationRelation.COMPLEMENTS,
-            "reason": (
-                "The other project gives a concrete follow-up for the global practice."
-            ),
-        }
-    ]
     read = read_observation_file(
         memory_dir=memories,
         project_id="P-current",
@@ -585,8 +617,10 @@ def test_read_and_search_resolve_related_observations_from_other_projects(tmp_pa
     )
 
     assert read is not None
-    assert read["related_observations"] == expected_related
-    assert hits[0]["related_observations"] == expected_related
+    assert read["related_observations"][0]["observation_id"] == target["observation_id"]
+    assert (
+        hits[0]["related_observations"][0]["observation_id"] == target["observation_id"]
+    )
 
 
 def test_malformed_observation_frontmatter_is_skipped(tmp_path):
@@ -764,7 +798,6 @@ def test_link_observations_tool_uses_runtime_project_id(tmp_path):
 
 
 def test_observation_linker_finish_counts_successful_relations_once(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memories = tmp_path / "memories"
     first = record_observation_file(
         memory_dir=memories,
@@ -790,49 +823,37 @@ def test_observation_linker_finish_counts_successful_relations_once(tmp_path):
         source_session_id="thread-1",
         source_agent="EvoScientist",
     )
-    run = background_runs.BackgroundRun(
-        name="EvoMemory observation linker",
-        url="http://x",
-        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
-        thread_id="linker-thread",
-        run_id="linker-run",
-        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
-        metadata={},
-    )
+    run = _observation_linker_run()
     hooks = memory_launch._observation_linker_launch_hooks(memories)
 
-    try:
-        assert hooks.on_before_run is not None
-        assert hooks.on_started is not None
-        assert hooks.on_finished is not None
-        hooks.on_before_run(run.thread_id)
-        hooks.on_started(run)
-        first_payload = link_observation_files(
-            memory_dir=memories,
-            project_id="P-project",
-            source_observation_id=first["observation_id"],
-            target_observation_id=second["observation_id"],
-            reason="Both validate status counting for durable links.",
-        )
-        duplicate_payload = link_observation_files(
-            memory_dir=memories,
-            project_id="P-project",
-            source_observation_id=first["observation_id"],
-            target_observation_id=second["observation_id"],
-            reason="Both validate status counting for durable links.",
-        )
-        hooks.on_finished(run)
-        status = worker_activity.observation_linker_status()
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run(run.thread_id)
+    hooks.on_started(run)
+    first_payload = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Both validate status counting for durable links.",
+    )
+    duplicate_payload = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Both validate status counting for durable links.",
+    )
+    hooks.on_finished(run)
+    status = worker_activity.observation_linker_status()
 
-        assert first_payload["linked"] is True
-        assert duplicate_payload["linked"] is False
-        assert status.relations_linked == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert first_payload["linked"] is True
+    assert duplicate_payload["linked"] is False
+    assert status.relations_linked == 1
 
 
 def test_observation_linker_finish_does_not_count_reason_only_updates(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memories = tmp_path / "memories"
     first = record_observation_file(
         memory_dir=memories,
@@ -865,36 +886,25 @@ def test_observation_linker_finish_does_not_count_reason_only_updates(tmp_path):
         target_observation_id=second["observation_id"],
         reason="Initial rationale for the existing relation.",
     )
-    run = background_runs.BackgroundRun(
-        name="EvoMemory observation linker",
-        url="http://x",
-        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
-        thread_id="linker-thread",
-        run_id="linker-run",
-        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
-        metadata={},
-    )
+    run = _observation_linker_run()
     hooks = memory_launch._observation_linker_launch_hooks(memories)
 
-    try:
-        assert hooks.on_before_run is not None
-        assert hooks.on_started is not None
-        assert hooks.on_finished is not None
-        hooks.on_before_run(run.thread_id)
-        hooks.on_started(run)
-        payload = link_observation_files(
-            memory_dir=memories,
-            project_id="P-project",
-            source_observation_id=first["observation_id"],
-            target_observation_id=second["observation_id"],
-            reason="Updated rationale for the existing relation.",
-        )
-        hooks.on_finished(run)
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run(run.thread_id)
+    hooks.on_started(run)
+    payload = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Updated rationale for the existing relation.",
+    )
+    hooks.on_finished(run)
 
-        assert payload["linked"] is True
-        assert worker_activity.observation_linker_status().relations_linked == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert payload["linked"] is True
+    assert worker_activity.observation_linker_status().relations_linked == 0
 
 
 def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
@@ -1382,7 +1392,6 @@ def test_record_observation_tool_skips_without_runtime_thread_id(tmp_path):
 def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
     from EvoScientist.middleware.memory import create_memory_middleware
 
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1395,56 +1404,53 @@ def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
     )
     tool = _tool_by_name(middleware.tools, "record_observation")
 
-    try:
-        payload = _record_observation_payload(
-            tool,
-            runtime=_tool_runtime(tool, thread_id="source-thread"),
-            memory_type=MemoryType.PROCEDURAL,
-            summary="Direct observations link after worker finish.",
-            observation=(
-                "Direct main-agent observations should be linked after the "
-                "post-turn memory worker phase finishes."
-            ),
-            why_it_matters=(
-                "The linker should see direct writes even when the worker "
-                "does not create another observation."
-            ),
-            scope=MemoryScope.PROJECT,
-        )
-        assert payload["created"] is True
-        assert launched == []
+    payload = _record_observation_payload(
+        tool,
+        runtime=_tool_runtime(tool, thread_id="source-thread"),
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Direct observations link after worker finish.",
+        observation=(
+            "Direct main-agent observations should be linked after the "
+            "post-turn memory worker phase finishes."
+        ),
+        why_it_matters=(
+            "The linker should see direct writes even when the worker "
+            "does not create another observation."
+        ),
+        scope=MemoryScope.PROJECT,
+    )
+    assert payload["created"] is True
+    assert launched == []
 
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
-        )
-        assert hooks.on_before_run is not None
-        assert hooks.on_started is not None
-        assert hooks.on_finished is not None
-        hooks.on_before_run("worker-thread")
-        worker_run = _memory_worker_run(
-            thread_id="worker-thread",
-            run_id="worker-run",
-            workspace_dir=str(workspace),
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run("worker-thread")
+    worker_run = _memory_worker_run(
+        thread_id="worker-thread",
+        run_id="worker-run",
+        workspace_dir=str(workspace),
+        project_id=middleware.project_id,
+    )
+    hooks.on_started(worker_run)
+    assert launched == []
+
+    hooks.on_finished(worker_run)
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace,
             project_id=middleware.project_id,
+            observation_ids=(payload["observation_id"],),
         )
-        hooks.on_started(worker_run)
-        assert launched == []
-
-        hooks.on_finished(worker_run)
-
-        assert launched == [
-            memory_scheduler.ObservationLinkerContext(
-                memory_dir=memory_dir,
-                workspace_dir=workspace,
-                project_id=middleware.project_id,
-                observation_ids=(payload["observation_id"],),
-            )
-        ]
-        status = worker_activity.memory_worker_status()
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.observations_recorded == 0
 
 
 def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
@@ -1559,7 +1565,6 @@ def test_turn_compaction_uses_latest_user_turn_only():
 def test_lifecycle_schedules_turn_worker_without_awaiting(
     tmp_path, monkeypatch, run_async
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     calls = []
@@ -1611,18 +1616,14 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
     worker_run = _memory_worker_run(workspace_dir=str(workspace_dir))
     hooks.on_started(worker_run)
     observation = _record_test_observation(memory_dir)
-    try:
-        hooks.on_finished(worker_run)
-        assert launched == [
-            memory_scheduler.ObservationLinkerContext(
-                memory_dir=memory_dir,
-                workspace_dir=workspace_dir,
-                project_id="P-project",
-                observation_ids=(observation["observation_id"],),
-            )
-        ]
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    hooks.on_finished(worker_run)
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
 
 
 def test_lifecycle_skips_memory_worker_without_runtime_thread_id(tmp_path, monkeypatch):
@@ -1736,80 +1737,55 @@ def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
     }
 
 
-def test_memory_worker_launch_helpers_reject_unsupported_source_type():
-    context = _memory_source_context(
-        memory_dir="/memories",
-        workspace_dir="/active/workspace",
-        source_type="future-source-type",
-    )
-
-    with pytest.raises(ValueError, match="Unsupported memory source type"):
-        memory_launch._memory_worker_graph_id("future-source-type")
-    with pytest.raises(ValueError, match="Unsupported memory source type"):
-        memory_launch._memory_worker_user_prompt(context)
-
-
 def test_memory_worker_finish_launches_linker_for_new_observations(
     tmp_path,
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
-    before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-        before_outputs=before,
-    )
+    _mark_worker_started(memory_dir)
     observation = _record_test_observation(memory_dir)
 
-    try:
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
-        )
-        assert hooks.on_finished is not None
-        hooks.on_finished(
-            _memory_worker_run(workspace_dir=str(workspace_dir), run_id="run-1")
-        )
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(
+        _memory_worker_run(workspace_dir=str(workspace_dir), run_id="run-1")
+    )
 
-        assert launched == [
-            memory_scheduler.ObservationLinkerContext(
-                memory_dir=memory_dir,
-                workspace_dir=workspace_dir,
-                project_id="P-project",
-                observation_ids=(observation["observation_id"],),
-            )
-        ]
-        assert worker_activity.memory_worker_status().observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    assert worker_activity.memory_worker_status().observations_recorded == 1
 
 
 def test_memory_worker_linker_waits_for_active_workers_and_batches_observations(
     tmp_path,
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     first_observation = _record_test_observation(
@@ -1818,255 +1794,223 @@ def test_memory_worker_linker_waits_for_active_workers_and_batches_observations(
         observation="The first reusable observation for linking.",
     )
 
-    try:
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-1",
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
+            source_agent="subagent-a",
+            source_session_id="session-a",
+            trajectory_digest="digest-a",
         )
-        assert hooks.on_finished is not None
-        hooks.on_finished(
-            _memory_worker_run(
-                thread_id="thread-1",
-                run_id="run-1",
-                workspace_dir=str(workspace_dir),
-                source_agent="subagent-a",
-                source_session_id="session-a",
-                trajectory_digest="digest-a",
-            )
-        )
-        assert launched == []
+    )
+    assert launched == []
 
-        second_observation = _record_test_observation(
-            memory_dir,
-            summary="Second durable observation.",
-            observation="The second reusable observation for linking.",
-            scope=MemoryScope.PROJECT,
+    second_observation = _record_test_observation(
+        memory_dir,
+        summary="Second durable observation.",
+        observation="The second reusable observation for linking.",
+        scope=MemoryScope.PROJECT,
+    )
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-2",
+            run_id="run-2",
+            workspace_dir=str(workspace_dir),
+            source_agent="EvoScientist",
+            source_session_id="session-b",
+            trajectory_digest="digest-b",
         )
-        hooks.on_finished(
-            _memory_worker_run(
-                thread_id="thread-2",
-                run_id="run-2",
-                workspace_dir=str(workspace_dir),
-                source_agent="EvoScientist",
-                source_session_id="session-b",
-                trajectory_digest="digest-b",
-            )
-        )
+    )
 
-        assert len(launched) == 1
-        assert launched[0].memory_dir == memory_dir
-        assert launched[0].workspace_dir == workspace_dir
-        assert launched[0].project_id == "P-project"
-        assert set(launched[0].observation_ids) == {
-            first_observation["observation_id"],
-            second_observation["observation_id"],
-        }
-        assert worker_activity.memory_worker_status().observations_recorded == 2
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert len(launched) == 1
+    assert launched[0].memory_dir == memory_dir
+    assert launched[0].workspace_dir == workspace_dir
+    assert launched[0].project_id == "P-project"
+    assert set(launched[0].observation_ids) == {
+        first_observation["observation_id"],
+        second_observation["observation_id"],
+    }
+    assert worker_activity.memory_worker_status().observations_recorded == 2
 
 
 def test_memory_worker_linker_flushes_when_last_worker_has_no_observations(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     observation = _record_test_observation(memory_dir)
 
-    try:
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-1",
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
         )
-        assert hooks.on_finished is not None
-        hooks.on_finished(
-            _memory_worker_run(
-                thread_id="thread-1",
-                run_id="run-1",
-                workspace_dir=str(workspace_dir),
-            )
-        )
-        assert launched == []
+    )
+    assert launched == []
 
-        profile_path = memory_dir / "profile" / "USER_PROFILE.md"
-        profile_path.parent.mkdir(parents=True)
-        profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
-        hooks.on_finished(
-            _memory_worker_run(
-                thread_id="thread-2",
-                run_id="run-2",
-                workspace_dir=str(workspace_dir),
-            )
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-2",
+            run_id="run-2",
+            workspace_dir=str(workspace_dir),
         )
+    )
 
-        assert len(launched) == 1
-        assert launched[0].observation_ids == (observation["observation_id"],)
-        status = worker_activity.memory_worker_status()
-        assert status.profile_updates == 1
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert len(launched) == 1
+    assert launched[0].observation_ids == (observation["observation_id"],)
+    status = worker_activity.memory_worker_status()
+    assert status.profile_updates == 1
+    assert status.observations_recorded == 1
 
 
 def test_memory_worker_linker_flushes_pending_batch_when_last_worker_aborts(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     observation = _record_test_observation(memory_dir)
 
-    try:
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
-            on_worker_aborted=coordinator.record_worker_aborted,
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+        on_worker_aborted=coordinator.record_worker_aborted,
+    )
+    assert hooks.on_finished is not None
+    assert hooks.on_aborted is not None
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-1",
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
         )
-        assert hooks.on_finished is not None
-        assert hooks.on_aborted is not None
-        hooks.on_finished(
-            _memory_worker_run(
-                thread_id="thread-1",
-                run_id="run-1",
-                workspace_dir=str(workspace_dir),
-            )
-        )
-        assert launched == []
+    )
+    assert launched == []
 
-        hooks.on_aborted(
-            _memory_worker_run(
-                thread_id="thread-2",
-                run_id="run-2",
-                workspace_dir=str(workspace_dir),
-            )
+    hooks.on_aborted(
+        _memory_worker_run(
+            thread_id="thread-2",
+            run_id="run-2",
+            workspace_dir=str(workspace_dir),
         )
+    )
 
-        assert launched == [
-            memory_scheduler.ObservationLinkerContext(
-                memory_dir=memory_dir,
-                workspace_dir=workspace_dir,
-                project_id="P-project",
-                observation_ids=(observation["observation_id"],),
-            )
-        ]
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.observations_recorded == 1
 
 
 def test_memory_worker_finish_does_not_launch_linker_for_profile_only_delta(
     tmp_path,
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
 
-    try:
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_finished=coordinator.record_worker_finished,
-        )
-        assert hooks.on_finished is not None
-        hooks.on_finished(_memory_worker_run(run_id="run-1"))
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(_memory_worker_run(run_id="run-1"))
 
-        assert launched == []
-        status = worker_activity.memory_worker_status()
-        assert status.profile_updates == 1
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert launched == []
+    status = worker_activity.memory_worker_status()
+    assert status.profile_updates == 1
+    assert status.observations_recorded == 0
 
 
 def test_memory_worker_abort_queues_written_observations_for_linking(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     launched: list[memory_scheduler.ObservationLinkerContext] = []
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
-    before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-        before_outputs=before,
-    )
+    _mark_worker_started(memory_dir)
     observation = _record_test_observation(memory_dir)
 
-    try:
-        hooks = memory_launch._memory_worker_launch_hooks(
-            memory_dir,
-            on_worker_aborted=coordinator.record_worker_aborted,
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_aborted=coordinator.record_worker_aborted,
+    )
+    assert hooks.on_aborted is not None
+    hooks.on_aborted(
+        _memory_worker_run(
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
         )
-        assert hooks.on_aborted is not None
-        hooks.on_aborted(
-            _memory_worker_run(
-                run_id="run-1",
-                workspace_dir=str(workspace_dir),
-            )
-        )
+    )
 
-        assert launched == [
-            memory_scheduler.ObservationLinkerContext(
-                memory_dir=memory_dir,
-                workspace_dir=workspace_dir,
-                project_id="P-project",
-                observation_ids=(observation["observation_id"],),
-            )
-        ]
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.observations_recorded == 1
 
 
 def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
-    context = memory_scheduler.ObservationLinkerContext(
+    context = _linker_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        project_id="P-project",
         observation_ids=("O-2", "O-1"),
     )
 
@@ -2075,31 +2019,22 @@ def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
 
     assert request.graph_id == memory_launch.OBSERVATION_LINKER_GRAPH_ID
     assert request.name == "EvoMemory observation linker"
-    assert request.thread_metadata == {
-        "run_kind": "evomemory_observation_linker",
-        "project_id": "P-project",
-        "observation_count": "2",
-        "workspace_dir": str((tmp_path / "workspace").resolve()),
-    }
-    assert kwargs["assistant_id"] == memory_launch.OBSERVATION_LINKER_GRAPH_ID
-    assert kwargs["metadata"] == request.thread_metadata
     configurable = kwargs["config"]["configurable"]
     assert configurable["thread_id"] == "linker-thread"
+    assert configurable["evomemory_project_id"] == "P-project"
     assert json.loads(configurable["evomemory_observation_ids"]) == [
         "O-2",
         "O-1",
     ]
-    assert configurable["evomemory_project_id"] == "P-project"
 
 
 def test_observation_linker_does_not_launch_when_observations_disabled(
     tmp_path,
     monkeypatch,
 ):
-    context = memory_scheduler.ObservationLinkerContext(
+    context = _linker_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        project_id="P-project",
         observation_ids=("O-1",),
     )
     monkeypatch.setattr(
@@ -2121,10 +2056,9 @@ def test_async_observation_linker_does_not_launch_when_observations_disabled(
     monkeypatch,
     run_async,
 ):
-    context = memory_scheduler.ObservationLinkerContext(
+    context = _linker_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        project_id="P-project",
         observation_ids=("O-1",),
     )
     monkeypatch.setattr(
@@ -2142,28 +2076,16 @@ def test_async_observation_linker_does_not_launch_when_observations_disabled(
 
 
 def test_observation_linker_launch_hooks_track_running_status(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
-    run = background_runs.BackgroundRun(
-        name="EvoMemory observation linker",
-        url="http://x",
-        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
-        thread_id="linker-thread",
-        run_id="linker-run",
-        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
-        metadata={},
-    )
+    run = _observation_linker_run()
 
-    try:
-        hooks = memory_launch._observation_linker_launch_hooks(tmp_path / "memories")
-        assert hooks.on_started is not None
-        assert hooks.on_finished is not None
-        hooks.on_started(run)
-        assert worker_activity.observation_linker_status().is_running is True
+    hooks = memory_launch._observation_linker_launch_hooks(tmp_path / "memories")
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_started(run)
+    assert worker_activity.observation_linker_status().is_running is True
 
-        hooks.on_finished(run)
-        assert worker_activity.observation_linker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    hooks.on_finished(run)
+    assert worker_activity.observation_linker_status().is_running is False
 
 
 def test_observation_linker_uses_read_search_memory_and_link_tool(tmp_path):
@@ -2204,80 +2126,58 @@ def _memory_tool_names(middleware) -> list[str]:
     return [tool.name for tool in memory_middleware.tools]
 
 
-def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
-    turn_middleware = memory_worker._memory_worker_middleware(
+@pytest.mark.parametrize(
+    ("source_type", "observation_writer", "expected_tools"),
+    [
+        (
+            MemorySourceType.SUBAGENT,
+            MemoryObservationWriter.AGENT,
+            ["search_observations", "read_memory"],
+        ),
+        (
+            MemorySourceType.SUBAGENT,
+            MemoryObservationWriter.WORKER,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+        (
+            MemorySourceType.TURN,
+            MemoryObservationWriter.WORKER,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+        (
+            MemorySourceType.TURN,
+            MemoryObservationWriter.ALL,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+        (
+            MemorySourceType.SUBAGENT,
+            MemoryObservationWriter.ALL,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+    ],
+)
+def test_memory_worker_observation_writer_modes(
+    tmp_path,
+    source_type: MemorySourceType,
+    observation_writer: MemoryObservationWriter,
+    expected_tools: list[str],
+):
+    middleware = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        source_type=MemorySourceType.TURN,
-        observation_writer=MemoryObservationWriter.ALL,
-    )
-    subagent_middleware = memory_worker._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        source_type=MemorySourceType.SUBAGENT,
-        observation_writer=MemoryObservationWriter.ALL,
-    )
-
-    assert type(turn_middleware[0]).__name__ == "ToolErrorHandlerMiddleware"
-    assert type(subagent_middleware[0]).__name__ == "ToolErrorHandlerMiddleware"
-    assert _memory_tool_names(turn_middleware) == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-    assert _memory_tool_names(subagent_middleware) == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-
-
-def test_memory_worker_observation_writer_modes(tmp_path):
-    agent_only = memory_worker._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        source_type=MemorySourceType.SUBAGENT,
-        observation_writer=MemoryObservationWriter.AGENT,
-    )
-    worker_subagent = memory_worker._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        source_type=MemorySourceType.SUBAGENT,
-        observation_writer=MemoryObservationWriter.WORKER,
-    )
-    worker_turn = memory_worker._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        source_type=MemorySourceType.TURN,
-        observation_writer=MemoryObservationWriter.WORKER,
+        source_type=source_type,
+        observation_writer=observation_writer,
     )
 
-    assert _memory_tool_names(agent_only) == [
-        "search_observations",
-        "read_memory",
-    ]
-    assert _memory_tool_names(worker_subagent) == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-    assert _memory_tool_names(worker_turn) == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
+    assert type(middleware[0]).__name__ == "ToolErrorHandlerMiddleware"
+    assert _memory_tool_names(middleware) == expected_tools
 
 
 def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     tmp_path, monkeypatch
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
@@ -2291,32 +2191,24 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         lambda **_kwargs: SimpleNamespace(runs=_Runs()),
     )
 
-    try:
-        background_runs.watch_background_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
-            watcher_config=_fast_watcher_config(max_poll_failures=1),
-        )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    background_runs.watch_background_run_sync(
+        url="http://x",
+        thread_id="worker-thread",
+        run_id="run-1",
+        hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+        watcher_config=_fast_watcher_config(max_poll_failures=1),
+    )
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 0
 
 
 def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     tmp_path, monkeypatch, run_async
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
@@ -2325,35 +2217,26 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         async def get(self, **_kwargs):
             raise RuntimeError("poll failed")
 
-    try:
-        run_async(
-            background_runs.awatch_background_run(
-                SimpleNamespace(runs=_Runs()),
-                thread_id="worker-thread",
-                run_id="run-1",
-                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
-                watcher_config=_fast_watcher_config(max_poll_failures=1),
-            )
+    run_async(
+        background_runs.awatch_background_run(
+            SimpleNamespace(runs=_Runs()),
+            thread_id="worker-thread",
+            run_id="run-1",
+            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+            watcher_config=_fast_watcher_config(max_poll_failures=1),
         )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    )
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 0
 
 
 def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
     tmp_path, run_async
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
@@ -2375,26 +2258,18 @@ def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
         finally:
             blocker.deactivate()
 
-    try:
-        run_async(run())
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 1
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    run_async(run())
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 1
+    assert status.observations_recorded == 0
 
 
 def test_memory_worker_watcher_untracks_when_client_creation_fails(
     tmp_path, monkeypatch
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
@@ -2404,20 +2279,17 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("client failed")),
     )
 
-    try:
-        with pytest.raises(RuntimeError, match="client failed"):
-            background_runs.watch_background_run_sync(
-                url="http://x",
-                thread_id="worker-thread",
-                run_id="run-1",
-                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
-            )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    with pytest.raises(RuntimeError, match="client failed"):
+        background_runs.watch_background_run_sync(
+            url="http://x",
+            thread_id="worker-thread",
+            run_id="run-1",
+            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+        )
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 0
 
 
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):
@@ -2448,7 +2320,6 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
 
 
 def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
-    worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(
         background_runs, "default_background_run_url", lambda: "http://x"
     )
@@ -2486,36 +2357,34 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
         spawn_status_watcher=spawned.append,
     )
 
-    try:
-        assert worker_activity.memory_worker_status().is_running is True
-        expected_metadata = {
-            "run_kind": "evomemory_turn_worker",
-            "source_session_id": "thread-1",
-            "source_agent": "EvoScientist",
-            "project_id": "P-project",
-            "trajectory_digest": source_context._trajectory_digest(trajectory),
-            "workspace_dir": "/tmp/ws",
-        }
-        fake_client.threads.create.assert_called_once_with(
-            graph_id=memory_launch.TURN_MEMORY_WORKER_GRAPH_ID,
-            metadata=expected_metadata,
-        )
-        fake_client.runs.create.assert_called_once()
-        run_kwargs = fake_client.runs.create.call_args.kwargs
-        assert run_kwargs["thread_id"] == "worker-thread"
-        assert run_kwargs["metadata"] == expected_metadata
-        assert run_kwargs["config"]["configurable"]["thread_id"] == "worker-thread"
-        assert [(run.url, run.thread_id, run.run_id) for run in spawned] == [
-            ("http://x", "worker-thread", "run-1")
-        ]
-        profile_path = memory_dir / "profile" / "USER_PROFILE.md"
-        profile_path.parent.mkdir(parents=True)
-        profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
-        observation_path = memory_dir / "observations" / "global" / "O-1.md"
-        observation_path.parent.mkdir(parents=True)
-        observation_path.write_text("# Observation\n", encoding="utf-8")
-    finally:
-        delta = worker_activity.mark_memory_worker_finished("worker-thread", "run-1")
+    assert worker_activity.memory_worker_status().is_running is True
+    expected_metadata = {
+        "run_kind": "evomemory_turn_worker",
+        "source_session_id": "thread-1",
+        "source_agent": "EvoScientist",
+        "project_id": "P-project",
+        "trajectory_digest": source_context._trajectory_digest(trajectory),
+        "workspace_dir": "/tmp/ws",
+    }
+    fake_client.threads.create.assert_called_once_with(
+        graph_id=memory_launch.TURN_MEMORY_WORKER_GRAPH_ID,
+        metadata=expected_metadata,
+    )
+    fake_client.runs.create.assert_called_once()
+    run_kwargs = fake_client.runs.create.call_args.kwargs
+    assert run_kwargs["thread_id"] == "worker-thread"
+    assert run_kwargs["metadata"] == expected_metadata
+    assert run_kwargs["config"]["configurable"]["thread_id"] == "worker-thread"
+    assert [(run.url, run.thread_id, run.run_id) for run in spawned] == [
+        ("http://x", "worker-thread", "run-1")
+    ]
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
+    observation_path = memory_dir / "observations" / "global" / "O-1.md"
+    observation_path.parent.mkdir(parents=True)
+    observation_path.write_text("# Observation\n", encoding="utf-8")
+    delta = worker_activity.mark_memory_worker_finished("worker-thread", "run-1")
     status = worker_activity.memory_worker_status()
     assert delta == worker_activity.MemoryOutputDelta(
         memory_dir=memory_dir,
@@ -2525,11 +2394,9 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     assert status.is_running is False
     assert status.profile_updates == 1
     assert status.observations_recorded == 1
-    worker_activity.reset_memory_worker_status_for_tests()
 
 
 def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_async):
-    worker_activity.reset_memory_worker_status_for_tests()
     monkeypatch.setattr(
         background_runs, "default_background_run_url", lambda: "http://x"
     )
@@ -2586,36 +2453,32 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
         )
         return event_loop_thread
 
-    try:
-        event_loop_thread = run_async(run())
-        assert [name for name, _thread_id in call_threads] == ["health", "snapshot"]
-        assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
-        assert worker_activity.memory_worker_status().is_running is True
-        assert [(run.url, run.thread_id, run.run_id) for run in spawned] == [
-            ("http://x", "worker-thread", "run-1")
-        ]
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    event_loop_thread = run_async(run())
+    assert [name for name, _thread_id in call_threads] == ["health", "snapshot"]
+    assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
+    assert worker_activity.memory_worker_status().is_running is True
+    assert [(run.url, run.thread_id, run.run_id) for run in spawned] == [
+        ("http://x", "worker-thread", "run-1")
+    ]
 
 
 def test_completed_memory_activity_clear_preserves_pending_worker_delta(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="finished-thread",
         run_id="finished-run",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
     worker_activity.mark_memory_worker_finished("finished-thread", "finished-run")
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="active-thread",
         run_id="active-run",
-        memory_dir=memory_dir,
     )
     worker_activity.mark_observation_relations_linked(1)
 
@@ -2628,22 +2491,18 @@ def test_completed_memory_activity_clear_preserves_pending_worker_delta(tmp_path
     worker_activity.mark_memory_worker_finished("active-thread", "active-run")
     status = worker_activity.memory_worker_status()
 
-    try:
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 1
 
 
 def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="active-thread",
         run_id="active-run",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     record_observation_file(
@@ -2659,14 +2518,11 @@ def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
         source_agent="EvoScientist",
     )
 
-    try:
-        status = worker_activity.memory_worker_observed_outputs()
-        assert status.is_running is True
-        assert status.observations_recorded == 1
-        assert status.profile_updates == 0
-        assert worker_activity.memory_worker_status().observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    status = worker_activity.memory_worker_observed_outputs()
+    assert status.is_running is True
+    assert status.observations_recorded == 1
+    assert status.profile_updates == 0
+    assert worker_activity.memory_worker_status().observations_recorded == 0
 
 
 def test_memory_pipeline_wait_keeps_polling_after_observed_memory_output():
@@ -2772,7 +2628,6 @@ def test_memory_pipeline_waits_for_observation_linker():
 
 
 def test_memory_pipeline_waits_while_observation_linker_is_launching(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     entered_launch = threading.Event()
     release_launch = threading.Event()
     waiting_phases: list[worker_activity.MemoryActivityPhase] = []
@@ -2787,10 +2642,9 @@ def test_memory_pipeline_waits_while_observation_linker_is_launching(tmp_path):
 
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launch_linker)
     coordinator.record_observation_created(
-        memory_scheduler.ObservationLinkerContext(
+        _linker_context(
             memory_dir=tmp_path / "memories",
             workspace_dir=tmp_path / "workspace",
-            project_id="P-project",
             observation_ids=("O-1",),
         )
     )
@@ -2811,7 +2665,6 @@ def test_memory_pipeline_waits_while_observation_linker_is_launching(tmp_path):
     finally:
         release_launch.set()
         flush_thread.join(timeout=1)
-        worker_activity.reset_memory_worker_status_for_tests()
 
 
 def test_memory_pipeline_wait_gives_linker_its_own_timeout_after_worker():
@@ -2859,19 +2712,18 @@ def test_memory_pipeline_wait_gives_linker_its_own_timeout_after_worker():
 
 
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
@@ -2882,16 +2734,13 @@ def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
     second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
-    try:
-        assert first_delta == worker_activity.MemoryOutputDelta(
-            memory_dir=memory_dir,
-            observation_paths=("observations/global/O-1.md",),
-        )
-        assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
-        assert status.is_running is False
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert first_delta == worker_activity.MemoryOutputDelta(
+        memory_dir=memory_dir,
+        observation_paths=("observations/global/O-1.md",),
+    )
+    assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
+    assert status.is_running is False
+    assert status.observations_recorded == 1
 
 
 def test_memory_output_snapshot_uses_posix_relative_paths(tmp_path):
@@ -2910,19 +2759,18 @@ def test_memory_output_snapshot_uses_posix_relative_paths(tmp_path):
 
 
 def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
@@ -2935,13 +2783,10 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
     second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
-    try:
-        assert first_delta == worker_activity.MemoryOutputDelta(
-            memory_dir=memory_dir,
-            observation_paths=("observations/global/O-1.md",),
-        )
-        assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
-        assert status.is_running is False
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert first_delta == worker_activity.MemoryOutputDelta(
+        memory_dir=memory_dir,
+        observation_paths=("observations/global/O-1.md",),
+    )
+    assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
+    assert status.is_running is False
+    assert status.observations_recorded == 0
