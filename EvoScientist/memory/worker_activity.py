@@ -88,6 +88,10 @@ def _file_digest(path: Path) -> str | None:
         return None
 
 
+def _relative_memory_path(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
 def _observation_frontmatter(path: Path) -> dict[str, object]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -170,13 +174,13 @@ def snapshot_memory_outputs(memory_dir: str | Path) -> MemoryOutputSnapshot:
                 continue
             digest = _file_digest(path)
             if digest is not None:
-                profile_files[str(path.relative_to(root))] = digest
+                profile_files[_relative_memory_path(path, root)] = digest
 
     observation_files: set[str] = set()
     if observation_root.exists():
         for path in observation_root.rglob("*.md"):
             if path.is_file():
-                observation_files.add(str(path.relative_to(root)))
+                observation_files.add(_relative_memory_path(path, root))
 
     return MemoryOutputSnapshot(
         profile_files=profile_files,

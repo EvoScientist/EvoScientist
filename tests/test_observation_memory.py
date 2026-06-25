@@ -2431,6 +2431,21 @@ def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
         worker_activity.reset_memory_worker_status_for_tests()
 
 
+def test_memory_output_snapshot_uses_posix_relative_paths(tmp_path):
+    memory_dir = tmp_path / "memories"
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n", encoding="utf-8")
+    observation_path = memory_dir / "observations" / "global" / "O-1.md"
+    observation_path.parent.mkdir(parents=True)
+    observation_path.write_text("# Observation\n", encoding="utf-8")
+
+    snapshot = worker_activity.snapshot_memory_outputs(memory_dir)
+
+    assert set(snapshot.profile_files) == {"profile/USER_PROFILE.md"}
+    assert snapshot.observation_files == frozenset({"observations/global/O-1.md"})
+
+
 def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
     worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
