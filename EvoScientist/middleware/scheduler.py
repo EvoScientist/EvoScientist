@@ -30,19 +30,14 @@ _CACHE_TTL_SECONDS = 15.0
 _SCHEDULING_INSTRUCTIONS = """<scheduling_instructions>
 When the user asks for something on a recurring schedule ("every 10 minutes",
 "each morning at 7"), translate the timing into a 5-field cron expression and
-call `schedule_task(name, cron, prompt, timezone)`. Absolute clock times use the
-host's local timezone by default; pass an explicit IANA `timezone` only to
-schedule in a different zone. The `prompt` must be a
-complete, self-contained instruction — the background scheduler has no chat
-history and no default output location. Spell out the task fully AND name an
+call `schedule_task(name, cron, prompt, timezone)`. The `prompt` must be a
+complete, self-contained instruction. Spell out the task fully AND name an
 explicit destination for its result, e.g. "...and save the summary to
 `/memories/daily-papers.md`" or "...and append the status to `experiment_log.json`"
 or "...and update my research memory". It can use skills (e.g.
 `paper-navigator`) and the workspace; a task that never says where to put its
 output leaves no trace. Use `list_scheduled_tasks` / `cancel_scheduled_task` to
-manage them. Scheduled tasks run only while an
-EvoScientist backend is alive. Active schedules (if any) are listed in the
-<scheduled_tasks> block below.
+manage them.
 </scheduling_instructions>"""
 
 

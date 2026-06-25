@@ -431,6 +431,23 @@ def test_format_batch_message_multiple():
     assert "check_async_task" in msg.lower()  # hint to LLM
 
 
+def test_format_batch_message_unknown_kind_uses_fallback_hint():
+    """A batch with only unrecognized kinds must not emit an empty hint join."""
+    notifs = [
+        async_notifier.AsyncTaskNotification(
+            task_id="t1",
+            agent_name="x",
+            status="success",
+            received_at="2026-05-07T12:00:00Z",
+            prompt="A",
+            kind="weird",
+        )
+    ]
+    msg = format_batch_message(notifs)
+    assert "the appropriate status tool" in msg
+    assert "via  " not in msg  # no empty " or ".join(hints)
+
+
 def test_dedup_preserves_order():
     """dedup_notifications preserves the original order of notifications."""
     notifs = [
