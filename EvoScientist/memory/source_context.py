@@ -196,11 +196,11 @@ def _trajectory_for_prompt(trajectory: list[CompactMessage]) -> str:
     return _pretty_json(trajectory)
 
 
-def _runtime_thread_id(runtime: Runtime | None) -> str:
+def _runtime_thread_id(runtime: Runtime | None) -> str | None:
     """Return the active LangGraph thread id when available."""
     if runtime and runtime.execution_info and runtime.execution_info.thread_id:
         return str(runtime.execution_info.thread_id)
-    raise RuntimeError("memory source context requires a runtime thread id")
+    return None
 
 
 def _short_hash(text: str) -> str:
@@ -220,6 +220,8 @@ def build_memory_source_context(
 ) -> MemorySourceContext | None:
     """Capture the current source run as a reusable memory context."""
     session_id = _runtime_thread_id(runtime)
+    if session_id is None:
+        return None
     if source_type == MemorySourceType.TURN:
         trajectory = _compact_turn_messages(
             _state_messages(state),

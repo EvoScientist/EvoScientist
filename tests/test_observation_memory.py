@@ -1012,6 +1012,37 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
     }
 
 
+def test_record_observation_tool_skips_without_runtime_thread_id(tmp_path):
+    from EvoScientist.middleware.memory import create_memory_middleware
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+    middleware = create_memory_middleware(
+        str(tmp_path / "memories"),
+        workspace_dir=workspace,
+        memory_scheduler=coordinator,
+    )
+    tool = _tool_by_name(middleware.tools, "record_observation")
+
+    payload = _record_observation_payload(
+        tool,
+        runtime=_tool_runtime(tool),
+        memory_type=MemoryType.SEMANTIC,
+        summary="Unthreaded observations are skipped.",
+        observation="Observation recording needs source session provenance.",
+        why_it_matters="Durable memory should not persist unknown source sessions.",
+        scope=MemoryScope.GLOBAL,
+    )
+
+    assert payload == {
+        "error": "Cannot record observation without a source session id.",
+    }
+    assert launched == []
+    assert list((tmp_path / "memories").glob("observations/**/*.md")) == []
+
+
 def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
     from EvoScientist.middleware.memory import create_memory_middleware
 
@@ -1256,6 +1287,25 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
         ]
     finally:
         worker_activity.reset_memory_worker_status_for_tests()
+
+
+def test_lifecycle_skips_memory_worker_without_runtime_thread_id(tmp_path, monkeypatch):
+    def fail_launch(*_args, **_kwargs):
+        raise AssertionError("worker should not launch without a source thread id")
+
+    monkeypatch.setattr(memory_lifecycle, "launch_memory_worker", fail_launch)
+    middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        source_type=MemorySourceType.TURN,
+        source_agent="EvoScientist",
+    )
+
+    middleware.after_agent(
+        {"messages": [HumanMessage("hi"), AIMessage("done", name="EvoScientist")]},
+        _runtime(),
+    )
 
 
 def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):

@@ -201,7 +201,7 @@ def _runtime_config_value(runtime: ToolRuntime | None, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _runtime_session_id(runtime: ToolRuntime | None) -> str:
+def _runtime_session_id(runtime: ToolRuntime | None) -> str | None:
     """Extract the source thread id from tool runtime metadata when present."""
     source_session_id = _runtime_config_value(runtime, "evomemory_source_session_id")
     if source_session_id:
@@ -212,7 +212,7 @@ def _runtime_session_id(runtime: ToolRuntime | None) -> str:
         thread_id = _runtime_config_value(runtime, "thread_id")
         if thread_id:
             return thread_id
-    raise RuntimeError("record_observation requires a source session id")
+    return None
 
 
 def _resolve_observation_context(
@@ -220,11 +220,14 @@ def _resolve_observation_context(
     *,
     project_id: str,
     source_agent: str,
-) -> _ObservationContext:
+) -> _ObservationContext | None:
     """Resolve required observation metadata from fixed values and runtime."""
+    source_session_id = _runtime_session_id(runtime)
+    if source_session_id is None:
+        return None
     return _ObservationContext(
         project_id=_runtime_config_value(runtime, "evomemory_project_id") or project_id,
-        source_session_id=_runtime_session_id(runtime),
+        source_session_id=source_session_id,
         source_agent=_runtime_config_value(runtime, "evomemory_source_agent")
         or source_agent,
     )
@@ -353,6 +356,14 @@ def create_record_observation_tool(
             project_id=project_id,
             source_agent=source_agent,
         )
+        if context is None:
+            return json.dumps(
+                {
+                    "error": "Cannot record observation without a source session id.",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         result = record_observation_file(
             memory_dir=memory_dir,
             project_id=context.project_id,
