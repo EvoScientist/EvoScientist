@@ -621,6 +621,7 @@ def spawn_background_run_status_task(
     task = asyncio.create_task(
         awatch_background_run(
             client,
+            url=run.url,
             thread_id=run.thread_id,
             run_id=run.run_id,
             graph_id=run.graph_id,
@@ -638,6 +639,7 @@ def spawn_background_run_status_task(
 async def awatch_background_run(
     client: AsyncLangGraphClient,
     *,
+    url: str = "",
     thread_id: str,
     run_id: str,
     graph_id: str = "",
@@ -652,7 +654,7 @@ async def awatch_background_run(
     watcher_config = watcher_config or BackgroundRunWatcherConfig()
     run_ref = BackgroundRun(
         name=name,
-        url="",
+        url=url,
         graph_id=graph_id,
         thread_id=thread_id,
         run_id=run_id,

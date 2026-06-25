@@ -288,3 +288,34 @@ def test_async_status_watcher_aborts_and_deletes_thread_on_error_status():
     assert finished == []
     assert [run.run_id for run in aborted] == ["run-1"]
     assert deleted == ["thread-1"]
+
+
+def test_async_status_watcher_preserves_run_url():
+    finished: list[background_runs.BackgroundRun] = []
+
+    class _Runs:
+        async def get(self, **_kwargs):
+            return {"status": "success"}
+
+    class _Threads:
+        async def delete(self, _thread_id: str):
+            return None
+
+    async def run() -> None:
+        await background_runs.awatch_background_run(
+            SimpleNamespace(runs=_Runs(), threads=_Threads()),
+            url="http://worker.example",
+            thread_id="thread-1",
+            run_id="run-1",
+            name="test worker",
+            hooks=background_runs.BackgroundRunHooks(
+                on_finished=finished.append,
+            ),
+            watcher_config=background_runs.BackgroundRunWatcherConfig(
+                poll_interval_seconds=0,
+            ),
+        )
+
+    asyncio.run(run())
+
+    assert [run.url for run in finished] == ["http://worker.example"]
