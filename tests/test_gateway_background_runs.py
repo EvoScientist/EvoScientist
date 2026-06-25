@@ -70,6 +70,47 @@ def test_launch_background_run_submits_run_and_invokes_hooks(monkeypatch):
     )
 
 
+def test_launch_background_run_routes_watcher_start_failure_to_hook(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+        lambda **_kwargs: True,
+    )
+    fake_client = MagicMock()
+    fake_client.threads.create.return_value = {"thread_id": "thread-1"}
+    fake_client.runs.create.return_value = {"run_id": "run-1", "status": "pending"}
+    monkeypatch.setattr("langgraph_sdk.get_sync_client", lambda **_kwargs: fake_client)
+
+    request = background_runs.BackgroundRunRequest(
+        graph_id="graph-1",
+        run_payload=lambda thread_id: {
+            "assistant_id": "graph-1",
+            "input": {"messages": []},
+            "metadata": {},
+            "config": {"configurable": {"thread_id": thread_id}},
+        },
+        url="http://x",
+        name="test worker",
+    )
+    watcher_failures: list[background_runs.BackgroundRun] = []
+    aborted: list[background_runs.BackgroundRun] = []
+
+    def fail_to_start_watcher(_run: background_runs.BackgroundRun) -> None:
+        raise RuntimeError("watcher failed")
+
+    handle = background_runs.launch_background_run(
+        request,
+        hooks=background_runs.BackgroundRunHooks(
+            on_watcher_start_failed=watcher_failures.append,
+            on_aborted=aborted.append,
+        ),
+        spawn_status_watcher=fail_to_start_watcher,
+    )
+
+    assert handle is not None
+    assert watcher_failures == [handle]
+    assert aborted == []
+
+
 def test_launch_background_run_deletes_thread_when_run_creation_fails(monkeypatch):
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
@@ -252,6 +293,44 @@ def test_sync_status_watcher_aborts_without_deleting_on_poll_failure(monkeypatch
 
     assert finished == []
     assert [run.run_id for run in aborted] == ["run-1"]
+    assert deleted == []
+
+
+def test_sync_status_watcher_routes_poll_failure_to_status_unknown(monkeypatch):
+    status_unknown: list[background_runs.BackgroundRun] = []
+    aborted: list[background_runs.BackgroundRun] = []
+    deleted: list[str] = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            raise RuntimeError("poll failed")
+
+    class _Threads:
+        def delete(self, thread_id: str):
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+
+    background_runs.watch_background_run_sync(
+        url="http://x",
+        thread_id="thread-1",
+        run_id="run-1",
+        name="test worker",
+        hooks=background_runs.BackgroundRunHooks(
+            on_status_unknown=status_unknown.append,
+            on_aborted=aborted.append,
+        ),
+        watcher_config=background_runs.BackgroundRunWatcherConfig(
+            poll_interval_seconds=0,
+            max_poll_failures=1,
+        ),
+    )
+
+    assert [run.run_id for run in status_unknown] == ["run-1"]
+    assert aborted == []
     assert deleted == []
 
 
