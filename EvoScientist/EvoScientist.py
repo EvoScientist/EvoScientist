@@ -668,6 +668,7 @@ def _get_default_middleware(
         create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_runtime_context_middleware,
+        create_scheduler_middleware,
         create_tool_selector_middleware,
         load_fallback_chain,
     )
@@ -734,8 +735,10 @@ def _get_default_middleware(
             timeout=cfg.code_interpreter_timeout,
             max_result_chars=cfg.code_interpreter_max_result_chars,
         ),
-        create_runtime_context_middleware(),
     ]
+    if cfg.enable_scheduler and not for_async_subagent:
+        mw.append(create_scheduler_middleware())
+    mw.append(create_runtime_context_middleware())
     if memory_controls.memory_enabled:
         mw.append(memory_middleware)
     if memory_controls.worker_needed(worker_target):

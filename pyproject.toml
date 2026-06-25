@@ -39,6 +39,7 @@ dependencies = [
     "lazy-loader>=0.5",
     "markdownify>=1.2",
     "nest-asyncio>=1.6",
+    "tzlocal>=5.0",
     "langchain-mcp-adapters>=0.2",
     # <8.2.7: 8.2.7 Kitty "report-all-keys" breaks CJK input on iTerm2
     "textual>=8.0,<8.2.7",

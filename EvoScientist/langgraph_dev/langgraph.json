@@ -4,6 +4,7 @@
         "EvoScientist": "EvoScientist.langgraph_dev.main_graph:EvoScientist_agent",
         "writing-agent": "EvoScientist.langgraph_dev.graphs:writing_agent",
         "data-analysis-agent": "EvoScientist.langgraph_dev.graphs:data_analysis_agent",
+        "scheduler": "EvoScientist.langgraph_dev.graphs:scheduler",
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
         "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker"
     },

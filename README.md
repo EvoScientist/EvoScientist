@@ -176,6 +176,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - [📦 Installation](#-installation)
 - [🔑 Configuration](#-configuration)
 - [⚡ Quick Start](#-quick-start)
+- [⏰ Scheduled Tasks](#-scheduled-tasks)
 - [🍪 Examples & Recipes](#-examples--recipes)
 - [🔌 MCP Integration](#-mcp-integration)
 - [📱 Channels](#-channels)
@@ -535,6 +536,31 @@ for state in EvoScientist_agent.stream(
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 
+## ⏰ Scheduled Tasks
+
+Automate recurring research tasks with cron-style schedules.
+
+```bash
+# Add a schedule (cron expression required for /schedule add)
+/schedule add "0 9 * * 1-5" "Summarise the latest ML papers from arXiv with the paper-navigator skill, and save the summary to /memories/daily-papers.md"
+/schedule add "*/10 * * * *" "Check my running experiment's status and append the result to experiment_log.json"
+
+# Manage schedules
+/schedule list           # list active schedules
+/schedule remove <id>    # delete a schedule
+/schedule run <id>       # fire a schedule immediately
+/schedule pause <id>     # pause without deleting
+/schedule resume <id>    # resume a paused schedule
+```
+
+Note: `/schedule add` requires a cron expression (5 fields, e.g. `*/10 * * * *`). To schedule with natural language ("every 10 minutes"), just ask in chat — the agent translates it via the `schedule_task` tool.
+
+Output goes wherever the task's prompt tells it to write — there is no enforced output directory, so make the prompt specific about file locations. Run `/schedule list` to review schedules; the agent is also made aware of the active schedules via a `<scheduled_tasks>` context block, so you can just ask it what's scheduled.
+
+> **Cost note:** each scheduled run consumes LLM tokens. Delete unused schedules with `/schedule remove` to avoid accumulating charges.
+
+<p align="right"><a href="#top">🔝Back to top</a></p>
+
 ## 🍪 Examples & Recipes
 
 A curated collection of official examples, advanced usage patterns, and community-contributed recipes to help you get the most out of EvoScientist.
@@ -608,9 +634,9 @@ Coming soon:
 - [x] 📑 Technical report on the way
 - [x] 🔐 OAuth sign-in (CLI coding agent subscribers)
 - [x] 📺 Web app with workspace UI
+- [x] ⏰ Scheduled tasks (cron-style, via `/schedule`)
 - [ ] 📹 Demo and tutorial in the works
 - [ ] 📊 Benchmark suite to be released
-- [ ] ⏰ Scheduled tasks for the core system planned
 
 Stay tuned — more features are on the way!
 
@@ -625,7 +651,7 @@ Stay tuned — more features are on the way!
     <tr>
       <td align="center">
         <a href="https://x-izhang.github.io/">
-          <img src="https://x-izhang.github.io/author/xi-zhang/avatar_hu13660783057866068725.jpg"
+          <img src="https://x-izhang.github.io/author/xi-zhang/avatar.jpg"
                width="100" height="100"
                style="object-fit: cover; border-radius: 20%;" alt="Xi Zhang"/>
           <br />

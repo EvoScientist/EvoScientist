@@ -972,6 +972,7 @@ dependencies = [
     { name = "tavily-python" },
     { name = "textual" },
     { name = "typer" },
+    { name = "tzlocal" },
 ]
 
 [package.optional-dependencies]
@@ -1093,6 +1094,7 @@ requires-dist = [
     { name = "tavily-python", specifier = ">=0.7" },
     { name = "textual", specifier = ">=8.0,<8.2.7" },
     { name = "typer", specifier = ">=0.24" },
+    { name = "tzlocal", specifier = ">=5.0" },
 ]
 provides-extras = ["dev", "telegram", "discord", "slack", "wechat", "feishu", "qq", "stt", "oauth", "all-channels"]
 

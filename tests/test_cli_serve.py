@@ -31,6 +31,7 @@ def _make_config(
         enable_ask_user=enable_ask_user,
         dangerous_mode=dangerous_mode,
         enable_async_subagents=False,
+        enable_scheduler=False,
         memory_profile_enabled=True,
         memory_observations_enabled=True,
         memory_observation_writer=MemoryObservationWriter.ALL,
