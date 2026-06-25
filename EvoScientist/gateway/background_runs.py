@@ -400,17 +400,21 @@ def launch_background_run(
         graph_id=request.graph_id,
         metadata=dict(request.thread_metadata or {}),
     )
-    _call_before_run_hook(
-        hooks.on_before_run,
-        thread_id,
-        name=request.name,
-    )
-    payload = request.run_payload(thread_id)
-    run_id = _create_run(
-        client,
-        thread_id=thread_id,
-        payload=payload,
-    )
+    try:
+        _call_before_run_hook(
+            hooks.on_before_run,
+            thread_id,
+            name=request.name,
+        )
+        payload = request.run_payload(thread_id)
+        run_id = _create_run(
+            client,
+            thread_id=thread_id,
+            payload=payload,
+        )
+    except Exception:
+        _delete_thread(client, thread_id, name=request.name)
+        raise
 
     handle = _background_run_handle(
         request=request,
@@ -465,17 +469,21 @@ async def alaunch_background_run(
         graph_id=request.graph_id,
         metadata=dict(request.thread_metadata or {}),
     )
-    await _acall_before_run_hook(
-        hooks.on_before_run,
-        thread_id,
-        name=request.name,
-    )
-    payload = request.run_payload(thread_id)
-    run_id = await _acreate_run(
-        client,
-        thread_id=thread_id,
-        payload=payload,
-    )
+    try:
+        await _acall_before_run_hook(
+            hooks.on_before_run,
+            thread_id,
+            name=request.name,
+        )
+        payload = request.run_payload(thread_id)
+        run_id = await _acreate_run(
+            client,
+            thread_id=thread_id,
+            payload=payload,
+        )
+    except Exception:
+        await _adelete_thread(client, thread_id, name=request.name)
+        raise
 
     handle = _background_run_handle(
         request=request,

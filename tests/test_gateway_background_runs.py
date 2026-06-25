@@ -4,6 +4,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 import EvoScientist.gateway.background_runs as background_runs
 
 
@@ -66,6 +68,79 @@ def test_launch_background_run_submits_run_and_invokes_hooks(monkeypatch):
         metadata={"run_kind": "test"},
         config={"configurable": {"thread_id": "thread-1"}},
     )
+
+
+def test_launch_background_run_deletes_thread_when_run_creation_fails(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+        lambda **_kwargs: True,
+    )
+    fake_client = MagicMock()
+    fake_client.threads.create.return_value = {"thread_id": "thread-1"}
+    fake_client.runs.create.side_effect = RuntimeError("run creation failed")
+    monkeypatch.setattr("langgraph_sdk.get_sync_client", lambda **_kwargs: fake_client)
+
+    request = background_runs.BackgroundRunRequest(
+        graph_id="graph-1",
+        run_payload=lambda thread_id: {
+            "assistant_id": "graph-1",
+            "input": {"messages": []},
+            "metadata": {},
+            "config": {"configurable": {"thread_id": thread_id}},
+        },
+        url="http://x",
+        name="test worker",
+    )
+
+    with pytest.raises(RuntimeError, match="run creation failed"):
+        background_runs.launch_background_run(request)
+
+    fake_client.threads.delete.assert_called_once_with("thread-1")
+
+
+def test_async_launch_background_run_deletes_thread_when_run_creation_fails(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+        lambda **_kwargs: True,
+    )
+    deleted: list[str] = []
+
+    class _Threads:
+        async def create(self, **_kwargs):
+            return {"thread_id": "thread-1"}
+
+        async def delete(self, thread_id: str):
+            deleted.append(thread_id)
+
+    class _Runs:
+        async def create(self, **_kwargs):
+            raise RuntimeError("run creation failed")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_client",
+        lambda **_kwargs: SimpleNamespace(threads=_Threads(), runs=_Runs()),
+    )
+    request = background_runs.BackgroundRunRequest(
+        graph_id="graph-1",
+        run_payload=lambda thread_id: {
+            "assistant_id": "graph-1",
+            "input": {"messages": []},
+            "metadata": {},
+            "config": {"configurable": {"thread_id": thread_id}},
+        },
+        url="http://x",
+        name="test worker",
+    )
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="run creation failed"):
+            await background_runs.alaunch_background_run(request)
+
+    asyncio.run(run())
+
+    assert deleted == ["thread-1"]
 
 
 def test_sync_status_watcher_finishes_and_deletes_thread(monkeypatch):
