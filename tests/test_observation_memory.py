@@ -1350,6 +1350,19 @@ def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
     }
 
 
+def test_memory_worker_launch_helpers_reject_unsupported_source_type():
+    context = _memory_source_context(
+        memory_dir="/memories",
+        workspace_dir="/active/workspace",
+        source_type="future-source-type",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported memory source type"):
+        memory_launch._memory_worker_graph_id("future-source-type")
+    with pytest.raises(ValueError, match="Unsupported memory source type"):
+        memory_launch._memory_worker_user_prompt(context)
+
+
 def test_memory_worker_finish_launches_linker_for_new_observations(
     tmp_path,
 ):

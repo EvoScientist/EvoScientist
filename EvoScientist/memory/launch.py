@@ -51,6 +51,8 @@ def _memory_worker_graph_id(source_type: MemorySourceType) -> str:
             return TURN_MEMORY_WORKER_GRAPH_ID
         case MemorySourceType.SUBAGENT:
             return SUBAGENT_MEMORY_WORKER_GRAPH_ID
+        case _:
+            raise ValueError(f"Unsupported memory source type: {source_type!r}")
 
 
 def _memory_worker_user_prompt(context: MemorySourceContext) -> str:
@@ -69,6 +71,8 @@ def _memory_worker_user_prompt(context: MemorySourceContext) -> str:
                 f"Source session: {context.session_id}\n\n"
                 f"Trajectory:\n{_trajectory_for_prompt(context.trajectory)}"
             )
+        case _:
+            raise ValueError(f"Unsupported memory source type: {context.source_type!r}")
 
 
 def _runs_create_kwargs(payload: BackgroundRunPayload) -> BackgroundRunPayload:
