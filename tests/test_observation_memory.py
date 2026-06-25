@@ -43,6 +43,7 @@ from EvoScientist.memory.observations import (
     create_search_observations_tool,
     link_observation_files,
     read_observation_file,
+    read_observation_id_from_path,
     record_observation_file,
     search_observation_files,
 )
@@ -458,6 +459,59 @@ def test_read_and_search_surface_related_observations(tmp_path):
     ]
     assert read_payload["related_observations"] == expected_json_related
     assert search_payload["results"][0]["related_observations"] == expected_json_related
+
+
+def test_malformed_observation_frontmatter_is_skipped(tmp_path):
+    memories = tmp_path / "memories"
+    valid = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Valid observations remain searchable.",
+        observation="A malformed neighboring observation file must not break search.",
+        why_it_matters="One bad memory file should not hide the rest of memory.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True, exist_ok=True)
+    missing_id = global_dir / "missing-id.md"
+    missing_id.write_text(
+        "---\n"
+        "summary: Missing id should skip this file\n"
+        "memory_type: semantic\n"
+        "scope: global\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+    bad_link = global_dir / "bad-link.md"
+    bad_link.write_text(
+        "---\n"
+        'id: "O-bad-link"\n'
+        'summary: "Invalid relation entries should be ignored"\n'
+        "memory_type: semantic\n"
+        "scope: global\n"
+        "related_observations:\n"
+        '  - id: "O-target"\n'
+        '    relation: "unbounded"\n'
+        '    reason: "not a supported relation"\n'
+        '    linked_at: "2026-06-25T00:00:00Z"\n'
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    assert read_observation_id_from_path(missing_id) is None
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="malformed neighboring observation",
+    )
+    assert [hit["observation_id"] for hit in hits] == [valid["observation_id"]]
+    assert worker_activity.snapshot_observation_relations(memories) == frozenset()
 
 
 def test_link_observation_files_keeps_supersedes_directional(tmp_path):

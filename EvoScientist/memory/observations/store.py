@@ -12,9 +12,9 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NotRequired, TypedDict
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ..search import (
     search_documents,
@@ -35,19 +35,93 @@ from ..types import (
 OBSERVATION_DIR = "/observations"
 
 
-class RelatedObservationEntry(TypedDict):
-    id: str
-    relation: str
-    reason: str
-    linked_at: str
+ObservationFrontmatterValue = str | dict[str, str] | list[dict[str, str]]
+ObservationFrontmatterPayload = dict[str, ObservationFrontmatterValue]
 
 
-class ObservationFrontmatter(TypedDict):
-    id: str
-    summary: str
-    memory_type: str
-    scope: str
-    related_observations: NotRequired[list[RelatedObservationEntry]]
+class RelatedObservationEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(min_length=1, strict=True)
+    relation: ObservationRelation
+    reason: str = Field(min_length=1, strict=True)
+    linked_at: str = Field(min_length=1, strict=True)
+
+    @field_validator("id", "reason", "linked_at")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    def to_frontmatter_dict(self) -> dict[str, str]:
+        return {
+            "id": self.id,
+            "relation": self.relation.value,
+            "reason": self.reason,
+            "linked_at": self.linked_at,
+        }
+
+
+class ObservationSourceFrontmatter(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: MemorySourceType
+    agent: str = Field(min_length=1, strict=True)
+    session_id: str = Field(min_length=1, strict=True)
+
+    @field_validator("agent", "session_id")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    def to_frontmatter_dict(self) -> dict[str, str]:
+        return {
+            "type": self.type.value,
+            "agent": self.agent,
+            "session_id": self.session_id,
+        }
+
+
+class ObservationFrontmatter(BaseModel):
+    model_config = ConfigDict(extra="ignore", validate_assignment=True)
+
+    id: str = Field(min_length=1, strict=True)
+    created_at: str | None = Field(default=None, min_length=1, strict=True)
+    summary: str = Field(min_length=1, strict=True)
+    memory_type: MemoryType
+    scope: MemoryScope
+    project_id: str | None = Field(default=None, min_length=1, strict=True)
+    source: ObservationSourceFrontmatter | None = None
+    related_observations: list[RelatedObservationEntry] = Field(default_factory=list)
+
+    @field_validator("id", "summary", "created_at", "project_id")
+    @classmethod
+    def _non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    def to_frontmatter_dict(self) -> ObservationFrontmatterPayload:
+        payload: ObservationFrontmatterPayload = {
+            "id": self.id,
+        }
+        if self.created_at is not None:
+            payload["created_at"] = self.created_at
+        payload["summary"] = self.summary
+        payload["memory_type"] = self.memory_type.value
+        payload["scope"] = self.scope.value
+        if self.project_id is not None:
+            payload["project_id"] = self.project_id
+        if self.source is not None:
+            payload["source"] = self.source.to_frontmatter_dict()
+        if self.related_observations:
+            payload["related_observations"] = [
+                entry.to_frontmatter_dict() for entry in self.related_observations
+            ]
+        return payload
 
 
 def _normalize(text: str) -> str:
@@ -110,10 +184,8 @@ def read_observation_document(
         return None
     try:
         frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
-        metadata: ObservationFrontmatter = yaml.safe_load(frontmatter)
-    except (ValueError, yaml.YAMLError):
-        return None
-    if not isinstance(metadata, dict):
+        metadata = ObservationFrontmatter.model_validate(yaml.safe_load(frontmatter))
+    except (ValueError, ValidationError, yaml.YAMLError):
         return None
     return metadata, body
 
@@ -126,7 +198,7 @@ def write_observation_document(
 ) -> None:
     """Write an observation markdown document with frontmatter."""
     frontmatter = yaml.safe_dump(
-        dict(metadata),
+        metadata.to_frontmatter_dict(),
         allow_unicode=True,
         sort_keys=False,
     )
@@ -139,16 +211,14 @@ def read_observation_id_from_path(path: str | Path) -> str | None:
     if document is None:
         return None
     metadata, _body = document
-    return metadata["id"].strip()
+    return metadata.id.strip()
 
 
 def related_observation_entries(
     metadata: ObservationFrontmatter,
 ) -> list[RelatedObservationEntry]:
     """Return related-observation frontmatter entries."""
-    if "related_observations" not in metadata:
-        return []
-    return list(metadata["related_observations"])
+    return list(metadata.related_observations)
 
 
 def _observation_files(
@@ -182,7 +252,7 @@ def _resolve_related_observations(
 ) -> tuple[RelatedObservationResult, ...]:
     related_observations: list[RelatedObservationResult] = []
     for entry in entries:
-        related_id = entry["id"]
+        related_id = entry.id
         if related_id not in documents_by_id:
             continue
         target = documents_by_id[related_id]
@@ -192,8 +262,8 @@ def _resolve_related_observations(
             "memory_type": target.memory_type,
             "scope": target.scope,
             "summary": target.summary,
-            "relation": ObservationRelation(entry["relation"]),
-            "reason": entry["reason"],
+            "relation": entry.relation,
+            "reason": entry.reason,
         }
         related_observations.append(related)
     return tuple(related_observations)
@@ -209,19 +279,17 @@ def _parse_observation_search_document(
         return None
     metadata, body = document
     try:
-        record_type = MemoryType(metadata["memory_type"])
-        record_scope = MemoryScope(metadata["scope"])
         memory_path = "/" + path.relative_to(root).as_posix()
     except ValueError:
         return None
 
     return (
         ObservationSearchDocument(
-            observation_id=metadata["id"],
+            observation_id=metadata.id,
             path=_agent_path(memory_path),
-            memory_type=record_type,
-            scope=record_scope,
-            summary=metadata["summary"],
+            memory_type=metadata.memory_type,
+            scope=metadata.scope,
+            summary=metadata.summary,
             body=body,
         ),
         related_observation_entries(metadata),
@@ -364,7 +432,7 @@ def observation_document_by_id(
         if document is None:
             continue
         metadata, body = document
-        if metadata["id"] == requested_id:
+        if metadata.id == requested_id:
             return path, metadata, body
     return None
 

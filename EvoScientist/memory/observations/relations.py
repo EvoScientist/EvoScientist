@@ -36,27 +36,27 @@ def _upsert_related_observation(
     linked_at: str,
 ) -> bool:
     entries = related_observation_entries(metadata)
-    new_entry: RelatedObservationEntry = {
-        "id": target_observation_id,
-        "relation": relation,
-        "reason": reason,
-        "linked_at": linked_at,
-    }
+    new_entry = RelatedObservationEntry(
+        id=target_observation_id,
+        relation=ObservationRelation(relation),
+        reason=reason,
+        linked_at=linked_at,
+    )
     for index, entry in enumerate(entries):
-        if entry["id"] != target_observation_id:
+        if entry.id != target_observation_id:
             continue
         if (
-            entry["id"] == new_entry["id"]
-            and entry["relation"] == new_entry["relation"]
-            and entry["reason"] == new_entry["reason"]
+            entry.id == new_entry.id
+            and entry.relation == new_entry.relation
+            and entry.reason == new_entry.reason
         ):
             return False
         entries[index] = new_entry
-        metadata["related_observations"] = entries
+        metadata.related_observations = entries
         return True
 
     entries.append(new_entry)
-    metadata["related_observations"] = entries
+    metadata.related_observations = entries
     return True
 
 

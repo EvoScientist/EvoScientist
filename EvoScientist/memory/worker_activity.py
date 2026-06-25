@@ -121,13 +121,13 @@ def snapshot_observation_relations(
         if document is None:
             continue
         metadata, _body = document
-        source_id = metadata["id"].strip()
+        source_id = metadata.id.strip()
         if not source_id:
             continue
         for item in related_observation_entries(metadata):
-            target_id = item["id"].strip()
-            relation = item["relation"].strip()
-            reason = item["reason"].strip()
+            target_id = item.id.strip()
+            relation = item.relation.value
+            reason = item.reason.strip()
             if not target_id or not relation:
                 continue
             relation_keys.add(
