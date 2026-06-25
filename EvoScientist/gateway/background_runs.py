@@ -328,6 +328,10 @@ def _call_before_run_hook(
         raise
 
 
+def _terminal_status_succeeded(status: str | None) -> bool:
+    return str(status or "").strip().lower() == "success"
+
+
 async def _acall_hook(
     callback: Callable[[BackgroundRun], None] | None,
     run: BackgroundRun,
@@ -555,6 +559,7 @@ def watch_background_run_sync(
     )
     failures = 0
     confirmed_finished = False
+    final_status: str | None = None
     client: SyncLangGraphClient | None = None
     try:
         client = get_sync_client(url=url, headers=_headers(headers))
@@ -582,11 +587,15 @@ def watch_background_run_sync(
 
             if status in watcher_config.terminal_statuses:
                 confirmed_finished = True
+                final_status = status
                 return
             time.sleep(watcher_config.poll_interval_seconds)
     finally:
         if confirmed_finished:
-            _call_hook(hooks.on_finished, run_ref, hook_name="on_finished")
+            if _terminal_status_succeeded(final_status):
+                _call_hook(hooks.on_finished, run_ref, hook_name="on_finished")
+            else:
+                _call_hook(hooks.on_aborted, run_ref, hook_name="on_aborted")
             if watcher_config.delete_thread_on_finish and client is not None:
                 _delete_thread(client, thread_id, name=name)
         else:
@@ -644,6 +653,7 @@ async def awatch_background_run(
     )
     failures = 0
     confirmed_finished = False
+    final_status: str | None = None
     try:
         while True:
             try:
@@ -671,11 +681,15 @@ async def awatch_background_run(
 
             if status in watcher_config.terminal_statuses:
                 confirmed_finished = True
+                final_status = status
                 return
             await asyncio.sleep(watcher_config.poll_interval_seconds)
     finally:
         if confirmed_finished:
-            await _acall_hook(hooks.on_finished, run_ref, hook_name="on_finished")
+            if _terminal_status_succeeded(final_status):
+                await _acall_hook(hooks.on_finished, run_ref, hook_name="on_finished")
+            else:
+                await _acall_hook(hooks.on_aborted, run_ref, hook_name="on_aborted")
             if watcher_config.delete_thread_on_finish:
                 await _adelete_thread(client, thread_id, name=name)
         else:

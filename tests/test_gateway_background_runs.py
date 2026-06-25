@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -104,6 +105,43 @@ def test_sync_status_watcher_finishes_and_deletes_thread(monkeypatch):
     assert deleted == ["thread-1"]
 
 
+def test_sync_status_watcher_aborts_and_deletes_thread_on_error_status(monkeypatch):
+    finished: list[background_runs.BackgroundRun] = []
+    aborted: list[background_runs.BackgroundRun] = []
+    deleted: list[str] = []
+
+    class _Runs:
+        def get(self, **_kwargs):
+            return {"status": "error"}
+
+    class _Threads:
+        def delete(self, thread_id: str):
+            deleted.append(thread_id)
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_sync_client",
+        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
+    )
+
+    background_runs.watch_background_run_sync(
+        url="http://x",
+        thread_id="thread-1",
+        run_id="run-1",
+        name="test worker",
+        hooks=background_runs.BackgroundRunHooks(
+            on_finished=finished.append,
+            on_aborted=aborted.append,
+        ),
+        watcher_config=background_runs.BackgroundRunWatcherConfig(
+            poll_interval_seconds=0,
+        ),
+    )
+
+    assert finished == []
+    assert [run.run_id for run in aborted] == ["run-1"]
+    assert deleted == ["thread-1"]
+
+
 def test_sync_status_watcher_aborts_without_deleting_on_poll_failure(monkeypatch):
     finished: list[background_runs.BackgroundRun] = []
     aborted: list[background_runs.BackgroundRun] = []
@@ -140,3 +178,38 @@ def test_sync_status_watcher_aborts_without_deleting_on_poll_failure(monkeypatch
     assert finished == []
     assert [run.run_id for run in aborted] == ["run-1"]
     assert deleted == []
+
+
+def test_async_status_watcher_aborts_and_deletes_thread_on_error_status():
+    finished: list[background_runs.BackgroundRun] = []
+    aborted: list[background_runs.BackgroundRun] = []
+    deleted: list[str] = []
+
+    class _Runs:
+        async def get(self, **_kwargs):
+            return {"status": "error"}
+
+    class _Threads:
+        async def delete(self, thread_id: str):
+            deleted.append(thread_id)
+
+    async def run() -> None:
+        await background_runs.awatch_background_run(
+            SimpleNamespace(runs=_Runs(), threads=_Threads()),
+            thread_id="thread-1",
+            run_id="run-1",
+            name="test worker",
+            hooks=background_runs.BackgroundRunHooks(
+                on_finished=finished.append,
+                on_aborted=aborted.append,
+            ),
+            watcher_config=background_runs.BackgroundRunWatcherConfig(
+                poll_interval_seconds=0,
+            ),
+        )
+
+    asyncio.run(run())
+
+    assert finished == []
+    assert [run.run_id for run in aborted] == ["run-1"]
+    assert deleted == ["thread-1"]
