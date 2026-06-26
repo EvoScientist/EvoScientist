@@ -36,6 +36,14 @@ async def get_models(_request: Request) -> JSONResponse:
 
     ``entries`` preserves the registry order so the WebUI picker can
     rank providers per short name the same way the backend would.
+    Mirrors the TUI ``/model`` picker by appending locally-pulled
+    Ollama models when ``ollama_base_url`` is configured — same
+    ``discover_ollama_models()`` call, same 1.5-s timeout, same
+    fail-soft semantics (the probe returns ``[]`` on any error, never
+    raises). The TUI's "Custom Ollama model…" sentinel is intentionally
+    omitted: that's a widget-specific input affordance, not part of
+    the registry surface.
+
     ``default`` reflects the deployment's currently-configured fallback
     (``config.yaml``'s ``model`` / ``provider`` — what ``/model reset``
     would land on). Returned even when the configured pair isn't in
@@ -46,6 +54,12 @@ async def get_models(_request: Request) -> JSONResponse:
         {"name": name, "model_id": model_id, "provider": provider}
         for name, model_id, provider in list_models_by_provider()
     ]
+    ollama_base_url = getattr(cfg, "ollama_base_url", None)
+    if ollama_base_url:
+        from EvoScientist.llm.ollama_discovery import discover_ollama_models
+
+        for name in await discover_ollama_models(ollama_base_url, timeout=1.5):
+            entries.append({"name": name, "model_id": name, "provider": "ollama"})
     return JSONResponse(
         {
             "entries": entries,
