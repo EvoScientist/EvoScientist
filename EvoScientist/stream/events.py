@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Tool
 from langgraph.graph import END
 from langgraph.types import Command, Interrupt
 
-from ..memory.worker_activity import clear_memory_worker_saved_counts
+from ..memory.worker_activity import clear_completed_memory_activity_counts
 from .emitter import StreamEventEmitter
 from .summarization import (
     _extract_summary_message_text,
@@ -831,7 +831,7 @@ async def stream_agent_events(
     except Exception:
         pass
 
-    clear_memory_worker_saved_counts()
+    clear_completed_memory_activity_counts()
     astream_input = await build_agent_stream_input(message, media=media)
 
     stream: Any | None = None

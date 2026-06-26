@@ -10,6 +10,7 @@ import pytest
 from EvoScientist import backends, paths
 from EvoScientist.backends import (
     CustomSandboxBackend,
+    MemoryFilesystemBackend,
     MergedSkillsBackend,
     convert_virtual_paths_in_command,
     prepare_sandbox_command,
@@ -802,6 +803,93 @@ class TestVirtualMountResolution:
         resp = backend.execute("python /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
+
+
+# === MemoryFilesystemBackend ===
+
+
+class TestMemoryFilesystemBackend:
+    def test_blocks_raw_file_creation(self, tmp_path):
+        backend = MemoryFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+        result = backend.write("/observations/projects/P-1/O-1.md", "content")
+
+        assert result.error is not None
+        assert "Raw writes to /memories are blocked" in result.error
+        assert not (tmp_path / "observations" / "projects" / "P-1" / "O-1.md").exists()
+
+    def test_allows_existing_profile_edits(self, tmp_path):
+        profile = tmp_path / "profile" / "USER_PROFILE.md"
+        profile.parent.mkdir()
+        profile.write_text("old preference\n", encoding="utf-8")
+        backend = MemoryFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+        result = backend.edit(
+            "/profile/USER_PROFILE.md",
+            "old preference",
+            "new preference",
+        )
+
+        assert result.error is None
+        assert result.occurrences == 1
+        assert profile.read_text(encoding="utf-8") == "new preference\n"
+
+    def test_blocks_observation_file_edits(self, tmp_path):
+        observation = tmp_path / "observations" / "projects" / "P-1" / "O-1.md"
+        observation.parent.mkdir(parents=True)
+        observation.write_text("old fact\n", encoding="utf-8")
+        backend = MemoryFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+        result = backend.edit(
+            "/observations/projects/P-1/O-1.md",
+            "old fact",
+            "new fact",
+        )
+
+        assert result.error is not None
+        assert "Raw edits under /memories are limited" in result.error
+        assert observation.read_text(encoding="utf-8") == "old fact\n"
+
+    def test_blocks_uploads(self, tmp_path):
+        backend = MemoryFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+        responses = backend.upload_files(
+            [
+                ("/profile/NEW.md", b"profile"),
+                ("/observations/projects/P-1/O-1.md", b"observation"),
+            ]
+        )
+
+        assert [response.error for response in responses] == [
+            backend._RAW_WRITE_ERROR,
+            backend._RAW_WRITE_ERROR,
+        ]
+        assert not (tmp_path / "profile" / "NEW.md").exists()
+        assert not (tmp_path / "observations" / "projects" / "P-1" / "O-1.md").exists()
+
+    def test_build_memory_agent_backend_routes_guarded_memories(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        memories = tmp_path / "memories"
+        workspace.mkdir()
+        memories.mkdir()
+        (workspace / "README.md").write_text("workspace text", encoding="utf-8")
+
+        backend = backends.build_memory_agent_backend(
+            workspace_dir=workspace,
+            memory_dir=memories,
+        )
+
+        read_result = backend.read("/README.md")
+        text = (
+            read_result
+            if isinstance(read_result, str)
+            else getattr(read_result, "content", str(read_result))
+        )
+        blocked_write = backend.write("/memories/observations/global/O-1.md", "raw")
+
+        assert "workspace text" in text
+        assert blocked_write.error == MemoryFilesystemBackend._RAW_WRITE_ERROR
+        assert not (memories / "observations" / "global" / "O-1.md").exists()
 
 
 # === CustomSandboxBackend._resolve_path ===

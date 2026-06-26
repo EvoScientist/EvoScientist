@@ -6,7 +6,8 @@
         "data-analysis-agent": "EvoScientist.langgraph_dev.graphs:data_analysis_agent",
         "scheduler": "EvoScientist.langgraph_dev.graphs:scheduler",
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
-        "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker"
+        "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker",
+        "evomemory-observation-linker": "EvoScientist.langgraph_dev.graphs:evomemory_observation_linker"
     },
     "checkpointer": {
         "backend": "custom",

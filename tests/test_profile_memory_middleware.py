@@ -12,6 +12,8 @@ from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    build_observation_index_context,
+    list_observation_documents,
     record_observation_file,
 )
 
@@ -33,7 +35,7 @@ def _request():
 
 
 def _path_project_id(workspace) -> str:
-    return memory_module._resolve_project_id(workspace)
+    return memory_module.resolve_project_id(workspace)
 
 
 def _profile_texts(memories):
@@ -47,32 +49,22 @@ def _sorted_tool_names(middleware) -> list[str]:
     return sorted(tool.name for tool in middleware.tools)
 
 
-def test_profile_memory_bootstraps_and_injects_profile_files(tmp_path, monkeypatch):
+def test_profile_memory_bootstraps_profiles_without_observation_project_dirs(
+    tmp_path, monkeypatch
+):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(str(memories))
-    modified = middleware.modify_request(_request())
-    content = str(modified.system_message.content)
+    middleware.modify_request(_request())
 
-    assert _sorted_tool_names(middleware) == [
-        "read_memory",
-        "record_observation",
-        "search_observations",
-    ]
-    assert (memories / "profile" / "SOUL.md").exists()
-    assert (memories / "profile" / "USER_PROFILE.md").exists()
-    assert (memories / "profile" / "RESEARCH_TASTE.md").exists()
-    assert list((memories / "profile" / "projects").glob("*/PROJECT_PROFILE.md"))
+    assert (
+        memories / "profile" / "projects" / middleware.project_id / "PROJECT_PROFILE.md"
+    ).exists()
     assert (memories / "observations" / "global").is_dir()
-    assert list((memories / "observations" / "projects").glob("P-*"))
-    assert content.index("base system") < content.index("<memory_instructions>")
-    assert content.index("<memory_instructions>") < content.index(
-        "<observation_memory>"
-    )
-    assert content.index("<observation_memory>") < content.index("<profile_memory>")
+    assert not (memories / "observations" / "projects").exists()
 
 
 def test_append_to_system_message_preserves_metadata():
@@ -159,7 +151,6 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     ]
     assert not (memories / "profile").exists()
     assert (memories / "observations" / "global").is_dir()
-    assert list((memories / "observations" / "projects").glob("P-*"))
     assert "<observation_memory>" in content
     assert "search_observations" in content
     assert "read_memory" in content
@@ -215,8 +206,15 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
 
     middleware = memory_module.create_memory_middleware(str(memories))
     indexed = {
-        record.observation_id: (record.memory_type, record.scope, record.summary)
-        for record in middleware._observation_index_records
+        document.observation_id: (
+            document.memory_type,
+            document.scope,
+            document.summary,
+        )
+        for document in list_observation_documents(
+            memory_dir=memories,
+            project_id=project_id,
+        )
     }
     later_result = record_observation_file(
         memory_dir=memories,
@@ -232,7 +230,11 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
     )
     modified = middleware.modify_request(_request())
     refreshed_ids = {
-        record.observation_id for record in middleware._observation_index_records
+        document.observation_id
+        for document in list_observation_documents(
+            memory_dir=memories,
+            project_id=project_id,
+        )
     }
 
     assert indexed == {
@@ -258,23 +260,69 @@ def test_observation_index_omits_summaries_when_budget_exceeded(tmp_path, monkey
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
-    records = [
-        memory_module.ObservationIndexRecord(
-            observation_id="O-large",
-            memory_path="/observations/global/O-large.md",
-            memory_type=MemoryType.PROCEDURAL,
-            scope=MemoryScope.GLOBAL,
-            summary="Do not inline this summary when the index exceeds budget.",
-        )
-    ]
+    memory_module.create_memory_middleware(str(memories))
+    record_observation_file(
+        memory_dir=memories,
+        project_id=_path_project_id(workspace),
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Do not inline this summary when the index exceeds budget.",
+        observation="A large-index observation exists.",
+        why_it_matters="Future prompts should fall back to search hints.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="research-agent",
+    )
 
-    context = middleware._observation_index_context_from_records(
-        records,
+    context = build_observation_index_context(
+        memory_dir=memories,
+        project_id=_path_project_id(workspace),
         max_inline_chars=1,
     )
 
     assert "Do not inline this summary" not in context
+
+
+def test_observation_index_over_budget_keeps_entries_that_fit(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    project_id = _path_project_id(workspace)
+    record_observation_file(
+        memory_dir=memories,
+        project_id=project_id,
+        memory_type=MemoryType.PROCEDURAL,
+        summary="First over-budget observation " + ("x" * 320),
+        observation="First large-index observation.",
+        why_it_matters="Index truncation should retain entries when possible.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="research-agent",
+    )
+    record_observation_file(
+        memory_dir=memories,
+        project_id=project_id,
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Second over-budget observation " + ("y" * 320),
+        observation="Second large-index observation.",
+        why_it_matters="Index truncation should retain entries when possible.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-2",
+        source_agent="research-agent",
+    )
+
+    context = build_observation_index_context(
+        memory_dir=memories,
+        project_id=project_id,
+        max_inline_chars=1_350,
+    )
+
+    assert "Observation index truncated to entries that fit." in context
+    assert len(context) <= 1_350
+    assert "over-budget observation" in context
 
 
 def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(
@@ -494,11 +542,11 @@ def test_profile_memory_resolves_project_id_once_per_middleware(
     workspace.mkdir()
     calls = []
 
-    def _resolve_project_id(workspace_dir):
+    def resolve_project_id(workspace_dir):
         calls.append(workspace_dir)
         return "P-cached-project"
 
-    monkeypatch.setattr(memory_module, "_resolve_project_id", _resolve_project_id)
+    monkeypatch.setattr(memory_module, "resolve_project_id", resolve_project_id)
 
     middleware = memory_module.create_memory_middleware(
         str(memories), workspace_dir=str(workspace), max_inline_profile_chars=10

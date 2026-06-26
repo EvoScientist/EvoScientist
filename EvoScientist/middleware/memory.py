@@ -13,12 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import subprocess
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ModelRequest,
@@ -27,19 +24,20 @@ from langchain.agents.middleware.types import (
 
 from .. import paths as _paths
 from ..memory import (
-    MemoryScope,
     MemorySourceType,
-    MemoryType,
+    ObservationRecordResult,
+    build_observation_index_context,
     create_read_memory_tool,
     create_record_observation_tool,
     create_search_observations_tool,
 )
+from ..memory.project import resolve_project_id
+from ..memory.scheduler import MemoryScheduler, ObservationLinkerContext
 from .utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_INLINE_PROFILE_CHARS = 24_000
-DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS = 12_000
 _LEGACY_MEMORY_FILENAME = "MEMORY.md"
 _LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
@@ -162,52 +160,6 @@ Notes about this workspace: conventions, commands, tests, and traps.
 }
 
 
-def _short_hash(text: str, *, n: int = 16) -> str:
-    """Return a deterministic hash fragment for generated profile paths."""
-    import hashlib
-
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
-
-
-def _run_git(args: list[str], cwd: Path) -> str | None:
-    """Run a bounded git query, returning trimmed stdout when it succeeds.
-
-    Failures are treated as missing metadata so profile setup can fall back to
-    path-based ids.
-    """
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    return value or None
-
-
-def _resolve_project_id(workspace: str | Path | None = None) -> str:
-    """Return the stable id used for this workspace's project profile.
-
-    Prefer the git remote when available, then the git root, and finally the
-    workspace path.
-    """
-    root = Path(workspace or _paths.WORKSPACE_ROOT).expanduser().resolve()
-    git_root = _run_git(["rev-parse", "--show-toplevel"], root)
-    if git_root:
-        git_root_path = Path(git_root).expanduser().resolve()
-        remote = _run_git(["remote", "get-url", "origin"], git_root_path)
-        source = f"git-remote:{remote}" if remote else f"git-root:{git_root_path}"
-        return f"P-{_short_hash(source)}"
-    return f"P-{_short_hash(f'path:{root}')}"
-
-
 def _profile_specs(project_id: str) -> list[tuple[str, str]]:
     """Return the profile files owned by this middleware and their templates."""
     return [
@@ -269,17 +221,6 @@ def _append_imported_section(content: str, body: str) -> str:
     return content.rstrip() + f"\n\n## {_LEGACY_IMPORT_HEADING}\n\n{body.strip()}\n"
 
 
-@dataclass(frozen=True)
-class ObservationIndexRecord:
-    """One summary-bearing observation listed in the system prompt index."""
-
-    observation_id: str
-    memory_path: str
-    memory_type: MemoryType
-    scope: MemoryScope
-    summary: str
-
-
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
@@ -298,12 +239,15 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_profile_memory: bool = True,
         enable_observation_memory: bool = True,
         enable_observation_tool: bool = True,
+        memory_scheduler: MemoryScheduler | None = None,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
-        self._project_id = _resolve_project_id(workspace)
+        self._workspace_dir = workspace
+        self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
         self._enable_observation_memory = enable_observation_memory
+        self._memory_scheduler = memory_scheduler
         self._profile_specs = _profile_specs(self._project_id)
         pointer_lines = ["Profile files are available at:"]
         pointer_lines.extend(
@@ -335,9 +279,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
                     project_id=self._project_id,
                     source_type=source_type,
                     source_agent=source_agent,
+                    on_observation_recorded=self._record_observation_created,
                 )
             )
-        self._observation_index_records = []
         self._observation_index_context = ""
         if not enable_observation_memory:
             return
@@ -348,6 +292,19 @@ class EvoMemoryMiddleware(AgentMiddleware):
     def project_id(self) -> str:
         """Stable project id used for this middleware's project memory paths."""
         return self._project_id
+
+    def _record_observation_created(self, result: ObservationRecordResult) -> None:
+        if self._memory_scheduler is None:
+            return
+        project_id = str(result.get("project_id") or self._project_id)
+        self._memory_scheduler.record_observation_created(
+            ObservationLinkerContext(
+                memory_dir=self._memory_dir,
+                workspace_dir=self._workspace_dir,
+                project_id=project_id,
+                observation_ids=(result["observation_id"],),
+            )
+        )
 
     def _file_path(self, memory_path: str) -> Path:
         """Resolve a memory-relative path against the memory directory."""
@@ -385,15 +342,11 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return True
 
     def _ensure_observation_dirs(self) -> None:
-        """Create the observation directories agents are prompted to search."""
-        for memory_path in (
-            "/observations/global",
-            f"/observations/projects/{self._project_id}",
-        ):
-            try:
-                self._file_path(memory_path).mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                logger.warning("Failed to create observation memory dir: %s", e)
+        """Create non-project observation directories agents are prompted to search."""
+        try:
+            self._file_path("/observations/global").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("Failed to create observation memory dir: %s", e)
 
     def _ensure_profile_files(self) -> list[tuple[str, str]]:
         """Create the expected profile files if needed and return their contents."""
@@ -506,190 +459,22 @@ class EvoMemoryMiddleware(AgentMiddleware):
             logger.debug("Failed to read profile memory: %s", e)
             return self._profile_pointer_context
 
-    def _observation_memory_paths(self) -> list[Path]:
-        """Return summary-indexable observation files for this project context."""
-        paths: list[Path] = []
-        for memory_path in (
-            "/observations/global",
-            f"/observations/projects/{self._project_id}",
-        ):
-            directory = self._file_path(memory_path)
-            try:
-                paths.extend(sorted(directory.glob("*.md")))
-            except OSError as e:
-                logger.warning("Failed to list observation memory %s: %s", directory, e)
-        return paths
-
-    def _read_observation_frontmatter(self, path: Path) -> dict[str, object] | None:
-        """Read explicit YAML frontmatter for an observation file."""
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            logger.warning("Failed to read observation memory %s: %s", path, e)
-            return None
-        if not text.startswith("---\n"):
-            return None
-        try:
-            frontmatter, _body = text.removeprefix("---\n").split("\n---\n", 1)
-            metadata = yaml.safe_load(frontmatter)
-        except (ValueError, yaml.YAMLError):
-            return None
-        if not isinstance(metadata, dict):
-            return None
-        return {key: value for key, value in metadata.items() if isinstance(key, str)}
-
-    def _observation_index_record_from_path(
-        self, path: Path
-    ) -> ObservationIndexRecord | None:
-        """Return an index record only when explicit summary metadata exists."""
-        metadata = self._read_observation_frontmatter(path)
-        if metadata is None:
-            return None
-
-        observation_id = str(metadata.get("id") or "").strip()
-        summary = str(metadata.get("summary") or "").strip()
-        memory_type_value = str(metadata.get("memory_type") or "").strip()
-        scope_value = str(metadata.get("scope") or "").strip()
-        if (
-            not observation_id
-            or not summary
-            or not memory_type_value
-            or not scope_value
-        ):
-            return None
-        try:
-            memory_type = MemoryType(memory_type_value)
-            scope = MemoryScope(scope_value)
-        except ValueError:
-            return None
-
-        try:
-            memory_path = "/" + path.relative_to(self._memory_dir).as_posix()
-        except ValueError:
-            return None
-        return ObservationIndexRecord(
-            observation_id=observation_id,
-            memory_path=memory_path,
-            memory_type=memory_type,
-            scope=scope,
-            summary=summary,
-        )
-
-    def _read_observation_index_records(self) -> list[ObservationIndexRecord]:
-        """Load summary-bearing observation records for prompt indexing."""
-        records = [
-            record
-            for path in self._observation_memory_paths()
-            if (record := self._observation_index_record_from_path(path)) is not None
-        ]
-        return sorted(records, key=lambda record: record.observation_id)
-
-    def _observation_index_count_line(
-        self, records: list[ObservationIndexRecord]
-    ) -> str:
-        """Return compact observation counts by scope and memory type."""
-        scope_counts = dict.fromkeys(MemoryScope, 0)
-        type_counts = dict.fromkeys(MemoryType, 0)
-        for record in records:
-            scope_counts[record.scope] += 1
-            type_counts[record.memory_type] += 1
-        return (
-            f"Counts: total={len(records)}; "
-            f"scope global={scope_counts[MemoryScope.GLOBAL]}, "
-            f"project={scope_counts[MemoryScope.PROJECT]}; "
-            f"type semantic={type_counts[MemoryType.SEMANTIC]}, "
-            f"procedural={type_counts[MemoryType.PROCEDURAL]}, "
-            f"episodic={type_counts[MemoryType.EPISODIC]}."
-        )
-
-    def _observation_search_hints(self) -> str:
-        """Return stable search hints for observation memory."""
-        return "\n".join(
-            [
-                "Search hints:",
-                "- Each line gives id, type/scope, path, and summary.",
-                (
-                    "- Use `search_observations` for ranked keyword search "
-                    "and `read_memory` for known observation IDs."
-                ),
-                "- Use `mode=regex` only when exact grep-like matching is required.",
-                "- Search by id when you already know it from the index.",
-                (
-                    "- Filter by type when appropriate: "
-                    "`memory_type: procedural`, `memory_type: semantic`, or "
-                    "`memory_type: episodic`."
-                ),
-                (
-                    "- Filter by scope when appropriate: "
-                    "`scope: project` or `scope: global`."
-                ),
-                (
-                    "- Search with a few distinctive words or phrases from "
-                    "the current work that describe the issue, constraint, "
-                    "procedure, or prior result to find."
-                ),
-            ]
-        )
-
-    def _observation_index_context_from_records(
-        self,
-        records: list[ObservationIndexRecord],
-        *,
-        max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
-    ) -> str:
-        """Build the observation index injected into the system prompt."""
-        header = "\n".join(
-            [
-                "<observation_memory>",
-                self._observation_index_count_line(records),
-            ]
-        )
-        if not records:
-            return "\n".join(
-                [header, self._observation_search_hints(), "</observation_memory>"]
-            )
-
-        lines = [
-            f"- {record.observation_id} "
-            f"[{record.memory_type.value}/{record.scope.value}] "
-            f"{_agent_path(record.memory_path)}: {record.summary}"
-            for record in records
-        ]
-        full = "\n".join(
-            [
-                header,
-                "Indexed observations:",
-                *lines,
-                self._observation_search_hints(),
-                "</observation_memory>",
-            ]
-        )
-        if len(full) <= max_inline_chars:
-            return full
-        return "\n".join(
-            [
-                header,
-                "Observation summaries are too large to inline; search on demand.",
-                self._observation_search_hints(),
-                "</observation_memory>",
-            ]
-        )
-
     def _refresh_observation_index_context(self) -> str:
         """Refresh the prompt observation index from current memory files."""
         if not self._enable_observation_memory:
             return ""
         try:
             self._ensure_observation_dirs()
-            records = self._read_observation_index_records()
-            context = self._observation_index_context_from_records(records)
+            context = build_observation_index_context(
+                memory_dir=self._memory_dir,
+                project_id=self._project_id,
+            )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
             return self._observation_index_context
         except Exception as e:
             logger.debug("Failed to refresh observation memory index: %s", e)
             return self._observation_index_context
-        self._observation_index_records = records
         self._observation_index_context = context
         return context
 
@@ -832,6 +617,7 @@ def create_memory_middleware(
     enable_profile_memory: bool = True,
     enable_observation_memory: bool = True,
     enable_observation_tool: bool = True,
+    memory_scheduler: MemoryScheduler | None = None,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
 
@@ -847,4 +633,5 @@ def create_memory_middleware(
         enable_profile_memory=enable_profile_memory,
         enable_observation_memory=enable_observation_memory,
         enable_observation_tool=enable_observation_tool,
+        memory_scheduler=memory_scheduler,
     )

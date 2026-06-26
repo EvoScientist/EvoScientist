@@ -226,10 +226,10 @@ class TestV3ProtocolStreaming:
         assert len(text_events) == 1
         assert text_events[0]["content"] == "should appear"
 
-    def test_user_message_clears_memory_worker_saved_counts(self, monkeypatch):
+    def test_user_message_clears_completed_memory_activity_counts(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            "EvoScientist.stream.events.clear_memory_worker_saved_counts",
+            "EvoScientist.stream.events.clear_completed_memory_activity_counts",
             lambda: calls.append(True),
         )
         agent = FakeV3Agent([])
@@ -238,10 +238,10 @@ class TestV3ProtocolStreaming:
 
         assert calls == [True]
 
-    def test_command_message_clears_memory_worker_saved_counts(self, monkeypatch):
+    def test_command_message_clears_completed_memory_activity_counts(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            "EvoScientist.stream.events.clear_memory_worker_saved_counts",
+            "EvoScientist.stream.events.clear_completed_memory_activity_counts",
             lambda: calls.append(True),
         )
         agent = FakeV3Agent([])

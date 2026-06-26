@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import threading
@@ -21,19 +20,34 @@ from langchain_core.tools import BaseTool
 from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
-from EvoScientist.config import MemoryObservationWriter
-from EvoScientist.memory import worker_activity
+from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
+from EvoScientist.gateway import background_runs
+from EvoScientist.memory import (
+    launch as memory_launch,
+)
+from EvoScientist.memory import (
+    scheduler as memory_scheduler,
+)
+from EvoScientist.memory import (
+    source_context,
+    worker_activity,
+)
+from EvoScientist.memory.agents import memory_worker, observation_linker
 from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
     ObservationSearchMode,
+    create_link_observations_tool,
     create_read_memory_tool,
     create_search_observations_tool,
+    link_observation_files,
     read_observation_file,
+    read_observation_id_from_path,
     record_observation_file,
     search_observation_files,
 )
+from EvoScientist.memory.types import ObservationRelation
 from EvoScientist.middleware import memory_lifecycle
 
 
@@ -97,6 +111,131 @@ def _runtime(thread_id: str | None = None) -> Runtime[None]:
     return Runtime(execution_info=_execution_info(thread_id))
 
 
+def _memory_source_context(
+    *,
+    memory_dir,
+    workspace_dir,
+    source_type: MemorySourceType = MemorySourceType.TURN,
+    project_id: str = "P-project",
+    source_agent: str = "EvoScientist",
+    session_id: str = "thread-1",
+    trajectory: list[source_context.CompactMessage] | None = None,
+) -> source_context.MemorySourceContext:
+    context_trajectory = trajectory or [{"role": "human", "content": "hi"}]
+    return source_context.MemorySourceContext(
+        source_type=source_type,
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+        project_id=project_id,
+        source_agent=source_agent,
+        session_id=session_id,
+        trajectory=context_trajectory,
+        trajectory_digest=source_context._trajectory_digest(context_trajectory),
+    )
+
+
+def _memory_worker_run(
+    *,
+    thread_id: str = "worker-thread",
+    run_id: str = "run-1",
+    workspace_dir: str = "/tmp/ws",
+    project_id: str = "P-project",
+    source_agent: str = "EvoScientist",
+    source_session_id: str = "thread-1",
+    trajectory_digest: str = "digest-1",
+) -> background_runs.BackgroundRun:
+    return background_runs.BackgroundRun(
+        name="EvoMemory worker",
+        url="http://x",
+        graph_id=memory_launch.TURN_MEMORY_WORKER_GRAPH_ID,
+        thread_id=thread_id,
+        run_id=run_id,
+        assistant_id=memory_launch.TURN_MEMORY_WORKER_GRAPH_ID,
+        metadata={
+            "workspace_dir": workspace_dir,
+            "project_id": project_id,
+            "source_agent": source_agent,
+            "source_session_id": source_session_id,
+            "trajectory_digest": trajectory_digest,
+        },
+    )
+
+
+def _observation_linker_run(
+    *,
+    thread_id: str = "linker-thread",
+    run_id: str = "linker-run",
+) -> background_runs.BackgroundRun:
+    return background_runs.BackgroundRun(
+        name="EvoMemory observation linker",
+        url="http://x",
+        graph_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        thread_id=thread_id,
+        run_id=run_id,
+        assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
+        metadata={},
+    )
+
+
+def _linker_context(
+    *,
+    memory_dir,
+    workspace_dir,
+    observation_ids: tuple[str, ...],
+    project_id: str = "P-project",
+) -> memory_scheduler.ObservationLinkerContext:
+    return memory_scheduler.ObservationLinkerContext(
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+        project_id=project_id,
+        observation_ids=observation_ids,
+    )
+
+
+def _mark_worker_started(
+    memory_dir,
+    *,
+    thread_id: str = "worker-thread",
+    run_id: str = "run-1",
+    before_outputs: worker_activity.MemoryOutputSnapshot | None = None,
+) -> None:
+    worker_activity.mark_memory_worker_started(
+        thread_id=thread_id,
+        run_id=run_id,
+        memory_dir=memory_dir,
+        before_outputs=(
+            before_outputs
+            if before_outputs is not None
+            else worker_activity.snapshot_memory_outputs(memory_dir)
+        ),
+    )
+
+
+def _record_test_observation(
+    memory_dir,
+    *,
+    summary: str = "Durable test observation.",
+    observation: str = "A reusable test observation.",
+    scope: MemoryScope = MemoryScope.GLOBAL,
+) -> dict[str, Any]:
+    return record_observation_file(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary=summary,
+        observation=observation,
+        why_it_matters=f"Future agents can use this test memory: {summary}",
+        scope=scope,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+
+
+def _memory_relative_path(record: dict[str, Any]) -> str:
+    return record["path"].removeprefix("/memories/")
+
+
 def _record_observation_payload(
     tool: Any,
     *,
@@ -126,6 +265,22 @@ def _tool_by_name(tools: Sequence[BaseTool], name: str) -> BaseTool:
     return matches[0]
 
 
+def _fast_watcher_config(
+    *, max_poll_failures: int = 3
+) -> background_runs.BackgroundRunWatcherConfig:
+    return background_runs.BackgroundRunWatcherConfig(
+        poll_interval_seconds=0,
+        max_poll_failures=max_poll_failures,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory_activity():
+    worker_activity.reset_memory_worker_status_for_tests()
+    yield
+    worker_activity.reset_memory_worker_status_for_tests()
+
+
 def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     memories = tmp_path / "memories"
     summary = "Focused pytest catches local regressions before broader runs."
@@ -145,8 +300,6 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_session_id="thread-1",
         source_agent="code-agent",
-        source_tool_call_id="tool-1",
-        record_worker_agent="evomemory-subagent-worker",
     )
     second = record_observation_file(
         memory_dir=memories,
@@ -160,8 +313,6 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_session_id="thread-1",
         source_agent="code-agent",
-        source_tool_call_id="tool-1",
-        record_worker_agent="evomemory-subagent-worker",
     )
 
     path = memories / first["path"].removeprefix("/memories/")
@@ -179,13 +330,639 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
         "memory_type": "procedural",
         "scope": "project",
         "project_id": "P-project",
-        "source": {"type": "subagent", "agent": "code-agent"},
+        "source": {
+            "type": "subagent",
+            "agent": "code-agent",
+            "session_id": "thread-1",
+        },
     }
     assert _markdown_sections(body) == {
         "Observation": observation,
         "Why It Matters": why_it_matters,
         "Evidence": evidence,
     }
+
+
+def test_link_observation_files_writes_frontmatter_and_dedupes(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Graph gateway launches background runs.",
+        observation="Use the graph gateway background run service for workers.",
+        why_it_matters="Future launchers avoid duplicating SDK plumbing.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Memory linkers should update metadata.",
+        observation="Observation links belong in frontmatter metadata.",
+        why_it_matters="Future indexing can consume links without parsing prose.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    first_path = memories / first["path"].removeprefix("/memories/")
+    second_path = memories / second["path"].removeprefix("/memories/")
+    _first_metadata, first_body_before = _read_memory_document(first_path)
+    _second_metadata, second_body_before = _read_memory_document(second_path)
+
+    result = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        relation=ObservationRelation.COMPLEMENTS,
+        reason="Both observations describe the durable background-memory flow.",
+    )
+    duplicate = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        relation=ObservationRelation.COMPLEMENTS,
+        reason="Both observations describe the durable background-memory flow.",
+    )
+
+    first_metadata, first_body_after = _read_memory_document(first_path)
+    second_metadata, second_body_after = _read_memory_document(second_path)
+    assert result == {
+        "linked": True,
+        "source_observation_id": first["observation_id"],
+        "target_observation_id": second["observation_id"],
+        "relation": "complements",
+        "updated_observation_ids": [
+            first["observation_id"],
+            second["observation_id"],
+        ],
+        "missing_observation_ids": [],
+    }
+    assert duplicate == {
+        **result,
+        "linked": False,
+        "updated_observation_ids": [],
+    }
+    assert first_body_after == first_body_before
+    assert second_body_after == second_body_before
+    first_links = first_metadata["related_observations"]
+    second_links = second_metadata["related_observations"]
+    assert len(first_links) == 1
+    assert len(second_links) == 1
+    assert first_links[0] == {
+        "id": second["observation_id"],
+        "relation": "complements",
+        "reason": "Both observations describe the durable background-memory flow.",
+        "linked_at": first_links[0]["linked_at"],
+    }
+    assert second_links[0] == {
+        "id": first["observation_id"],
+        "relation": "complements",
+        "reason": "Both observations describe the durable background-memory flow.",
+        "linked_at": first_links[0]["linked_at"],
+    }
+    datetime.strptime(first_links[0]["linked_at"], "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_link_observation_files_serializes_concurrent_frontmatter_updates(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Source observation for concurrent links.",
+        observation="Several linker workers may update this observation.",
+        why_it_matters="Concurrent linkers must not lose frontmatter updates.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    targets = [
+        record_observation_file(
+            memory_dir=memories,
+            project_id="P-project",
+            memory_type=MemoryType.SEMANTIC,
+            summary=f"Target observation {index}.",
+            observation=f"Concurrent target observation {index}.",
+            why_it_matters=f"Target {index} should remain linked.",
+            scope=MemoryScope.PROJECT,
+            source_type=MemorySourceType.TURN,
+            source_session_id="thread-1",
+            source_agent="EvoScientist",
+        )
+        for index in range(12)
+    ]
+    barrier = threading.Barrier(len(targets))
+    errors: list[Exception] = []
+
+    def link_target(index: int, target: dict[str, Any]) -> None:
+        try:
+            barrier.wait(timeout=5)
+            link_observation_files(
+                memory_dir=memories,
+                project_id="P-project",
+                source_observation_id=source["observation_id"],
+                target_observation_id=target["observation_id"],
+                relation=ObservationRelation.COMPLEMENTS,
+                reason=f"Target {index} is relevant to the shared source.",
+                bidirectional=False,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=link_target, args=(index, target))
+        for index, target in enumerate(targets)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    source_path = memories / source["path"].removeprefix("/memories/")
+    source_metadata, _source_body = _read_memory_document(source_path)
+    linked_ids = {entry["id"] for entry in source_metadata["related_observations"]}
+    assert linked_ids == {target["observation_id"] for target in targets}
+
+
+def test_read_and_search_surface_related_observations(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Gateway memory workers preserve launch metadata.",
+        observation="Use the gateway service when launching memory workers.",
+        why_it_matters="Future launchers should reuse the same async-run plumbing.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    target = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Observation links should be visible during retrieval.",
+        observation="Related observations need to surface in memory tool results.",
+        why_it_matters="Future agents can use existing links without parsing YAML.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=source["observation_id"],
+        target_observation_id=target["observation_id"],
+        relation=ObservationRelation.COMPLEMENTS,
+        reason="Launch metadata and retrieval visibility describe the same memory pipeline.",
+    )
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        observation_id=source["observation_id"],
+    )
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="gateway memory workers launch metadata",
+    )
+
+    assert read is not None
+    assert read["related_observations"][0]["observation_id"] == target["observation_id"]
+    assert (
+        read["related_observations"][0]["relation"] == ObservationRelation.COMPLEMENTS
+    )
+    assert hits[0]["observation_id"] == source["observation_id"]
+    assert (
+        hits[0]["related_observations"][0]["observation_id"] == target["observation_id"]
+    )
+
+    read_tool = create_read_memory_tool(memory_dir=memories, project_id="P-project")
+    read_payload = json.loads(
+        read_tool.run({"observation_id": source["observation_id"]})
+    )
+    search_tool = create_search_observations_tool(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    search_payload = json.loads(
+        search_tool.run({"query": "gateway memory workers launch metadata"})
+    )
+    assert (
+        read_payload["related_observations"][0]["observation_id"]
+        == target["observation_id"]
+    )
+    assert (
+        search_payload["results"][0]["related_observations"][0]["observation_id"]
+        == target["observation_id"]
+    )
+
+
+def test_read_and_search_resolve_related_observations_from_other_projects(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-current",
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Global linker practice applies across projects.",
+        observation="Global observations may link to project-specific follow-ups.",
+        why_it_matters="Related observations should remain visible from other projects.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    target = record_observation_file(
+        memory_dir=memories,
+        project_id="P-other",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Other project follow-up explains the linker practice.",
+        observation="A separate project can hold the concrete follow-up observation.",
+        why_it_matters="Global observations should surface explicitly linked project memories.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-2",
+        source_agent="EvoScientist",
+    )
+    link_observation_files(
+        memory_dir=memories,
+        project_id="P-other",
+        source_observation_id=source["observation_id"],
+        target_observation_id=target["observation_id"],
+        relation=ObservationRelation.COMPLEMENTS,
+        reason="The other project gives a concrete follow-up for the global practice.",
+        bidirectional=False,
+    )
+
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-current",
+        observation_id=source["observation_id"],
+    )
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-current",
+        query="global linker practice",
+    )
+
+    assert read is not None
+    assert read["related_observations"][0]["observation_id"] == target["observation_id"]
+    assert (
+        hits[0]["related_observations"][0]["observation_id"] == target["observation_id"]
+    )
+
+
+def test_malformed_observation_frontmatter_is_skipped(tmp_path):
+    memories = tmp_path / "memories"
+    valid = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Valid observations remain searchable.",
+        observation="A malformed neighboring observation file must not break search.",
+        why_it_matters="One bad memory file should not hide the rest of memory.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True, exist_ok=True)
+    missing_id = global_dir / "missing-id.md"
+    missing_id.write_text(
+        "---\n"
+        "summary: Missing id should skip this file\n"
+        "memory_type: semantic\n"
+        "scope: global\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+    bad_link = global_dir / "bad-link.md"
+    bad_link.write_text(
+        "---\n"
+        'id: "O-bad-link"\n'
+        'summary: "Invalid relation entries should be ignored"\n'
+        "memory_type: semantic\n"
+        "scope: global\n"
+        "related_observations:\n"
+        '  - id: "O-target"\n'
+        '    relation: "unbounded"\n'
+        '    reason: "not a supported relation"\n'
+        '    linked_at: "2026-06-25T00:00:00Z"\n'
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    assert read_observation_id_from_path(missing_id) is None
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="malformed neighboring observation",
+    )
+    assert [hit["observation_id"] for hit in hits] == [valid["observation_id"]]
+    assert worker_activity.snapshot_observation_relations(memories) == frozenset()
+
+
+def test_link_observation_files_keeps_supersedes_directional(tmp_path):
+    memories = tmp_path / "memories"
+    source = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="New memory replaces older guidance.",
+        observation="Use the newer observation as the current guidance.",
+        why_it_matters="Future agents should prefer the replacement guidance.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    target = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Older guidance is superseded.",
+        observation="This older observation should no longer be preferred.",
+        why_it_matters="Future agents need to avoid stale guidance.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+
+    result = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=source["observation_id"],
+        target_observation_id=target["observation_id"],
+        relation=ObservationRelation.SUPERSEDES,
+        reason="The source observation replaces the target observation.",
+    )
+
+    source_metadata, _source_body = _read_memory_document(
+        memories / source["path"].removeprefix("/memories/")
+    )
+    target_metadata, _target_body = _read_memory_document(
+        memories / target["path"].removeprefix("/memories/")
+    )
+    assert result["updated_observation_ids"] == [source["observation_id"]]
+    assert source_metadata["related_observations"] == [
+        {
+            "id": target["observation_id"],
+            "relation": "supersedes",
+            "reason": "The source observation replaces the target observation.",
+            "linked_at": source_metadata["related_observations"][0]["linked_at"],
+        }
+    ]
+    assert "related_observations" not in target_metadata
+
+
+def test_link_observation_files_rejects_unknown_relation(tmp_path):
+    memories = tmp_path / "memories"
+
+    with pytest.raises(ValueError, match="relation must be one of"):
+        link_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            source_observation_id="O-source",
+            target_observation_id="O-target",
+            relation="overlaps",
+            reason="This unsupported relation should be rejected.",
+        )
+
+
+def test_link_observations_tool_uses_runtime_project_id(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-runtime",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Runtime project id selects project memory.",
+        observation="Linking tools should honor runtime project ids.",
+        why_it_matters="Shared graph builds can still handle project memory.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-runtime",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Observation links live in frontmatter.",
+        observation="Frontmatter links are machine-readable.",
+        why_it_matters="Future status and search features can use metadata.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    tool = create_link_observations_tool(
+        memory_dir=memories,
+        project_id="wrong-project",
+    )
+    runtime = _tool_runtime(
+        tool,
+        config={"configurable": {"evomemory_project_id": "P-runtime"}},
+    )
+
+    payload = json.loads(
+        tool.run(
+            {
+                "source_observation_id": first["observation_id"],
+                "target_observation_id": second["observation_id"],
+                "reason": "Both validate frontmatter-native linker behavior.",
+                "runtime": runtime,
+            }
+        )
+    )
+
+    assert payload["linked"] is True
+    metadata, _body = _read_memory_document(
+        memories / first["path"].removeprefix("/memories/")
+    )
+    assert metadata["related_observations"][0]["id"] == second["observation_id"]
+
+
+def test_observation_linker_finish_counts_successful_relations_once(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Linked relation counts are status-bar outcomes.",
+        observation="Successful link_observations calls should count relations.",
+        why_it_matters="The status bar should report durable link outcomes.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Duplicate relation calls should be no-ops.",
+        observation="Duplicate link_observations calls should not recount links.",
+        why_it_matters="Relation counts should reflect actual metadata updates.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    run = _observation_linker_run()
+    hooks = memory_launch._observation_linker_launch_hooks(memories)
+
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run(run.thread_id)
+    hooks.on_started(run)
+    first_payload = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Both validate status counting for durable links.",
+    )
+    duplicate_payload = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Both validate status counting for durable links.",
+    )
+    hooks.on_finished(run)
+    status = worker_activity.observation_linker_status()
+
+    assert first_payload["linked"] is True
+    assert duplicate_payload["linked"] is False
+    assert status.relations_linked == 1
+
+
+def test_observation_linker_finish_does_not_count_reason_only_updates(tmp_path):
+    memories = tmp_path / "memories"
+    first = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Relation identity ignores rationale text.",
+        observation="Changing a relation reason is not a newly created link.",
+        why_it_matters="The status bar should not inflate memory-link counts.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    second = record_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Existing relation can receive a better rationale.",
+        observation="Linker reruns may refine the reason for an existing relation.",
+        why_it_matters="Refined metadata should not look like a new edge.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+    link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Initial rationale for the existing relation.",
+    )
+    run = _observation_linker_run()
+    hooks = memory_launch._observation_linker_launch_hooks(memories)
+
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run(run.thread_id)
+    hooks.on_started(run)
+    payload = link_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=second["observation_id"],
+        reason="Updated rationale for the existing relation.",
+    )
+    hooks.on_finished(run)
+
+    assert payload["linked"] is True
+    assert worker_activity.observation_linker_status().relations_linked == 0
+
+
+def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
+    memories = tmp_path / "memories"
+    observation = record_observation_file(
+        memory_dir=memories,
+        project_id="P-runtime",
+        memory_type=MemoryType.SEMANTIC,
+        summary="Runtime project id selects observation reads.",
+        observation="Read and search tools should honor runtime project ids.",
+        why_it_matters="Shared graph builds can still inspect project memory.",
+        scope=MemoryScope.PROJECT,
+        source_type=MemorySourceType.TURN,
+        source_session_id="thread-1",
+        source_agent="EvoScientist",
+    )
+
+    search_tool = create_search_observations_tool(
+        memory_dir=memories,
+        project_id="wrong-project",
+    )
+    search_runtime = _tool_runtime(
+        search_tool,
+        config={"configurable": {"evomemory_project_id": "P-runtime"}},
+    )
+    search_payload = json.loads(
+        search_tool.run(
+            {
+                "query": "runtime project observation reads",
+                "scope": MemoryScope.PROJECT,
+                "runtime": search_runtime,
+            }
+        )
+    )
+    assert [hit["observation_id"] for hit in search_payload["results"]] == [
+        observation["observation_id"]
+    ]
+
+    read_tool = create_read_memory_tool(
+        memory_dir=memories,
+        project_id="wrong-project",
+    )
+    read_runtime = _tool_runtime(
+        read_tool,
+        config={"configurable": {"evomemory_project_id": "P-runtime"}},
+    )
+    read_payload = json.loads(
+        read_tool.run(
+            {
+                "observation_id": observation["observation_id"],
+                "runtime": read_runtime,
+            }
+        )
+    )
+    assert (
+        "Read and search tools should honor runtime project ids."
+        in read_payload["text"]
+    )
 
 
 def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
@@ -506,7 +1283,11 @@ def test_record_observation_tool_can_use_worker_config_source(tmp_path):
         "memory_type": "procedural",
         "scope": "project",
         "project_id": "P-project",
-        "source": {"type": "subagent", "agent": "writing-agent"},
+        "source": {
+            "type": "subagent",
+            "agent": "writing-agent",
+            "session_id": "thread-source",
+        },
     }
 
 
@@ -569,8 +1350,107 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
         "summary": "Injected runtime metadata survives tool validation.",
         "memory_type": "semantic",
         "scope": "global",
-        "source": {"type": "turn", "agent": "EvoScientist"},
+        "source": {
+            "type": "turn",
+            "agent": "EvoScientist",
+            "session_id": "thread-from-runtime",
+        },
     }
+
+
+def test_record_observation_tool_skips_without_runtime_thread_id(tmp_path):
+    from EvoScientist.middleware.memory import create_memory_middleware
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+    middleware = create_memory_middleware(
+        str(tmp_path / "memories"),
+        workspace_dir=workspace,
+        memory_scheduler=coordinator,
+    )
+    tool = _tool_by_name(middleware.tools, "record_observation")
+
+    payload = _record_observation_payload(
+        tool,
+        runtime=_tool_runtime(tool),
+        memory_type=MemoryType.SEMANTIC,
+        summary="Unthreaded observations are skipped.",
+        observation="Observation recording needs source session provenance.",
+        why_it_matters="Durable memory should not persist unknown source sessions.",
+        scope=MemoryScope.GLOBAL,
+    )
+
+    assert payload == {
+        "error": "Cannot record observation without a source session id.",
+    }
+    assert launched == []
+    assert list((tmp_path / "memories").glob("observations/**/*.md")) == []
+
+
+def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
+    from EvoScientist.middleware.memory import create_memory_middleware
+
+    memory_dir = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+    middleware = create_memory_middleware(
+        str(memory_dir),
+        workspace_dir=workspace,
+        memory_scheduler=coordinator,
+    )
+    tool = _tool_by_name(middleware.tools, "record_observation")
+
+    payload = _record_observation_payload(
+        tool,
+        runtime=_tool_runtime(tool, thread_id="source-thread"),
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Direct observations link after worker finish.",
+        observation=(
+            "Direct main-agent observations should be linked after the "
+            "post-turn memory worker phase finishes."
+        ),
+        why_it_matters=(
+            "The linker should see direct writes even when the worker "
+            "does not create another observation."
+        ),
+        scope=MemoryScope.PROJECT,
+    )
+    assert payload["created"] is True
+    assert launched == []
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run("worker-thread")
+    worker_run = _memory_worker_run(
+        thread_id="worker-thread",
+        run_id="worker-run",
+        workspace_dir=str(workspace),
+        project_id=middleware.project_id,
+    )
+    hooks.on_started(worker_run)
+    assert launched == []
+
+    hooks.on_finished(worker_run)
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace,
+            project_id=middleware.project_id,
+            observation_ids=(payload["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.observations_recorded == 0
 
 
 def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
@@ -593,7 +1473,7 @@ def test_turn_compaction_hides_task_call_and_keeps_orchestrator_response():
         ),
     ]
 
-    compact = memory_lifecycle._compact_turn_messages(
+    compact = source_context._compact_turn_messages(
         messages,
         source_agent="EvoScientist",
     )
@@ -632,7 +1512,7 @@ def test_turn_compaction_keeps_direct_tool_results_with_tool_names():
         AIMessage("final answer", name="EvoScientist"),
     ]
 
-    compact = memory_lifecycle._compact_turn_messages(
+    compact = source_context._compact_turn_messages(
         messages,
         source_agent="EvoScientist",
     )
@@ -671,7 +1551,7 @@ def test_turn_compaction_uses_latest_user_turn_only():
         AIMessage("current answer", name="EvoScientist"),
     ]
 
-    compact = memory_lifecycle._compact_turn_messages(
+    compact = source_context._compact_turn_messages(
         messages,
         source_agent="EvoScientist",
     )
@@ -685,22 +1565,27 @@ def test_turn_compaction_uses_latest_user_turn_only():
 def test_lifecycle_schedules_turn_worker_without_awaiting(
     tmp_path, monkeypatch, run_async
 ):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
     calls = []
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
 
-    async def fake_launch(**kwargs):
-        calls.append(kwargs)
+    async def fake_launch(request, **kwargs):
+        calls.append((request, kwargs["hooks"]))
 
     monkeypatch.setattr(
-        memory_lifecycle,
-        "_alaunch_memory_worker",
+        memory_launch,
+        "alaunch_background_run",
         fake_launch,
     )
     middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
         project_id="P-project",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
+        memory_scheduler=coordinator,
     )
     runtime = _runtime("thread-1")
 
@@ -717,25 +1602,53 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
             state,
             runtime,
         )
-        await asyncio.sleep(0)
 
     run_async(run())
 
     assert len(calls) == 1
-    assert calls[0]["role"] == memory_lifecycle.MemoryLifecycleRole.TURN
-    assert calls[0]["session_id"] == "thread-1"
-    assert calls[0]["source_agent"] == "EvoScientist"
-    assert calls[0]["project_id"] == "P-project"
-    assert calls[0]["trajectory"] == [
-        {"role": "human", "content": "hi"},
-        {"role": "ai", "content": "done"},
+    request, hooks = calls[0]
+    assert request.graph_id == memory_launch.TURN_MEMORY_WORKER_GRAPH_ID
+    assert request.name == "EvoMemory worker"
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_before_run("worker-thread")
+    worker_run = _memory_worker_run(workspace_dir=str(workspace_dir))
+    hooks.on_started(worker_run)
+    observation = _record_test_observation(memory_dir)
+    hooks.on_finished(worker_run)
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
     ]
+
+
+def test_lifecycle_skips_memory_worker_without_runtime_thread_id(tmp_path, monkeypatch):
+    def fail_launch(*_args, **_kwargs):
+        raise AssertionError("worker should not launch without a source thread id")
+
+    monkeypatch.setattr(memory_lifecycle, "launch_memory_worker", fail_launch)
+    middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        project_id="P-project",
+        source_type=MemorySourceType.TURN,
+        source_agent="EvoScientist",
+    )
+
+    middleware.after_agent(
+        {"messages": [HumanMessage("hi"), AIMessage("done", name="EvoScientist")]},
+        _runtime(),
+    )
 
 
 def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     summary = "Completed the analysis."
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_worker,
         "_current_configurable",
         lambda: {
             "evomemory_source_session_id": "thread-1",
@@ -744,13 +1657,13 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
             "evomemory_trajectory_digest": "digest-1",
         },
     )
-    middleware = memory_lifecycle._SubagentSummaryWriterMiddleware(
+    middleware = memory_worker._SubagentSummaryWriterMiddleware(
         memory_dir=tmp_path / "memories"
     )
 
     state: AgentState[object] = {
         "messages": [],
-        "structured_response": memory_lifecycle.SubagentMemoryDecision(summary=summary),
+        "structured_response": memory_worker.SubagentMemoryDecision(summary=summary),
     }
     middleware.after_agent(
         state,
@@ -761,7 +1674,7 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     assert len(paths) == 1
     metadata, body = _read_memory_document(paths[0])
     assert _stable_created_at(metadata) == {
-        "id": memory_lifecycle._execution_summary_id(
+        "id": memory_worker._execution_summary_id(
             session_id="thread-1",
             source_agent="writing-agent",
             trajectory_digest="digest-1",
@@ -777,33 +1690,37 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     assert _markdown_sections(body) == {"Summary": summary}
 
 
-def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monkeypatch):
+def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
+    monkeypatch,
+):
     monkeypatch.setattr(
-        memory_lifecycle,
+        memory_launch,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
-    trajectory: list[memory_lifecycle.CompactMessage] = [
+    trajectory: list[source_context.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
-
-    kwargs = memory_lifecycle._memory_worker_run_kwargs(
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        thread_id="worker-thread",
+    context = _memory_source_context(
+        memory_dir="/memories",
         workspace_dir="/active/workspace",
-        project_id="P-project",
+        source_type=MemorySourceType.SUBAGENT,
         source_agent="writing-agent",
-        session_id="thread-1",
         trajectory=trajectory,
     )
 
-    assert kwargs["assistant_id"] == memory_lifecycle.SUBAGENT_MEMORY_WORKER_GRAPH_ID
+    kwargs = memory_launch._memory_worker_run_payload(
+        context=context,
+        thread_id="worker-thread",
+    )
+
+    assert kwargs["assistant_id"] == memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID
     assert kwargs["metadata"] == {
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",
         "source_agent": "writing-agent",
         "project_id": "P-project",
-        "trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+        "trajectory_digest": source_context._trajectory_digest(trajectory),
         "workspace_dir": "/tmp/ws",
     }
     configurable = kwargs["config"]["configurable"]
@@ -816,21 +1733,386 @@ def test_memory_worker_run_kwargs_use_server_thread_id_and_source_metadata(monke
         "evomemory_source_session_id": "thread-1",
         "evomemory_source_agent": "writing-agent",
         "evomemory_project_id": "P-project",
-        "evomemory_trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
+        "evomemory_trajectory_digest": source_context._trajectory_digest(trajectory),
     }
 
 
-def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
+def test_memory_worker_finish_launches_linker_for_new_observations(
+    tmp_path,
+):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    _mark_worker_started(memory_dir)
+    observation = _record_test_observation(memory_dir)
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(
+        _memory_worker_run(workspace_dir=str(workspace_dir), run_id="run-1")
+    )
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    assert worker_activity.memory_worker_status().observations_recorded == 1
+
+
+def test_memory_worker_linker_waits_for_active_workers_and_batches_observations(
+    tmp_path,
+):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    _mark_worker_started(
+        memory_dir,
+        thread_id="thread-1",
+        run_id="run-1",
+        before_outputs=before,
+    )
+    _mark_worker_started(
+        memory_dir,
+        thread_id="thread-2",
+        run_id="run-2",
+        before_outputs=before,
+    )
+    first_observation = _record_test_observation(
+        memory_dir,
+        summary="First durable observation.",
+        observation="The first reusable observation for linking.",
+    )
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-1",
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
+            source_agent="subagent-a",
+            source_session_id="session-a",
+            trajectory_digest="digest-a",
+        )
+    )
+    assert launched == []
+
+    second_observation = _record_test_observation(
+        memory_dir,
+        summary="Second durable observation.",
+        observation="The second reusable observation for linking.",
+        scope=MemoryScope.PROJECT,
+    )
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-2",
+            run_id="run-2",
+            workspace_dir=str(workspace_dir),
+            source_agent="EvoScientist",
+            source_session_id="session-b",
+            trajectory_digest="digest-b",
+        )
+    )
+
+    assert len(launched) == 1
+    assert launched[0].memory_dir == memory_dir
+    assert launched[0].workspace_dir == workspace_dir
+    assert launched[0].project_id == "P-project"
+    assert set(launched[0].observation_ids) == {
+        first_observation["observation_id"],
+        second_observation["observation_id"],
+    }
+    assert worker_activity.memory_worker_status().observations_recorded == 2
+
+
+def test_memory_worker_linker_flushes_when_last_worker_has_no_observations(tmp_path):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    _mark_worker_started(
+        memory_dir,
+        thread_id="thread-1",
+        run_id="run-1",
+        before_outputs=before,
+    )
+    _mark_worker_started(
+        memory_dir,
+        thread_id="thread-2",
+        run_id="run-2",
+        before_outputs=before,
+    )
+    observation = _record_test_observation(memory_dir)
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-1",
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
+        )
+    )
+    assert launched == []
+
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-2",
+            run_id="run-2",
+            workspace_dir=str(workspace_dir),
+        )
+    )
+
+    assert len(launched) == 1
+    assert launched[0].observation_ids == (observation["observation_id"],)
+    status = worker_activity.memory_worker_status()
+    assert status.profile_updates == 1
+    assert status.observations_recorded == 1
+
+
+def test_memory_worker_linker_flushes_pending_batch_when_last_worker_aborts(tmp_path):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    _mark_worker_started(
+        memory_dir,
+        thread_id="thread-1",
+        run_id="run-1",
+        before_outputs=before,
+    )
+    _mark_worker_started(
+        memory_dir,
+        thread_id="thread-2",
+        run_id="run-2",
+        before_outputs=before,
+    )
+    observation = _record_test_observation(memory_dir)
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+        on_worker_aborted=coordinator.record_worker_aborted,
+    )
+    assert hooks.on_finished is not None
+    assert hooks.on_aborted is not None
+    hooks.on_finished(
+        _memory_worker_run(
+            thread_id="thread-1",
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
+        )
+    )
+    assert launched == []
+
+    hooks.on_aborted(
+        _memory_worker_run(
+            thread_id="thread-2",
+            run_id="run-2",
+            workspace_dir=str(workspace_dir),
+        )
+    )
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.observations_recorded == 1
+
+
+def test_memory_worker_finish_does_not_launch_linker_for_profile_only_delta(
+    tmp_path,
+):
+    memory_dir = tmp_path / "memories"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    _mark_worker_started(memory_dir)
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_finished=coordinator.record_worker_finished,
+    )
+    assert hooks.on_finished is not None
+    hooks.on_finished(_memory_worker_run(run_id="run-1"))
+
+    assert launched == []
+    status = worker_activity.memory_worker_status()
+    assert status.profile_updates == 1
+    assert status.observations_recorded == 0
+
+
+def test_memory_worker_abort_queues_written_observations_for_linking(tmp_path):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    _mark_worker_started(memory_dir)
+    observation = _record_test_observation(memory_dir)
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_aborted=coordinator.record_worker_aborted,
+    )
+    assert hooks.on_aborted is not None
+    hooks.on_aborted(
+        _memory_worker_run(
+            run_id="run-1",
+            workspace_dir=str(workspace_dir),
+        )
+    )
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.observations_recorded == 1
+
+
+def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
+    context = _linker_context(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        observation_ids=("O-2", "O-1"),
+    )
+
+    request = memory_launch.observation_linker_launch_request(context)
+    kwargs = request.run_payload("linker-thread")
+
+    assert request.graph_id == memory_launch.OBSERVATION_LINKER_GRAPH_ID
+    assert request.name == "EvoMemory observation linker"
+    configurable = kwargs["config"]["configurable"]
+    assert configurable["thread_id"] == "linker-thread"
+    assert configurable["evomemory_project_id"] == "P-project"
+    assert json.loads(configurable["evomemory_observation_ids"]) == [
+        "O-2",
+        "O-1",
+    ]
+
+
+def test_observation_linker_does_not_launch_when_observations_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    context = _linker_context(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        observation_ids=("O-1",),
+    )
+    monkeypatch.setattr(
+        memory_launch,
+        "get_effective_config",
+        lambda: EvoScientistConfig(memory_observations_enabled=False),
+    )
+    launch_call = MagicMock()
+    monkeypatch.setattr(memory_launch, "launch_background_run", launch_call)
+
+    run = memory_launch.launch_observation_linker(context)
+
+    assert run is None
+    launch_call.assert_not_called()
+
+
+def test_async_observation_linker_does_not_launch_when_observations_disabled(
+    tmp_path,
+    monkeypatch,
+    run_async,
+):
+    context = _linker_context(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        observation_ids=("O-1",),
+    )
+    monkeypatch.setattr(
+        memory_launch,
+        "get_effective_config",
+        lambda: EvoScientistConfig(memory_observations_enabled=False),
+    )
+    launch_call = MagicMock()
+    monkeypatch.setattr(memory_launch, "alaunch_background_run", launch_call)
+
+    run = run_async(memory_launch.alaunch_observation_linker(context))
+
+    assert run is None
+    launch_call.assert_not_called()
+
+
+def test_observation_linker_launch_hooks_track_running_status(tmp_path):
+    run = _observation_linker_run()
+
+    hooks = memory_launch._observation_linker_launch_hooks(tmp_path / "memories")
+    assert hooks.on_started is not None
+    assert hooks.on_finished is not None
+    hooks.on_started(run)
+    assert worker_activity.observation_linker_status().is_running is True
+
+    hooks.on_finished(run)
+    assert worker_activity.observation_linker_status().is_running is False
+
+
+def test_observation_linker_uses_read_search_memory_and_link_tool(tmp_path):
+    tools = observation_linker._observation_linker_tools(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+    )
+
+    assert [tool.name for tool in tools] == [
+        "search_observations",
+        "read_memory",
+        "link_observations",
+    ]
+    assert "record_observation" not in {tool.name for tool in tools}
+
+
+def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
     calls = []
 
     def fake_build(**kwargs):
         calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(memory_lifecycle, "_build_memory_worker_agent", fake_build)
+    monkeypatch.setattr(memory_worker, "_build_memory_worker_agent", fake_build)
 
-    memory_lifecycle.build_memory_worker_graph(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
+    memory_worker.build_memory_worker_graph(
+        MemorySourceType.TURN,
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
     )
@@ -839,120 +2121,63 @@ def test_memory_worker_graph_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
-def test_all_mode_gives_memory_workers_observation_tool(tmp_path):
-    turn_middleware = memory_lifecycle._memory_worker_middleware(
+def _memory_tool_names(middleware) -> list[str]:
+    memory_middleware = next(item for item in middleware if getattr(item, "tools", ()))
+    return [tool.name for tool in memory_middleware.tools]
+
+
+@pytest.mark.parametrize(
+    ("source_type", "observation_writer", "expected_tools"),
+    [
+        (
+            MemorySourceType.SUBAGENT,
+            MemoryObservationWriter.AGENT,
+            ["search_observations", "read_memory"],
+        ),
+        (
+            MemorySourceType.SUBAGENT,
+            MemoryObservationWriter.WORKER,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+        (
+            MemorySourceType.TURN,
+            MemoryObservationWriter.WORKER,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+        (
+            MemorySourceType.TURN,
+            MemoryObservationWriter.ALL,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+        (
+            MemorySourceType.SUBAGENT,
+            MemoryObservationWriter.ALL,
+            ["search_observations", "read_memory", "record_observation"],
+        ),
+    ],
+)
+def test_memory_worker_observation_writer_modes(
+    tmp_path,
+    source_type: MemorySourceType,
+    observation_writer: MemoryObservationWriter,
+    expected_tools: list[str],
+):
+    middleware = memory_worker._memory_worker_middleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
-        observation_writer=MemoryObservationWriter.ALL,
-    )
-    subagent_middleware = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        observation_writer=MemoryObservationWriter.ALL,
+        source_type=source_type,
+        observation_writer=observation_writer,
     )
 
-    assert [tool.name for tool in turn_middleware[0].tools] == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-    assert [tool.name for tool in subagent_middleware[0].tools] == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-
-
-def test_memory_worker_observation_writer_modes(tmp_path):
-    agent_only = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        observation_writer=MemoryObservationWriter.AGENT,
-    )
-    worker_subagent = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        observation_writer=MemoryObservationWriter.WORKER,
-    )
-    worker_turn = memory_lifecycle._memory_worker_middleware(
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
-        observation_writer=MemoryObservationWriter.WORKER,
-    )
-
-    assert [tool.name for tool in agent_only[0].tools] == [
-        "search_observations",
-        "read_memory",
-    ]
-    assert [tool.name for tool in worker_subagent[0].tools] == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-    assert [tool.name for tool in worker_turn[0].tools] == [
-        "search_observations",
-        "read_memory",
-        "record_observation",
-    ]
-
-
-def test_memory_worker_prompts_match_observation_tool_availability():
-    turn_profile_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
-        enable_profile_memory=True,
-        enable_observation_tool=False,
-    )
-    turn_with_observation_flag = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
-        enable_profile_memory=True,
-        enable_observation_tool=True,
-    )
-    subagent_profile_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        enable_profile_memory=True,
-        enable_observation_tool=False,
-    )
-    subagent_with_observations = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        enable_profile_memory=True,
-        enable_observation_tool=True,
-    )
-    subagent_observations_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.SUBAGENT,
-        enable_profile_memory=False,
-        enable_observation_tool=True,
-    )
-    turn_observations_only = memory_lifecycle._memory_worker_system_prompt(
-        memory_lifecycle.MemoryLifecycleRole.TURN,
-        enable_profile_memory=False,
-        enable_observation_tool=True,
-    )
-
-    assert "record_observation" not in turn_profile_only
-    assert "record_observation" in turn_with_observation_flag
-    assert "record_observation" not in subagent_profile_only
-    assert "record_observation" in subagent_with_observations
-    assert "record_observation" in subagent_observations_only
-    assert "/memories/profile/" not in subagent_observations_only
-    assert "record_observation" in turn_observations_only
-    assert "/memories/profile/" not in turn_observations_only
+    assert type(middleware[0]).__name__ == "ToolErrorHandlerMiddleware"
+    assert _memory_tool_names(middleware) == expected_tools
 
 
 def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     tmp_path, monkeypatch
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
@@ -965,33 +2190,25 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         "langgraph_sdk.get_sync_client",
         lambda **_kwargs: SimpleNamespace(runs=_Runs()),
     )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
 
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    background_runs.watch_background_run_sync(
+        url="http://x",
+        thread_id="worker-thread",
+        run_id="run-1",
+        hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+        watcher_config=_fast_watcher_config(max_poll_failures=1),
+    )
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 0
 
 
 def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     tmp_path, monkeypatch, run_async
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
@@ -1000,36 +2217,26 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         async def get(self, **_kwargs):
             raise RuntimeError("poll failed")
 
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
-
-    try:
-        run_async(
-            memory_lifecycle._watch_memory_worker_run_async(
-                SimpleNamespace(runs=_Runs()),
-                thread_id="worker-thread",
-                run_id="run-1",
-            )
+    run_async(
+        background_runs.awatch_background_run(
+            SimpleNamespace(runs=_Runs()),
+            thread_id="worker-thread",
+            run_id="run-1",
+            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+            watcher_config=_fast_watcher_config(max_poll_failures=1),
         )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    )
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 0
 
 
 def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
     tmp_path, run_async
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-        before_outputs=worker_activity.snapshot_memory_outputs(memory_dir),
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
@@ -1039,37 +2246,30 @@ def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
             return {"status": "success"}
 
     async def run():
-        blocker = BlockBuster(scanned_modules=[memory_lifecycle, worker_activity])
+        blocker = BlockBuster(scanned_modules=[memory_worker, worker_activity])
         blocker.activate()
         try:
-            await memory_lifecycle._watch_memory_worker_run_async(
+            await background_runs.awatch_background_run(
                 SimpleNamespace(runs=_Runs()),
                 thread_id="worker-thread",
                 run_id="run-1",
+                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
             )
         finally:
             blocker.deactivate()
 
-    try:
-        run_async(run())
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 1
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    run_async(run())
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 1
+    assert status.observations_recorded == 0
 
 
 def test_memory_worker_watcher_untracks_when_client_creation_fails(
     tmp_path, monkeypatch
 ):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=memory_dir,
-    )
+    _mark_worker_started(memory_dir)
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- later update\n", encoding="utf-8")
@@ -1079,197 +2279,23 @@ def test_memory_worker_watcher_untracks_when_client_creation_fails(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("client failed")),
     )
 
-    try:
-        with pytest.raises(RuntimeError, match="client failed"):
-            memory_lifecycle._watch_memory_worker_run_sync(
-                url="http://x",
-                thread_id="worker-thread",
-                run_id="run-1",
-            )
-        status = worker_activity.memory_worker_status()
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_memory_worker_watcher_finishes_on_terminal_status(tmp_path, monkeypatch):
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
+    with pytest.raises(RuntimeError, match="client failed"):
+        background_runs.watch_background_run_sync(
             url="http://x",
             thread_id="worker-thread",
             run_id="run-1",
+            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
         )
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_deletes_worker_thread_on_terminal_status(tmp_path, monkeypatch):
-    """Finished workers leave no checkpoint residue: thread is deleted."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        def delete(self, thread_id):
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert deleted == ["worker-thread"]
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_delete_failure_still_marks_finished(tmp_path, monkeypatch):
-    """Thread deletion is best-effort: a failure must not break accounting."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-
-    class _Runs:
-        def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        def delete(self, thread_id):
-            raise RuntimeError("delete failed")
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_sync_watcher_does_not_delete_thread_on_poll_abort(tmp_path, monkeypatch):
-    """A run we lost track of may still be live — never delete its thread."""
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        def get(self, **_kwargs):
-            raise RuntimeError("poll failed")
-
-    class _Threads:
-        def delete(self, thread_id):
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(
-        "langgraph_sdk.get_sync_client",
-        lambda **_kwargs: SimpleNamespace(runs=_Runs(), threads=_Threads()),
-    )
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_MAX_POLL_FAILURES", 1)
-
-    try:
-        memory_lifecycle._watch_memory_worker_run_sync(
-            url="http://x",
-            thread_id="worker-thread",
-            run_id="run-1",
-        )
-        assert deleted == []
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
-
-
-def test_async_watcher_deletes_worker_thread_on_terminal_status(
-    tmp_path, monkeypatch, run_async
-):
-    worker_activity.reset_memory_worker_status_for_tests()
-    worker_activity.mark_memory_worker_started(
-        thread_id="worker-thread",
-        run_id="run-1",
-        memory_dir=tmp_path / "memories",
-    )
-    deleted: list[str] = []
-
-    class _Runs:
-        async def get(self, **_kwargs):
-            return {"status": "success"}
-
-    class _Threads:
-        async def delete(self, thread_id):
-            # Accounting must complete BEFORE the best-effort deletion —
-            # cancellation mid-deletion must never leave the worker
-            # stuck as "running" (CodeRabbit on #279).
-            assert worker_activity.memory_worker_status().is_running is False
-            deleted.append(thread_id)
-
-    monkeypatch.setattr(memory_lifecycle, "_MEMORY_WORKER_POLL_INTERVAL_SECONDS", 0)
-
-    try:
-        run_async(
-            memory_lifecycle._watch_memory_worker_run_async(
-                SimpleNamespace(runs=_Runs(), threads=_Threads()),
-                thread_id="worker-thread",
-                run_id="run-1",
-            )
-        )
-        assert deleted == ["worker-thread"]
-        assert worker_activity.memory_worker_status().is_running is False
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 0
 
 
 def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatch):
-    monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
+    monkeypatch.setattr(
+        background_runs, "default_background_run_url", lambda: "http://x"
+    )
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         lambda **_kwargs: False,
@@ -1280,26 +2306,25 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
 
     monkeypatch.setattr("langgraph_sdk.get_sync_client", fail_get_sync_client)
 
-    trajectory: list[memory_lifecycle.CompactMessage] = [
-        {"role": "human", "content": "hi"}
-    ]
-
-    memory_lifecycle._launch_memory_worker(
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+    middleware = memory_lifecycle.EvoMemoryLifecycleMiddleware(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         project_id="P-project",
+        source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
-        session_id="thread-1",
-        trajectory=trajectory,
+    )
+    middleware.after_agent(
+        {"messages": [HumanMessage("hi"), AIMessage("done", name="EvoScientist")]},
+        _runtime("thread-1"),
     )
 
 
-def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
-    worker_activity.reset_memory_worker_status_for_tests()
-    monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
+def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        memory_lifecycle,
+        background_runs, "default_background_run_url", lambda: "http://x"
+    )
+    monkeypatch.setattr(
+        memory_launch,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -1313,72 +2338,70 @@ def test_memory_worker_launch_marks_active_status(tmp_path, monkeypatch):
     fake_client.runs.create.return_value = {"run_id": "run-1", "status": "pending"}
     monkeypatch.setattr("langgraph_sdk.get_sync_client", lambda **_kwargs: fake_client)
 
-    spawned = []
-    monkeypatch.setattr(
-        memory_lifecycle,
-        "_spawn_memory_worker_status_thread",
-        lambda **kwargs: spawned.append(kwargs),
-    )
+    spawned: list[background_runs.BackgroundRun] = []
 
-    trajectory: list[memory_lifecycle.CompactMessage] = [
+    trajectory: list[source_context.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
 
     memory_dir = tmp_path / "memories"
-    memory_lifecycle._launch_memory_worker(
-        role=memory_lifecycle.MemoryLifecycleRole.TURN,
+    context = _memory_source_context(
         memory_dir=memory_dir,
         workspace_dir=tmp_path / "workspace",
-        project_id="P-project",
-        source_agent="EvoScientist",
-        session_id="thread-1",
         trajectory=trajectory,
     )
+    request = memory_launch.memory_worker_launch_request(context)
+    background_runs.launch_background_run(
+        request,
+        hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+        spawn_status_watcher=spawned.append,
+    )
 
-    try:
-        assert worker_activity.memory_worker_status().is_running is True
-        expected_metadata = {
-            "run_kind": "evomemory_turn_worker",
-            "source_session_id": "thread-1",
-            "source_agent": "EvoScientist",
-            "project_id": "P-project",
-            "trajectory_digest": memory_lifecycle._trajectory_digest(trajectory),
-            "workspace_dir": "/tmp/ws",
-        }
-        fake_client.threads.create.assert_called_once_with(
-            graph_id=memory_lifecycle.TURN_MEMORY_WORKER_GRAPH_ID,
-            metadata=expected_metadata,
-        )
-        fake_client.runs.create.assert_called_once()
-        run_kwargs = fake_client.runs.create.call_args.kwargs
-        assert run_kwargs["thread_id"] == "worker-thread"
-        assert run_kwargs["metadata"] == expected_metadata
-        assert run_kwargs["config"]["configurable"]["thread_id"] == "worker-thread"
-        assert spawned == [
-            {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
-        ]
-        profile_path = memory_dir / "profile" / "USER_PROFILE.md"
-        profile_path.parent.mkdir(parents=True)
-        profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
-        observation_path = memory_dir / "observations" / "global" / "O-1.md"
-        observation_path.parent.mkdir(parents=True)
-        observation_path.write_text("# Observation\n", encoding="utf-8")
-    finally:
-        worker_activity.mark_memory_worker_finished("worker-thread", "run-1")
+    assert worker_activity.memory_worker_status().is_running is True
+    expected_metadata = {
+        "run_kind": "evomemory_turn_worker",
+        "source_session_id": "thread-1",
+        "source_agent": "EvoScientist",
+        "project_id": "P-project",
+        "trajectory_digest": source_context._trajectory_digest(trajectory),
+        "workspace_dir": "/tmp/ws",
+    }
+    fake_client.threads.create.assert_called_once_with(
+        graph_id=memory_launch.TURN_MEMORY_WORKER_GRAPH_ID,
+        metadata=expected_metadata,
+    )
+    fake_client.runs.create.assert_called_once()
+    run_kwargs = fake_client.runs.create.call_args.kwargs
+    assert run_kwargs["thread_id"] == "worker-thread"
+    assert run_kwargs["metadata"] == expected_metadata
+    assert run_kwargs["config"]["configurable"]["thread_id"] == "worker-thread"
+    assert [(run.url, run.thread_id, run.run_id) for run in spawned] == [
+        ("http://x", "worker-thread", "run-1")
+    ]
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
+    observation_path = memory_dir / "observations" / "global" / "O-1.md"
+    observation_path.parent.mkdir(parents=True)
+    observation_path.write_text("# Observation\n", encoding="utf-8")
+    delta = worker_activity.mark_memory_worker_finished("worker-thread", "run-1")
     status = worker_activity.memory_worker_status()
+    assert delta == worker_activity.MemoryOutputDelta(
+        memory_dir=memory_dir,
+        profile_paths=("profile/USER_PROFILE.md",),
+        observation_paths=("observations/global/O-1.md",),
+    )
     assert status.is_running is False
     assert status.profile_updates == 1
     assert status.observations_recorded == 1
-    worker_activity.reset_memory_worker_status_for_tests()
 
 
-def test_async_memory_worker_launch_offloads_blocking_work(
-    tmp_path, monkeypatch, run_async
-):
-    worker_activity.reset_memory_worker_status_for_tests()
-    monkeypatch.setattr(memory_lifecycle, "_memory_worker_url", lambda: "http://x")
+def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_async):
     monkeypatch.setattr(
-        memory_lifecycle,
+        background_runs, "default_background_run_url", lambda: "http://x"
+    )
+    monkeypatch.setattr(
+        memory_launch,
         "_worker_workspace_dir",
         lambda _workspace_dir: "/tmp/ws",
     )
@@ -1400,7 +2423,7 @@ def test_async_memory_worker_launch_offloads_blocking_work(
         "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
         fake_is_running,
     )
-    monkeypatch.setattr(memory_lifecycle, "snapshot_memory_outputs", fake_snapshot)
+    monkeypatch.setattr(memory_launch, "snapshot_memory_outputs", fake_snapshot)
 
     class _Threads:
         async def create(self, **_kwargs):
@@ -1413,82 +2436,73 @@ def test_async_memory_worker_launch_offloads_blocking_work(
     fake_client = SimpleNamespace(threads=_Threads(), runs=_Runs())
     monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: fake_client)
 
-    spawned = []
-    monkeypatch.setattr(
-        memory_lifecycle,
-        "_spawn_memory_worker_status_thread",
-        lambda **kwargs: spawned.append(kwargs),
-    )
+    spawned: list[background_runs.BackgroundRun] = []
 
     async def run():
         event_loop_thread = threading.get_ident()
-        await memory_lifecycle._alaunch_memory_worker(
-            role=memory_lifecycle.MemoryLifecycleRole.TURN,
+        context = _memory_source_context(
             memory_dir=tmp_path / "memories",
             workspace_dir=tmp_path / "workspace",
-            project_id="P-project",
-            source_agent="EvoScientist",
-            session_id="thread-1",
             trajectory=[{"role": "human", "content": "hi"}],
+        )
+        request = memory_launch.memory_worker_launch_request(context)
+        await background_runs.alaunch_background_run(
+            request,
+            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
+            spawn_status_watcher=spawned.append,
         )
         return event_loop_thread
 
-    try:
-        event_loop_thread = run_async(run())
-        assert [name for name, _thread_id in call_threads] == ["health", "snapshot"]
-        assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
-        assert worker_activity.memory_worker_status().is_running is True
-        assert spawned == [
-            {"url": "http://x", "thread_id": "worker-thread", "run_id": "run-1"}
-        ]
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    event_loop_thread = run_async(run())
+    assert [name for name, _thread_id in call_threads] == ["health", "snapshot"]
+    assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
+    assert worker_activity.memory_worker_status().is_running is True
+    assert [(run.url, run.thread_id, run.run_id) for run in spawned] == [
+        ("http://x", "worker-thread", "run-1")
+    ]
 
 
-def test_memory_worker_saved_counts_clear_preserves_pending_worker_delta(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
+def test_completed_memory_activity_clear_preserves_pending_worker_delta(tmp_path):
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="finished-thread",
         run_id="finished-run",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     profile_path = memory_dir / "profile" / "USER_PROFILE.md"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
     worker_activity.mark_memory_worker_finished("finished-thread", "finished-run")
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="active-thread",
         run_id="active-run",
-        memory_dir=memory_dir,
     )
+    worker_activity.mark_observation_relations_linked(1)
 
-    worker_activity.clear_memory_worker_saved_counts()
+    worker_activity.clear_completed_memory_activity_counts()
     assert worker_activity.memory_worker_status().is_running is True
+    assert worker_activity.observation_linker_status().relations_linked == 0
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
     worker_activity.mark_memory_worker_finished("active-thread", "active-run")
     status = worker_activity.memory_worker_status()
 
-    try:
-        assert status.is_running is False
-        assert status.profile_updates == 0
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert status.is_running is False
+    assert status.profile_updates == 0
+    assert status.observations_recorded == 1
 
 
 def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="active-thread",
         run_id="active-run",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     record_observation_file(
@@ -1504,31 +2518,26 @@ def test_memory_worker_observed_outputs_includes_active_worker_delta(tmp_path):
         source_agent="EvoScientist",
     )
 
-    try:
-        status = worker_activity.memory_worker_observed_outputs()
-        assert status.is_running is True
-        assert status.observations_recorded == 1
-        assert status.profile_updates == 0
-        assert worker_activity.memory_worker_status().observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    status = worker_activity.memory_worker_observed_outputs()
+    assert status.is_running is True
+    assert status.observations_recorded == 1
+    assert status.profile_updates == 0
+    assert worker_activity.memory_worker_status().observations_recorded == 0
 
 
-def test_one_shot_cli_wait_keeps_polling_after_observed_memory_output(monkeypatch):
-    from EvoScientist.cli import interactive
-
+def test_memory_pipeline_wait_keeps_polling_after_observed_memory_output():
     now = 0.0
-    printed = []
+    saved_counts = []
     observed_calls = 0
 
-    def fake_monotonic():
+    def monotonic():
         return now
 
-    def fake_sleep(seconds):
+    def sleep(seconds):
         nonlocal now
         now += seconds
 
-    def fake_observed_outputs():
+    def get_worker_status():
         nonlocal observed_calls
         observed_calls += 1
         if observed_calls < 8:
@@ -1542,105 +2551,242 @@ def test_one_shot_cli_wait_keeps_polling_after_observed_memory_output(monkeypatc
             profile_updates=1,
         )
 
-    monkeypatch.setattr(interactive.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(interactive.time, "sleep", fake_sleep)
-    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
-    monkeypatch.setattr(
-        worker_activity,
-        "memory_worker_observed_outputs",
-        fake_observed_outputs,
-    )
-
-    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
-
-    assert observed_calls == 8
-    assert any("EvoMemory saved 1 observation(s)." in str(line) for line in printed)
-    assert any(
-        "EvoMemory saved 1 observation(s), 1 profile update(s)." in str(line)
-        for line in printed
-    )
-    assert not any("still running" in str(line) for line in printed)
-
-
-def test_one_shot_cli_wait_reports_fast_worker_output(monkeypatch):
-    from EvoScientist.cli import interactive
-
-    printed = []
-
-    monkeypatch.setattr(interactive.console, "print", lambda text: printed.append(text))
-    monkeypatch.setattr(
-        worker_activity,
-        "memory_worker_observed_outputs",
-        lambda: worker_activity.MemoryWorkerStatusSnapshot(
-            is_running=False,
-            observations_recorded=1,
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=get_worker_status,
+        get_linker_status=worker_activity.ObservationLinkerStatusSnapshot,
+        monotonic=monotonic,
+        sleep=sleep,
+        on_saved=lambda status: saved_counts.append(
+            (status.observations_recorded, status.profile_updates)
         ),
     )
 
-    interactive._wait_for_memory_workers_before_exit(timeout_seconds=10)
+    assert waited_until_idle is True
+    assert observed_calls == 9
+    assert saved_counts == [(1, 0), (1, 1)]
 
-    assert printed == ["[dim]EvoMemory saved 1 observation(s).[/dim]"]
+
+def test_memory_pipeline_wait_reports_fast_worker_output():
+    saved_counts = []
+
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=lambda: worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False,
+            observations_recorded=1,
+        ),
+        get_linker_status=worker_activity.ObservationLinkerStatusSnapshot,
+        on_saved=lambda status: saved_counts.append(
+            (status.observations_recorded, status.profile_updates)
+        ),
+    )
+
+    assert waited_until_idle is True
+    assert saved_counts == [(1, 0)]
+
+
+def test_memory_pipeline_waits_for_observation_linker():
+    now = 0.0
+    waiting_phases = []
+    linker_calls = 0
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def get_linker_status():
+        nonlocal linker_calls
+        linker_calls += 1
+        return worker_activity.ObservationLinkerStatusSnapshot(
+            is_running=linker_calls < 3
+        )
+
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=lambda: worker_activity.MemoryWorkerStatusSnapshot(
+            is_running=False
+        ),
+        get_linker_status=get_linker_status,
+        monotonic=monotonic,
+        sleep=sleep,
+        on_waiting=waiting_phases.append,
+    )
+
+    assert waited_until_idle is True
+    assert linker_calls >= 3
+    assert waiting_phases == ["linker", "linker"]
+
+
+def test_memory_pipeline_waits_while_observation_linker_is_launching(tmp_path):
+    entered_launch = threading.Event()
+    release_launch = threading.Event()
+    waiting_phases: list[worker_activity.MemoryActivityPhase] = []
+
+    def launch_linker(_context: memory_scheduler.ObservationLinkerContext):
+        entered_launch.set()
+        release_launch.wait(timeout=5)
+
+    def on_waiting(phase: worker_activity.MemoryActivityPhase) -> None:
+        waiting_phases.append(phase)
+        release_launch.set()
+
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launch_linker)
+    coordinator.record_observation_created(
+        _linker_context(
+            memory_dir=tmp_path / "memories",
+            workspace_dir=tmp_path / "workspace",
+            observation_ids=("O-1",),
+        )
+    )
+    flush_thread = threading.Thread(target=coordinator.flush_ready)
+    flush_thread.start()
+
+    try:
+        assert entered_launch.wait(timeout=1)
+        waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+            timeout_seconds=1,
+            poll_seconds=0.01,
+            output_grace_seconds=0,
+            on_waiting=on_waiting,
+        )
+
+        assert waited_until_idle is True
+        assert waiting_phases == ["linker"]
+    finally:
+        release_launch.set()
+        flush_thread.join(timeout=1)
+
+
+def test_memory_pipeline_wait_gives_linker_its_own_timeout_after_worker():
+    now = 0.0
+    timed_out_phases = []
+    worker_calls = 0
+    linker_calls = 0
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def get_worker_status():
+        nonlocal worker_calls
+        worker_calls += 1
+        return worker_activity.MemoryWorkerStatusSnapshot(is_running=worker_calls < 20)
+
+    def get_linker_status():
+        nonlocal linker_calls
+        if worker_calls < 20:
+            return worker_activity.ObservationLinkerStatusSnapshot(is_running=False)
+        linker_calls += 1
+        return worker_activity.ObservationLinkerStatusSnapshot(
+            is_running=linker_calls < 4
+        )
+
+    waited_until_idle = worker_activity.wait_for_memory_pipeline_idle(
+        timeout_seconds=10,
+        poll_seconds=0.5,
+        output_grace_seconds=3,
+        get_worker_status=get_worker_status,
+        get_linker_status=get_linker_status,
+        monotonic=monotonic,
+        sleep=sleep,
+        on_timeout=timed_out_phases.append,
+    )
+
+    assert waited_until_idle is True
+    assert worker_calls >= 20
+    assert linker_calls >= 4
+    assert timed_out_phases == []
 
 
 def test_memory_worker_status_dedupes_overlapping_observation_deltas(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
 
-    worker_activity.mark_memory_worker_finished("thread-1", "run-1")
-    worker_activity.mark_memory_worker_finished("thread-2", "run-2")
+    first_delta = worker_activity.mark_memory_worker_finished("thread-1", "run-1")
+    second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
-    try:
-        assert status.is_running is False
-        assert status.observations_recorded == 1
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert first_delta == worker_activity.MemoryOutputDelta(
+        memory_dir=memory_dir,
+        observation_paths=("observations/global/O-1.md",),
+    )
+    assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
+    assert status.is_running is False
+    assert status.observations_recorded == 1
+
+
+def test_memory_output_snapshot_uses_posix_relative_paths(tmp_path):
+    memory_dir = tmp_path / "memories"
+    profile_path = memory_dir / "profile" / "USER_PROFILE.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("# User profile\n", encoding="utf-8")
+    observation_path = memory_dir / "observations" / "global" / "O-1.md"
+    observation_path.parent.mkdir(parents=True)
+    observation_path.write_text("# Observation\n", encoding="utf-8")
+
+    snapshot = worker_activity.snapshot_memory_outputs(memory_dir)
+
+    assert set(snapshot.profile_files) == {"profile/USER_PROFILE.md"}
+    assert snapshot.observation_files == frozenset({"observations/global/O-1.md"})
 
 
 def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
-    worker_activity.reset_memory_worker_status_for_tests()
     memory_dir = tmp_path / "memories"
     before = worker_activity.snapshot_memory_outputs(memory_dir)
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-1",
         run_id="run-1",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
-    worker_activity.mark_memory_worker_started(
+    _mark_worker_started(
+        memory_dir,
         thread_id="thread-2",
         run_id="run-2",
-        memory_dir=memory_dir,
         before_outputs=before,
     )
     observation_path = memory_dir / "observations" / "global" / "O-1.md"
     observation_path.parent.mkdir(parents=True)
     observation_path.write_text("# Observation\n", encoding="utf-8")
 
-    worker_activity.mark_memory_worker_finished("thread-1", "run-1")
+    first_delta = worker_activity.mark_memory_worker_finished("thread-1", "run-1")
     assert worker_activity.memory_worker_status().observations_recorded == 1
-    worker_activity.clear_memory_worker_saved_counts()
-    worker_activity.mark_memory_worker_finished("thread-2", "run-2")
+    worker_activity.clear_completed_memory_activity_counts()
+    second_delta = worker_activity.mark_memory_worker_finished("thread-2", "run-2")
     status = worker_activity.memory_worker_status()
 
-    try:
-        assert status.is_running is False
-        assert status.observations_recorded == 0
-    finally:
-        worker_activity.reset_memory_worker_status_for_tests()
+    assert first_delta == worker_activity.MemoryOutputDelta(
+        memory_dir=memory_dir,
+        observation_paths=("observations/global/O-1.md",),
+    )
+    assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
+    assert status.is_running is False
+    assert status.observations_recorded == 0
