@@ -738,3 +738,19 @@ class TestAuxiliaryModelConfig:
         config = get_effective_config()
         assert config.auxiliary_model == "gpt-5.5"
         assert config.auxiliary_provider == "openai"
+
+
+def test_scheduler_config_defaults_and_env(monkeypatch):
+    from EvoScientist.config.settings import EvoScientistConfig, get_effective_config
+
+    c = EvoScientistConfig()
+    assert c.enable_scheduler is True
+    assert c.scheduler_default_timezone == ""
+
+    monkeypatch.setenv("EVOSCIENTIST_ENABLE_SCHEDULER", "false")
+    eff = get_effective_config({})
+    assert eff.enable_scheduler is False
+
+    monkeypatch.setenv("EVOSCIENTIST_SCHEDULER_DEFAULT_TIMEZONE", "America/New_York")
+    eff2 = get_effective_config({})
+    assert eff2.scheduler_default_timezone == "America/New_York"

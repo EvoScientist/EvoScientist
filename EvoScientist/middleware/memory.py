@@ -23,7 +23,6 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import SystemMessage
 
 from .. import paths as _paths
 from ..memory import (
@@ -37,6 +36,7 @@ from ..memory import (
 )
 from ..memory.project import resolve_project_id
 from ..memory.scheduler import MemoryScheduler, ObservationLinkerContext
+from .utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
 
@@ -162,21 +162,6 @@ Notes about this workspace: conventions, commands, tests, and traps.
 ## Known traps
 """,
 }
-
-
-def _append_to_system_message(
-    system_message: SystemMessage | None,
-    text: str,
-) -> SystemMessage:
-    """Append text to a system message while preserving existing metadata."""
-    existing_blocks = list(system_message.content_blocks) if system_message else []
-    new_blocks = [
-        *existing_blocks,
-        {"type": "text", "text": text},
-    ]
-    if system_message is None:
-        return SystemMessage(content=new_blocks)
-    return system_message.model_copy(update={"content": new_blocks})
 
 
 def _profile_specs(project_id: str) -> list[tuple[str, str]]:
@@ -751,7 +736,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             observation_index_context=observation_index_context,
             profile_content=profile_content,
         )
-        new_system = _append_to_system_message(request.system_message, injection)
+        new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
     def _profile_context_for_request(self) -> str:

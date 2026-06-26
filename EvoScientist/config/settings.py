@@ -100,7 +100,7 @@ class EvoScientistConfig:
         provider: Default LLM provider ('anthropic', 'openai', 'google-genai', or 'nvidia').
         model: Default model name (short name or full ID).
         auxiliary_provider: Provider for auxiliary_model (empty = use main provider).
-        auxiliary_model: Model for memory workers + tool selector (empty = use main model).
+        auxiliary_model: Model for memory workers + tool selector + scheduler (empty = use main model).
         default_mode: Default workspace mode ('daemon' or 'run').
         default_workdir: Default workspace directory (empty = use current working directory).
         show_thinking: Whether to show thinking panels in CLI.
@@ -164,6 +164,15 @@ class EvoScientistConfig:
     # pairing with the langgraph dev port that it connects to. The backend keeps
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
+
+    # --- Scheduled tasks (cron) ---
+    # Master switch for scheduled tasks (/schedule, NL tools, scheduler context). Defaults
+    # True so the feature is available out-of-the-box; set False to disable.
+    enable_scheduler: bool = True
+    # Default IANA timezone for cron schedules created without an explicit tz.
+    # Empty string => the host's local IANA zone (resolved via tzlocal), falling
+    # back to UTC if it can't be determined; set e.g. "Europe/London" to pin one.
+    scheduler_default_timezone: str = ""
 
     # Whether langgraph dev persists its runtime state to .langgraph_api/ next
     # to the subprocess cwd. True (default) keeps async-task, scheduler, and
@@ -660,6 +669,8 @@ _ENV_MAPPINGS = {
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
+    "enable_scheduler": "EVOSCIENTIST_ENABLE_SCHEDULER",
+    "scheduler_default_timezone": "EVOSCIENTIST_SCHEDULER_DEFAULT_TIMEZONE",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
     "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",

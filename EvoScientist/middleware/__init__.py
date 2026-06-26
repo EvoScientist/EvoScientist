@@ -29,6 +29,10 @@ from .memory_lifecycle import (
 )
 from .model_fallback import ModelFallbackMiddleware, load_fallback_chain
 from .runtime_context import RuntimeContextMiddleware, create_runtime_context_middleware
+from .scheduler import (
+    SchedulerMiddleware,
+    create_scheduler_middleware,
+)
 from .tool_error_handler import ToolErrorHandlerMiddleware
 from .tool_selector import create_tool_selector_middleware
 from .utils import disable_thinking
@@ -45,6 +49,7 @@ __all__ = [
     "ModelFallbackMiddleware",
     "Question",
     "RuntimeContextMiddleware",
+    "SchedulerMiddleware",
     "ToolErrorHandlerMiddleware",
     "compute_context_editing_trigger",
     "create_code_interpreter_middleware",
@@ -52,6 +57,7 @@ __all__ = [
     "create_memory_lifecycle_middleware",
     "create_memory_middleware",
     "create_runtime_context_middleware",
+    "create_scheduler_middleware",
     "create_tool_selector_middleware",
     "default_memory_scheduler",
     "disable_thinking",

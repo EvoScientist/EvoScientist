@@ -240,10 +240,11 @@ class TestEnsureLanggraphDev:
     def test_skips_when_async_and_memory_workers_disabled(
         self, tmp_path, runtime_paths
     ):
-        """No background server is needed without async subagents or workers."""
+        """No background server is needed without async subagents, workers, or scheduler."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
         cfg.memory_workers_enabled = False
+        cfg.enable_scheduler = False  # scheduler crons also require the backend
         cfg.langgraph_dev_port = 6174
         cfg.langgraph_dev_file_persistence = True
         with (
@@ -264,6 +265,16 @@ class TestEnsureLanggraphDev:
         mock_running.assert_not_called()
         start.assert_not_called()
         assert manager.is_async_subagents_available() is False
+
+    def test_needs_langgraph_dev_for_scheduler_only(self):
+        """enable_scheduler alone requires the backend (crons fire inside it)."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.enable_scheduler = True
+        assert manager.needs_langgraph_dev(cfg) is True
+        cfg.enable_scheduler = False
+        assert manager.needs_langgraph_dev(cfg) is False
 
     def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
         """When the subprocess is already running, no new Popen call."""

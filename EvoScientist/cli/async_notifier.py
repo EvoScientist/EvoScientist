@@ -480,13 +480,17 @@ def format_notification_lines(
     """
     if not notifs:
         return []
-    tasks = [n for n in notifs if n.kind != "bg-process"]
+    tasks = [n for n in notifs if n.kind == "agent"]
     shell = [n for n in notifs if n.kind == "bg-process"]
+    unknown = [n for n in notifs if n.kind not in {"agent", "bg-process"}]
     lines: list[tuple[str, str]] = []
     if tasks:
         lines += _render_notification_group(tasks, " ✦ Agent Teams ✦ ", "Task")
     if shell:
         lines += _render_notification_group(shell, " ✦ Background ✦ ", "Cmd")
+    if unknown:
+        # Fallback so a future kind is never silently dropped from the display.
+        lines += _render_notification_group(unknown, " ✦ Updates ✦ ", "Task")
     return lines
 
 
@@ -515,12 +519,14 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
         )
     # bg-process is inspected with check_process; sub-agents with check_async_task.
     hints: list[str] = []
-    if any(n.kind != "bg-process" for n in notifs):
+    if any(n.kind == "agent" for n in notifs):
         hints.append("check_async_task (sub-agents)")
     if any(n.kind == "bg-process" for n in notifs):
         hints.append("check_process (background processes)")
+    # Fallback when a batch has only unrecognized kinds (hints empty).
+    hint_text = " or ".join(hints) if hints else "the appropriate status tool"
     lines.append(
-        f"(Signal only — fetch full result via {' or '.join(hints)} if relevant to "
+        f"(Signal only — fetch full result via {hint_text} if relevant to "
         "the current step, else acknowledge & continue.)"
     )
     return "\n".join(lines)
