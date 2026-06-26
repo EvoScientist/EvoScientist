@@ -12,6 +12,8 @@ from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
     MemoryType,
+    build_observation_index_context,
+    list_observation_documents,
     record_observation_file,
 )
 
@@ -204,8 +206,15 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
 
     middleware = memory_module.create_memory_middleware(str(memories))
     indexed = {
-        record.observation_id: (record.memory_type, record.scope, record.summary)
-        for record in middleware._observation_index_records
+        document.observation_id: (
+            document.memory_type,
+            document.scope,
+            document.summary,
+        )
+        for document in list_observation_documents(
+            memory_dir=memories,
+            project_id=project_id,
+        )
     }
     later_result = record_observation_file(
         memory_dir=memories,
@@ -221,7 +230,11 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
     )
     modified = middleware.modify_request(_request())
     refreshed_ids = {
-        record.observation_id for record in middleware._observation_index_records
+        document.observation_id
+        for document in list_observation_documents(
+            memory_dir=memories,
+            project_id=project_id,
+        )
     }
 
     assert indexed == {
@@ -247,23 +260,69 @@ def test_observation_index_omits_summaries_when_budget_exceeded(tmp_path, monkey
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
-    records = [
-        memory_module.ObservationIndexRecord(
-            observation_id="O-large",
-            memory_path="/observations/global/O-large.md",
-            memory_type=MemoryType.PROCEDURAL,
-            scope=MemoryScope.GLOBAL,
-            summary="Do not inline this summary when the index exceeds budget.",
-        )
-    ]
+    memory_module.create_memory_middleware(str(memories))
+    record_observation_file(
+        memory_dir=memories,
+        project_id=_path_project_id(workspace),
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Do not inline this summary when the index exceeds budget.",
+        observation="A large-index observation exists.",
+        why_it_matters="Future prompts should fall back to search hints.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="research-agent",
+    )
 
-    context = middleware._observation_index_context_from_records(
-        records,
+    context = build_observation_index_context(
+        memory_dir=memories,
+        project_id=_path_project_id(workspace),
         max_inline_chars=1,
     )
 
     assert "Do not inline this summary" not in context
+
+
+def test_observation_index_over_budget_keeps_entries_that_fit(tmp_path, monkeypatch):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    project_id = _path_project_id(workspace)
+    record_observation_file(
+        memory_dir=memories,
+        project_id=project_id,
+        memory_type=MemoryType.PROCEDURAL,
+        summary="First over-budget observation " + ("x" * 320),
+        observation="First large-index observation.",
+        why_it_matters="Index truncation should retain entries when possible.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="research-agent",
+    )
+    record_observation_file(
+        memory_dir=memories,
+        project_id=project_id,
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Second over-budget observation " + ("y" * 320),
+        observation="Second large-index observation.",
+        why_it_matters="Index truncation should retain entries when possible.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-2",
+        source_agent="research-agent",
+    )
+
+    context = build_observation_index_context(
+        memory_dir=memories,
+        project_id=project_id,
+        max_inline_chars=1_350,
+    )
+
+    assert "Observation index truncated to entries that fit." in context
+    assert len(context) <= 1_350
+    assert "over-budget observation" in context
 
 
 def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(

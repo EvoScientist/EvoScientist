@@ -150,7 +150,7 @@ class LinkObservationsArgs(BaseModel):
     )
     target_observation_id: str = Field(
         min_length=1,
-        description="Exact ID of the existing related observation.",
+        description="Exact ID of the related observation.",
     )
     relation: ObservationRelation = Field(
         default=ObservationRelation.COMPLEMENTS,

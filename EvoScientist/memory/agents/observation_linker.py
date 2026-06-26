@@ -33,11 +33,12 @@ _OBSERVATION_LINKER_EXCLUDED_TOOLS = frozenset(
 
 def _observation_linker_system_prompt() -> str:
     return (
-        "You maintain links between existing observation memory files.\n\n"
-        "Read each newly recorded observation id you are given. Search and "
-        "read existing observations that may be strongly related. When a "
+        "You maintain links between observation memory files.\n\n"
+        "Read each newly recorded observation id you are given. Other newly "
+        "recorded ids in the same batch are link candidates too. Search and "
+        "read observations that may be strongly related. When a "
         "durable relationship exists, call `link_observations` with the "
-        "new observation id, the related existing observation id, and a short "
+        "new observation id, the related observation id, and a short "
         "reason. Use relation `complements`, `contradicts`, or `supersedes`. "
         "For bidirectional links, write the reason so it remains true from "
         "either observation's perspective; set `bidirectional=false` when the "

@@ -14,10 +14,8 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ModelRequest,
@@ -26,10 +24,9 @@ from langchain.agents.middleware.types import (
 
 from .. import paths as _paths
 from ..memory import (
-    MemoryScope,
     MemorySourceType,
-    MemoryType,
     ObservationRecordResult,
+    build_observation_index_context,
     create_read_memory_tool,
     create_record_observation_tool,
     create_search_observations_tool,
@@ -41,7 +38,6 @@ from .utils import append_to_system_message
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_INLINE_PROFILE_CHARS = 24_000
-DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS = 12_000
 _LEGACY_MEMORY_FILENAME = "MEMORY.md"
 _LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
@@ -225,17 +221,6 @@ def _append_imported_section(content: str, body: str) -> str:
     return content.rstrip() + f"\n\n## {_LEGACY_IMPORT_HEADING}\n\n{body.strip()}\n"
 
 
-@dataclass(frozen=True)
-class ObservationIndexRecord:
-    """One summary-bearing observation listed in the system prompt index."""
-
-    observation_id: str
-    memory_path: str
-    memory_type: MemoryType
-    scope: MemoryScope
-    summary: str
-
-
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
@@ -297,7 +282,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
                     on_observation_recorded=self._record_observation_created,
                 )
             )
-        self._observation_index_records = []
         self._observation_index_context = ""
         if not enable_observation_memory:
             return
@@ -475,190 +459,22 @@ class EvoMemoryMiddleware(AgentMiddleware):
             logger.debug("Failed to read profile memory: %s", e)
             return self._profile_pointer_context
 
-    def _observation_memory_paths(self) -> list[Path]:
-        """Return summary-indexable observation files for this project context."""
-        paths: list[Path] = []
-        for memory_path in (
-            "/observations/global",
-            f"/observations/projects/{self._project_id}",
-        ):
-            directory = self._file_path(memory_path)
-            try:
-                paths.extend(sorted(directory.glob("*.md")))
-            except OSError as e:
-                logger.warning("Failed to list observation memory %s: %s", directory, e)
-        return paths
-
-    def _read_observation_frontmatter(self, path: Path) -> dict[str, object] | None:
-        """Read explicit YAML frontmatter for an observation file."""
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            logger.warning("Failed to read observation memory %s: %s", path, e)
-            return None
-        if not text.startswith("---\n"):
-            return None
-        try:
-            frontmatter, _body = text.removeprefix("---\n").split("\n---\n", 1)
-            metadata = yaml.safe_load(frontmatter)
-        except (ValueError, yaml.YAMLError):
-            return None
-        if not isinstance(metadata, dict):
-            return None
-        return {key: value for key, value in metadata.items() if isinstance(key, str)}
-
-    def _observation_index_record_from_path(
-        self, path: Path
-    ) -> ObservationIndexRecord | None:
-        """Return an index record only when explicit summary metadata exists."""
-        metadata = self._read_observation_frontmatter(path)
-        if metadata is None:
-            return None
-
-        observation_id = str(metadata.get("id") or "").strip()
-        summary = str(metadata.get("summary") or "").strip()
-        memory_type_value = str(metadata.get("memory_type") or "").strip()
-        scope_value = str(metadata.get("scope") or "").strip()
-        if (
-            not observation_id
-            or not summary
-            or not memory_type_value
-            or not scope_value
-        ):
-            return None
-        try:
-            memory_type = MemoryType(memory_type_value)
-            scope = MemoryScope(scope_value)
-        except ValueError:
-            return None
-
-        try:
-            memory_path = "/" + path.relative_to(self._memory_dir).as_posix()
-        except ValueError:
-            return None
-        return ObservationIndexRecord(
-            observation_id=observation_id,
-            memory_path=memory_path,
-            memory_type=memory_type,
-            scope=scope,
-            summary=summary,
-        )
-
-    def _read_observation_index_records(self) -> list[ObservationIndexRecord]:
-        """Load summary-bearing observation records for prompt indexing."""
-        records = [
-            record
-            for path in self._observation_memory_paths()
-            if (record := self._observation_index_record_from_path(path)) is not None
-        ]
-        return sorted(records, key=lambda record: record.observation_id)
-
-    def _observation_index_count_line(
-        self, records: list[ObservationIndexRecord]
-    ) -> str:
-        """Return compact observation counts by scope and memory type."""
-        scope_counts = dict.fromkeys(MemoryScope, 0)
-        type_counts = dict.fromkeys(MemoryType, 0)
-        for record in records:
-            scope_counts[record.scope] += 1
-            type_counts[record.memory_type] += 1
-        return (
-            f"Counts: total={len(records)}; "
-            f"scope global={scope_counts[MemoryScope.GLOBAL]}, "
-            f"project={scope_counts[MemoryScope.PROJECT]}; "
-            f"type semantic={type_counts[MemoryType.SEMANTIC]}, "
-            f"procedural={type_counts[MemoryType.PROCEDURAL]}, "
-            f"episodic={type_counts[MemoryType.EPISODIC]}."
-        )
-
-    def _observation_search_hints(self) -> str:
-        """Return stable search hints for observation memory."""
-        return "\n".join(
-            [
-                "Search hints:",
-                "- Each line gives id, type/scope, path, and summary.",
-                (
-                    "- Use `search_observations` for ranked keyword search "
-                    "and `read_memory` for known observation IDs."
-                ),
-                "- Use `mode=regex` only when exact grep-like matching is required.",
-                "- Search by id when you already know it from the index.",
-                (
-                    "- Filter by type when appropriate: "
-                    "`memory_type: procedural`, `memory_type: semantic`, or "
-                    "`memory_type: episodic`."
-                ),
-                (
-                    "- Filter by scope when appropriate: "
-                    "`scope: project` or `scope: global`."
-                ),
-                (
-                    "- Search with a few distinctive words or phrases from "
-                    "the current work that describe the issue, constraint, "
-                    "procedure, or prior result to find."
-                ),
-            ]
-        )
-
-    def _observation_index_context_from_records(
-        self,
-        records: list[ObservationIndexRecord],
-        *,
-        max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
-    ) -> str:
-        """Build the observation index injected into the system prompt."""
-        header = "\n".join(
-            [
-                "<observation_memory>",
-                self._observation_index_count_line(records),
-            ]
-        )
-        if not records:
-            return "\n".join(
-                [header, self._observation_search_hints(), "</observation_memory>"]
-            )
-
-        lines = [
-            f"- {record.observation_id} "
-            f"[{record.memory_type.value}/{record.scope.value}] "
-            f"{_agent_path(record.memory_path)}: {record.summary}"
-            for record in records
-        ]
-        full = "\n".join(
-            [
-                header,
-                "Indexed observations:",
-                *lines,
-                self._observation_search_hints(),
-                "</observation_memory>",
-            ]
-        )
-        if len(full) <= max_inline_chars:
-            return full
-        return "\n".join(
-            [
-                header,
-                "Observation summaries are too large to inline; search on demand.",
-                self._observation_search_hints(),
-                "</observation_memory>",
-            ]
-        )
-
     def _refresh_observation_index_context(self) -> str:
         """Refresh the prompt observation index from current memory files."""
         if not self._enable_observation_memory:
             return ""
         try:
             self._ensure_observation_dirs()
-            records = self._read_observation_index_records()
-            context = self._observation_index_context_from_records(records)
+            context = build_observation_index_context(
+                memory_dir=self._memory_dir,
+                project_id=self._project_id,
+            )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
             return self._observation_index_context
         except Exception as e:
             logger.debug("Failed to refresh observation memory index: %s", e)
             return self._observation_index_context
-        self._observation_index_records = records
         self._observation_index_context = context
         return context
 

@@ -353,7 +353,7 @@ def _resolve_document_links(
     ]
 
 
-def _candidate_observation_documents(
+def list_observation_documents(
     *,
     memory_dir: str | Path,
     project_id: str,
@@ -398,7 +398,7 @@ def search_observation_files(
         return []
     search_mode = ObservationSearchMode(mode)
 
-    documents = _candidate_observation_documents(
+    documents = list_observation_documents(
         memory_dir=memory_dir,
         project_id=project_id,
         scope=scope,
@@ -424,7 +424,7 @@ def read_observation_file(
         return None
 
     root = Path(memory_dir).expanduser()
-    for document in _candidate_observation_documents(
+    for document in list_observation_documents(
         memory_dir=root,
         project_id=project_id,
         scope=None,

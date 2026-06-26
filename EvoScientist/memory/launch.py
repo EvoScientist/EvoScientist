@@ -16,6 +16,7 @@ from ..gateway.background_runs import (
     alaunch_background_run,
     launch_background_run,
 )
+from .observations import build_observation_linker_index_context
 from .scheduler import ObservationLinkerContext
 from .source_context import MemorySourceContext, _trajectory_for_prompt
 from .types import MemorySourceType
@@ -151,11 +152,19 @@ def _observation_linker_user_prompt(context: ObservationLinkerContext) -> str:
         "project_id": context.project_id,
         "new_observation_ids": sorted(context.observation_ids),
     }
-    return (
-        "Link newly recorded observations to existing observation memory when "
-        "there is a strong reusable relationship.\n\n"
+    prompt = (
+        "Link newly recorded observations when there is a strong reusable "
+        "relationship.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)}"
     )
+    observation_index = build_observation_linker_index_context(
+        memory_dir=context.memory_dir,
+        project_id=context.project_id,
+        exclude_ids=context.observation_ids,
+    )
+    if observation_index:
+        prompt += f"\n\n{observation_index}"
+    return prompt
 
 
 def _observation_linker_metadata(
