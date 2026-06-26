@@ -22,6 +22,8 @@ memory.
 
 from __future__ import annotations
 
+import asyncio
+
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -52,8 +54,12 @@ async def get_models(_request: Request) -> JSONResponse:
     Uses ``get_effective_config()`` (not ``load_config()``) so env-var
     overrides like ``OLLAMA_BASE_URL`` from ``_ENV_MAPPINGS`` are
     honored — matching the deploy's actual model-building behavior.
+    Offloaded to a thread because ``get_effective_config()`` calls
+    ``find_dotenv(usecwd=True)`` which invokes ``os.getcwd()`` — a
+    blocking syscall that langgraph-dev's ``blockbuster`` middleware
+    refuses to allow on the async event loop (would surface as a 500).
     """
-    cfg = get_effective_config()
+    cfg = await asyncio.to_thread(get_effective_config)
     entries = [
         {"name": name, "model_id": model_id, "provider": provider}
         for name, model_id, provider in list_models_by_provider()
