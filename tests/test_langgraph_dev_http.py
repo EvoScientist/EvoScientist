@@ -19,7 +19,9 @@ def test_get_models_returns_entries_and_default():
     mock_cfg = EvoScientistConfig(
         model="claude-sonnet-4-6", provider="custom-anthropic"
     )
-    with patch("EvoScientist.langgraph_dev.http.load_config", return_value=mock_cfg):
+    with patch(
+        "EvoScientist.langgraph_dev.http.get_effective_config", return_value=mock_cfg
+    ):
         resp = client.get("/api/models")
     assert resp.status_code == 200
     body = resp.json()
@@ -46,8 +48,9 @@ def test_entries_preserve_registry_order():
     """The picker uses position-in-list to rank providers per short name —
     the JSON must preserve the order returned by ``list_models_by_provider``.
 
-    Stubs ``load_config`` to keep the assertion focused on registry order
-    rather than implicitly depending on the ambient deploy config.
+    Stubs ``get_effective_config`` to keep the assertion focused on
+    registry order rather than implicitly depending on the ambient
+    deploy config.
     """
     from EvoScientist.llm.models import list_models_by_provider
 
@@ -56,7 +59,9 @@ def test_entries_preserve_registry_order():
         for n, m, p in list_models_by_provider()
     ]
     mock_cfg = EvoScientistConfig()
-    with patch("EvoScientist.langgraph_dev.http.load_config", return_value=mock_cfg):
+    with patch(
+        "EvoScientist.langgraph_dev.http.get_effective_config", return_value=mock_cfg
+    ):
         resp = client.get("/api/models")
     assert resp.json()["entries"] == expected
 
@@ -67,7 +72,9 @@ def test_default_passes_through_arbitrary_config_pair():
     picker labels it as the active selection regardless.
     """
     mock_cfg = EvoScientistConfig(model="some-retired-name", provider="some-provider")
-    with patch("EvoScientist.langgraph_dev.http.load_config", return_value=mock_cfg):
+    with patch(
+        "EvoScientist.langgraph_dev.http.get_effective_config", return_value=mock_cfg
+    ):
         resp = client.get("/api/models")
     assert resp.json()["default"] == {
         "name": "some-retired-name",
@@ -90,7 +97,10 @@ def test_ollama_models_appended_when_base_url_configured():
         return ["llama3:8b", "mistral:7b"]
 
     with (
-        patch("EvoScientist.langgraph_dev.http.load_config", return_value=mock_cfg),
+        patch(
+            "EvoScientist.langgraph_dev.http.get_effective_config",
+            return_value=mock_cfg,
+        ),
         patch(
             "EvoScientist.llm.ollama_discovery.discover_ollama_models",
             new=fake_discover,
@@ -98,19 +108,20 @@ def test_ollama_models_appended_when_base_url_configured():
     ):
         body = client.get("/api/models").json()
 
-    ollama_entries = [e for e in body["entries"] if e["provider"] == "ollama"]
-    assert ollama_entries == [
+    # Assert the response is the static registry followed by the discovered
+    # Ollama suffix — robust to future static Ollama entries in the registry.
+    from EvoScientist.llm.models import list_models_by_provider
+
+    static_entries = [
+        {"name": n, "model_id": m, "provider": p}
+        for n, m, p in list_models_by_provider()
+    ]
+    discovered_entries = [
         {"name": "llama3:8b", "model_id": "llama3:8b", "provider": "ollama"},
         {"name": "mistral:7b", "model_id": "mistral:7b", "provider": "ollama"},
     ]
-    # Discovered entries must come AFTER the static registry, not interleave.
-    last_registry_idx = max(
-        i for i, e in enumerate(body["entries"]) if e["provider"] != "ollama"
-    )
-    first_ollama_idx = min(
-        i for i, e in enumerate(body["entries"]) if e["provider"] == "ollama"
-    )
-    assert first_ollama_idx > last_registry_idx
+    assert body["entries"][: len(static_entries)] == static_entries
+    assert body["entries"][len(static_entries) :] == discovered_entries
     # TUI's "Custom Ollama model…" sentinel is a widget-specific affordance —
     # it must not appear on the HTTP surface.
     assert not any(e["model_id"] == "__custom_ollama__" for e in body["entries"])
@@ -131,7 +142,10 @@ def test_ollama_discovery_skipped_when_base_url_absent():
         return []
 
     with (
-        patch("EvoScientist.langgraph_dev.http.load_config", return_value=mock_cfg),
+        patch(
+            "EvoScientist.langgraph_dev.http.get_effective_config",
+            return_value=mock_cfg,
+        ),
         patch(
             "EvoScientist.llm.ollama_discovery.discover_ollama_models",
             new=spy_discover,
@@ -140,4 +154,10 @@ def test_ollama_discovery_skipped_when_base_url_absent():
         body = client.get("/api/models").json()
 
     assert calls == []
-    assert not any(e["provider"] == "ollama" for e in body["entries"])
+    # Response is exactly the static registry — no Ollama additions whatsoever.
+    from EvoScientist.llm.models import list_models_by_provider
+
+    assert body["entries"] == [
+        {"name": n, "model_id": m, "provider": p}
+        for n, m, p in list_models_by_provider()
+    ]

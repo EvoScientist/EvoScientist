@@ -27,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from EvoScientist.config import load_config
+from EvoScientist.config import get_effective_config
 from EvoScientist.llm.models import list_models_by_provider
 
 
@@ -48,8 +48,12 @@ async def get_models(_request: Request) -> JSONResponse:
     (``config.yaml``'s ``model`` / ``provider`` — what ``/model reset``
     would land on). Returned even when the configured pair isn't in
     the registry, so the picker can still label it.
+
+    Uses ``get_effective_config()`` (not ``load_config()``) so env-var
+    overrides like ``OLLAMA_BASE_URL`` from ``_ENV_MAPPINGS`` are
+    honored — matching the deploy's actual model-building behavior.
     """
-    cfg = load_config()
+    cfg = get_effective_config()
     entries = [
         {"name": name, "model_id": model_id, "provider": provider}
         for name, model_id, provider in list_models_by_provider()
