@@ -652,6 +652,16 @@ def run_textual_interactive(
             for child in list(container.children):
                 if child is not welcome:
                     child.remove()
+            # Issue #301: after free-scrolling (#262) the anchor may keep the
+            # viewport pinned to the bottom of the previous conversation.  When
+            # ``/new`` wipes the chat while anchored, Textual can compute a
+            # negative relative scroll position and push the welcome banner out
+            # of view.  Reset the anchor and scroll to the top so the banner
+            # remains at the top of the fresh session.
+            container.anchor(False)
+            container.scroll_home(animate=False, immediate=True)
+            self._chat_following = True
+            self._new_content_below = False
 
         def request_quit(self) -> None:
             self.action_request_quit()
