@@ -16,7 +16,10 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict
+
+if TYPE_CHECKING:
+    from ..gateway import GraphGateway, GraphTarget
 
 TERMINAL_STATUSES: Final = frozenset({"success", "error", "timeout", "interrupted"})
 """Aligned with langgraph_sdk.schema.RunStatus terminal values.
@@ -29,6 +32,15 @@ Cancel operations transition runs into ``interrupted`` (not ``cancelled``).
 # HTTP keep-alive timeout on long static periods). Bounded to prevent an
 # unbounded loop if the server permanently misreports status.
 _MAX_RECONNECT_ATTEMPTS: Final = 10
+
+
+class AsyncTaskState(TypedDict, total=False):
+    status: str
+    last_checked_at: str
+    last_updated_at: str
+
+
+AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
 
 
 @dataclass(frozen=True)
@@ -66,12 +78,10 @@ _notification_queue = _unrouted_queue
 # dict[handle, origin_cli_thread_id] so the consumer's batching grace loop
 # can filter for watchers tied to the current CLI thread (or unrouted)
 # without being delayed by sibling-thread watchers.
-_active_watchers: dict = {}
+_active_watchers: dict[object, str | None] = {}
 # Map thread_id (sub-agent thread) → current watcher handle (supports
-# replacement on update_async_task). Value type widens from asyncio.Task
-# to "anything with .cancel()/.done()/.add_done_callback()" so we can
-# move watcher scheduling onto a background loop in a follow-up fix.
-_watcher_by_thread: dict[str, object] = {}
+# replacement on update_async_task).
+_watcher_by_thread: dict[str, asyncio.Task[None]] = {}
 
 
 def _has_relevant_active_watchers(current_thread_id: str | None) -> bool:
@@ -127,6 +137,19 @@ def pending_thread_ids() -> set[str]:
     """Return the set of thread_ids with pending routed notifications."""
     with _notifications_lock:
         return {tid for tid, q in _notifications_by_thread.items() if not q.empty()}
+
+
+async def read_async_tasks_from_gateway(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+) -> AsyncTasksState:
+    """Read async_tasks state through the active graph gateway."""
+    try:
+        values = await gateway.get_state_values(target, thread_id)
+    except Exception:
+        return {}
+    return values.get("async_tasks", {})
 
 
 async def watch_run_and_notify(
@@ -285,7 +308,7 @@ def spawn_watcher(
     agent_name: str,
     prompt: str = "",
     origin_cli_thread_id: str | None = None,
-) -> asyncio.Task:
+) -> asyncio.Task[None]:
     """Spawn a watcher on the caller's asyncio loop.
 
     Replacement semantics support ``update_async_task`` which creates a new
@@ -319,7 +342,7 @@ def spawn_watcher(
     _watcher_by_thread[thread_id] = task
     _active_watchers[task] = origin_cli_thread_id
 
-    def _cleanup(t: asyncio.Task) -> None:
+    def _cleanup(t: asyncio.Task[None]) -> None:
         _active_watchers.pop(t, None)
         # Only remove if THIS task is still the registered one — could
         # have been replaced by a newer spawn_watcher call already.
@@ -366,7 +389,7 @@ def drain_notifications(
 
 def dedup_notifications(
     notifs: list[AsyncTaskNotification],
-    async_tasks: dict[str, dict] | None,
+    async_tasks: AsyncTasksState | None,
 ) -> list[AsyncTaskNotification]:
     """Filter notifications the agent has already 'seen' via prior check.
 
@@ -457,13 +480,17 @@ def format_notification_lines(
     """
     if not notifs:
         return []
-    tasks = [n for n in notifs if n.kind != "bg-process"]
+    tasks = [n for n in notifs if n.kind == "agent"]
     shell = [n for n in notifs if n.kind == "bg-process"]
+    unknown = [n for n in notifs if n.kind not in {"agent", "bg-process"}]
     lines: list[tuple[str, str]] = []
     if tasks:
         lines += _render_notification_group(tasks, " ✦ Agent Teams ✦ ", "Task")
     if shell:
         lines += _render_notification_group(shell, " ✦ Background ✦ ", "Cmd")
+    if unknown:
+        # Fallback so a future kind is never silently dropped from the display.
+        lines += _render_notification_group(unknown, " ✦ Updates ✦ ", "Task")
     return lines
 
 
@@ -492,12 +519,14 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
         )
     # bg-process is inspected with check_process; sub-agents with check_async_task.
     hints: list[str] = []
-    if any(n.kind != "bg-process" for n in notifs):
+    if any(n.kind == "agent" for n in notifs):
         hints.append("check_async_task (sub-agents)")
     if any(n.kind == "bg-process" for n in notifs):
         hints.append("check_process (background processes)")
+    # Fallback when a batch has only unrecognized kinds (hints empty).
+    hint_text = " or ".join(hints) if hints else "the appropriate status tool"
     lines.append(
-        f"(Signal only — fetch full result via {' or '.join(hints)} if relevant to "
+        f"(Signal only — fetch full result via {hint_text} if relevant to "
         "the current step, else acknowledge & continue.)"
     )
     return "\n".join(lines)
@@ -513,7 +542,7 @@ NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS = 3.0
 
 async def consume_notifications(
     run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
-    read_async_tasks_state: Callable[[], Awaitable[dict[str, dict]]],
+    read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
     current_thread_id: str | None = None,
 ) -> None:
     """Drain queue, dedup, batch, and inject as a synthetic user message.

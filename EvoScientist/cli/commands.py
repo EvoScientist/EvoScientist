@@ -1,23 +1,32 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import asyncio
 import logging
 import os
 import queue
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import typer
 from rich.markup import escape
 from rich.table import Table
 
-from ..commands.base import Command, CommandContext
+from ..commands.base import ChannelRuntime, Command, CommandContext
+from ..gateway import (
+    GraphGateway,
+    GraphTarget,
+    RuntimeGateways,
+    create_runtime_gateways,
+)
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..stream.console import console
+from . import async_notifier
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
@@ -50,6 +59,11 @@ from .mcp_ui import (
     _mcp_remove_server,
     _show_mcp_config,
 )
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
+    from ..config import EvoScientistConfig
 
 # =============================================================================
 # Onboard command
@@ -596,16 +610,17 @@ def build_compact_summary_renderable(
 
 
 async def compact_conversation(
-    agent: Any,
-    thread_id: str | None,
+    graph_gateway: GraphGateway,
+    thread_id: str,
+    target: GraphTarget,
     *,
     input_tokens_hint: int | None = None,
 ) -> CompactResult:
     """Compact the conversation by summarizing old messages.
 
-    Reads the agent's checkpointed state, creates a temporary
+    Reads the graph's checkpointed state, creates a temporary
     ``SummarizationMiddleware``, generates a summary, and writes
-    the compacted state back via ``aupdate_state``.
+    the compacted state back through ``GraphGateway``.
 
     ``input_tokens_hint`` is the real LLM input token count from the last
     ``usage_metadata`` (includes system prompt + tool schemas).  When
@@ -615,20 +630,17 @@ async def compact_conversation(
 
     Returns a structured ``CompactResult``.
     """
-    if not agent or not thread_id:
-        return CompactResult("noop", "Nothing to compact — start a conversation first.")
-
     from langchain_core.messages.utils import count_tokens_approximately
     from langchain_core.runnables import RunnableConfig
 
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
     try:
-        state_snapshot = await agent.aget_state(config)
+        state_values = await graph_gateway.get_state_values(target, thread_id)
     except Exception as exc:
         return CompactResult("error", f"Failed to read state: {exc}")
 
-    messages = state_snapshot.values.get("messages", [])
+    messages = state_values.get("messages", [])
     if not messages:
         return CompactResult(
             "noop", "Nothing to compact — no messages in conversation."
@@ -661,7 +673,7 @@ async def compact_conversation(
     )
 
     # Rebuild effective message list accounting for prior compaction
-    event = state_snapshot.values.get("_summarization_event")
+    event = state_values.get("_summarization_event")
     effective = middleware._apply_event_to_messages(messages, event)
     effective_tokens = count_tokens_approximately(effective)
 
@@ -783,7 +795,11 @@ async def compact_conversation(
         "file_path": file_path,
     }
 
-    await agent.aupdate_state(config, {"_summarization_event": new_event})
+    await graph_gateway.update_state_values(
+        target,
+        thread_id,
+        {"_summarization_event": new_event},
+    )
 
     return CompactResult(
         "ok",
@@ -809,9 +825,44 @@ async def compact_conversation(
 _serve_logger = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class ServeRuntimeState:
+    """Mutable serve-mode runtime shared by the poll loop and slash callbacks."""
+
+    agent: "CompiledStateGraph"
+    thread_id: str
+    workspace_dir: str | None
+    config: "EvoScientistConfig | None"
+    runtime_gateways: RuntimeGateways
+    resume_warning_thread_id: str | None = None
+
+    def set_agent(
+        self,
+        agent: "CompiledStateGraph",
+        channel_runtime: ChannelRuntime | None,
+    ) -> None:
+        self.agent = agent
+        if channel_runtime is not None:
+            channel_runtime.agent = agent
+
+    def set_thread_id(
+        self,
+        thread_id: str,
+        channel_runtime: ChannelRuntime | None,
+        *,
+        forget_previous_origin: bool = True,
+    ) -> None:
+        old_thread_id = self.thread_id
+        if forget_previous_origin:
+            forget_channel_origin(old_thread_id)
+        self.thread_id = thread_id
+        if channel_runtime is not None:
+            channel_runtime.thread_id = thread_id
+
+
 def _make_serve_start_new_session_cb(
-    agent_holder: dict[str, Any],
-    channel_runtime: Any | None = None,
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None = None,
 ):
     """Build the ``start_new_session_cb`` used by serve mode.
 
@@ -821,55 +872,52 @@ def _make_serve_start_new_session_cb(
     fresh thread id.  Without a wired callback the channel user gets
     ``ChannelCommandUI``'s fallback "restart the channel link" message
     and nothing actually rotates.  This helper generates a new thread
-    id, updates the shared holder, and syncs the channel runtime so
+    id, updates the shared runtime state, and syncs the channel runtime so
     subsequent messages land on the new thread.
     """
 
-    def _cb() -> None:
-        from ..sessions import generate_thread_id
-
-        new_tid = generate_thread_id()
-        forget_channel_origin(agent_holder.get("thread_id"))
-        agent_holder["thread_id"] = new_tid
-        if channel_runtime is not None:
-            channel_runtime.thread_id = new_tid
+    async def _cb() -> None:
+        new_tid = await runtime_state.runtime_gateways.graph_gateway.create_thread(
+            GraphTarget(workspace_dir=runtime_state.workspace_dir)
+        )
+        runtime_state.set_thread_id(new_tid, channel_runtime)
         console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
 
     return _cb
 
 
 def _serve_resume_config(
-    agent_holder: dict[str, Any],
-    config: Any | None,
-) -> Any | None:
+    runtime_state: ServeRuntimeState,
+    config: "EvoScientistConfig | None",
+) -> "EvoScientistConfig | None":
     """Return the effective config to use for serve-mode resume sync."""
-    return config if config is not None else agent_holder.get("config")
+    return config if config is not None else runtime_state.config
 
 
 async def _apply_serve_resume_state(
-    agent_holder: dict[str, Any],
-    channel_runtime: Any | None,
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None,
     *,
     thread_id: str,
     workspace_dir: str | None,
-    config: Any | None = None,
+    config: "EvoScientistConfig | None" = None,
 ) -> None:
     """Adopt a resumed thread/workspace into serve-mode runtime state.
 
     Workspace-bound resources are rebuilt and synced before mutating the shared
-    holder. The agent is loaded before syncing the external server so a load
+    state. The agent is loaded before syncing the external server so a load
     failure cannot move the server away from the currently active session.
     """
     import asyncio
 
-    old_workspace = agent_holder.get("workspace_dir")
+    old_workspace = runtime_state.workspace_dir
     new_workspace = (
         workspace_dir if workspace_dir and workspace_dir != old_workspace else None
     )
-    new_agent: Any | None = None
+    workspace_update: tuple[str, CompiledStateGraph] | None = None
 
     if new_workspace is not None:
-        effective_config = _serve_resume_config(agent_holder, config)
+        effective_config = _serve_resume_config(runtime_state, config)
         if effective_config is None:
             raise RuntimeError(
                 "Cannot resume into a different workspace in serve mode without "
@@ -885,59 +933,56 @@ async def _apply_serve_resume_state(
                 effective_config,
                 workspace_dir=new_workspace,
             )
+            workspace_update = (new_workspace, new_agent)
         except Exception:
             if old_workspace:
                 set_active_workspace(old_workspace)
             raise
 
-    old_thread_id = agent_holder.get("thread_id")
-    thread_changed = bool(thread_id) and thread_id != old_thread_id
+    old_thread_id = runtime_state.thread_id
+    thread_changed = thread_id != old_thread_id
     if thread_changed:
-        forget_channel_origin(old_thread_id)
-        agent_holder["thread_id"] = thread_id
-        if channel_runtime is not None:
-            channel_runtime.thread_id = thread_id
+        runtime_state.set_thread_id(thread_id, channel_runtime)
 
-    if new_workspace is not None:
-        agent_holder["workspace_dir"] = new_workspace
-        agent_holder["agent"] = new_agent
-        if channel_runtime is not None:
-            channel_runtime.agent = new_agent
+    if workspace_update is not None:
+        updated_workspace, updated_agent = workspace_update
+        runtime_state.workspace_dir = updated_workspace
+        runtime_state.set_agent(updated_agent, channel_runtime)
 
 
 def _make_serve_handle_session_resume_cb(
-    agent_holder: dict[str, Any],
-    channel_runtime: Any | None = None,
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None = None,
     *,
-    config: Any | None = None,
+    config: "EvoScientistConfig | None" = None,
 ):
     """Build the ChannelCommandUI resume callback for serve mode."""
 
     async def _cb(thread_id: str, workspace_dir: str | None = None) -> None:
-        old_thread_id = agent_holder.get("thread_id")
+        old_thread_id = runtime_state.thread_id
         await _apply_serve_resume_state(
-            agent_holder,
+            runtime_state,
             channel_runtime,
             thread_id=thread_id,
             workspace_dir=workspace_dir,
             config=config,
         )
-        if thread_id and thread_id != old_thread_id:
-            agent_holder["_resume_warning_thread_id"] = thread_id
+        if thread_id != old_thread_id:
+            runtime_state.resume_warning_thread_id = thread_id
 
     return _cb
 
 
 def _make_serve_cmd_completed_hook(
-    agent_holder: dict[str, Any],
-    channel_runtime: Any | None = None,
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None = None,
     *,
-    config: Any | None = None,
+    config: "EvoScientistConfig | None" = None,
 ):
     """Build the ``on_cmd_completed`` hook used by serve mode.
 
     Adopts ``/model`` agent swaps and ``/resume`` thread/workspace
-    swaps back into ``agent_holder`` so the outer poll loop picks up
+    swaps back into ``runtime_state`` so the outer poll loop picks up
     the new handles on subsequent messages.  Also keeps
     ``channel_runtime`` in sync so the bus sees the new values.
 
@@ -952,17 +997,17 @@ def _make_serve_cmd_completed_hook(
     without spinning up the whole serve loop.
     """
 
-    async def _hook(ctx: CommandContext, original_agent: Any, cmd: Command) -> None:
+    async def _hook(
+        ctx: CommandContext,
+        original_agent: "CompiledStateGraph",
+        cmd: Command,
+    ) -> None:
         if ctx.agent is not None and ctx.agent is not original_agent:
-            agent_holder["agent"] = ctx.agent
-            if channel_runtime is not None:
-                channel_runtime.agent = ctx.agent
+            runtime_state.set_agent(ctx.agent, channel_runtime)
 
-        old_thread_id = agent_holder.get("thread_id")
-        resume_warning_thread_id = agent_holder.pop(
-            "_resume_warning_thread_id",
-            None,
-        )
+        old_thread_id = runtime_state.thread_id
+        resume_warning_thread_id = runtime_state.resume_warning_thread_id
+        runtime_state.resume_warning_thread_id = None
 
         # ``/resume`` mutates ``ctx.thread_id`` directly (its UI callback
         # is a no-op in serve mode since there's no REPL to reset).  Pick
@@ -975,21 +1020,18 @@ def _make_serve_cmd_completed_hook(
         new_tid = ctx.thread_id
         if cmd.name == "/resume":
             await _apply_serve_resume_state(
-                agent_holder,
+                runtime_state,
                 channel_runtime,
                 thread_id=new_tid,
                 workspace_dir=ctx.workspace_dir,
                 config=config,
             )
         else:
-            thread_changed = bool(new_tid) and new_tid != old_thread_id
+            thread_changed = new_tid != old_thread_id
             if thread_changed:
-                forget_channel_origin(old_thread_id)
-                agent_holder["thread_id"] = new_tid
-                if channel_runtime is not None:
-                    channel_runtime.thread_id = new_tid
+                runtime_state.set_thread_id(new_tid, channel_runtime)
 
-        thread_changed = bool(new_tid) and new_tid != old_thread_id
+        thread_changed = new_tid != old_thread_id
 
         # Surface the in-memory-state limitation to the channel user
         # for ``/resume`` so the missing history isn't silent.  Flush
@@ -1014,22 +1056,21 @@ def _make_serve_cmd_completed_hook(
 def _serve_process_message(
     msg: ChannelMessage,
     *,
-    agent_holder: dict[str, Any],
+    runtime_state: ServeRuntimeState,
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
-    start_new_session_cb: Callable[[], None] | None = None,
-    channel_runtime: Any | None = None,
+    start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
+    channel_runtime: ChannelRuntime | None = None,
 ) -> None:
     """Process a single channel message in headless serve mode.
 
     Headless equivalent of interactive.py's ``_process_channel_message``.
     No CLI prompt manipulation — just log lines for monitoring.
 
-    ``agent_holder`` is a mutable dict (keys: ``agent``, ``thread_id``,
-    ``workspace_dir``) shared with the outer ``serve()`` loop.
+    ``runtime_state`` is shared with the outer ``serve()`` loop.
     ``on_cmd_completed`` (the agent-swap / session-adoption hook) and
     ``start_new_session_cb`` (thread rotation for ``/new``) are
     constructed once in ``serve()`` — if omitted, they're rebuilt per
@@ -1042,12 +1083,14 @@ def _serve_process_message(
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
+    runtime_gateways = runtime_state.runtime_gateways
+
     if not _claim_or_complete_channel_request(msg):
         return
 
-    remember_channel_origin(agent_holder.get("thread_id"), msg)
+    remember_channel_origin(runtime_state.thread_id, msg)
 
-    runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
+    runtime_workspace = runtime_state.workspace_dir or workspace_dir
 
     console.print(
         f"[dim][{msg.channel_type}] {msg.sender}: {escape(msg.content[:80])}[/dim]"
@@ -1138,25 +1181,29 @@ def _serve_process_message(
             _slash_handled = _slash_loop.run_until_complete(
                 dispatch_channel_slash_command(
                     msg,
-                    agent=agent_holder["agent"],
-                    thread_id=agent_holder["thread_id"],
+                    agent=runtime_state.agent,
+                    thread_id=runtime_state.thread_id,
                     workspace_dir=runtime_workspace,
                     checkpointer=None,
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
-                    or _make_serve_start_new_session_cb(agent_holder, channel_runtime),
+                    or _make_serve_start_new_session_cb(
+                        runtime_state,
+                        channel_runtime,
+                    ),
                     handle_session_resume_cb=handle_session_resume_cb
                     or _make_serve_handle_session_resume_cb(
-                        agent_holder,
+                        runtime_state,
                         channel_runtime,
                     ),
                     on_cmd_completed=on_cmd_completed
                     or _make_serve_cmd_completed_hook(
-                        agent_holder,
+                        runtime_state,
                         channel_runtime,
-                        config=agent_holder.get("config"),
+                        config=runtime_state.config,
                     ),
                     channel_runtime=channel_runtime,
+                    graph_gateway=runtime_gateways.graph_gateway,
                 )
             )
         except Exception as exc:
@@ -1178,7 +1225,7 @@ def _serve_process_message(
             # A channel-issued /new or /resume rotates the thread inside the
             # dispatch above; re-bind the now-current thread to this channel
             # so async-notifier turns on it still forward back here.
-            remember_channel_origin(agent_holder["thread_id"], msg)
+            remember_channel_origin(runtime_state.thread_id, msg)
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
@@ -1186,9 +1233,9 @@ def _serve_process_message(
         try:
             response = run_streaming(
                 ui_backend="cli",
-                agent=agent_holder["agent"],
+                agent=runtime_state.agent,
                 message=msg.content,
-                thread_id=agent_holder["thread_id"],
+                thread_id=runtime_state.thread_id,
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
@@ -1198,6 +1245,7 @@ def _serve_process_message(
                 hitl_prompt_fn=_hitl_prompt,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
+                gateway=runtime_gateways.graph_gateway,
             )
         except Exception as e:
             response = f"Error: {e}"
@@ -1216,7 +1264,7 @@ def _serve_process_message(
 
 def _serve_drain_notifications(
     *,
-    agent_holder: dict,
+    runtime_state: ServeRuntimeState,
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
@@ -1228,8 +1276,6 @@ def _serve_drain_notifications(
     """
     import asyncio as _aio
 
-    from EvoScientist.cli import async_notifier
-
     from .tui_runtime import run_streaming
 
     def _run_notification_message(text: str, notifs: list) -> None:
@@ -1239,20 +1285,21 @@ def _serve_drain_notifications(
 
         for line_text, line_style in format_notification_lines(notifs):
             console.print(line_text, style=line_style, markup=False)
-        # Use the current workspace from agent_holder (updated by /resume's
+        # Use the current workspace from runtime_state (updated by /resume's
         # session-rebind callback), falling back to the startup value.
-        runtime_workspace = agent_holder.get("workspace_dir") or workspace_dir
+        runtime_workspace = runtime_state.workspace_dir or workspace_dir
         meta = build_metadata(runtime_workspace, model)
-        tid = agent_holder["thread_id"]
+        tid = runtime_state.thread_id
         try:
             response = run_streaming(
                 ui_backend="cli",
-                agent=agent_holder["agent"],
+                agent=runtime_state.agent,
                 message=text,
                 thread_id=tid,
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                gateway=runtime_state.runtime_gateways.graph_gateway,
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
@@ -1270,22 +1317,24 @@ def _serve_drain_notifications(
     async def _run_notification_message_async(text: str, notifs: list) -> None:
         await _aio.to_thread(_run_notification_message, text, notifs)
 
-    async def _read_async_tasks() -> dict:
-        agent = agent_holder.get("agent")
-        thread_id = agent_holder.get("thread_id")
-        if agent is None or not thread_id:
+    async def _read_async_tasks() -> async_notifier.AsyncTasksState:
+        thread_id = runtime_state.thread_id
+        if not thread_id:
             return {}
-        try:
-            snap = await agent.aget_state({"configurable": {"thread_id": thread_id}})
-            return (snap.values or {}).get("async_tasks") or {}
-        except Exception:
-            return {}
+        return await async_notifier.read_async_tasks_from_gateway(
+            runtime_state.runtime_gateways.graph_gateway,
+            GraphTarget(
+                local_graph=runtime_state.agent,
+                workspace_dir=runtime_state.workspace_dir,
+            ),
+            thread_id,
+        )
 
     async def _consume() -> None:
         await async_notifier.consume_notifications(
             run_message=_run_notification_message_async,
             read_async_tasks_state=_read_async_tasks,
-            current_thread_id=agent_holder.get("thread_id"),
+            current_thread_id=runtime_state.thread_id,
         )
 
     _notif_loop: _aio.AbstractEventLoop | None = None
@@ -1406,22 +1455,22 @@ def serve(
         )
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config)
-    from ..sessions import generate_thread_id
 
-    tid = generate_thread_id()
+    runtime_gateways = create_runtime_gateways()
+    tid = asyncio.run(
+        runtime_gateways.graph_gateway.create_thread(GraphTarget(workspace_dir=ws))
+    )
 
-    # Mutable holder shared with _serve_process_message so ``/model``
-    # invoked over a channel can hot-swap the agent for subsequent
-    # messages.  A pass-by-value parameter gets captured once at startup
-    # and never updated.
-    agent_holder: dict[str, Any] = {
-        "agent": agent,
-        "thread_id": tid,
-        "workspace_dir": ws,
-        "config": config,
-    }
-
-    from ..commands.base import ChannelRuntime
+    # Mutable runtime shared with _serve_process_message so channel slash
+    # commands can update the active agent/thread/workspace for subsequent
+    # messages.
+    runtime_state = ServeRuntimeState(
+        agent=agent,
+        thread_id=tid,
+        workspace_dir=ws,
+        config=config,
+        runtime_gateways=runtime_gateways,
+    )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
 
@@ -1429,13 +1478,13 @@ def serve(
     # them for every inbound message.  Without this hoist each message
     # would allocate a fresh closure pair.
     _serve_on_cmd_completed = _make_serve_cmd_completed_hook(
-        agent_holder, channel_runtime, config=config
+        runtime_state, channel_runtime, config=config
     )
     _serve_handle_session_resume_cb = _make_serve_handle_session_resume_cb(
-        agent_holder, channel_runtime, config=config
+        runtime_state, channel_runtime, config=config
     )
     _serve_start_new_session_cb = _make_serve_start_new_session_cb(
-        agent_holder, channel_runtime
+        runtime_state, channel_runtime
     )
 
     _start_channels_bus_mode(
@@ -1486,7 +1535,7 @@ def serve(
                 try:
                     _serve_process_message(
                         msg,
-                        agent_holder=agent_holder,
+                        runtime_state=runtime_state,
                         model=config.model,
                         workspace_dir=ws,
                         show_thinking=effective_channel_thinking,
@@ -1500,11 +1549,9 @@ def serve(
                     break
 
             # Poll notification queue when idle (no channel message was pending).
-            from EvoScientist.cli import async_notifier
-
-            if async_notifier.has_pending_notifications(agent_holder.get("thread_id")):
+            if async_notifier.has_pending_notifications(runtime_state.thread_id):
                 _serve_drain_notifications(
-                    agent_holder=agent_holder,
+                    runtime_state=runtime_state,
                     model=config.model,
                     workspace_dir=ws,
                     show_thinking=effective_channel_thinking,
@@ -2173,27 +2220,26 @@ def _main_callback(
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
-        from ..sessions import (
-            generate_thread_id,
-            get_checkpointer,
-            resolve_thread_id_prefix,
-        )
+        from ..sessions import get_checkpointer
         from .interactive import cmd_run
         from .resume_hint import print_resume_hint
+
+        runtime_gateways = create_runtime_gateways()
+        graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
             async with get_checkpointer() as checkpointer:
                 # Resolve resume target first so a bad --resume/--thread-id
                 # exits before the slow _load_agent() provider setup.
                 if thread_id:
-                    resolved, matches = await resolve_thread_id_prefix(thread_id)
-                    if resolved:
-                        tid = resolved
-                    elif matches:
+                    resolution = await graph_gateway.resolve_thread(thread_id)
+                    if resolution.thread_id:
+                        tid = resolution.thread_id
+                    elif resolution.matches:
                         console.print(
                             f"[yellow]Ambiguous thread ID '{escape(thread_id)}'. Matches:[/yellow]"
                         )
-                        for s in matches:
+                        for s in resolution.matches:
                             console.print(f"  [cyan]{escape(s)}[/cyan]")
                         raise typer.Exit(1)
                     else:
@@ -2202,7 +2248,7 @@ def _main_callback(
                         )
                         raise typer.Exit(1)
                 else:
-                    tid = generate_thread_id()
+                    tid = await graph_gateway.create_thread()
                 console.print("[dim]Loading agent...[/dim]")
                 agent = _load_agent(
                     workspace_dir=workspace_dir,
@@ -2218,6 +2264,7 @@ def _main_callback(
                         workspace_dir=workspace_dir,
                         model=config.model,
                         ui_backend=config.ui_backend,
+                        runtime_gateways=runtime_gateways,
                     )
                 finally:
                     try:

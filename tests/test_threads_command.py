@@ -1,10 +1,11 @@
 """Tests for the /threads command."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 from rich.table import Table
 
 from tests.conftest import run_async as _run
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(**overrides):
@@ -12,11 +13,13 @@ def _ctx(**overrides):
 
     ui = MagicMock()
     ui.supports_interactive = overrides.pop("supports_interactive", True)
+    store = overrides.pop("thread_store", FakeThreadStore())
     return CommandContext(
         agent=None,
         thread_id=overrides.pop("thread_id", "tid-1"),
         ui=ui,
         workspace_dir=overrides.pop("workspace_dir", "/ws"),
+        graph_gateway=FakeGraphGateway(thread_store=store),
     ), ui
 
 
@@ -25,11 +28,7 @@ class TestThreadsCommand:
         from EvoScientist.commands.implementation.session import ThreadsCommand
 
         ctx, ui = _ctx()
-        with patch(
-            "EvoScientist.sessions.list_threads",
-            new=AsyncMock(return_value=[]),
-        ):
-            _run(ThreadsCommand().execute(ctx, []))
+        _run(ThreadsCommand().execute(ctx, []))
         ui.append_system.assert_called_once()
         assert "No saved sessions" in ui.append_system.call_args.args[0]
 
@@ -53,11 +52,9 @@ class TestThreadsCommand:
                 "updated_at": None,
             },
         ]
-        with patch(
-            "EvoScientist.sessions.list_threads",
-            new=AsyncMock(return_value=threads),
-        ):
-            _run(ThreadsCommand().execute(ctx, []))
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        _run(ThreadsCommand().execute(ctx, []))
         ui.mount_renderable.assert_called_once()
         table = ui.mount_renderable.call_args.args[0]
         assert isinstance(table, Table)
@@ -81,11 +78,9 @@ class TestThreadsCommand:
                 "updated_at": None,
             }
         ]
-        with patch(
-            "EvoScientist.sessions.list_threads",
-            new=AsyncMock(return_value=threads),
-        ):
-            _run(ThreadsCommand().execute(ctx, []))
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        _run(ThreadsCommand().execute(ctx, []))
         ui.append_system.assert_not_called()
 
     def test_channel_mode_drops_model_column(self):
@@ -102,11 +97,9 @@ class TestThreadsCommand:
                 "updated_at": None,
             }
         ]
-        with patch(
-            "EvoScientist.sessions.list_threads",
-            new=AsyncMock(return_value=threads),
-        ):
-            _run(ThreadsCommand().execute(ctx, []))
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        _run(ThreadsCommand().execute(ctx, []))
         # Channel mode: no Model column. 4 columns: ID, Preview, Msgs, Last Used.
         table = ui.mount_renderable.call_args.args[0]
         column_headers = [col.header for col in table.columns]

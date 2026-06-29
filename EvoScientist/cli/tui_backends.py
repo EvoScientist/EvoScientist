@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..gateway import GraphGateway
 from ..stream.display import _run_streaming
 
 
@@ -31,6 +32,7 @@ class StreamingTUIBackend(Protocol):
         hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
         ask_user_prompt_fn: Callable[[dict], dict] | None = None,
         cancel_scope: str | None = None,
+        gateway: GraphGateway,
     ) -> str:
         """Run streaming and return final response text."""
 
@@ -58,6 +60,7 @@ class RichStreamingBackend:
         hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
         ask_user_prompt_fn: Callable[[dict], dict] | None = None,
         cancel_scope: str | None = None,
+        gateway: GraphGateway,
     ) -> str:
         return _run_streaming(
             agent=agent,
@@ -74,4 +77,5 @@ class RichStreamingBackend:
             hitl_prompt_fn=hitl_prompt_fn,
             ask_user_prompt_fn=ask_user_prompt_fn,
             cancel_scope=cancel_scope,
+            gateway=gateway,
         )

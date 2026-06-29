@@ -9,15 +9,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 _logger = logging.getLogger(__name__)
 
 ProgressEvent = str  # "start" | "success" | "error"
 ProgressState = str  # "pending" | "ok" | "error"
 
+AgentT = TypeVar("AgentT")
 ProgressCallback = Callable[[ProgressEvent, str, str], None]
-SuccessCallback = Callable[[Any], None]
+SuccessCallback = Callable[[AgentT], None]
 FailureCallback = Callable[[BaseException], None]
 
 
@@ -73,7 +74,7 @@ class MCPProgressTracker:
         return done, total
 
 
-class BackgroundAgentLoader:
+class BackgroundAgentLoader(Generic[AgentT]):
     """Owns the background ``_load_agent`` task and its generation token.
 
     Each :meth:`start` bumps an internal id; callbacks from a superseded
@@ -88,7 +89,7 @@ class BackgroundAgentLoader:
 
     def __init__(
         self,
-        loader_fn: Callable[..., Any],
+        loader_fn: Callable[..., AgentT],
         *,
         on_progress: ProgressCallback | None = None,
         on_success: SuccessCallback | None = None,
@@ -98,12 +99,12 @@ class BackgroundAgentLoader:
         self._on_progress = on_progress
         self._on_success = on_success
         self._on_failure = on_failure
-        self.agent: Any = None
-        self._task: asyncio.Task | None = None
+        self.agent: AgentT | None = None
+        self._task: asyncio.Task[AgentT] | None = None
         self._load_id: int = 0
 
     @property
-    def task(self) -> asyncio.Task | None:
+    def task(self) -> asyncio.Task[AgentT] | None:
         return self._task
 
     @property
@@ -146,7 +147,7 @@ class BackgroundAgentLoader:
         )
         self._task.add_done_callback(lambda task, lid=load_id: self._on_done(task, lid))
 
-    def adopt(self, agent: Any) -> None:
+    def adopt(self, agent: AgentT) -> None:
         """Install an externally-built agent and supersede any in-flight load.
 
         Used by ``/model`` (and any other caller that constructs a
@@ -162,7 +163,7 @@ class BackgroundAgentLoader:
         self._task = None
         self.agent = agent
 
-    async def await_ready(self) -> Any:
+    async def await_ready(self) -> AgentT:
         """Return the loaded agent; re-raises on load failure.
 
         Idempotent.  State transitions (setting ``self.agent``, calling
@@ -177,9 +178,11 @@ class BackgroundAgentLoader:
                 "BackgroundAgentLoader.await_ready called before start()"
             )
         await self._task
+        if self.agent is None:
+            raise RuntimeError("BackgroundAgentLoader completed without an agent")
         return self.agent
 
-    def _on_done(self, task: asyncio.Task, load_id: int) -> None:
+    def _on_done(self, task: asyncio.Task[AgentT], load_id: int) -> None:
         if load_id != self._load_id:
             return
         if task.cancelled():

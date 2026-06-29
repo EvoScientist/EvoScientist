@@ -1,6 +1,7 @@
 """Custom backends for EvoScientist agent."""
 
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -807,6 +808,63 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
         return EditResult(
             error="This directory is read-only. Edit operations are not permitted here."
         )
+
+
+class MemoryFilesystemBackend(FilesystemBackend):
+    """Filesystem backend for memory files with structured-write enforcement.
+
+    Agents may read memory files and edit existing profile notes, but raw file
+    creation is blocked so observations are recorded through memory tools.
+    """
+
+    _RAW_WRITE_ERROR = (
+        "Raw writes to /memories are blocked. Edit existing "
+        "/memories/profile/... files or use memory tools."
+    )
+    _RAW_EDIT_ERROR = (
+        "Raw edits under /memories are limited to existing "
+        "/memories/profile/... files. Use memory tools for observations."
+    )
+
+    @staticmethod
+    def _is_profile_path(file_path: str) -> bool:
+        normalized = posixpath.normpath("/" + file_path.strip().lstrip("/"))
+        return normalized == "/profile" or normalized.startswith("/profile/")
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(error=self._RAW_WRITE_ERROR)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        if not self._is_profile_path(file_path):
+            return EditResult(error=self._RAW_EDIT_ERROR)
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(path=file_path, error=self._RAW_WRITE_ERROR)
+            for file_path, _ in files
+        ]
+
+
+def build_memory_agent_backend(*, workspace_dir: str | Path, memory_dir: str | Path):
+    """Build the workspace backend with guarded `/memories/` routing."""
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
+        routes={
+            "/memories/": MemoryFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            )
+        },
+    )
 
 
 class MergedSkillsBackend(BackendProtocol):

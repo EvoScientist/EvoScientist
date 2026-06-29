@@ -9,6 +9,8 @@ enqueues a ``ChannelMessage`` on a thread-safe ``queue.Queue`` and waits
 for the main thread to set a response via ``_set_channel_response()``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import queue
@@ -17,13 +19,16 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.panel import Panel
 from rich.text import Text
 
 from ..commands.base import ChannelRuntime
 from ..stream.console import console
+
+if TYPE_CHECKING:
+    from ..gateway import GraphGateway
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -253,7 +258,8 @@ async def dispatch_channel_slash_command(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
-    start_new_session_cb: Callable[[], None] | None = None,
+    graph_gateway: GraphGateway,
+    start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None = None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
@@ -284,6 +290,9 @@ async def dispatch_channel_slash_command(
         Optional lifecycle callbacks forwarded to ``ChannelCommandUI``.
         Headless serve passes ``None`` — ``/new`` and ``/resume`` degrade
         gracefully via the default ``ChannelCommandUI`` messages.
+    graph_gateway:
+        Graph gateway forwarded to slash commands and channel resume-history
+        rendering.
     await_agent_ready:
         Optional async resolver that blocks until the background agent
         load finishes.  Called only when ``cmd.needs_agent(args)`` is
@@ -320,6 +329,7 @@ async def dispatch_channel_slash_command(
             await_agent_ready=await_agent_ready,
             on_cmd_completed=on_cmd_completed,
             channel_runtime=channel_runtime,
+            graph_gateway=graph_gateway,
         )
     except Exception as exc:
         # Last-ditch safety: any uncaught exception from inside the
@@ -350,7 +360,8 @@ async def _dispatch_channel_slash_impl(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
-    start_new_session_cb: Callable[[], None] | None,
+    graph_gateway: GraphGateway,
+    start_new_session_cb: Callable[[], Awaitable[None]] | None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
     await_agent_ready: Callable[[], Awaitable[Any]] | None,
     on_cmd_completed: Callable[..., Awaitable[None]] | None,
@@ -386,6 +397,7 @@ async def _dispatch_channel_slash_impl(
         append_system_callback=append_system,
         start_new_session_callback=start_new_session_cb,
         handle_session_resume_callback=handle_session_resume_cb,
+        graph_gateway=graph_gateway,
     )
     ctx = CommandContext(
         agent=agent_for_ctx,
@@ -394,6 +406,7 @@ async def _dispatch_channel_slash_impl(
         workspace_dir=workspace_dir,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
+        graph_gateway=graph_gateway,
     )
 
     try:
@@ -619,7 +632,7 @@ def _try_set_hitl_reply(channel_type: str, chat_id: str, content: str) -> bool:
 
 def channel_ask_user_prompt(
     ask_user_data: dict,
-    msg: "ChannelMessage | None" = None,
+    msg: ChannelMessage | None = None,
 ) -> dict:
     """Format ask_user questions and collect answers from a channel user.
 
@@ -651,7 +664,7 @@ def channel_ask_user_prompt(
                         channel=msg.channel_type,
                         chat_id=msg.chat_id,
                         content=content,
-                        metadata=msg.metadata,
+                        metadata=msg.metadata or {},
                     )
                 ),
                 bus_loop,
@@ -748,7 +761,7 @@ def channel_ask_user_prompt(
 
 def channel_hitl_prompt(
     action_requests: list,
-    msg: "ChannelMessage",
+    msg: ChannelMessage,
 ) -> list[dict] | None:
     """Send HITL approval prompt to channel user and wait for reply.
 
@@ -793,7 +806,9 @@ def channel_hitl_prompt(
                         channel=msg.channel_type,
                         chat_id=msg.chat_id,
                         content=content,
-                        metadata=metadata if metadata is not None else msg.metadata,
+                        metadata=metadata
+                        if metadata is not None
+                        else msg.metadata or {},
                     )
                 ),
                 bus_loop,

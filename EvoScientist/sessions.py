@@ -34,6 +34,7 @@ import math
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -45,6 +46,7 @@ from langchain_core.messages import (
     RemoveMessage,
     convert_to_messages,
 )
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -68,6 +70,12 @@ if not hasattr(aiosqlite.Connection, "is_alive"):
 # ---------------------------------------------------------------------------
 
 AGENT_NAME = "EvoScientist"
+MAIN_THREAD_FILTER_SQL = (
+    "json_extract(metadata, '$.agent_name') = ? "
+    "AND (json_extract(metadata, '$.graph_id') IS NULL "
+    "     OR json_extract(metadata, '$.graph_id') = ?)"
+)
+MAIN_THREAD_FILTER_PARAMS = (AGENT_NAME, AGENT_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +645,8 @@ async def _load_checkpoint_messages(
 
     Returns a list of LangChain message objects, or an empty list on failure.
     """
-    # Pre-resolve the latest EvoScientist checkpoint_id with an
-    # ``agent_name`` filter, then pin it into the config so
+    # Pre-resolve the latest main EvoScientist checkpoint_id, then pin it
+    # into the config so
     # ``aget_tuple`` fetches THAT specific row. Without the pin,
     # ``aget_tuple`` returns the latest by ``checkpoint_id`` alone — in
     # a multi-agent DB where a third-party tool shares the same
@@ -650,14 +658,16 @@ async def _load_checkpoint_messages(
     head_query = (
         "SELECT checkpoint_id FROM checkpoints "
         "WHERE thread_id = ? AND checkpoint_ns = '' "
-        "  AND json_extract(metadata, '$.agent_name') = ? "
+        f"  AND {MAIN_THREAD_FILTER_SQL} "
         "ORDER BY checkpoint_id DESC LIMIT 1"
     )
-    async with saver.conn.execute(head_query, (thread_id, AGENT_NAME)) as cur:
+    async with saver.conn.execute(
+        head_query, (thread_id, *MAIN_THREAD_FILTER_PARAMS)
+    ) as cur:
         head_row = await cur.fetchone()
     if head_row is None:
         return []
-    config = {
+    config: RunnableConfig = {
         "configurable": {
             "thread_id": thread_id,
             "checkpoint_ns": "",
@@ -880,20 +890,20 @@ async def list_threads(
         if not await _table_exists(conn, "checkpoints"):
             return []
 
-        query = """
+        query = f"""
             SELECT thread_id,
                    MAX(json_extract(metadata, '$.updated_at')) as updated_at,
                    json_extract(metadata, '$.workspace_dir') as workspace_dir,
                    json_extract(metadata, '$.model') as model
             FROM checkpoints
-            WHERE json_extract(metadata, '$.agent_name') = ?
+            WHERE {MAIN_THREAD_FILTER_SQL}
             GROUP BY thread_id
             ORDER BY updated_at DESC
         """
-        params: tuple = (AGENT_NAME,)
+        params: tuple = MAIN_THREAD_FILTER_PARAMS
         if limit > 0:
             query += "    LIMIT ?\n"
-            params = (AGENT_NAME, limit)
+            params = (*MAIN_THREAD_FILTER_PARAMS, limit)
         async with conn.execute(query, params) as cur:
             rows = await cur.fetchall()
 
@@ -927,13 +937,13 @@ async def get_most_recent() -> str | None:
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return None
-        query = """
+        query = f"""
             SELECT thread_id FROM checkpoints
-            WHERE json_extract(metadata, '$.agent_name') = ?
+            WHERE {MAIN_THREAD_FILTER_SQL}
             ORDER BY checkpoint_id DESC
             LIMIT 1
         """
-        async with conn.execute(query, (AGENT_NAME,)) as cur:
+        async with conn.execute(query, MAIN_THREAD_FILTER_PARAMS) as cur:
             row = await cur.fetchone()
             return row[0] if row else None
 
@@ -944,12 +954,12 @@ async def thread_exists(thread_id: str) -> bool:
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return False
-        query = """
+        query = f"""
             SELECT 1 FROM checkpoints
-            WHERE thread_id = ? AND json_extract(metadata, '$.agent_name') = ?
+            WHERE thread_id = ? AND {MAIN_THREAD_FILTER_SQL}
             LIMIT 1
         """
-        async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
+        async with conn.execute(query, (thread_id, *MAIN_THREAD_FILTER_PARAMS)) as cur:
             return (await cur.fetchone()) is not None
 
 
@@ -964,15 +974,17 @@ async def find_similar_threads(thread_id: str, limit: int = 5) -> list[str]:
         escaped = (
             thread_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
-        query = r"""
+        query = f"""
             SELECT DISTINCT thread_id
             FROM checkpoints
-            WHERE thread_id LIKE ? ESCAPE '\'
-              AND json_extract(metadata, '$.agent_name') = ?
+            WHERE thread_id LIKE ? ESCAPE '\\'
+              AND {MAIN_THREAD_FILTER_SQL}
             ORDER BY thread_id
             LIMIT ?
         """
-        async with conn.execute(query, (escaped + "%", AGENT_NAME, limit)) as cur:
+        async with conn.execute(
+            query, (escaped + "%", *MAIN_THREAD_FILTER_PARAMS, limit)
+        ) as cur:
             rows = await cur.fetchall()
             return [r[0] for r in rows]
 
@@ -1002,18 +1014,18 @@ async def delete_thread(thread_id: str) -> bool:
         # Delete writes FIRST — the subquery needs checkpoints to still exist
         if await _table_exists(conn, "writes"):
             await conn.execute(
-                """DELETE FROM writes
+                f"""DELETE FROM writes
                    WHERE thread_id = ?
                      AND checkpoint_id IN (
                          SELECT checkpoint_id FROM checkpoints
                          WHERE thread_id = ?
-                           AND json_extract(metadata, '$.agent_name') = ?
+                           AND {MAIN_THREAD_FILTER_SQL}
                      )""",
-                (thread_id, thread_id, AGENT_NAME),
+                (thread_id, thread_id, *MAIN_THREAD_FILTER_PARAMS),
             )
         cur = await conn.execute(
-            "DELETE FROM checkpoints WHERE thread_id = ? AND json_extract(metadata, '$.agent_name') = ?",
-            (thread_id, AGENT_NAME),
+            f"DELETE FROM checkpoints WHERE thread_id = ? AND {MAIN_THREAD_FILTER_SQL}",
+            (thread_id, *MAIN_THREAD_FILTER_PARAMS),
         )
         deleted = cur.rowcount > 0
         await conn.commit()
@@ -1029,17 +1041,17 @@ async def get_thread_metadata(thread_id: str) -> dict | None:
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return None
-        query = """
+        query = f"""
             SELECT json_extract(metadata, '$.workspace_dir') as workspace_dir,
                    json_extract(metadata, '$.model') as model,
                    json_extract(metadata, '$.updated_at') as updated_at
             FROM checkpoints
             WHERE thread_id = ?
-              AND json_extract(metadata, '$.agent_name') = ?
+              AND {MAIN_THREAD_FILTER_SQL}
             ORDER BY checkpoint_id DESC
             LIMIT 1
         """
-        async with conn.execute(query, (thread_id, AGENT_NAME)) as cur:
+        async with conn.execute(query, (thread_id, *MAIN_THREAD_FILTER_PARAMS)) as cur:
             row = await cur.fetchone()
             if not row:
                 return None
@@ -1066,12 +1078,12 @@ async def get_thread_messages(thread_id: str) -> list:
         if not await _table_exists(conn, "checkpoints"):
             return []
         # Verify this thread belongs to EvoScientist before loading messages
-        check = """
+        check = f"""
             SELECT 1 FROM checkpoints
-            WHERE thread_id = ? AND json_extract(metadata, '$.agent_name') = ?
+            WHERE thread_id = ? AND {MAIN_THREAD_FILTER_SQL}
             LIMIT 1
         """
-        async with conn.execute(check, (thread_id, AGENT_NAME)) as cur:
+        async with conn.execute(check, (thread_id, *MAIN_THREAD_FILTER_PARAMS)) as cur:
             if not await cur.fetchone():
                 return []
         serde = JsonPlusSerializer()
@@ -1237,7 +1249,7 @@ async def _run_migration_sweep(
             "WHERE json_extract(metadata, '$.agent_name') = ?",
             (AGENT_NAME,),
         ) as cur:
-            pairs = await cur.fetchall()
+            pairs = list(await cur.fetchall())
 
         # Reuse the DeltaChannel-aware prune logic from PruningCheckpointer
         # instead of running naive keep_latest SQL: legacy DBs almost always
@@ -1437,13 +1449,15 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
     """``PruningCheckpointer`` that stamps CLI-compatible ownership metadata.
 
     langgraph-api run metadata carries ``graph_id``/``assistant_id`` but not
-    the ``agent_name`` / ``workspace_dir`` / ``updated_at`` keys that the CLI
-    session surface (``list_threads``, ``/resume``, ``/delete``,
-    ``_prune_after_put``) filters and sorts on. Stamping them at write time
-    — for main-graph runs only — makes WebUI threads first-class CLI
-    sessions in the same workspace, and brings them under the existing
-    pruning/retention machinery. Worker and async-subagent graphs are left
-    unstamped on purpose: they must not surface in CLI listings.
+    always the ``workspace_dir`` / ``updated_at`` keys needed to safely
+    rebuild the in-memory thread registry after server restart. Stamping graph
+    rows with the current workspace keeps main and async-subagent threads
+    restorable without exposing other workspaces. Memory-worker rows still get
+    workspace metadata, but remain disposable until worker cloning lands.
+
+    Only the main graph receives ``agent_name``. The local CLI session
+    surface still uses that ownership key, so worker/subagent graph rows must
+    remain outside ordinary ``/threads``, ``/resume``, and ``/delete``.
     """
 
     async def aput(
@@ -1453,9 +1467,8 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
         metadata: Any,
         new_versions: Any,
     ) -> Any:
-        if isinstance(metadata, dict) and metadata.get("graph_id") == AGENT_NAME:
+        if isinstance(metadata, dict) and isinstance(metadata.get("graph_id"), str):
             metadata = dict(metadata)
-            metadata.setdefault("agent_name", AGENT_NAME)
             # _api_workspace_dir() calls Path.resolve()/Path.cwd() -> os.getcwd(),
             # a blocking syscall flagged by the dev runtime's blockbuster guard.
             # Run it in a thread, and only when actually needed — ``setdefault``
@@ -1464,6 +1477,8 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
             if "workspace_dir" not in metadata:
                 metadata["workspace_dir"] = await _api_workspace_dir_async()
             metadata["updated_at"] = datetime.now(UTC).isoformat()
+            if metadata.get("graph_id") == AGENT_NAME:
+                metadata.setdefault("agent_name", AGENT_NAME)
         return await super().aput(config, checkpoint, metadata, new_versions)
 
 
@@ -1508,6 +1523,15 @@ async def _purge_internal_worker_threads() -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _RestoredThreadInfo:
+    updated_at: str | None
+    assistant_id: str | None
+    graph_id: str
+    workspace_dir: str
+    model: str | None
+
+
 async def _restore_webui_threads_to_global_store() -> None:
     """Re-populate ``GlobalStore["threads"]`` from SQLite on server startup.
 
@@ -1519,20 +1543,21 @@ async def _restore_webui_threads_to_global_store() -> None:
     are normalized in place, and missing threads are appended as stub
     dicts that satisfy ``POST /threads/search``.
 
-    Restore scope — only threads that are BOTH main-graph
-    (``metadata.graph_id == AGENT_NAME``) and owned by this server's
-    workspace (``metadata.workspace_dir`` matches): sessions.db is
-    machine-global, and an unscoped restore would expose every workspace's
-    history (and internal worker threads) on the unauthenticated API —
-    worst case ``--tunnel``. CLI/TUI threads (8-char hex IDs, managed by
-    ``list_threads()``) and pre-stamping rows without ``workspace_dir``
-    are excluded.
+    Restore scope — UUID-format graph threads owned by this server's
+    workspace (``metadata.workspace_dir`` matches). This includes the main
+    graph and async-subagent graphs. Memory-worker graphs are excluded for now:
+    they are still treated as disposable residue until worker cloning lands.
+    The workspace filter is required because sessions.db is machine-global,
+    and an unscoped restore would expose every workspace's history on the
+    unauthenticated API — worst case ``--tunnel``. CLI/TUI threads (8-char
+    hex IDs, managed by ``list_threads()``) and pre-stamping rows without
+    ``workspace_dir`` are excluded.
 
     Best-effort: any exception is logged and swallowed so a broken restore
     never prevents the ``langgraph dev`` server from starting.
     """
     try:
-        from langgraph_runtime_inmem.database import (  # type: ignore[import-untyped]
+        from langgraph_runtime_inmem.database import (
             GLOBAL_STORE,
         )
     except ImportError:
@@ -1547,24 +1572,15 @@ async def _restore_webui_threads_to_global_store() -> None:
 
     try:
         rows: list[Any] = []
-        # All UUID threads that have ANY checkpoint rows — the existence
-        # check for ghost removal (deliberately unscoped: a thread whose
-        # checkpoints exist but fall outside the restore scope is not a
-        # ghost, its state still loads when opened).
-        uuid_threads_in_db: set[uuid.UUID] = set()
-        # Restore scope: ONLY main-graph threads belonging to THIS server's
-        # workspace. sessions.db is machine-global, so an unscoped restore
-        # would resurrect every workspace's history (and internal
-        # worker/subagent threads) into this server's thread registry — and
-        # expose it over the unauthenticated API / --tunnel. Main-graph =
-        # metadata.graph_id == AGENT_NAME (langgraph-api rows, stamped by
-        # _ApiPruningCheckpointer) OR no graph_id but agent_name ==
-        # AGENT_NAME (CLI rows via build_metadata). Worker residue carries
-        # graph_id='evomemory-*' and is excluded by the first clause even
-        # though it also stamps agent_name. Rows predating stamping have no
-        # workspace_dir and are deliberately excluded.
+        # Restore scope: graph threads belonging to THIS server's workspace.
+        # sessions.db is machine-global, so an unscoped restore would
+        # resurrect every workspace's history into this server's thread
+        # registry — and expose it over the unauthenticated API / --tunnel.
+        # Legacy WebUI/CLI interop rows without graph_id are restored as the
+        # main graph only when they carry agent_name == AGENT_NAME. Rows
+        # predating workspace stamping remain deliberately excluded.
         current_workspace = await _api_workspace_dir_async()
-        sqlite_data: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
+        sqlite_data: dict[uuid.UUID, _RestoredThreadInfo] = {}
         titles: dict[uuid.UUID, str] = {}
         db_path = str(get_db_path())
         async with aiosqlite.connect(db_path, timeout=30.0) as conn:
@@ -1584,14 +1600,19 @@ async def _restore_webui_threads_to_global_store() -> None:
                            MAX(json_extract(metadata, '$.assistant_id')) as assistant_id,
                            MAX(json_extract(metadata, '$.graph_id')) as graph_id,
                            MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir,
+                           MAX(json_extract(metadata, '$.model')) as model,
                            MAX(json_extract(metadata, '$.agent_name')) as agent_name
                     FROM checkpoints
                     WHERE thread_id LIKE '________-____-____-____-____________'
+                      AND (
+                          json_extract(metadata, '$.graph_id') IS NULL
+                          OR json_extract(metadata, '$.graph_id') NOT LIKE 'evomemory-%'
+                      )
                     GROUP BY thread_id
                     ORDER BY updated_at DESC
                 """
                 async with conn.execute(query) as cur:
-                    rows = await cur.fetchall()
+                    rows = list(await cur.fetchall())
 
             for row in rows:
                 (
@@ -1600,20 +1621,26 @@ async def _restore_webui_threads_to_global_store() -> None:
                     assistant_id,
                     graph_id,
                     workspace_dir,
+                    model,
                     agent_name,
                 ) = row
                 thread_uuid = _to_uuid_safe(thread_id_str)
                 if thread_uuid is None:
                     continue
-                uuid_threads_in_db.add(thread_uuid)
-                is_main_graph = graph_id == AGENT_NAME or (
-                    graph_id is None and agent_name == AGENT_NAME
-                )
-                if not is_main_graph:
+                restored_graph_id = graph_id
+                if restored_graph_id is None and agent_name == AGENT_NAME:
+                    restored_graph_id = AGENT_NAME
+                if restored_graph_id is None:
                     continue
                 if not workspace_dir or workspace_dir != current_workspace:
                     continue
-                sqlite_data[thread_uuid] = (updated_at, assistant_id, AGENT_NAME)
+                sqlite_data[thread_uuid] = _RestoredThreadInfo(
+                    updated_at=updated_at,
+                    assistant_id=assistant_id,
+                    graph_id=restored_graph_id,
+                    workspace_dir=workspace_dir,
+                    model=model,
+                )
 
             # Derive a sidebar title from each scoped thread's first human
             # message (stubs carry values=None, so the WebUI would otherwise
@@ -1638,16 +1665,16 @@ async def _restore_webui_threads_to_global_store() -> None:
                     pass
             return datetime.now(UTC)
 
-        # Drop ghost entries: a .pckl-loaded UUID entry with no checkpoint
-        # rows opens as an empty session (the #277 symptom). Slice
-        # assignment mutates the live registry list.
+        # Drop stale registry entries: UUID entries outside the scoped restore
+        # set either point at missing state or another workspace's state.
+        # Slice assignment mutates the live registry list.
         store_threads: list[dict[str, Any]] = GLOBAL_STORE.get("threads", [])
         before = len(store_threads)
         store_threads[:] = [
             entry
             for entry in store_threads
             if (tid := _to_uuid_safe(entry.get("thread_id"))) is None
-            or tid in uuid_threads_in_db
+            or tid in sqlite_data
         ]
         removed = before - len(store_threads)
 
@@ -1665,15 +1692,21 @@ async def _restore_webui_threads_to_global_store() -> None:
                 entry["thread_id"] = tid_uuid
                 changed = True
             if tid_uuid in sqlite_data:
-                _updated_at, asst_id_str, gid = sqlite_data[tid_uuid]
+                info = sqlite_data[tid_uuid]
                 meta: dict[str, Any] = entry.setdefault("metadata", {})
-                if asst_id_str and "assistant_id" not in meta:
+                if info.assistant_id and "assistant_id" not in meta:
                     # str, not uuid.UUID: the runtime stores str and search
                     # filters compare with raw == against JSON strings.
-                    meta["assistant_id"] = str(asst_id_str)
+                    meta["assistant_id"] = str(info.assistant_id)
                     changed = True
-                if gid and "graph_id" not in meta:
-                    meta["graph_id"] = gid
+                if info.graph_id and "graph_id" not in meta:
+                    meta["graph_id"] = info.graph_id
+                    changed = True
+                if meta.get("workspace_dir") != info.workspace_dir:
+                    meta["workspace_dir"] = info.workspace_dir
+                    changed = True
+                if info.model and meta.get("model") != info.model:
+                    meta["model"] = info.model
                     changed = True
                 if "title" not in meta and tid_uuid in titles:
                     meta["title"] = titles[tid_uuid]
@@ -1692,16 +1725,21 @@ async def _restore_webui_threads_to_global_store() -> None:
 
         # Append threads present in SQLite but absent from the registry.
         restored = 0
-        for thread_uuid, (updated_at, assistant_id, graph_id) in sqlite_data.items():
+        for thread_uuid, info in sqlite_data.items():
             if thread_uuid in existing_uuids:
                 continue
-            stub_metadata: dict[str, Any] = {"graph_id": graph_id}
-            if assistant_id:
+            stub_metadata: dict[str, Any] = {
+                "graph_id": info.graph_id,
+                "workspace_dir": info.workspace_dir,
+            }
+            if info.assistant_id:
                 # str, not uuid.UUID — same convention as above.
-                stub_metadata["assistant_id"] = str(assistant_id)
+                stub_metadata["assistant_id"] = str(info.assistant_id)
+            if info.model:
+                stub_metadata["model"] = info.model
             if thread_uuid in titles:
                 stub_metadata["title"] = titles[thread_uuid]
-            ts = _parse_dt(updated_at)
+            ts = _parse_dt(info.updated_at)
             stub: dict[str, Any] = {
                 "thread_id": thread_uuid,
                 "created_at": ts,
@@ -1746,9 +1784,10 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
     bad row only loses that row. The langgraph-api adapter detects async
     context managers and enters them automatically.
 
-    The yielded ``_ApiPruningCheckpointer`` stamps main-graph rows with
-    ``agent_name`` / ``workspace_dir`` / ``updated_at`` so WebUI threads
-    surface in the CLI session commands and participate in
+    The yielded ``_ApiPruningCheckpointer`` stamps graph rows with
+    ``workspace_dir`` / ``updated_at`` so they can be restored into the
+    LangGraph server registry. Main-graph rows also get ``agent_name`` so
+    WebUI threads surface in the CLI session commands and participate in
     ``_prune_after_put`` retention.
 
     Capability note: ``adelete_thread`` is real, but ``aprune`` /

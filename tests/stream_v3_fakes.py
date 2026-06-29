@@ -17,12 +17,20 @@ async def async_iter(items: Iterable[Any]) -> AsyncIterator[Any]:
         yield item
 
 
-def collect_events(agent, message: str = "hi", thread_id: str = "t1"):
+def collect_events(
+    agent,
+    message: str = "hi",
+    thread_id: str = "t1",
+):
     """Collect stream_agent_events output for synchronous tests."""
 
     async def _run():
         events = []
-        async for ev in stream_agent_events(agent, message, thread_id):
+        async for ev in stream_agent_events(
+            agent,
+            message,
+            thread_id,
+        ):
             events.append(ev)
         return events
 

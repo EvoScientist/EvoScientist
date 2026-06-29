@@ -92,6 +92,8 @@ def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
     """Return whether this config needs the background langgraph dev server."""
     if config.enable_async_subagents:
         return True
+    if config.enable_scheduler:
+        return True
     memory_controls = MemoryControls.from_config(config)
     return memory_controls.worker_needed(
         MemoryObservationTarget.TURN_WORKER

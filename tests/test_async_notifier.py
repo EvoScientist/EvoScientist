@@ -12,6 +12,8 @@ from EvoScientist.cli.async_notifier import (
     format_batch_message,
     format_notification_lines,
 )
+from EvoScientist.gateway import GraphTarget
+from tests.fakes import FakeGraphGateway
 
 
 def test_notification_dataclass_fields():
@@ -47,6 +49,26 @@ def _drain_queue(q):
             items.append(q.get_nowait())
         except queue.Empty:
             return items
+
+
+def test_read_async_tasks_from_gateway_reads_state_values(run_async):
+    gateway = FakeGraphGateway(
+        state_values={
+            "async_tasks": {
+                "task-1": {"status": "success"},
+            }
+        }
+    )
+
+    tasks = run_async(
+        async_notifier.read_async_tasks_from_gateway(
+            gateway,
+            GraphTarget(local_graph=MagicMock()),
+            "tid",
+        )
+    )
+
+    assert tasks == {"task-1": {"status": "success"}}
 
 
 def test_watcher_pushes_notification_on_stream_end(run_async):
@@ -322,7 +344,7 @@ def test_drain_returns_all_pending_and_empties_queue():
 
 def test_dedup_skips_tasks_already_checked_after_terminal():
     """dedup_notifications skips tasks with terminal status and last_checked_at >= last_updated_at."""
-    async_tasks = {
+    async_tasks: async_notifier.AsyncTasksState = {
         "a": {
             "status": "success",
             "last_checked_at": "2026-05-06T12:01:00Z",
@@ -407,6 +429,23 @@ def test_format_batch_message_multiple():
         "task_id": "t2",
     }
     assert "check_async_task" in msg.lower()  # hint to LLM
+
+
+def test_format_batch_message_unknown_kind_uses_fallback_hint():
+    """A batch with only unrecognized kinds must not emit an empty hint join."""
+    notifs = [
+        async_notifier.AsyncTaskNotification(
+            task_id="t1",
+            agent_name="x",
+            status="success",
+            received_at="2026-05-07T12:00:00Z",
+            prompt="A",
+            kind="weird",
+        )
+    ]
+    msg = format_batch_message(notifs)
+    assert "the appropriate status tool" in msg
+    assert "via  " not in msg  # no empty " or ".join(hints)
 
 
 def test_dedup_preserves_order():

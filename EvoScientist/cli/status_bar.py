@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
@@ -13,8 +13,15 @@ from ..llm.context_window import (
     DEFAULT_CONTEXT_WINDOW_FALLBACK,
     resolve_context_window,
 )
-from ..memory.worker_activity import MemoryWorkerStatusSnapshot, memory_worker_status
-from ..sessions import get_thread_messages
+from ..memory.worker_activity import (
+    MemoryWorkerStatusSnapshot,
+    ObservationLinkerStatusSnapshot,
+    memory_worker_status,
+    observation_linker_status,
+)
+
+if TYPE_CHECKING:
+    from ..gateway import GraphGateway
 
 _FALLBACK_CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW_FALLBACK
 STATUS_BAR_BG = "#171a20"
@@ -180,37 +187,61 @@ def get_memory_worker_status() -> MemoryWorkerStatusSnapshot | None:
         return None
 
 
+def get_observation_linker_status() -> ObservationLinkerStatusSnapshot | None:
+    """Read active observation-linker status without making rendering fail."""
+    try:
+        return observation_linker_status()
+    except Exception:
+        return None
+
+
 def _plural(count: int, singular: str, plural: str | None = None) -> str:
     word = singular if count == 1 else (plural or f"{singular}s")
     return f"{count} {word}"
 
 
-def _memory_worker_label(status: MemoryWorkerStatusSnapshot) -> str:
+def _memory_activity_label(
+    *,
+    worker_status: MemoryWorkerStatusSnapshot | None,
+    linker_status: ObservationLinkerStatusSnapshot | None,
+) -> str:
     parts: list[str] = []
-    if status.is_running:
+    if worker_status is not None and worker_status.is_running:
         parts.append("🧠")
+    if linker_status is not None and linker_status.is_running:
+        parts.append("🔗")
 
     saved: list[str] = []
-    if status.profile_updates:
-        saved.append(_plural(status.profile_updates, "profile edit"))
-    if status.observations_recorded:
-        saved.append(_plural(status.observations_recorded, "observation"))
+    if worker_status is not None:
+        if worker_status.profile_updates:
+            saved.append(_plural(worker_status.profile_updates, "profile edit"))
+        if worker_status.observations_recorded:
+            saved.append(_plural(worker_status.observations_recorded, "observation"))
     if saved:
         parts.append(f"Saved {', '.join(saved)}")
+
+    if linker_status is not None and linker_status.relations_linked:
+        parts.append(
+            f"Created {_plural(linker_status.relations_linked, 'memory link')}"
+        )
 
     return " ".join(parts)
 
 
-def _append_memory_worker_indicator(
+def _append_memory_indicator(
     frags: list[tuple[str, str]],
     *,
-    status: MemoryWorkerStatusSnapshot | None,
+    worker_status: MemoryWorkerStatusSnapshot | None,
+    linker_status: ObservationLinkerStatusSnapshot | None,
     width: int,
 ) -> None:
-    if status is None:
+    if worker_status is None and linker_status is None:
         return
 
-    label = _memory_worker_label(status)
+    label = _memory_activity_label(
+        worker_status=worker_status,
+        linker_status=linker_status,
+    )
     if not label:
         return
 
@@ -273,9 +304,10 @@ def build_status_fragments(
             ("class:status-bar", " "),
         ]
 
-    _append_memory_worker_indicator(
+    _append_memory_indicator(
         frags,
-        status=get_memory_worker_status(),
+        worker_status=get_memory_worker_status(),
+        linker_status=get_observation_linker_status(),
         width=width,
     )
 
@@ -409,11 +441,12 @@ async def build_session_status_snapshot(
     model_name: str | None = None,
     model_obj: Any | None = None,
     pending_user_text: str | None = None,
+    graph_gateway: GraphGateway,
 ) -> SessionStatusSnapshot:
     """Count current thread context and return a display snapshot."""
     resolved_name = _resolve_model_name(model_name, model_obj)
     window = _resolve_context_window(model_obj)
-    messages = list(await get_thread_messages(thread_id))
+    messages = list(await graph_gateway.get_thread_messages(thread_id))
 
     pending = (pending_user_text or "").strip()
     if pending:

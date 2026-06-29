@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from EvoScientist.stream import display as display_mod
+from tests.fakes import FakeGraphGateway
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +39,7 @@ def test_consume_breaks_on_cancel_event():
     seen_events: list[int] = []
     cancel_scope = "scope:consume"
 
-    async def _fake_stream(agent, message, thread_id, **kwargs):
+    async def _fake_stream(_request):
         for i in range(100):
             if i == 3:
                 # Set during iteration — next loop iter should bail.
@@ -46,18 +47,15 @@ def test_consume_breaks_on_cancel_event():
             seen_events.append(i)
             yield {"type": "text", "content": f"chunk-{i}"}
 
-    with patch(
-        "EvoScientist.stream.display.stream_agent_events",
-        new=_fake_stream,
-    ):
-        result = display_mod._run_streaming(
-            agent=MagicMock(),
-            message="hello",
-            thread_id="t1",
-            show_thinking=False,
-            interactive=True,
-            cancel_scope=cancel_scope,
-        )
+    result = display_mod._run_streaming(
+        agent=MagicMock(),
+        message="hello",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        cancel_scope=cancel_scope,
+        gateway=FakeGraphGateway(stream=_fake_stream),
+    )
 
     # We set the flag during event index 3; the cancel check runs at the
     # top of the NEXT iteration (index 4), so indices 0-3 are pulled from
@@ -76,25 +74,22 @@ def test_run_streaming_short_circuits_when_scope_already_cancelled():
     seen_event = False
     cancel_scope = "scope:queued"
 
-    async def _fake_stream(agent, message, thread_id, **kwargs):
+    async def _fake_stream(_request):
         nonlocal seen_event
         seen_event = True
         yield {"type": "text", "content": "ok"}
 
     display_mod.request_stream_cancel(cancel_scope)
 
-    with patch(
-        "EvoScientist.stream.display.stream_agent_events",
-        new=_fake_stream,
-    ):
-        result = display_mod._run_streaming(
-            agent=MagicMock(),
-            message="hello",
-            thread_id="t1",
-            show_thinking=False,
-            interactive=True,
-            cancel_scope=cancel_scope,
-        )
+    result = display_mod._run_streaming(
+        agent=MagicMock(),
+        message="hello",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        cancel_scope=cancel_scope,
+        gateway=FakeGraphGateway(stream=_fake_stream),
+    )
 
     assert result == "[Stopped.]"
     assert seen_event is False
@@ -105,21 +100,18 @@ def test_run_streaming_ignores_other_scope_cancel():
     """Cancelling one scope must not bleed into a different stream."""
     display_mod.request_stream_cancel("scope:other")
 
-    async def _fake_stream(agent, message, thread_id, **kwargs):
+    async def _fake_stream(_request):
         yield {"type": "text", "content": "ok"}
 
-    with patch(
-        "EvoScientist.stream.display.stream_agent_events",
-        new=_fake_stream,
-    ):
-        result = display_mod._run_streaming(
-            agent=MagicMock(),
-            message="hello",
-            thread_id="t1",
-            show_thinking=False,
-            interactive=True,
-            cancel_scope="scope:self",
-        )
+    result = display_mod._run_streaming(
+        agent=MagicMock(),
+        message="hello",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        cancel_scope="scope:self",
+        gateway=FakeGraphGateway(stream=_fake_stream),
+    )
 
     assert "[Stopped.]" not in result
 
@@ -132,7 +124,7 @@ def test_run_streaming_ignores_other_scope_cancel():
 def test_run_streaming_pending_interrupt_short_circuits_on_cancel():
     """If cancel is already set, pending HITL prompt should not run."""
 
-    async def _empty_stream(agent, message, thread_id, **kwargs):
+    async def _empty_stream(_request):
         if False:
             yield {}
 
@@ -150,17 +142,17 @@ def test_run_streaming_pending_interrupt_short_circuits_on_cancel():
         prompt_called = True
         return None
 
-    with patch("EvoScientist.stream.display.stream_agent_events", new=_empty_stream):
-        result = display_mod._run_streaming(
-            agent=MagicMock(),
-            message="hello",
-            thread_id="t1",
-            show_thinking=False,
-            interactive=True,
-            hitl_prompt_fn=_prompt,
-            cancel_scope="scope:hitl",
-            _state=state,
-        )
+    result = display_mod._run_streaming(
+        agent=MagicMock(),
+        message="hello",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        hitl_prompt_fn=_prompt,
+        cancel_scope="scope:hitl",
+        _state=state,
+        gateway=FakeGraphGateway(stream=_empty_stream),
+    )
 
     assert result == "Partial answer\n[Stopped.]"
     assert prompt_called is False

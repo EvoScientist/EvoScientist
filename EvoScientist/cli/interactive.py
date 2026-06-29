@@ -5,10 +5,10 @@ import logging
 import queue
 import random
 import sys
-import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer  # type: ignore[import-untyped]
 from prompt_toolkit import PromptSession  # type: ignore[import-untyped]
@@ -34,17 +34,16 @@ import EvoScientist.cli.channel as _ch_mod
 
 from ..commands.base import Command, CommandContext
 from ..commands.manager import manager as cmd_manager
-from ..sessions import (
-    generate_thread_id,
-    get_checkpointer,
-    get_thread_messages,
-    get_thread_metadata,
-    resolve_thread_id_prefix,
-    short_thread_id,
-    thread_exists,
+from ..gateway import (
+    GraphGateway,
+    GraphTarget,
+    RuntimeGateways,
+    create_runtime_gateways,
 )
+from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
+from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
     DANGEROUS_BANNER_LABEL,
@@ -86,7 +85,7 @@ from .status_bar import (
 from .tui_interactive import run_textual_interactive
 from .tui_runtime import resolve_ui_backend, run_streaming
 
-_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 90.0
+_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
 _MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
 _MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
 
@@ -94,6 +93,19 @@ _channel_logger = logging.getLogger(__name__)
 
 # Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
 _background_tasks: set[asyncio.Task] = set()
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
+
+@dataclass(frozen=True, slots=True)
+class _StartupSession:
+    """Resolved interactive startup session with a concrete active thread."""
+
+    thread_id: str
+    workspace_dir: str | None
+    resumed: bool
+
 
 # =============================================================================
 # Banner
@@ -250,6 +262,67 @@ class SlashCommandCompleter(Completer):
                 return
 
 
+async def _resolve_startup_session(
+    requested_thread_id: str | None,
+    *,
+    workspace_dir: str | None,
+    graph_gateway: GraphGateway,
+    config: Any,
+) -> _StartupSession:
+    """Resolve/create the initial CLI session before shared REPL state exists."""
+    if not requested_thread_id:
+        return _StartupSession(
+            thread_id=await graph_gateway.create_thread(
+                GraphTarget(workspace_dir=workspace_dir)
+            ),
+            workspace_dir=workspace_dir,
+            resumed=False,
+        )
+
+    resolution = await graph_gateway.resolve_thread(requested_thread_id)
+    if resolution.thread_id is None:
+        if resolution.matches:
+            console.print(
+                f"[yellow]Ambiguous thread ID '{escape(requested_thread_id)}'. "
+                "Matches:[/yellow]"
+            )
+            for match in resolution.matches:
+                console.print(f"  [cyan]{match}[/cyan]")
+        else:
+            console.print(
+                f"[red]Thread '{escape(requested_thread_id)}' not found.[/red]"
+            )
+        return _StartupSession(
+            thread_id=await graph_gateway.create_thread(
+                GraphTarget(workspace_dir=workspace_dir)
+            ),
+            workspace_dir=workspace_dir,
+            resumed=False,
+        )
+
+    resolved_thread_id = resolution.thread_id
+    metadata = await graph_gateway.get_thread_metadata(resolved_thread_id)
+    resolved_workspace = (metadata or {}).get("workspace_dir") or workspace_dir
+    if resolved_workspace:
+        from ..langgraph_dev.manager import WorkspaceMismatchError
+        from .commands import _sync_background_agent_server_workspace
+
+        try:
+            await _sync_background_agent_server_workspace(
+                config,
+                workspace_dir=resolved_workspace,
+            )
+        except WorkspaceMismatchError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+
+    return _StartupSession(
+        thread_id=resolved_thread_id,
+        workspace_dir=resolved_workspace,
+        resumed=True,
+    )
+
+
 # =============================================================================
 # Interactive & single-shot modes
 # =============================================================================
@@ -346,20 +419,6 @@ def cmd_interactive(
         width = console.size.width
         console.print(Text("\u2500" * width, style="dim"))
 
-    # Mutable state for async loop
-    state: dict[str, Any] = {
-        "thread_id": thread_id or generate_thread_id(),
-        "workspace_dir": workspace_dir,
-        "running": True,
-        "resumed": False,
-        "ui_backend": resolved_ui_backend,
-        "status_started_at": datetime.now(),
-        "status_base_snapshot": make_empty_status_snapshot(model),
-        "status_snapshot": make_empty_status_snapshot(model),
-        "status_streaming_text": "",
-        "status_last_input_tokens": None,
-    }
-
     from ..commands.base import ChannelRuntime
 
     channel_runtime = ChannelRuntime()
@@ -389,6 +448,23 @@ def cmd_interactive(
         on_progress=_on_mcp_progress,
     )
 
+    runtime_gateways = create_runtime_gateways()
+    graph_gateway = runtime_gateways.graph_gateway
+    requested_thread_id = thread_id
+
+    # Mutable state for async loop
+    state: dict[str, Any] = {
+        "workspace_dir": workspace_dir,
+        "running": True,
+        "resumed": False,
+        "ui_backend": resolved_ui_backend,
+        "status_started_at": datetime.now(),
+        "status_base_snapshot": make_empty_status_snapshot(model),
+        "status_snapshot": make_empty_status_snapshot(model),
+        "status_streaming_text": "",
+        "status_last_input_tokens": None,
+    }
+
     def _on_status_after_compact(input_tokens: int) -> None:
         """Mirror inline /compact post-update: refresh both fields so the
         next status render reflects the reduced context immediately.
@@ -412,7 +488,7 @@ def cmd_interactive(
             config=config,
         )
 
-    async def _await_agent_ready() -> Any:
+    async def _await_agent_ready() -> "CompiledStateGraph":
         """Await the agent load and apply CLI-side post-load side effects.
 
         Raises when called before ``_start_agent_load``: reloading here
@@ -468,6 +544,7 @@ def cmd_interactive(
                     state["thread_id"],
                     model_name=model,
                     pending_user_text=pending,
+                    graph_gateway=graph_gateway,
                 )
         elif state["status_last_input_tokens"] is not None:
             state["status_base_snapshot"] = make_usage_status_snapshot(
@@ -478,6 +555,7 @@ def cmd_interactive(
             state["status_base_snapshot"] = await build_session_status_snapshot(
                 state["thread_id"],
                 model_name=model,
+                graph_gateway=graph_gateway,
             )
         if reset_streaming_text:
             state["status_streaming_text"] = ""
@@ -539,24 +617,9 @@ def cmd_interactive(
         elif event_type in ("done", "error"):
             _set_status_streaming_text("")
 
-    async def _resolve_thread_id(tid: str) -> str | None:
-        """Resolve a (possibly partial) thread ID. Returns full ID or None."""
-        resolved, matches = await resolve_thread_id_prefix(tid)
-        if resolved:
-            return resolved
-        if matches:
-            console.print(
-                f"[yellow]Ambiguous thread ID '{escape(tid)}'. Matches:[/yellow]"
-            )
-            for s in matches:
-                console.print(f"  [cyan]{s}[/cyan]")
-            return None
-        console.print(f"[red]Thread '{escape(tid)}' not found.[/red]")
-        return None
-
     async def _render_history(thread_id: str):
         """Display conversation history for a resumed session."""
-        messages = await get_thread_messages(thread_id)
+        messages = await graph_gateway.get_thread_messages(thread_id)
         if not messages:
             return
 
@@ -632,11 +695,23 @@ def cmd_interactive(
         """Async main loop with prompt_async and channel queue checking."""
         nonlocal model
         async with get_checkpointer() as checkpointer:
+            startup = await _resolve_startup_session(
+                requested_thread_id,
+                workspace_dir=state["workspace_dir"],
+                graph_gateway=graph_gateway,
+                config=config,
+            )
+            state["thread_id"] = startup.thread_id
+            state["workspace_dir"] = startup.workspace_dir
+            state["resumed"] = startup.resumed
+            if startup.resumed:
+                state["status_started_at"] = datetime.now()
+                state["status_last_input_tokens"] = None
             # Lifecycle callbacks (new / resume) need ``checkpointer``
             # in scope — define the ``rich_ui`` adapter here rather than
             # at the outer function level.
 
-            def _on_start_new_session() -> None:
+            async def _on_start_new_session() -> None:
                 """NewCommand callback — rotate workspace (if not fixed),
                 issue a new thread id, reset session-scoped status fields,
                 and kick off background agent reload. The dispatch block
@@ -645,7 +720,9 @@ def cmd_interactive(
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 if not workspace_fixed:
                     state["workspace_dir"] = _create_session_workspace(run_name)
-                state["thread_id"] = generate_thread_id()
+                state["thread_id"] = await graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=state["workspace_dir"])
+                )
                 state["resumed"] = False
                 state["status_started_at"] = datetime.now()
                 state["status_last_input_tokens"] = None
@@ -734,45 +811,6 @@ def cmd_interactive(
                 on_start_new_session=_on_start_new_session,
                 on_handle_session_resume=_on_handle_session_resume,
             )
-
-            # Handle --thread-id resume
-            if thread_id:
-                resolved = await _resolve_thread_id(thread_id)
-                if resolved:
-                    meta = await get_thread_metadata(resolved)
-                    ws = (meta or {}).get("workspace_dir", "") or state["workspace_dir"]
-                    state["thread_id"] = resolved
-                    state["resumed"] = True
-                    state["status_started_at"] = datetime.now()
-                    state["status_last_input_tokens"] = None
-                    if ws:
-                        state["workspace_dir"] = ws
-                        # CLI-startup --resume path: sync langgraph dev
-                        # subprocess to the thread's saved workspace if it
-                        # differs from the one we initially launched it with.
-                        # Show a spinner during the 10-15s restart, and run
-                        # the sync call in a worker thread so the asyncio
-                        # event loop stays responsive.
-                        from ..langgraph_dev.manager import WorkspaceMismatchError
-                        from .commands import _sync_background_agent_server_workspace
-
-                        try:
-                            await _sync_background_agent_server_workspace(
-                                config,
-                                workspace_dir=ws,
-                            )
-                        except WorkspaceMismatchError as exc:
-                            # Startup --resume into a workspace owned by
-                            # a different EvoSci process: refuse to start
-                            # the CLI so the user can resolve the conflict.
-                            console.print(f"[red]{exc}[/red]")
-                            raise typer.Exit(1) from exc
-                else:
-                    # Resolution failed (ambiguous/not-found); the user's raw
-                    # input is still seeded in state["thread_id"] from init.
-                    # Replace with a fresh ID so a new session isn't
-                    # checkpointed under the bad prefix.
-                    state["thread_id"] = generate_thread_id()
 
             # Kick off agent construction (MCP tool enumeration is the
             # slow part) in the background so the banner and prompt can
@@ -969,6 +1007,7 @@ def cmd_interactive(
                         await_agent_ready=_await_agent_ready,
                         on_cmd_completed=_on_channel_cmd_completed,
                         channel_runtime=channel_runtime,
+                        graph_gateway=runtime_gateways.graph_gateway,
                     )
                     if _slash_handled:
                         # A channel-issued /new or /resume rotates the thread
@@ -1003,6 +1042,7 @@ def cmd_interactive(
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
                             cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
+                            gateway=runtime_gateways.graph_gateway,
                         )
                     except Exception as e:
                         response = f"Error: {e}"
@@ -1043,9 +1083,10 @@ def cmd_interactive(
                     console.print(line_text, style=line_style, markup=False)
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
+                ready_agent = await _await_agent_ready()
                 response = run_streaming(
                     ui_backend=state["ui_backend"],
-                    agent=await _await_agent_ready(),
+                    agent=ready_agent,
                     message=text,
                     # Falls back to live state["thread_id"] if no override is
                     # passed (legacy / direct-call paths). Dedup reader has no
@@ -1058,6 +1099,7 @@ def cmd_interactive(
                     metadata=meta,
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
+                    gateway=runtime_gateways.graph_gateway,
                 )
                 _notif_tid = target_thread_id or state["thread_id"]
                 if _ch_mod.publish_to_channel_origin(_notif_tid, response):
@@ -1077,9 +1119,12 @@ def cmd_interactive(
                 sys.stdout.write("\033[34;1m❯\033[0m ")
                 sys.stdout.flush()
 
+            async def _empty_async_tasks() -> async_notifier.AsyncTasksState:
+                return {}
+
             async def _read_current_async_tasks(
-                target_thread_id: str | None,
-            ) -> dict[str, dict]:
+                target_thread_id: str,
+            ) -> async_notifier.AsyncTasksState:
                 """Snapshot async_tasks from the active agent state for dedup.
 
                 Uses ``agent_loader.agent`` (the currently loaded agent) and
@@ -1088,20 +1133,22 @@ def cmd_interactive(
                 cannot make us read the wrong thread's state).
                 """
                 agent = agent_loader.agent
-                if agent is None or not target_thread_id:
+                if agent is None:
                     return {}
                 try:
-                    snap = await agent.aget_state(
-                        {"configurable": {"thread_id": target_thread_id}}
+                    return await async_notifier.read_async_tasks_from_gateway(
+                        runtime_gateways.graph_gateway,
+                        GraphTarget(
+                            local_graph=agent,
+                            workspace_dir=state["workspace_dir"],
+                        ),
+                        target_thread_id,
                     )
-                    return (snap.values or {}).get("async_tasks") or {}
                 except Exception:
                     return {}
 
             async def _check_channel_queue() -> None:
                 """Poll the channel + notification queues and dispatch."""
-                from EvoScientist.cli import async_notifier
-
                 while True:
                     try:
                         msg = _message_queue.get_nowait()
@@ -1117,6 +1164,11 @@ def cmd_interactive(
                     # would silently die otherwise (Fix #4).
                     current_tid = state.get("thread_id")
                     if async_notifier.has_pending_notifications(current_tid):
+                        read_async_tasks_state = (
+                            (lambda _tid=current_tid: _read_current_async_tasks(_tid))
+                            if current_tid
+                            else _empty_async_tasks
+                        )
                         try:
                             await async_notifier.consume_notifications(
                                 run_message=lambda text, notifs, _tid=current_tid: (
@@ -1124,9 +1176,7 @@ def cmd_interactive(
                                         text, notifs, target_thread_id=_tid
                                     )
                                 ),
-                                read_async_tasks_state=lambda _tid=current_tid: (
-                                    _read_current_async_tasks(_tid)
-                                ),
+                                read_async_tasks_state=read_async_tasks_state,
                                 current_thread_id=current_tid,
                             )
                         except Exception:
@@ -1257,6 +1307,7 @@ def cmd_interactive(
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                                 channel_runtime=channel_runtime,
+                                graph_gateway=runtime_gateways.graph_gateway,
                             )
                             await cmd_manager.execute(user_input, ctx)
 
@@ -1349,6 +1400,7 @@ def cmd_interactive(
                             metadata=meta,
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
+                            gateway=runtime_gateways.graph_gateway,
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1388,7 +1440,7 @@ def cmd_interactive(
                 current_tid = state.get("thread_id")
                 if current_tid:
                     try:
-                        if await thread_exists(current_tid):
+                        if await graph_gateway.thread_exists(current_tid):
                             state["resume_hint_thread_id"] = current_tid
                     except Exception:
                         _channel_logger.debug(
@@ -1411,27 +1463,27 @@ def cmd_interactive(
 
 
 def cmd_run(
-    agent: Any,
+    agent: "CompiledStateGraph",
     prompt: str,
-    thread_id: str | None = None,
+    thread_id: str,
     show_thinking: bool = True,
     workspace_dir: str | None = None,
     model: str | None = None,
     ui_backend: str = "cli",
+    *,
+    runtime_gateways: RuntimeGateways,
 ) -> None:
     """Single-shot execution with streaming display.
 
     Args:
         agent: Compiled agent graph
         prompt: User prompt
-        thread_id: Optional thread ID (generates new one if None)
+        thread_id: Thread ID for conversation persistence.
         show_thinking: Whether to display thinking panels
         workspace_dir: Per-session workspace directory path
         model: Model name for checkpoint metadata
         ui_backend: UI backend ('cli' or 'tui')
     """
-    thread_id = thread_id or generate_thread_id()
-
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
     console.print(sep)
@@ -1452,6 +1504,7 @@ def cmd_run(
             show_thinking=show_thinking,
             interactive=False,
             metadata=meta,
+            gateway=runtime_gateways.graph_gateway,
         )
         _wait_for_memory_workers_before_exit()
     except Exception as e:
@@ -1473,65 +1526,39 @@ def _wait_for_memory_workers_before_exit(
 ) -> None:
     """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
     try:
-        from ..memory.worker_activity import memory_worker_observed_outputs
+        from ..memory.worker_activity import (
+            MemoryActivityPhase,
+            MemoryWorkerStatusSnapshot,
+            wait_for_memory_pipeline_idle,
+        )
     except Exception:
         return
 
-    deadline = time.monotonic() + timeout_seconds
     announced = False
-    saved_announced = False
-    announced_saved_counts: tuple[int, int] | None = None
-    output_seen_at: float | None = None
-    observed_status = None
-    while True:
-        now = time.monotonic()
-        try:
-            observed = memory_worker_observed_outputs()
-        except Exception:
-            return
 
-        if not observed.is_running:
-            saved_counts = (observed.observations_recorded, observed.profile_updates)
-            if saved_counts != (0, 0) and saved_counts != announced_saved_counts:
-                saved = []
-                if observed.observations_recorded:
-                    saved.append(f"{observed.observations_recorded} observation(s)")
-                if observed.profile_updates:
-                    saved.append(f"{observed.profile_updates} profile update(s)")
-                if saved:
-                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
-            return
+    def print_saved(observed: MemoryWorkerStatusSnapshot) -> None:
+        saved = []
+        if observed.observations_recorded:
+            saved.append(f"{observed.observations_recorded} observation(s)")
+        if observed.profile_updates:
+            saved.append(f"{observed.profile_updates} profile update(s)")
+        if saved:
+            console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
 
-        if observed.observations_recorded or observed.profile_updates:
-            if output_seen_at is None:
-                output_seen_at = now
-            observed_status = observed
-            if (
-                now - output_seen_at >= _MEMORY_WORKER_OUTPUT_GRACE_SECONDS
-                and not saved_announced
-            ):
-                saved = []
-                if observed_status and observed_status.observations_recorded:
-                    saved.append(
-                        f"{observed_status.observations_recorded} observation(s)"
-                    )
-                if observed_status and observed_status.profile_updates:
-                    saved.append(f"{observed_status.profile_updates} profile update(s)")
-                if saved:
-                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
-                    saved_announced = True
-                    announced_saved_counts = (
-                        observed_status.observations_recorded,
-                        observed_status.profile_updates,
-                    )
-
-        if now >= deadline:
-            console.print(
-                "[dim]EvoMemory worker is still running; shutting down.[/dim]"
-            )
-            return
-
+    def print_waiting(phase: MemoryActivityPhase) -> None:
+        nonlocal announced
         if not announced:
-            console.print("[dim]Waiting for EvoMemory worker...[/dim]")
+            console.print(f"[dim]Waiting for EvoMemory {phase}...[/dim]")
             announced = True
-        time.sleep(_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS)
+
+    def print_timeout(phase: MemoryActivityPhase) -> None:
+        console.print(f"[dim]EvoMemory {phase} is still running; shutting down.[/dim]")
+
+    wait_for_memory_pipeline_idle(
+        timeout_seconds=timeout_seconds,
+        poll_seconds=_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS,
+        output_grace_seconds=_MEMORY_WORKER_OUTPUT_GRACE_SECONDS,
+        on_saved=print_saved,
+        on_waiting=print_waiting,
+        on_timeout=print_timeout,
+    )

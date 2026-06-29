@@ -8,6 +8,9 @@ budget for returning structured JSON, and a user-facing tool name that LLMs
 recognize from ChatGPT Code Interpreter training data.
 
 Excluded from PTC by design:
+    - ``task`` (sub-agent dispatch) — reserved by langchain-quickjs >=0.3; it
+      is always the top-level ``task()`` REPL global (with ``responseSchema``),
+      so a ``tools.task`` variant would be a conflicting, degraded duplicate
     - ``execute`` (shell) — would bypass ``HumanInTheLoopMiddleware`` approval
     - ``write_file`` / ``edit_file`` — side-effectful, no batch benefit
     - ``think_tool`` — reflection is not batchable
@@ -58,8 +61,7 @@ _DEFAULT_PTC_ALLOWLIST: list[str] = [
     # Memory lookup (read-only, should precede workspace inspection)
     "search_observations",
     "read_memory",
-    # Sub-agent dispatch — sync (deepagents) + async (langgraph dev)
-    "task",
+    # Async sub-agent dispatch (langgraph dev). `task` is excluded — see docstring.
     "start_async_task",
     "check_async_task",
     "update_async_task",
