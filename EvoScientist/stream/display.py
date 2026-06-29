@@ -1013,7 +1013,7 @@ def _resolve_hitl_approval(
     override all auto-approve settings."""
     global _session_auto_approve
 
-    from ..backends import check_forced_confirmation
+    from ..backends import ActionDecision, resolve_action_decision
     from ..config.settings import load_config
 
     action_requests = interrupt_data.get("action_requests", [])
@@ -1026,7 +1026,7 @@ def _resolve_hitl_approval(
     auto_approve = (
         _session_auto_approve or cfg.auto_approve or get_runtime_auto_approve()
     )
-    shell_allow_list = (
+    allow_list = (
         [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
         if cfg.shell_allow_list
         else []
@@ -1047,36 +1047,29 @@ def _resolve_hitl_approval(
             continue
 
         command = args.get("command", "") if isinstance(args, dict) else ""
-        forced_reason = check_forced_confirmation(command)
+        verdict = resolve_action_decision(
+            command,
+            auto_approve=auto_approve,
+            dangerous_mode=cfg.dangerous_mode,
+            allow_list=allow_list,
+        )
 
-        # Forced confirmation: always prompt regardless of auto-approve
-        if forced_reason:
-            remaining = len(action_requests) - i
-            result = (
-                prompt_fn([req])
-                if prompt_fn
-                else _prompt_hitl_approval([req], forced_reason=forced_reason)
-            )
-            if result is None:
-                decisions.extend(
-                    {"type": "reject", "message": "Rejected by user"}
-                    for _ in range(remaining)
-                )
-                return decisions
-            decisions.append(result[0] if isinstance(result, list) else result)
-            continue
-
-        # Normal auto-approve paths
-        if auto_approve:
-            decisions.append({"type": "approve"})
-            continue
-        if _matches_shell_allow_list(command, shell_allow_list):
+        if verdict.decision is ActionDecision.APPROVE:
             decisions.append({"type": "approve"})
             continue
 
-        # Needs manual approval
+        if verdict.decision is ActionDecision.REJECT:
+            decisions.append({"type": "reject", "message": verdict.reason})
+            continue
+
+        # PROMPT: interactive user decides
         remaining = len(action_requests) - i
-        result = prompt_fn([req]) if prompt_fn else _prompt_hitl_approval([req])
+        prompt_kwargs = {"forced_reason": verdict.reason} if verdict.reason else {}
+        result = (
+            prompt_fn([req])
+            if prompt_fn
+            else _prompt_hitl_approval([req], **prompt_kwargs)
+        )
         if result is None:
             decisions.extend(
                 {"type": "reject", "message": "Rejected by user"}

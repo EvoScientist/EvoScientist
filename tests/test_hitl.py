@@ -487,73 +487,84 @@ class TestConsumerHitlHelpers:
         assert "1. execute: ls" in prompt
         assert "2. write_file: /out.txt" in prompt
 
-    def test_should_auto_approve_non_execute(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+    def test_resolve_verdicts_non_execute(self):
+        from EvoScientist.backends import ActionDecision
+        from EvoScientist.channels.consumer import _resolve_action_verdicts
 
-        assert _should_auto_approve([{"name": "write_file", "args": {}}]) is True
+        verdicts = _resolve_action_verdicts([{"name": "write_file", "args": {}}])
+        assert all(v.decision == ActionDecision.APPROVE for v in verdicts)
 
-    def test_should_auto_approve_empty(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+    def test_resolve_verdicts_empty(self):
+        from EvoScientist.channels.consumer import _resolve_action_verdicts
 
-        assert _should_auto_approve([]) is True
+        assert _resolve_action_verdicts([]) == []
 
-    def test_should_auto_approve_execute_no_allowlist(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+    def test_resolve_verdicts_execute_no_allowlist(self):
+        from EvoScientist.backends import ActionDecision
+        from EvoScientist.channels.consumer import _resolve_action_verdicts
 
         # With default config (auto_approve=False, shell_allow_list=""),
         # execute should NOT auto-approve
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
+        mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = ""
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            verdicts = _resolve_action_verdicts(
                 [
                     {"name": "execute", "args": {"command": "rm -rf /"}},
                 ]
             )
-        assert result is False
+        assert verdicts[0].decision == ActionDecision.PROMPT
 
-    def test_should_auto_approve_run_in_background_no_allowlist(self):
+    def test_resolve_verdicts_run_in_background_no_allowlist(self):
         """Channel path must NOT auto-approve run_in_background (same as execute)."""
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.backends import ActionDecision
+        from EvoScientist.channels.consumer import _resolve_action_verdicts
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
+        mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = ""
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            verdicts = _resolve_action_verdicts(
                 [
                     {"name": "run_in_background", "args": {"command": "rm -rf /"}},
                 ]
             )
-        assert result is False
+        assert verdicts[0].decision == ActionDecision.PROMPT
 
-    def test_should_auto_approve_config_true(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+    def test_resolve_verdicts_config_auto_approve(self):
+        from EvoScientist.backends import ActionDecision
+        from EvoScientist.channels.consumer import _resolve_action_verdicts
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = True
+        mock_cfg.dangerous_mode = False
+        mock_cfg.shell_allow_list = ""
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
-                [
-                    {"name": "execute", "args": {"command": "rm -rf /"}},
-                ]
-            )
-        assert result is True
-
-    def test_should_auto_approve_allowlist_match(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
-
-        mock_cfg = MagicMock()
-        mock_cfg.auto_approve = False
-        mock_cfg.shell_allow_list = "ls,python"
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            verdicts = _resolve_action_verdicts(
                 [
                     {"name": "execute", "args": {"command": "ls -la"}},
                 ]
             )
-        assert result is True
+        assert verdicts[0].decision == ActionDecision.APPROVE
+
+    def test_resolve_verdicts_allowlist_match(self):
+        from EvoScientist.backends import ActionDecision
+        from EvoScientist.channels.consumer import _resolve_action_verdicts
+
+        mock_cfg = MagicMock()
+        mock_cfg.auto_approve = False
+        mock_cfg.dangerous_mode = False
+        mock_cfg.shell_allow_list = "ls,python"
+        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+            verdicts = _resolve_action_verdicts(
+                [
+                    {"name": "execute", "args": {"command": "ls -la"}},
+                ]
+            )
+        assert verdicts[0].decision == ActionDecision.APPROVE
 
 
 # =============================================================================

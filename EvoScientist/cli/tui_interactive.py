@@ -1962,19 +1962,21 @@ def run_textual_interactive(
                 if state.pending_interrupts:
                     from langgraph.types import Command  # type: ignore[import-untyped]
 
-                    from EvoScientist.backends import check_forced_confirmation
-                    from EvoScientist.config.settings import HITL_SHELL_TOOLS
+                    from EvoScientist.backends import (
+                        ActionDecision,
+                        resolve_action_decision,
+                    )
+                    from EvoScientist.config.settings import (
+                        HITL_SHELL_TOOLS,
+                        get_runtime_auto_approve,
+                    )
 
-                    def _has_forced(areqs):
-                        for r in areqs:
-                            n = r.get("name", "") if isinstance(r, dict) else ""
-                            if n not in HITL_SHELL_TOOLS:
-                                continue
-                            a = r.get("args", {}) if isinstance(r, dict) else {}
-                            c = a.get("command", "") if isinstance(a, dict) else ""
-                            if check_forced_confirmation(c):
-                                return True
-                        return False
+                    _auto = self._hitl_auto_approve or get_runtime_auto_approve()
+                    _allow = (
+                        [s.strip() for s in config.shell_allow_list.split(",") if s.strip()]
+                        if config.shell_allow_list
+                        else []
+                    )
 
                     resume_map: dict[str, dict] = {}
                     _cancelled = False
@@ -1986,15 +1988,39 @@ def run_textual_interactive(
                         _areqs = _iev.get("action_requests", [])
                         _n = len(_areqs) or 1
 
-                        from EvoScientist.config.settings import (
-                            get_runtime_auto_approve,
-                        )
+                        batch_decision = ActionDecision.APPROVE
+                        batch_reason = ""
+                        for _req in _areqs:
+                            _rname = _req.get("name", "") if isinstance(_req, dict) else ""
+                            if _rname not in HITL_SHELL_TOOLS:
+                                continue
+                            _rargs = _req.get("args", {}) if isinstance(_req, dict) else {}
+                            _cmd = _rargs.get("command", "") if isinstance(_rargs, dict) else ""
+                            _v = resolve_action_decision(
+                                _cmd,
+                                auto_approve=_auto,
+                                dangerous_mode=config.dangerous_mode,
+                                allow_list=_allow,
+                            )
+                            if _v.decision is ActionDecision.PROMPT:
+                                batch_decision = ActionDecision.PROMPT
+                                break
+                            if _v.decision is ActionDecision.REJECT:
+                                batch_decision = ActionDecision.REJECT
+                                batch_reason = _v.reason
 
-                        if (
-                            self._hitl_auto_approve or get_runtime_auto_approve()
-                        ) and not _has_forced(_areqs):
+                        if batch_decision is ActionDecision.APPROVE:
                             resume_map[_iid] = {
                                 "decisions": [{"type": "approve"} for _ in range(_n)]
+                            }
+                            continue
+
+                        if batch_decision is ActionDecision.REJECT:
+                            resume_map[_iid] = {
+                                "decisions": [
+                                    {"type": "reject", "message": batch_reason}
+                                    for _ in range(_n)
+                                ]
                             }
                             continue
 

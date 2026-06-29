@@ -15,7 +15,10 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from ..backends import ActionVerdict
 
 from .base import Channel
 from .bus import MessageBus
@@ -108,60 +111,56 @@ def _join_subagent_text(buffers: dict[str, tuple[str, list[str]]]) -> str:
     return "\n\n".join(sections)
 
 
-def _should_auto_approve(action_requests: list[dict]) -> bool:
-    """Check if all action requests can be auto-approved via config.
+def _resolve_action_verdicts(
+    action_requests: list[dict],
+) -> list[ActionVerdict]:
+    """Return an :class:`ActionVerdict` for every action request.
 
-    Returns True if no manual approval is needed (config auto_approve,
-    non-execute tools, or shell_allow_list match).
+    Non-shell actions are always approved.  Shell actions are evaluated
+    via the centralised :func:`resolve_action_decision` policy.
     """
+    from ..backends import ActionDecision, ActionVerdict, resolve_action_decision
+    from ..config.settings import HITL_SHELL_TOOLS, get_runtime_auto_approve
+
     if not action_requests:
-        return True
+        return []
 
     try:
-        from ..config.settings import HITL_SHELL_TOOLS, load_config
+        from ..config.settings import load_config
 
         cfg = load_config()
     except Exception:
-        return False  # fail-closed
+        return [ActionVerdict(ActionDecision.PROMPT) for _ in action_requests]
 
-    from ..backends import check_forced_confirmation
-    from ..config.settings import HITL_SHELL_TOOLS
+    auto = cfg.auto_approve or get_runtime_auto_approve()
+    dangerous = cfg.dangerous_mode
+    allow_list = (
+        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
+        if cfg.shell_allow_list
+        else None
+    )
 
-    # Check forced confirmation before auto-approve
+    verdicts: list[ActionVerdict] = []
     for req in action_requests:
         name = (
             req.get("name", "") if isinstance(req, dict) else getattr(req, "name", "")
         )
         if name not in HITL_SHELL_TOOLS:
+            verdicts.append(ActionVerdict(ActionDecision.APPROVE))
             continue
         args = (
             req.get("args", {}) if isinstance(req, dict) else getattr(req, "args", {})
         )
         command = args.get("command", "") if isinstance(args, dict) else ""
-        if check_forced_confirmation(command):
-            return False
-
-    from ..config.settings import get_runtime_auto_approve
-
-    if cfg.auto_approve or get_runtime_auto_approve():
-        return True
-
-    shell_allow_list = (
-        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
-        if cfg.shell_allow_list
-        else []
-    )
-
-    for req in action_requests:
-        name = req.get("name", "")
-        if name not in HITL_SHELL_TOOLS:
-            continue
-        args = req.get("args", {})
-        command = args.get("command", "") if isinstance(args, dict) else ""
-        cmd = command.strip()
-        if not any(cmd.startswith(prefix) for prefix in shell_allow_list):
-            return False
-    return True
+        verdicts.append(
+            resolve_action_decision(
+                command,
+                auto_approve=auto,
+                dangerous_mode=dangerous,
+                allow_list=allow_list,
+            )
+        )
+    return verdicts
 
 
 def _format_approval_prompt(
@@ -636,8 +635,7 @@ class InboundConsumer:
                 # HITL: resolve all pending interrupts
                 from langgraph.types import Command  # type: ignore[import-untyped]
 
-                from ..backends import check_forced_confirmation
-                from ..config.settings import HITL_SHELL_TOOLS
+                from ..backends import ActionDecision
 
                 has_buttons = (
                     channel is not None and channel.capabilities.inline_buttons
@@ -648,27 +646,42 @@ class InboundConsumer:
                     action_reqs = _iev.get("action_requests", [])
                     n = len(action_reqs) or 1
 
-                    _has_forced = any(
-                        check_forced_confirmation(
-                            (r.get("args", {}) if isinstance(r, dict) else {}).get(
-                                "command", ""
-                            )
-                        )
-                        for r in action_reqs
-                        if (r.get("name", "") if isinstance(r, dict) else "")
-                        in HITL_SHELL_TOOLS
+                    verdicts = _resolve_action_verdicts(action_reqs)
+                    _has_rejected = any(
+                        v.decision == ActionDecision.REJECT for v in verdicts
                     )
-                    if not _has_forced and (
+                    if not _has_rejected and (
                         session_key in self._auto_approve_sessions
-                        or _should_auto_approve(action_reqs)
+                        or all(
+                            v.decision == ActionDecision.APPROVE for v in verdicts
+                        )
                     ):
                         resume_map[_iid] = {
                             "decisions": [{"type": "approve"} for _ in range(n)]
                         }
                         continue
 
+                    if _has_rejected:
+                        reasons = [v.reason for v in verdicts if v.reason]
+                        reject_msg = reasons[0] if reasons else "Rejected"
+                        resume_map[_iid] = {
+                            "decisions": [
+                                {"type": "reject", "message": reject_msg}
+                                for _ in range(n)
+                            ]
+                        }
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content=f"\u274c {reject_msg}",
+                                metadata=msg.metadata,
+                            )
+                        )
+                        continue
+
                     prompt_text = _format_approval_prompt(
-                        action_reqs, with_buttons=has_buttons, forced=_has_forced
+                        action_reqs, with_buttons=has_buttons, forced=False
                     )
                     await self.bus.publish_outbound(
                         OutboundMessage(
@@ -678,7 +691,7 @@ class InboundConsumer:
                             metadata=_approval_prompt_metadata(
                                 msg.metadata,
                                 with_buttons=has_buttons,
-                                forced=_has_forced,
+                                forced=False,
                             ),
                         )
                     )
@@ -760,7 +773,7 @@ class InboundConsumer:
                             )
                         break
 
-                    if decision == "auto" and not _has_forced:
+                    if decision == "auto" and not _has_rejected:
                         self._auto_approve_sessions.add(session_key)
                     resume_map[_iid] = {
                         "decisions": [{"type": "approve"} for _ in range(n)]

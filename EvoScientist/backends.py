@@ -5,6 +5,8 @@ import re
 import shlex
 import sys
 import uuid
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
@@ -138,12 +140,20 @@ _FORCED_INTERPRETER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
+# Commands that are dangerous as pipe RHS (receiving piped data)
+_PIPE_NETWORKING_RHS = frozenset({
+    "nc", "ncat", "netcat", "ssh", "curl", "wget",
+    "telnet", "socat", "scp", "sftp", "rsync", "ftp",
+})
+_PIPE_DANGEROUS_RHS = frozenset({
+    # Interpreters (code execution via stdin)
+    "sh", "bash", "zsh", "dash", "ash", "ksh", "fish",
+    "python", "python3", "python2", "node", "bun", "deno",
+    "ruby", "perl", "php", "lua", "iex", "elixir",
+}) | _PIPE_NETWORKING_RHS
+
 # Patterns checked ONLY outside quoted strings (| and > are common inside regexes/code)
 _FORCED_UNQUOTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (
-        re.compile(r"(?<!\|)\|(?!\|)"),
-        "contains pipe (output chained to another command)",
-    ),
     (
         re.compile(r"(?<![=\-<>&])>{1,2}(?![=&])"),
         "contains output redirection (can overwrite files)",
@@ -166,6 +176,27 @@ def _strip_quoted(command: str) -> str:
     return _QUOTED_RE.sub('""', command)
 
 
+def _check_pipe_to_dangerous(command: str) -> str | None:
+    """Check if any pipe segment feeds into a dangerous command.
+
+    Returns a reason string if a dangerous pipe target is found, None otherwise.
+    Safe pipes like ``grep``, ``sort``, ``wc`` pass through.
+    """
+    tokens = _shell_token_spans(command)
+    after_pipe = False
+    for token in tokens:
+        if token.get("type") == "op" and token.get("value") == "|":
+            after_pipe = True
+            continue
+        if after_pipe and token.get("type") != "op":
+            base = str(token.get("value", "")).split("/")[-1]
+            if base in _PIPE_DANGEROUS_RHS:
+                kind = "networking tool" if base in _PIPE_NETWORKING_RHS else "interpreter"
+                return f"pipes output to {kind} '{base}' ({kind.split()[0]} risk)"
+            after_pipe = False
+    return None
+
+
 def check_forced_confirmation(command: str) -> str | None:
     """Check if a command contains patterns that require forced confirmation.
 
@@ -185,7 +216,57 @@ def check_forced_confirmation(command: str) -> str | None:
     for pattern, reason in _FORCED_UNQUOTED_PATTERNS:
         if pattern.search(unquoted):
             return reason
+    pipe_reason = _check_pipe_to_dangerous(command)
+    if pipe_reason:
+        return pipe_reason
     return None
+
+
+class ActionDecision(StrEnum):
+    """Result of the centralized approve/reject/prompt policy."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    PROMPT = "prompt"
+
+
+@dataclass(frozen=True)
+class ActionVerdict:
+    """The decision for a single shell action and an optional reason."""
+
+    decision: ActionDecision
+    reason: str = ""
+
+
+def resolve_action_decision(
+    command: str,
+    *,
+    auto_approve: bool = False,
+    dangerous_mode: bool = False,
+    allow_list: list[str] | None = None,
+) -> ActionVerdict:
+    """Centralized policy for approving, rejecting, or prompting for a shell command.
+
+    Callers (TUI, CLI, channels) map the verdict to their UI primitives.
+    """
+    forced_reason = check_forced_confirmation(command)
+
+    if forced_reason:
+        if dangerous_mode:
+            return ActionVerdict(ActionDecision.APPROVE)
+        if auto_approve:
+            return ActionVerdict(ActionDecision.REJECT, forced_reason)
+        return ActionVerdict(ActionDecision.PROMPT, forced_reason)
+
+    if auto_approve:
+        return ActionVerdict(ActionDecision.APPROVE)
+
+    if allow_list:
+        cmd_lower = command.lstrip().lower()
+        if any(cmd_lower.startswith(prefix) for prefix in allow_list):
+            return ActionVerdict(ActionDecision.APPROVE)
+
+    return ActionVerdict(ActionDecision.PROMPT)
 
 
 def _shell_token_spans(command: str) -> list[dict[str, object]]:
