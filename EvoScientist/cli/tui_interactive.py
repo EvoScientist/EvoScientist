@@ -652,12 +652,12 @@ def run_textual_interactive(
             for child in list(container.children):
                 if child is not welcome:
                     child.remove()
-            # Issue #301: after free-scrolling (#262) the anchor may keep the
-            # viewport pinned to the bottom of the previous conversation.  When
-            # ``/new`` wipes the chat while anchored, Textual can compute a
-            # negative relative scroll position and push the welcome banner out
-            # of view.  Reset the anchor and scroll to the top so the banner
-            # remains at the top of the fresh session.
+            # Issue #301: unconditionally release the anchor and pin to the
+            # top after wiping. The children removed above are laid out
+            # asynchronously, so a ``max_scroll_y`` check at this moment is
+            # stale — relying on it (via ``_anchor_chat``) can re-engage the
+            # anchor and let Textual's compositor push ``scroll_y`` negative
+            # once the new (smaller) content lays out. Always reset.
             container.anchor(False)
             container.scroll_home(animate=False, immediate=True)
             self._chat_following = True
@@ -1046,10 +1046,24 @@ def run_textual_interactive(
         # ── Widget helpers ─────────────────────────────────────
 
         def _anchor_chat(self, container: VerticalScroll | None = None) -> None:
-            """Re-engage the scroll anchor so the viewport pins to the bottom."""
+            """Re-engage the scroll anchor so the viewport pins to the bottom.
+
+            Only engages the anchor when the chat content actually overflows
+            the viewport. Textual's compositor (see ``textual._compositor``)
+            recomputes ``scroll_y`` for anchored widgets via ``set_reactive``
+            — which bypasses the validator — so when anchored content is
+            shorter than the viewport, ``scroll_y`` goes negative and the
+            welcome banner drops below the visible region (issue #301).
+            When content fits, we instead release any prior anchor and pin
+            the viewport to the top.
+            """
             if container is None:
                 container = self.query_one("#chat", VerticalScroll)
-            container.anchor()
+            if container.max_scroll_y > 0:
+                container.anchor()
+            else:
+                container.anchor(False)
+                container.scroll_home(animate=False, immediate=True)
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1546,6 +1560,13 @@ def run_textual_interactive(
                                 container.anchor()
                                 self._chat_following = True
                                 self._new_content_below = False
+                        elif container.is_anchored:
+                            # Content no longer overflows (e.g. loading widget
+                            # was just removed). Release the anchor so the
+                            # compositor doesn't pin scroll_y to a negative
+                            # value on the next layout pass (issue #301).
+                            container.anchor(False)
+                            container.scroll_home(animate=False, immediate=True)
                         event_type = state.handle_event(event)
 
                         new_phase = state.compute_phase()

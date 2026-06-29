@@ -291,6 +291,99 @@ def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
     _run(scenario)
 
 
+def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
+    """Regression for the second symptom of issue #301: after a short
+    user/assistant turn that fits in the viewport, end-of-stream
+    ``_anchor_chat`` must NOT leave the chat anchored.
+
+    Why: Textual's compositor (``textual._compositor``) writes ``scroll_y``
+    via ``set_reactive`` (bypassing the validator) whenever a widget is
+    anchored. If the anchored widget's content is shorter than the
+    viewport, ``scroll_y`` goes negative on the next layout pass and the
+    welcome banner drops below the visible region. The fix in
+    ``_anchor_chat`` only engages the anchor when content actually
+    overflows (``max_scroll_y > 0``).
+    """
+
+    async def scenario():
+        from textual.containers import VerticalScroll
+        from textual.widgets import Static
+
+        from EvoScientist.cli.widgets.assistant_message import AssistantMessage
+        from EvoScientist.cli.widgets.user_message import UserMessage
+
+        app = _capture_app(monkeypatch)
+        # Tall terminal: welcome + a short exchange fits with room to spare,
+        # which is exactly the bug condition (content < viewport).
+        async with app.run_test(size=(80, 40)) as pilot:
+            await pilot.pause()
+            chat = app.query_one("#chat", VerticalScroll)
+            welcome = app.query_one("#welcome", Static)
+
+            await chat.mount(UserMessage("hi"))
+            await pilot.pause()
+            await chat.mount(
+                AssistantMessage("Hi. What are you looking to work on today?")
+            )
+            await pilot.pause()
+
+            # End-of-stream re-anchor (matches _stream_with_widgets).
+            app._anchor_chat(chat)
+            await pilot.pause()
+
+            # Any subsequent mount triggers a layout refresh — this is when
+            # the compositor would push scroll_y negative without the fix.
+            # In production this happens via Markdown re-renders, status-bar
+            # updates, the system "usage" line, etc.
+            await chat.mount(Static("trailing line\n"))
+            await pilot.pause()
+            await pilot.pause()
+
+            _assert_banner_at_top(
+                chat, welcome, label="after short turn + trailing mount"
+            )
+
+    _run(scenario)
+
+
+def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
+    """When the conversation overflows, ``_anchor_chat`` must still engage
+    the anchor so streaming output remains visible. The issue #301 fix
+    only suppresses anchoring when content fits — long content must
+    continue to behave as before.
+    """
+
+    async def scenario():
+        from textual.containers import VerticalScroll
+        from textual.widgets import Static
+
+        app = _capture_app(monkeypatch)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            chat = app.query_one("#chat", VerticalScroll)
+
+            for i in range(50):
+                await chat.mount(Static(f"prior message {i}\n" * 2))
+            await pilot.pause()
+
+            app._anchor_chat(chat)
+            await pilot.pause()
+            assert chat.scroll_y == chat.max_scroll_y, (
+                "long content must anchor to bottom after _anchor_chat"
+            )
+
+            # Trailing mount must keep the viewport pinned to the new bottom.
+            await chat.mount(Static("trailing line\n"))
+            await pilot.pause()
+            await pilot.pause()
+            assert chat.scroll_y == chat.max_scroll_y, (
+                "anchored viewport must follow new bottom after trailing mount"
+            )
+            assert chat.scroll_y > 0, "long content must have positive scroll_y"
+
+    _run(scenario)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
