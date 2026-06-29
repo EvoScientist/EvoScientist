@@ -1996,7 +1996,11 @@ def run_textual_interactive(
                         get_runtime_auto_approve,
                     )
 
-                    _auto = self._hitl_auto_approve or get_runtime_auto_approve()
+                    _auto = (
+                        config.auto_approve
+                        or self._hitl_auto_approve
+                        or get_runtime_auto_approve()
+                    )
                     _allow = (
                         [
                             s.strip()

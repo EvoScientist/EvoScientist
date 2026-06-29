@@ -807,6 +807,7 @@ def _get_default_agent():
     global _EvoScientist_agent
     if _EvoScientist_agent is None:
         from deepagents import create_deep_agent
+        from langchain.agents.middleware import HumanInTheLoopMiddleware
 
         cfg = _ensure_config()
         be = _get_default_backend()
@@ -816,6 +817,8 @@ def _get_default_agent():
         # not interrupt_on= kwarg — the kwarg propagates to every subagent and
         # breaks parallel execute calls (multi-pending-interrupt LangGraph
         # error). See PR #202.
+        # When auto_approve is on, forced commands are caught by
+        # validate_command() in the sandbox backend before execution.
         if not cfg.auto_approve:
             mw.append(
                 HumanInTheLoopMiddleware(
@@ -842,7 +845,6 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
-            interrupt_on=hitl_interrupt_on,
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -903,6 +905,7 @@ def create_cli_agent(
 
     from deepagents import create_deep_agent
     from deepagents.backends import CompositeBackend
+    from langchain.agents.middleware import HumanInTheLoopMiddleware
 
     from . import paths as _paths
     from .backends import (
@@ -1003,5 +1006,4 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-        interrupt_on=hitl_interrupt_on,
     ).with_config({"recursion_limit": cfg.recursion_limit})

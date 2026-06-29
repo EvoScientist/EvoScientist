@@ -1276,6 +1276,18 @@ def prepare_sandbox_command(
     )
     if error:
         return command, error
+
+    # In auto-approve mode (no HITL middleware), reject forced-confirmation
+    # commands at the backend level so the LLM gets feedback.
+    if not dangerous:
+        from .config.settings import get_runtime_auto_approve, load_config
+
+        _cfg = load_config()
+        if _cfg.auto_approve or get_runtime_auto_approve():
+            forced = check_forced_confirmation(command)
+            if forced:
+                return command, f"Command blocked (auto-approve): {forced}"
+
     return _restore_spans(command, ssh_replacements), None
 
 
