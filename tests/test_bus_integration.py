@@ -9,11 +9,11 @@ import asyncio
 
 import pytest
 
-from EvoScientist.channels.base import Channel, OutgoingMessage
 from EvoScientist.channels.bus.events import InboundMessage
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from tests.conftest import run_async as _run
+from tests.fakes import QueueFakeChannel as FakeChannel
 
 
 def _drain_queue(q):
@@ -53,44 +53,6 @@ def clean_channel_state():
     _reset()
     yield
     _reset()
-
-
-class _FakeConfig:
-    text_chunk_limit = 4096
-    allowed_senders = None
-
-
-class FakeChannel(Channel):
-    """Minimal channel for bus integration testing."""
-
-    name = "fake"
-
-    def __init__(self):
-        super().__init__(_FakeConfig())
-        self._started = False
-        self._stopped = False
-        self._sent: list[OutgoingMessage] = []
-
-    async def start(self):
-        self._started = True
-
-    async def stop(self):
-        self._stopped = True
-
-    async def receive(self):
-        while True:
-            try:
-                msg = await asyncio.wait_for(self._queue.get(), timeout=0.5)
-                yield msg
-            except TimeoutError:
-                return
-
-    async def send(self, message: OutgoingMessage) -> bool:
-        self._sent.append(message)
-        return True
-
-    async def _send_chunk(self, chat_id, formatted_text, raw_text, reply_to, metadata):
-        pass
 
 
 class TestBusInboundConsumer:

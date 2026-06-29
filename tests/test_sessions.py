@@ -918,7 +918,7 @@ class TestPruningCheckpointer(unittest.TestCase):
             async def _boom(*args, **kwargs):
                 raise RuntimeError("simulated prune failure")
 
-            wrapper._prune_after_put = _boom  # type: ignore[assignment]
+            wrapper._prune_after_put = _boom
             return await wrapper.aput(
                 self._config(tid),
                 self._checkpoint("cpf_0001", step=0),
@@ -1040,7 +1040,7 @@ class TestPruningCheckpointer(unittest.TestCase):
                     await release_prune.wait()
                 await orig_prune(thread_id, checkpoint_ns)
 
-            saver._prune_after_put = _gated_prune  # type: ignore[method-assign]
+            saver._prune_after_put = _gated_prune
 
             cfg_a = self._config(tid)
             cfg_b = self._config(tid)
@@ -2149,10 +2149,8 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
                 "docstring in create_checkpointer_for_langgraph_api"
             )
 
-    def test_aput_stamps_cli_metadata_for_main_graph_rows(self):
-        """Main-graph (graph_id == AGENT_NAME) rows get agent_name /
-        workspace_dir / updated_at so they surface in CLI listings and
-        participate in pruning."""
+    def test_aput_stamps_workspace_metadata_for_graph_rows(self):
+        """Graph rows get workspace metadata; only main rows get agent_name."""
         import json
 
         import aiosqlite
@@ -2212,7 +2210,8 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
             assert main.get("workspace_dir") == "/tmp/test-workspace"
             assert main.get("updated_at"), "updated_at drives /threads ordering"
             assert "agent_name" not in worker
-            assert "workspace_dir" not in worker
+            assert worker.get("workspace_dir") == "/tmp/test-workspace"
+            assert worker.get("updated_at")
 
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "sessions.db")
@@ -2250,6 +2249,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assistant_id: str | None = "aaaa-bbbb",
         graph_id: str | None = "EvoScientist",
         workspace_dir: str | None = _WS,
+        model: str | None = "test-model",
         agent_name: str | None = "EvoScientist",
         ckpt_prefix: str = "ckpt",
     ) -> None:
@@ -2273,6 +2273,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 meta_dict["graph_id"] = graph_id
             if workspace_dir is not None:
                 meta_dict["workspace_dir"] = workspace_dir
+            if model is not None:
+                meta_dict["model"] = model
             meta = json.dumps(meta_dict)
             con.execute(
                 "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
@@ -2345,6 +2347,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(added[0]["metadata"].get("assistant_id"), str)
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("model") == "test-model"
         # created_at / updated_at must be datetime objects, not ISO strings.
         # Threads.search() sorts by these fields using sorted(); mixing
         # datetime and str raises TypeError: '<' not supported.
@@ -2413,14 +2417,18 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert t["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(t["metadata"].get("assistant_id"), str)
         assert t["metadata"].get("graph_id") == "EvoScientist"
+        assert t["metadata"].get("workspace_dir") == self._WS
+        assert t["metadata"].get("model") == "test-model"
 
-    def test_restore_excludes_other_workspaces_and_internal_graphs(self):
-        """The restore scope is graph_id==AGENT_NAME AND current workspace.
+    def test_restore_includes_current_workspace_graph_threads_only(self):
+        """Restore includes current-workspace graph threads only.
 
-        Threads from other workspaces, internal worker/subagent graphs, and
-        pre-stamping rows without workspace_dir must NOT be resurrected —
-        sessions.db is machine-global and an unscoped restore would expose
-        them on the unauthenticated API (worst case --tunnel).
+        Threads from other workspaces and pre-stamping rows without
+        workspace_dir must NOT be resurrected — sessions.db is machine-global
+        and an unscoped restore would expose them on the unauthenticated API
+        (worst case --tunnel). Current-workspace async-subagent graph threads
+        are restored; memory-worker graph threads remain disposable until
+        worker cloning lands.
         """
         import sys
         import uuid as _uuid_mod
@@ -2463,11 +2471,24 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 _run(_restore_webui_threads_to_global_store())
 
         added = mock_store["threads"]
-        assert len(added) == 1, (
-            f"Only the current-workspace main-graph thread may be restored, "
-            f"got {len(added)}: {[t['thread_id'] for t in added]}"
+        restored = {entry["thread_id"]: entry for entry in added}
+        assert set(restored) == {
+            _uuid_mod.UUID(mine),
+            _uuid_mod.UUID(subagent),
+        }
+        assert restored[_uuid_mod.UUID(mine)]["metadata"].get("graph_id") == (
+            "EvoScientist"
         )
-        assert added[0]["thread_id"] == _uuid_mod.UUID(mine)
+        assert restored[_uuid_mod.UUID(mine)]["metadata"].get("workspace_dir") == (
+            self._WS
+        )
+        assert restored[_uuid_mod.UUID(mine)]["metadata"].get("model") == ("test-model")
+        assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("graph_id") == (
+            "writing-agent"
+        )
+        assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("workspace_dir") == (
+            self._WS
+        )
 
     def test_purge_removes_only_evomemory_rows(self):
         """Startup purge drops evomemory-* residue, leaves everything else."""
@@ -2479,6 +2500,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         keep_main = "11111111-1111-1111-1111-111111111111"
         keep_cli = "abcd1234"
         drop_worker = "33333333-3333-3333-3333-333333333333"
+        keep_subagent = "44444444-4444-4444-4444-444444444444"
 
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "sessions.db")
@@ -2486,6 +2508,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             self._make_db_with_threads(
                 db, [drop_worker], graph_id="evomemory-turn-worker"
             )
+            self._make_db_with_threads(db, [keep_subagent], graph_id="writing-agent")
             with patch(
                 "EvoScientist.sessions.get_db_path",
                 return_value=_mock_path(db),
@@ -2499,7 +2522,37 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 r[0] for r in con.execute("SELECT DISTINCT thread_id FROM checkpoints")
             }
             con.close()
-        assert remaining == {keep_main, keep_cli}
+
+        assert remaining == {keep_main, keep_cli, keep_subagent}
+
+    def test_cli_session_filters_exclude_non_main_graph_rows(self):
+        from unittest.mock import patch
+
+        from EvoScientist.sessions import (
+            list_threads,
+            resolve_thread_id_prefix,
+            thread_exists,
+        )
+
+        main_thread = "11111111-1111-1111-1111-111111111111"
+        worker_thread = "33333333-3333-3333-3333-333333333333"
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            self._make_db_with_threads(db, [main_thread])
+            self._make_db_with_threads(
+                db, [worker_thread], graph_id="evomemory-turn-worker"
+            )
+            with patch(
+                "EvoScientist.sessions.get_db_path",
+                return_value=_mock_path(db),
+            ):
+                assert [row["thread_id"] for row in _run(list_threads())] == [
+                    main_thread
+                ]
+                assert _run(thread_exists(main_thread))
+                assert not _run(thread_exists(worker_thread))
+                assert _run(resolve_thread_id_prefix(worker_thread[:8])) == (None, [])
 
     def test_restores_cli_rows_and_excludes_worker_residue(self):
         """CLI rows (agent_name, no graph_id) are restored with graph_id
@@ -2547,10 +2600,12 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 _run(_restore_webui_threads_to_global_store())
 
         added = mock_store["threads"]
-        assert len(added) == 1, f"expected only the CLI thread, got {added}"
+        assert len(added) == 1
         assert added[0]["thread_id"] == _uuid_mod.UUID(cli_thread)
-        # graph_id backfilled so Threads.State.get works on the stub.
+        # graph_id backfilled so Threads.State.get works on the CLI stub.
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("model") == "test-model"
 
     def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
         """Interop thread (CLI rows + WebUI rows under one UUID): bare
@@ -2601,6 +2656,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(tid)
         assert added[0]["metadata"].get("assistant_id") == asst
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
+        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("model") == "test-model"
 
     def test_restored_stub_gets_title_from_first_human_message(self):
         """Stubs carry metadata.title derived from the thread's first human
@@ -2668,15 +2725,13 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert len(added) == 1, f"expected 1 restored thread, got {added}"
         assert added[0]["metadata"].get("title") == "hello title test"
 
-    def test_removes_ghost_entries_absent_from_sqlite(self):
-        """Stale .pckl UUID entries with no checkpoint rows are dropped.
+    def test_removes_preloaded_uuid_entries_outside_restore_scope(self):
+        """Stale and out-of-scope .pckl UUID entries are dropped.
 
-        Ghost entries point at deleted/lost state and render as empty
-        sessions (the #277 symptom). Existence is checked against ALL UUID
-        threads in the DB, not the scoped restore set: a thread whose
-        checkpoints exist but fall outside the restore scope still opens
-        fine, so it must NOT be treated as a ghost. CLI-style non-UUID
-        entries are never touched.
+        Stale UUID entries point at deleted/lost state and render as empty
+        sessions (the #277 symptom). Out-of-scope UUID entries point at another
+        workspace's state and must not remain in this server's unauthenticated
+        thread registry. CLI-style non-UUID entries are never touched.
         """
         import sys
         import uuid as _uuid_mod
@@ -2724,8 +2779,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert _uuid_mod.UUID(ghost) not in ids, f"ghost must be removed, got {ids}"
         assert ghost not in ids, f"ghost must be removed (str form), got {ids}"
         assert "notauuid" in ids, "CLI-style entries must never be touched"
-        # Out-of-scope but existing in DB: kept (state still loads when opened).
-        assert _uuid_mod.UUID(out_of_scope) in ids
+        assert _uuid_mod.UUID(out_of_scope) not in ids
+        assert out_of_scope not in ids
         # In-scope thread restored as usual.
         assert _uuid_mod.UUID(in_scope) in ids
 

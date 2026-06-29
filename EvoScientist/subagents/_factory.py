@@ -40,13 +40,14 @@ def build_async_subagent_graph(name: str) -> Any:
     from EvoScientist.config import apply_config_to_env, get_effective_config
     from EvoScientist.EvoScientist import (
         SUBAGENTS_CONFIG,
+        _ensure_auxiliary_chat_model,
         _ensure_chat_model,
         _ensure_general_purpose_subagent,
         _get_default_backend,
         _get_default_middleware,
         _inject_subagent_middleware,
     )
-    from EvoScientist.tools import tavily_search, think_tool
+    from EvoScientist.tools import skill_manager, tavily_search, think_tool
     from EvoScientist.utils import load_subagents
 
     # Surface API keys as env vars so downstream SDKs (openai, anthropic, …)
@@ -55,7 +56,7 @@ def build_async_subagent_graph(name: str) -> Any:
     apply_config_to_env(cfg)
 
     # Mirror the tool registry constructed in EvoScientist._build_base_kwargs.
-    tool_registry = {"think_tool": think_tool}
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
 
@@ -102,16 +103,23 @@ def build_async_subagent_graph(name: str) -> Any:
     _ensure_general_purpose_subagent(subagents)
     _inject_subagent_middleware(subagents)
 
+    middleware = _get_default_middleware(
+        for_async_subagent=True,
+        memory_source_agent=name,
+    )
+
+    # Scheduler is an unattended timer task → use the cheaper auxiliary model.
+    model = (
+        _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
+    )
+
     return create_deep_agent(
         name=name,
-        model=_ensure_chat_model(),
+        model=model,
         system_prompt=spec.get("system_prompt", ""),
         tools=spec.get("tools", []) + agent_mcp_tools,
         skills=spec.get("skills"),
         backend=_get_default_backend(),
-        middleware=_get_default_middleware(
-            for_async_subagent=True,
-            memory_source_agent=name,
-        ),
+        middleware=middleware,
         subagents=subagents,
     ).with_config({"recursion_limit": cfg.recursion_limit})

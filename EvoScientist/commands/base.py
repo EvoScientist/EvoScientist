@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from ..gateway import GraphGateway
 
 
 @dataclass
@@ -53,7 +56,7 @@ class CommandUI(Protocol):
     def clear_chat(self) -> None: ...
     def request_quit(self) -> None: ...
     def force_quit(self) -> None: ...
-    def start_new_session(self) -> None: ...
+    async def start_new_session(self) -> None: ...
     async def handle_session_resume(
         self, thread_id: str, workspace_dir: str | None = None
     ) -> None: ...
@@ -67,7 +70,7 @@ class ChannelRuntime:
     agent: Any = None
     thread_id: str | None = None
 
-    def bind(self, agent: Any, thread_id: str | None) -> None:
+    def bind(self, agent: Any, thread_id: str) -> None:
         self.agent = agent
         self.thread_id = thread_id
 
@@ -87,6 +90,7 @@ class CommandContext:
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
+    graph_gateway: GraphGateway | None = None
     command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.

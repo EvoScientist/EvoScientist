@@ -7,10 +7,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from EvoScientist.commands.channel_ui import ChannelCommandUI
+from EvoScientist.gateway import ThreadStore
 from tests.conftest import run_async as _run
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
-def _make_ui(callback=None, bus_ref=None):
+def _make_ui(*, thread_store: ThreadStore, callback=None, bus_ref=None):
     captured: list[str] = []
     ui = ChannelCommandUI(
         SimpleNamespace(
@@ -23,6 +25,7 @@ def _make_ui(callback=None, bus_ref=None):
         ),
         append_system_callback=lambda text, style="dim": captured.append(text),
         handle_session_resume_callback=callback,
+        graph_gateway=FakeGraphGateway(thread_store=thread_store),
     )
     return ui, captured
 
@@ -57,20 +60,22 @@ def _sent_text(bus_ref) -> str:
 def test_handle_session_resume_sends_history_back_to_channel_without_local_duplicate():
     callback = AsyncMock()
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
-    ui, captured = _make_ui(callback=callback, bus_ref=bus_ref)
 
     messages = [
         SimpleNamespace(type="human", content="How does this work?"),
         SimpleNamespace(type="ai", content="Here is the saved answer."),
     ]
+    thread_store = FakeThreadStore(messages=messages)
+    ui, captured = _make_ui(
+        callback=callback,
+        bus_ref=bus_ref,
+        thread_store=thread_store,
+    )
 
-    with patch(
-        "EvoScientist.sessions.get_thread_messages",
-        new=AsyncMock(return_value=messages),
-    ):
-        _run(_run_resume(ui, "thread-42", "/workspace"))
+    _run(_run_resume(ui, "thread-42", "/workspace"))
 
     callback.assert_awaited_once_with("thread-42", "/workspace")
+    assert thread_store.calls == [("get_thread_messages", "thread-42")]
     assert captured == []
     text = _sent_text(bus_ref)
     assert "Resumed session: thread-42" in text
@@ -82,17 +87,18 @@ def test_handle_session_resume_sends_history_back_to_channel_without_local_dupli
 def test_handle_session_resume_propagates_callback_abort_without_history():
     callback = AsyncMock(side_effect=RuntimeError("workspace conflict"))
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
-    ui, captured = _make_ui(callback=callback, bus_ref=bus_ref)
+    thread_store = FakeThreadStore()
+    ui, captured = _make_ui(
+        callback=callback,
+        bus_ref=bus_ref,
+        thread_store=thread_store,
+    )
 
-    with patch(
-        "EvoScientist.sessions.get_thread_messages",
-        new=AsyncMock(),
-    ) as get_messages:
-        with pytest.raises(RuntimeError, match="workspace conflict"):
-            _run(_run_resume(ui, "thread-42", "/workspace"))
+    with pytest.raises(RuntimeError, match="workspace conflict"):
+        _run(_run_resume(ui, "thread-42", "/workspace"))
 
     callback.assert_awaited_once_with("thread-42", "/workspace")
-    get_messages.assert_not_awaited()
+    assert thread_store.calls == []
     bus_ref.publish_outbound.assert_not_awaited()
     assert captured == []
 
@@ -100,13 +106,15 @@ def test_handle_session_resume_propagates_callback_abort_without_history():
 def test_handle_session_resume_reports_history_load_error():
     callback = AsyncMock()
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
-    ui, captured = _make_ui(callback=callback, bus_ref=bus_ref)
+    ui, captured = _make_ui(
+        callback=callback,
+        bus_ref=bus_ref,
+        thread_store=FakeThreadStore(
+            errors={"get_thread_messages": RuntimeError("db locked")}
+        ),
+    )
 
-    with patch(
-        "EvoScientist.sessions.get_thread_messages",
-        new=AsyncMock(side_effect=RuntimeError("db locked")),
-    ):
-        _run(_run_resume(ui, "thread-42", "/workspace"))
+    _run(_run_resume(ui, "thread-42", "/workspace"))
 
     callback.assert_awaited_once_with("thread-42", "/workspace")
     assert captured == []
@@ -117,13 +125,14 @@ def test_handle_session_resume_reports_history_load_error():
 
 def test_handle_session_resume_distinguishes_non_displayable_messages():
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
-    ui, captured = _make_ui(bus_ref=bus_ref)
+    ui, captured = _make_ui(
+        bus_ref=bus_ref,
+        thread_store=FakeThreadStore(
+            messages=[SimpleNamespace(type="tool", content="hidden")]
+        ),
+    )
 
-    with patch(
-        "EvoScientist.sessions.get_thread_messages",
-        new=AsyncMock(return_value=[SimpleNamespace(type="tool", content="hidden")]),
-    ):
-        _run(_run_resume(ui, "thread-42", "/workspace"))
+    _run(_run_resume(ui, "thread-42", "/workspace"))
 
     assert captured == [
         "Resumed session: thread-42\nNo displayable messages in this session."

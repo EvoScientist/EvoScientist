@@ -1,6 +1,6 @@
 """Tests for the /new command."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from tests.conftest import run_async as _run
 
@@ -11,6 +11,7 @@ class TestNewCommand:
         from EvoScientist.commands.implementation.session import NewCommand
 
         ui = MagicMock()
+        ui.start_new_session = AsyncMock()
         ctx = CommandContext(
             agent=None,
             thread_id="old-tid",
@@ -18,7 +19,7 @@ class TestNewCommand:
             workspace_dir="/old/ws",
         )
         _run(NewCommand().execute(ctx, []))
-        ui.start_new_session.assert_called_once()
+        ui.start_new_session.assert_awaited_once()
 
     def test_requires_agent_false(self):
         from EvoScientist.commands.implementation.session import NewCommand
@@ -31,6 +32,7 @@ class TestNewCommand:
         from EvoScientist.commands.implementation.session import NewCommand
 
         ui = MagicMock()
+        ui.start_new_session = AsyncMock()
         ctx = CommandContext(agent=None, thread_id="tid", ui=ui)
         # No AttributeError even though ctx.agent is None
         _run(NewCommand().execute(ctx, []))

@@ -12,6 +12,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from EvoScientist.config import MemoryObservationWriter
+from EvoScientist.memory import MemorySourceType
 
 
 def _single_middleware(subagent: dict, class_name: str):
@@ -21,8 +22,6 @@ def _single_middleware(subagent: dict, class_name: str):
 
 
 def _assert_subagent_memory_middleware(subagent: dict, *, source_agent: str) -> None:
-    from EvoScientist.middleware.memory_lifecycle import MemoryLifecycleRole
-
     memory_middleware = _single_middleware(subagent, "EvoMemoryMiddleware")
     lifecycle_middleware = _single_middleware(
         subagent,
@@ -34,7 +33,7 @@ def _assert_subagent_memory_middleware(subagent: dict, *, source_agent: str) -> 
         "read_memory",
         "record_observation",
     ]
-    assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
+    assert lifecycle_middleware._source_type == MemorySourceType.SUBAGENT
     assert lifecycle_middleware._source_agent == source_agent
     assert lifecycle_middleware._project_id == memory_middleware.project_id
 
@@ -164,7 +163,6 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
     mock_config.return_value = cfg
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
-    from EvoScientist.middleware.memory_lifecycle import MemoryLifecycleRole
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -181,7 +179,7 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
         "search_observations",
         "read_memory",
     ]
-    assert lifecycle_middleware._role == MemoryLifecycleRole.SUBAGENT
+    assert lifecycle_middleware._source_type == MemorySourceType.SUBAGENT
 
 
 @patch(
@@ -222,7 +220,7 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
     lifecycle_middleware = next(
         m for m in middleware if type(m).__name__ == "EvoMemoryLifecycleMiddleware"
     )
-    assert lifecycle_middleware._role.value == "turn"
+    assert lifecycle_middleware._source_type == MemorySourceType.TURN
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +281,35 @@ def test_async_subagent_mode_filters_ask_user(
         "AskUserMiddleware leaked into async sub-agent middleware — its "
         "interrupt() call deadlocks the deployed graph (no UI to resume)."
     )
+
+
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_async_subagent_disables_tool_selector_stream_tracking(
+    mock_config, mock_chat, mock_tool_selector
+):
+    """Async subagents still select tools, but must not drive main-agent UI state."""
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    _get_default_middleware(for_async_subagent=True)
+
+    mock_tool_selector.assert_called_once()
+    assert mock_tool_selector.call_args.kwargs["track_stream_selection"] is False

@@ -240,7 +240,7 @@ def main():
         print(f"Error: No SKILL.md found at {skill_path}", file=sys.stderr)
         sys.exit(1)
 
-    name, original_description, content = parse_skill_md(skill_path)
+    name, original_description, _content = parse_skill_md(skill_path)
     description = args.description or original_description
 
     if args.verbose:

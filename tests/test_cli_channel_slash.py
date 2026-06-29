@@ -10,9 +10,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.cli.channel import (
     ChannelMessage,
-    dispatch_channel_slash_command,
+)
+from EvoScientist.cli.channel import (
+    dispatch_channel_slash_command as _dispatch_channel_slash_command,
 )
 from tests.conftest import run_async as _run
+from tests.fakes import FakeGraphGateway, FakeThreadStore
+
+
+def _thread_store() -> FakeThreadStore:
+    return FakeThreadStore()
+
+
+def dispatch_channel_slash_command(*args, **kwargs):
+    kwargs.setdefault("graph_gateway", FakeGraphGateway())
+    return _dispatch_channel_slash_command(*args, **kwargs)
 
 
 def _make_msg(
@@ -107,6 +119,45 @@ def test_successful_slash_execution_sets_response_and_breadcrumb():
     assert any("Executed command from" in t for t in breadcrumbs)
 
 
+def test_slash_dispatch_passes_graph_gateway_to_command_context():
+    msg = _make_msg()
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+    append = MagicMock()
+    graph_gateway = FakeGraphGateway(thread_store=_thread_store())
+    captured = {}
+
+    async def _execute(_content, ctx):
+        captured["graph_gateway"] = ctx.graph_gateway
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["core"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            new=AsyncMock(side_effect=_execute),
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response"),
+    ):
+        handled = _run(
+            dispatch_channel_slash_command(
+                msg,
+                agent="fake-agent",
+                thread_id="t1",
+                workspace_dir="/tmp",
+                checkpointer=None,
+                append_system=append,
+                graph_gateway=graph_gateway,
+            )
+        )
+
+    assert handled is True
+    assert captured["graph_gateway"] is graph_gateway
+
+
 def test_needs_agent_awaits_loader_and_passes_result():
     """Commands with needs_agent=True must await the loader and the
     resulting agent must flow through the CommandContext."""
@@ -144,7 +195,9 @@ def test_needs_agent_awaits_loader_and_passes_result():
         )
     assert handled is True
     await_called.assert_called_once()
-    ctx_arg = mock_execute.await_args.args[1]
+    await_args = mock_execute.await_args
+    assert await_args is not None
+    ctx_arg = await_args.args[1]
     assert ctx_arg.agent == "ready-agent"
 
 

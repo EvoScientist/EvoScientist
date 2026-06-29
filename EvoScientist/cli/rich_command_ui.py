@@ -41,7 +41,7 @@ class RichCLICommandUI(CommandUI):
         on_force_quit: Callable[[], None] | None = None,
         on_clear_chat: Callable[[], None] | None = None,
         on_status_after_compact: Callable[[int], None] | None = None,
-        on_start_new_session: Callable[[], None] | None = None,
+        on_start_new_session: Callable[[], Awaitable[None]] | None = None,
         on_handle_session_resume: (
             Callable[[str, str | None], Awaitable[None]] | None
         ) = None,
@@ -188,9 +188,9 @@ class RichCLICommandUI(CommandUI):
         if self._on_force_quit is not None:
             self._on_force_quit()
 
-    def start_new_session(self) -> None:
+    async def start_new_session(self) -> None:
         if self._on_start_new_session is not None:
-            self._on_start_new_session()
+            await self._on_start_new_session()
 
     async def handle_session_resume(
         self, thread_id: str, workspace_dir: str | None = None

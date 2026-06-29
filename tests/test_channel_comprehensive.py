@@ -16,14 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from EvoScientist.channels.base import (
-    Channel,
     ChannelError,
     InboundMessage,
     OutboundMessage,
@@ -47,40 +45,8 @@ from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
 from tests.conftest import run_async as _run
-
-
-@dataclass
-class _FakeConfig:
-    text_chunk_limit: int = 4096
-    allowed_senders: list | None = None
-    allowed_channels: list | None = None
-    proxy: str | None = None
-    require_mention: str = "group"
-    dm_policy: str = "allowlist"
-
-
-class StubChannel(Channel):
-    """Minimal concrete channel for unit testing."""
-
-    name = "stub"
-
-    def __init__(self, config=None):
-        super().__init__(config or _FakeConfig())
-        self._sent_chunks: list[tuple] = []
-        self._typing_started: list[str] = []
-        self._typing_stopped: list[str] = []
-        self._started = False
-
-    async def start(self):
-        self._started = True
-        self._running = True
-
-    async def _send_chunk(self, chat_id, formatted, raw, reply_to, metadata):
-        self._sent_chunks.append((chat_id, formatted, raw, reply_to, metadata))
-
-    async def _send_typing_action(self, chat_id):
-        self._typing_started.append(chat_id)
-
+from tests.fakes import FakeChannelConfig as _FakeConfig
+from tests.fakes import FakeGraphGateway, StubChannel
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. DedupCache
@@ -1395,6 +1361,7 @@ class TestInboundConsumer:
             mgr.register(StubChannel())
         if agent is None:
             agent = MagicMock()
+        kw.setdefault("graph_gateway", FakeGraphGateway())
         return InboundConsumer(
             bus=bus,
             manager=mgr,
@@ -1412,15 +1379,21 @@ class TestInboundConsumer:
         assert msg.session_key == "tg:c1"
 
     def test_get_thread_id_creates_unique(self):
-        consumer = self._make_consumer()
-        tid1 = consumer._get_thread_id("user_a")
-        tid2 = consumer._get_thread_id("user_b")
+        consumer = self._make_consumer(
+            graph_gateway=FakeGraphGateway(
+                generated_thread_ids=["thread-a", "thread-b"]
+            )
+        )
+        tid1 = _run(consumer._get_thread_id("user_a"))
+        tid2 = _run(consumer._get_thread_id("user_b"))
         assert tid1 != tid2
 
     def test_get_thread_id_returns_same_for_same_sender(self):
-        consumer = self._make_consumer()
-        tid1 = consumer._get_thread_id("user_a")
-        tid2 = consumer._get_thread_id("user_a")
+        consumer = self._make_consumer(
+            graph_gateway=FakeGraphGateway(generated_thread_ids=["thread-a"])
+        )
+        tid1 = _run(consumer._get_thread_id("user_a"))
+        tid2 = _run(consumer._get_thread_id("user_a"))
         assert tid1 == tid2
 
     def test_shared_thread_id_bug(self):
@@ -1433,9 +1406,10 @@ class TestInboundConsumer:
             manager=mgr,
             agent=MagicMock(),
             thread_id="shared_thread",  # Non-empty!
+            graph_gateway=FakeGraphGateway(),
         )
-        tid1 = consumer._get_thread_id("alice")
-        tid2 = consumer._get_thread_id("bob")
+        tid1 = _run(consumer._get_thread_id("alice"))
+        tid2 = _run(consumer._get_thread_id("bob"))
         # Fixed: Each sender gets a unique thread_id using thread_id as prefix
         assert tid1 != tid2
         assert tid1 == "shared_thread:alice"
@@ -1451,7 +1425,7 @@ class TestInboundConsumer:
             consumer._sessions[f"user_{i}"] = f"thread_{i}"
 
         # Access "user_0" via _get_thread_id (triggers LRU move_to_end)
-        consumer._get_thread_id("user_0")
+        _run(consumer._get_thread_id("user_0"))
 
         # "user_0" should now be at the end (most recently used)
         oldest = next(iter(consumer._sessions))
@@ -1494,6 +1468,7 @@ class TestInboundConsumerErrorHandling:
                 manager=mgr,
                 agent=MagicMock(),
                 thread_id="",
+                graph_gateway=FakeGraphGateway(),
             )
 
             # The error message format includes the raw exception

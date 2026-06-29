@@ -283,14 +283,16 @@ class TestPhaseBMigrated:
     """Session lifecycle callbacks (start/resume) filled in Phase B."""
 
     def test_start_new_session_fires_callback(self):
-        called = []
-        ui, _ = _make_ui(on_start_new_session=lambda: called.append("new"))
-        ui.start_new_session()
-        assert called == ["new"]
+        from unittest.mock import AsyncMock
+
+        cb = AsyncMock()
+        ui, _ = _make_ui(on_start_new_session=cb)
+        _run(ui.start_new_session())
+        cb.assert_awaited_once()
 
     def test_start_new_session_without_callback_is_noop(self):
         ui, console = _make_ui()
-        ui.start_new_session()
+        _run(ui.start_new_session())
         console.print.assert_not_called()
 
     def test_handle_session_resume_awaits_callback(self):

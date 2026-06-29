@@ -31,6 +31,26 @@ def run_async_fixture():
     return run_async
 
 
+@pytest.fixture(autouse=True)
+def _reset_tool_selection_state():
+    """Isolate the process-global tool-selection state around every test.
+
+    ``middleware.tool_selector`` records the last selected tools and the
+    selector-active flag in module globals that ``stream/tool_selection.py``
+    reads to decide whether to suppress selector output. A test that drives the
+    selector or tracker would otherwise leave those globals set and silently
+    flip unrelated streaming tests later in the same process. Reset on both ends
+    so order and worker sharding can't reintroduce the leak.
+    """
+    from EvoScientist.middleware.tool_selector import (
+        reset_tool_selection_state_for_tests,
+    )
+
+    reset_tool_selection_state_for_tests()
+    yield
+    reset_tool_selection_state_for_tests()
+
+
 @pytest.fixture
 def sample_tool_call():
     """A minimal tool call dict."""

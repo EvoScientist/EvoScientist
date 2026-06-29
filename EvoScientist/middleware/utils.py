@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 
 
 def disable_thinking(model: BaseChatModel) -> BaseChatModel:
@@ -42,3 +43,20 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         # Fallback for non-Pydantic or unusual model classes
         # Note: bind() may not effectively override first-class Pydantic fields
         return model.bind(**updates)
+
+
+def append_to_system_message(
+    system_message: SystemMessage | None, text: str
+) -> SystemMessage:
+    """Append a text block to a system message, preserving its metadata.
+
+    Used by the memory and scheduler middleware. Unlike building a fresh
+    ``SystemMessage``, ``model_copy`` keeps ``additional_kwargs`` (e.g.
+    ``cache_control`` prompt-cache breakpoints), ``id``, ``name`` and
+    ``response_metadata`` from the original message.
+    """
+    existing_blocks = list(system_message.content_blocks) if system_message else []
+    new_blocks = [*existing_blocks, {"type": "text", "text": text}]
+    if system_message is None:
+        return SystemMessage(content=new_blocks)
+    return system_message.model_copy(update={"content": new_blocks})

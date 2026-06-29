@@ -14,7 +14,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.console import Group
 from rich.text import Text
@@ -24,16 +24,15 @@ from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
 from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
-from ..paths import DATA_DIR
-from ..sessions import (
-    generate_thread_id,
-    get_checkpointer,
-    get_thread_messages,
-    get_thread_metadata,
-    resolve_thread_id_prefix,
-    thread_exists,
+from ..gateway import (
+    GraphGateway,
+    GraphTarget,
+    RunRequest,
+    RuntimeGateways,
+    create_runtime_gateways,
 )
-from ..stream.events import stream_agent_events
+from ..paths import DATA_DIR
+from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
@@ -43,6 +42,12 @@ from ._constants import (
     LOGO_LINES,
     WELCOME_SLOGANS,
     build_metadata,
+)
+from .async_notifier import (
+    AsyncTasksState,
+    consume_notifications,
+    has_pending_notifications,
+    read_async_tasks_from_gateway,
 )
 from .channel import (
     ChannelMessage,
@@ -73,6 +78,9 @@ from .status_bar import (
 )
 
 _channel_logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 
 def _shorten_path(path: str) -> str:
@@ -286,6 +294,9 @@ def run_textual_interactive(
 
         config = get_effective_config()
 
+    runtime_gateways = create_runtime_gateways()
+    graph_gateway = runtime_gateways.graph_gateway
+
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
@@ -405,6 +416,7 @@ def run_textual_interactive(
             thread_id_value: str,
             workspace: str | None,
             checkpointer: Any,
+            runtime_gateways: RuntimeGateways,
             channel_send_thinking_value: bool = True,
             resumed: bool = False,
             resume_warning: str = "",
@@ -421,6 +433,7 @@ def run_textual_interactive(
             self._conversation_tid = thread_id_value
             self._workspace_dir = workspace
             self._checkpointer = checkpointer
+            self._runtime_gateways = runtime_gateways
             self._channel_send_thinking = channel_send_thinking_value
             self._resumed = resumed
             self._resume_warning = resume_warning
@@ -539,11 +552,14 @@ def run_textual_interactive(
             if widget.dismissed:
                 self._mcp_loader_widget = None
 
-        async def _await_agent_ready(self) -> Any:
+        async def _await_agent_ready(self) -> CompiledStateGraph:
             """Await the agent load, auto-retrying on cold-start or failure."""
             if self._agent_loader.needs_restart:
                 self._start_background_agent_load(self._workspace_dir)
             return await self._agent_loader.await_ready()
+
+        def _graph_gateway(self) -> GraphGateway:
+            return self._runtime_gateways.graph_gateway
 
         # ── CommandUI implementation ─────────────────────────
 
@@ -640,14 +656,18 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
-        def start_new_session(self) -> None:
+        async def start_new_session(self) -> None:
             # Clear all widgets except #welcome
             self.clear_chat()
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
             if not workspace_fixed:
                 self._workspace_dir = create_session_workspace(run_name)
-            self._conversation_tid = generate_thread_id()
+            self._conversation_tid = (
+                await self._runtime_gateways.graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=self._workspace_dir)
+                )
+            )
             # Background reload: next user message awaits it.
             self._start_background_agent_load(self._workspace_dir)
             self._status_started_at = datetime.now()
@@ -870,8 +890,6 @@ def run_textual_interactive(
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
-            from EvoScientist.cli import async_notifier
-
             try:
                 msg = _message_queue.get_nowait()
             except queue.Empty:
@@ -892,7 +910,7 @@ def run_textual_interactive(
             # so that the next poll tick cannot schedule a second consumer before
             # the first one has a chance to run (fixes overlapping-turn bug).
             if (
-                async_notifier.has_pending_notifications(self._conversation_tid)
+                has_pending_notifications(self._conversation_tid)
                 and not self._busy
                 and not self._notification_consuming
             ):
@@ -909,12 +927,10 @@ def run_textual_interactive(
             ``asyncio.ensure_future(...)`` scheduled by ``_poll_channel_queue``
             and silently kill notification + channel dispatch.
             """
-            from EvoScientist.cli import async_notifier
-
             target_tid = self._conversation_tid
             try:
                 try:
-                    await async_notifier.consume_notifications(
+                    await consume_notifications(
                         run_message=lambda text, notifs: self._inject_notification_tui(
                             text, notifs, target_thread_id=target_tid
                         ),
@@ -987,9 +1003,7 @@ def run_textual_interactive(
 
             self._run_task = asyncio.ensure_future(_run_and_publish())
 
-        async def _read_async_tasks_tui(
-            self, target_thread_id: str | None
-        ) -> dict[str, dict]:
+        async def _read_async_tasks_tui(self, target_thread_id: str) -> AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
 
             ``target_thread_id`` is captured by ``_consume_notifications_tui`` at
@@ -997,13 +1011,17 @@ def run_textual_interactive(
             make us read the wrong thread's state.
             """
             agent = self._agent_loader.agent
-            if agent is None or not target_thread_id:
+            if agent is None:
                 return {}
             try:
-                snap = await agent.aget_state(
-                    {"configurable": {"thread_id": target_thread_id}}
+                return await read_async_tasks_from_gateway(
+                    self._graph_gateway(),
+                    GraphTarget(
+                        local_graph=agent,
+                        workspace_dir=self._workspace_dir,
+                    ),
+                    target_thread_id,
                 )
-                return (snap.values or {}).get("async_tasks") or {}
             except Exception:
                 return {}
 
@@ -1312,6 +1330,7 @@ def run_textual_interactive(
 
             metadata = build_metadata(self._workspace_dir, self._current_model)
             response = ""
+            agent = await self._await_agent_ready()
 
             async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -1472,6 +1491,7 @@ def run_textual_interactive(
 
             _MAX_HITL_ROUNDS = 50
             _stream_input: Any = user_text  # str or Command for HITL resume
+            graph_gateway = self._graph_gateway()
 
             for _hitl_round in range(_MAX_HITL_ROUNDS):
                 if is_stream_cancel_requested(cancel_scope):
@@ -1487,11 +1507,16 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     _anchor_engaged = False
-                    async for event in stream_agent_events(
-                        self._agent_loader.agent,
-                        _stream_input,
-                        thread_id_override or self._conversation_tid,
-                        metadata=metadata,
+                    async for event in graph_gateway.stream_events(
+                        RunRequest(
+                            message=_stream_input,
+                            thread_id=thread_id_override or self._conversation_tid,
+                            metadata=metadata,
+                            target=GraphTarget(
+                                local_graph=agent,
+                                workspace_dir=self._workspace_dir,
+                            ),
+                        )
                     ):
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
@@ -2303,6 +2328,7 @@ def run_textual_interactive(
                     await_agent_ready=self._await_agent_ready,
                     on_cmd_completed=self._on_channel_cmd_completed,
                     channel_runtime=self._channel_runtime,
+                    graph_gateway=self._runtime_gateways.graph_gateway,
                 )
                 if _slash_handled:
                     # A channel-issued /new or /resume rotates the thread in
@@ -2777,8 +2803,12 @@ def run_textual_interactive(
                 # Only gate on agent readiness for commands that need it —
                 # recovery commands like ``/mcp add`` must run even when
                 # ``_await_agent_ready`` would hang on a broken MCP load.
-                cmd, cmd_args = cmd_manager.resolve(command) or (None, [])
+                parsed = cmd_manager.resolve(command)
+                cmd = None
+                cmd_args: list[str] = []
                 agent = None
+                if parsed is not None:
+                    cmd, cmd_args = parsed
                 if cmd is not None and cmd.needs_agent(cmd_args):
                     try:
                         agent = await self._await_agent_ready()
@@ -2793,9 +2823,12 @@ def run_textual_interactive(
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
+                    graph_gateway=self._runtime_gateways.graph_gateway,
                 )
 
                 if await cmd_manager.execute(command, ctx):
+                    if cmd is None:
+                        return
                     await _sync_tui_command_completion(
                         self,
                         ctx,
@@ -2819,7 +2852,9 @@ def run_textual_interactive(
             skipped — they are difficult to faithfully reproduce from
             checkpoint data.
             """
-            messages = await get_thread_messages(thread_id_value)
+            messages = await self._runtime_gateways.graph_gateway.get_thread_messages(
+                thread_id_value
+            )
             if not messages:
                 return
 
@@ -2974,6 +3009,7 @@ def run_textual_interactive(
                         self._conversation_tid,
                         model_name=self._current_model,
                         pending_user_text=pending,
+                        graph_gateway=self._runtime_gateways.graph_gateway,
                     )
             elif self._status_last_input_tokens is not None:
                 self._status_base_snapshot = make_usage_status_snapshot(
@@ -2984,6 +3020,7 @@ def run_textual_interactive(
                 self._status_base_snapshot = await build_session_status_snapshot(
                     self._conversation_tid,
                     model_name=self._current_model,
+                    graph_gateway=self._runtime_gateways.graph_gateway,
                 )
             if reset_streaming_text:
                 self._status_streaming_text = ""
@@ -3194,9 +3231,9 @@ def run_textual_interactive(
             resumed = False
             resume_warning = ""
             if thread_id:
-                resolved, matches = await resolve_thread_id_prefix(thread_id)
-                if resolved:
-                    meta = await get_thread_metadata(resolved)
+                resolution = await graph_gateway.resolve_thread(thread_id)
+                if resolution.thread_id:
+                    meta = await graph_gateway.get_thread_metadata(resolution.thread_id)
                     ws = (meta or {}).get("workspace_dir", "")
                     mismatch_aborted = False
                     if ws:
@@ -3255,19 +3292,21 @@ def run_textual_interactive(
                             "workspace conflict. Starting new session."
                         )
                     else:
-                        effective_thread_id = resolved
+                        effective_thread_id = resolution.thread_id
                         resumed = True
-                elif matches:
+                elif resolution.matches:
                     resume_warning = (
                         f"Thread prefix '{thread_id}' is ambiguous "
-                        f"({', '.join(matches)}). Starting new session."
+                        f"({', '.join(resolution.matches)}). Starting new session."
                     )
                 else:
                     resume_warning = (
                         f"Thread '{thread_id}' not found. Starting new session."
                     )
             if not effective_thread_id:
-                effective_thread_id = generate_thread_id()
+                effective_thread_id = await graph_gateway.create_thread(
+                    GraphTarget(workspace_dir=effective_workspace)
+                )
 
             # The TUI opens instantly and starts MCP loading in the
             # background; ``on_mount`` in the app kicks off the real
@@ -3276,6 +3315,7 @@ def run_textual_interactive(
                 thread_id_value=effective_thread_id,
                 workspace=effective_workspace,
                 checkpointer=checkpointer,
+                runtime_gateways=runtime_gateways,
                 channel_send_thinking_value=channel_send_thinking,
                 resumed=resumed,
                 resume_warning=resume_warning,
@@ -3292,7 +3332,7 @@ def run_textual_interactive(
                 hint_tid: str | None = None
                 if exit_tid:
                     try:
-                        if await thread_exists(exit_tid):
+                        if await graph_gateway.thread_exists(exit_tid):
                             hint_tid = exit_tid
                     except Exception:
                         _channel_logger.debug(

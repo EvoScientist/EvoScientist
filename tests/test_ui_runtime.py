@@ -7,6 +7,7 @@ from EvoScientist.cli.tui_runtime import (
     resolve_ui_backend,
     run_streaming,
 )
+from tests.fakes import FakeGraphGateway
 
 
 def test_normalize_ui_backend_defaults_to_cli():
@@ -73,5 +74,6 @@ def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
         thread_id="t1",
         show_thinking=False,
         interactive=True,
+        gateway=FakeGraphGateway(),
     )
     assert result == "fallback-ok"

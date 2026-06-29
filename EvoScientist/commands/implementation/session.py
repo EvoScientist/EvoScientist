@@ -5,8 +5,15 @@ from typing import ClassVar
 
 from rich.table import Table
 
+from ...gateway import GraphGateway, GraphTarget
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
+
+
+def _graph_gateway(ctx: CommandContext) -> GraphGateway:
+    if ctx.graph_gateway is None:
+        raise RuntimeError("Session commands require a graph_gateway")
+    return ctx.graph_gateway
 
 
 class CompactCommand(Command):
@@ -36,8 +43,12 @@ class CompactCommand(Command):
 
         try:
             result = await compact_conversation(
-                agent=ctx.agent,
+                graph_gateway=_graph_gateway(ctx),
                 thread_id=ctx.thread_id,
+                target=GraphTarget(
+                    local_graph=ctx.agent,
+                    workspace_dir=ctx.workspace_dir,
+                ),
                 input_tokens_hint=ctx.input_tokens_hint,
             )
         finally:
@@ -73,9 +84,10 @@ class ThreadsCommand(Command):
     description = "List recent sessions"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        from ...sessions import _format_relative_time, list_threads
+        from ...sessions import _format_relative_time, short_thread_id
 
-        threads = await list_threads(
+        gateway = _graph_gateway(ctx)
+        threads = await gateway.list_threads(
             limit=0,
             include_message_count=True,
             include_preview=True,
@@ -97,8 +109,6 @@ class ThreadsCommand(Command):
         if not is_channel:
             table.add_column("Model", style="dim")
         table.add_column("Last Used", style="dim")
-
-        from ...sessions import short_thread_id
 
         for thread in threads:
             thread_id_value = thread["thread_id"]
@@ -137,14 +147,10 @@ class ResumeCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        from ...sessions import (
-            get_thread_metadata,
-            list_threads,
-        )
-
+        gateway = _graph_gateway(ctx)
         arg = args[0] if args else ""
         if not arg:
-            threads = await list_threads(
+            threads = await gateway.list_threads(
                 limit=0,
                 include_message_count=True,
                 include_preview=True,
@@ -168,7 +174,7 @@ class ResumeCommand(Command):
         if not resolved:
             return
 
-        metadata = await get_thread_metadata(resolved)
+        metadata = await gateway.get_thread_metadata(resolved)
         restored_workspace = (metadata or {}).get("workspace_dir", "")
         if restored_workspace:
             ctx.workspace_dir = restored_workspace
@@ -180,21 +186,16 @@ class ResumeCommand(Command):
             await ctx.ui.handle_session_resume(resolved, restored_workspace)
 
     async def _resolve_thread_id(self, prefix: str, ctx: CommandContext) -> str | None:
-        from ...sessions import find_similar_threads, thread_exists
+        resolution = await _graph_gateway(ctx).resolve_thread(prefix)
+        if resolution.thread_id:
+            return resolution.thread_id
 
-        if await thread_exists(prefix):
-            return prefix
-
-        similar = await find_similar_threads(prefix)
-        if len(similar) == 1:
-            return similar[0]
-
-        if len(similar) > 1:
+        if resolution.matches:
             ctx.ui.append_system(
                 f"Ambiguous thread ID '{prefix}'. Use a longer prefix.",
                 style="yellow",
             )
-            for thread in similar:
+            for thread in resolution.matches:
                 ctx.ui.append_system(f"  - {thread}", style="dim")
             return None
 
@@ -209,7 +210,7 @@ class NewCommand(Command):
     description = "Start a new session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        ctx.ui.start_new_session()
+        await ctx.ui.start_new_session()
 
 
 class ClearCommand(Command):
@@ -237,16 +238,10 @@ class DeleteCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        from ...sessions import (
-            delete_thread,
-            find_similar_threads,
-            list_threads,
-            thread_exists,
-        )
-
+        gateway = _graph_gateway(ctx)
         arg = args[0] if args else ""
         if not arg:
-            threads = await list_threads(
+            threads = await gateway.list_threads(
                 limit=0,
                 include_message_count=True,
                 include_preview=True,
@@ -266,22 +261,17 @@ class DeleteCommand(Command):
             arg = selected
 
         # Resolve thread_id
-        resolved = None
-        if await thread_exists(arg):
-            resolved = arg
-        else:
-            similar = await find_similar_threads(arg)
-            if len(similar) == 1:
-                resolved = similar[0]
-            elif len(similar) > 1:
-                ctx.ui.append_system(
-                    f"Ambiguous thread ID '{arg}'. Use a longer prefix.",
-                    style="yellow",
-                )
-                for thread in similar:
-                    ctx.ui.append_system(f"  - {thread}", style="dim")
-                return
+        resolution = await gateway.resolve_thread(arg)
+        if resolution.matches:
+            ctx.ui.append_system(
+                f"Ambiguous thread ID '{arg}'. Use a longer prefix.",
+                style="yellow",
+            )
+            for thread in resolution.matches:
+                ctx.ui.append_system(f"  - {thread}", style="dim")
+            return
 
+        resolved = resolution.thread_id
         if not resolved:
             ctx.ui.append_system(f"Session '{arg}' not found.", style="red")
             return
@@ -293,7 +283,7 @@ class DeleteCommand(Command):
             )
             return
 
-        deleted = await delete_thread(resolved)
+        deleted = await gateway.delete_thread(resolved)
         if deleted:
             ctx.ui.append_system(f"Deleted session {resolved}.", style="green")
         else:

@@ -226,10 +226,10 @@ class TestV3ProtocolStreaming:
         assert len(text_events) == 1
         assert text_events[0]["content"] == "should appear"
 
-    def test_user_message_clears_memory_worker_saved_counts(self, monkeypatch):
+    def test_user_message_clears_completed_memory_activity_counts(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            "EvoScientist.stream.events.clear_memory_worker_saved_counts",
+            "EvoScientist.stream.events.clear_completed_memory_activity_counts",
             lambda: calls.append(True),
         )
         agent = FakeV3Agent([])
@@ -238,10 +238,10 @@ class TestV3ProtocolStreaming:
 
         assert calls == [True]
 
-    def test_command_message_clears_memory_worker_saved_counts(self, monkeypatch):
+    def test_command_message_clears_completed_memory_activity_counts(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            "EvoScientist.stream.events.clear_memory_worker_saved_counts",
+            "EvoScientist.stream.events.clear_completed_memory_activity_counts",
             lambda: calls.append(True),
         )
         agent = FakeV3Agent([])
@@ -360,6 +360,41 @@ class TestV3ProtocolStreaming:
         summary_events = [e for e in events if e.get("type") == "summarization"]
         assert summary_events == []
 
+    def test_direct_stream_loads_existing_summarization_event_when_omitted(self):
+        """Public stream_agent_events() suppresses persisted summary replays."""
+        summary_message = HumanMessage(
+            content="Here is a summary of the conversation to date:\n\nKey facts",
+        )
+        summary_event = {
+            "_summarization_event": {
+                "summary_message": summary_message,
+                "cutoff_index": 12,
+                "file_path": None,
+            }
+        }
+        agent = FakeV3Agent(
+            [
+                protocol_event("updates", summary_event),
+                message_delta("real content"),
+            ],
+            state_values=summary_event,
+        )
+
+        async def _collect():
+            events = []
+            async for event in stream_agent_events(agent, "hi", "t1"):
+                events.append(event)
+            return events
+
+        events = run_async(_collect())
+
+        summary_start_events = [
+            e for e in events if e.get("type") == "summarization_start"
+        ]
+        assert summary_start_events == []
+        summary_events = [e for e in events if e.get("type") == "summarization"]
+        assert summary_events == []
+
     def test_whole_message_reasoning_is_not_duplicated(self):
         """Providers can expose the same reasoning in kwargs and content blocks."""
         message = AIMessage(
@@ -371,6 +406,61 @@ class TestV3ProtocolStreaming:
         thinking_events = [e for e in events if e.get("type") == "thinking"]
         assert len(thinking_events) == 1
         assert thinking_events[0]["content"] == "Think once."
+
+    def test_tool_selector_reasoning_delta_is_suppressed(self):
+        """Selector reasoning must not appear as main-agent thinking."""
+        import EvoScientist.middleware.tool_selector as selector_mod
+
+        original_active = selector_mod._selector_active
+        selector_mod._selector_active = True
+        try:
+            agent = FakeV3Agent(
+                [
+                    protocol_event(
+                        "messages",
+                        (
+                            {
+                                "event": "content-block-delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "reasoning-delta",
+                                    "reasoning": "selector-only thought",
+                                },
+                            },
+                            {},
+                        ),
+                    )
+                ]
+            )
+            events = collect_events(agent)
+        finally:
+            selector_mod._selector_active = original_active
+
+        assert not any(
+            e.get("type") == "thinking" and e.get("content") == "selector-only thought"
+            for e in events
+        )
+
+    def test_tool_selector_whole_message_reasoning_is_suppressed(self):
+        """Selector reasoning in whole-message payloads is also hidden."""
+        import EvoScientist.middleware.tool_selector as selector_mod
+
+        original_active = selector_mod._selector_active
+        selector_mod._selector_active = True
+        try:
+            message = AIMessage(
+                additional_kwargs={"reasoning_content": "selector whole thought"},
+                content="",
+            )
+            agent = FakeV3Agent([protocol_event("messages", (message, {}))])
+            events = collect_events(agent)
+        finally:
+            selector_mod._selector_active = original_active
+
+        assert not any(
+            e.get("type") == "thinking" and e.get("content") == "selector whole thought"
+            for e in events
+        )
 
     def test_tool_events_emit_call_and_result(self):
         """v3 tool projection events become UI tool call/result events."""
@@ -432,7 +522,9 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, "run probe", "live-deepagents-tool-id"
+                    agent,
+                    "run probe",
+                    "live-deepagents-tool-id",
                 )
             ]
 
@@ -493,7 +585,9 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, "run echo", "live-deepagents-hitl"
+                    agent,
+                    "run echo",
+                    "live-deepagents-hitl",
                 )
             ]
 
@@ -554,7 +648,9 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, message, "live-deepagents-ask-user"
+                    agent,
+                    message,
+                    "live-deepagents-ask-user",
                 )
             ]
 
@@ -625,7 +721,9 @@ class TestV3ProtocolStreaming:
             return [
                 event
                 async for event in stream_agent_events(
-                    agent, "delegate", "live-deepagents-subagent"
+                    agent,
+                    "delegate",
+                    "live-deepagents-subagent",
                 )
             ]
 
@@ -983,7 +1081,11 @@ class TestV3ProtocolStreaming:
 
         async def consume_one_and_close():
             agent = HangingV3Agent([message_delta("hi")])
-            stream = stream_agent_events(agent, "hi", "t1")
+            stream = stream_agent_events(
+                agent,
+                "hi",
+                "t1",
+            )
             first = await stream.__anext__()
             await stream.aclose()
             return first, agent.aborted

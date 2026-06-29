@@ -108,8 +108,10 @@ async def _async_main(
     if use_agent:
         logger.info("Loading EvoScientist agent...")
         from ..EvoScientist import create_cli_agent
+        from ..gateway import create_runtime_gateways
 
         agent = create_cli_agent()
+        runtime_gateways = create_runtime_gateways()
         logger.info("Agent loaded")
 
         consumer = InboundConsumer(
@@ -117,6 +119,7 @@ async def _async_main(
             manager=manager,
             agent=agent,
             thread_id="",
+            graph_gateway=runtime_gateways.graph_gateway,
             send_thinking=send_thinking,
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)

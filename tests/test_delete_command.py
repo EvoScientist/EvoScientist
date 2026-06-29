@@ -1,87 +1,47 @@
 """Tests for the /delete command."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from tests.conftest import run_async as _run
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
-def _ctx(thread_id="current"):
+def _ctx(thread_id="current", thread_store=None):
     from EvoScientist.commands.base import CommandContext
 
+    store = thread_store or FakeThreadStore()
     ui = MagicMock()
     ui.supports_interactive = True
-    return CommandContext(agent=None, thread_id=thread_id, ui=ui), ui
-
-
-def _patches(thread_exists=False, similar=None, deleted=True, threads=None):
-    """Return a context manager stack patching the sessions module."""
-    from contextlib import ExitStack
-
-    stack = ExitStack()
-    stack.enter_context(
-        patch(
-            "EvoScientist.sessions.thread_exists",
-            new=AsyncMock(return_value=thread_exists),
-        )
-    )
-    stack.enter_context(
-        patch(
-            "EvoScientist.sessions.find_similar_threads",
-            new=AsyncMock(return_value=similar or []),
-        )
-    )
-    stack.enter_context(
-        patch(
-            "EvoScientist.sessions.delete_thread",
-            new=AsyncMock(return_value=deleted),
-        )
-    )
-    stack.enter_context(
-        patch(
-            "EvoScientist.sessions.list_threads",
-            new=AsyncMock(return_value=threads or []),
-        )
-    )
-    return stack
+    return CommandContext(
+        agent=None,
+        thread_id=thread_id,
+        ui=ui,
+        graph_gateway=FakeGraphGateway(thread_store=store),
+    ), ui
 
 
 class TestDeleteCommand:
     def test_refuses_to_delete_current(self):
         from EvoScientist.commands.implementation.session import DeleteCommand
 
-        ctx, ui = _ctx(thread_id="current")
-        # Inline the patches here (rather than using ``_patches``) so we
-        # can keep a direct handle on the ``delete_thread`` mock and
-        # assert on it *inside* the context.  Asserting after the
-        # context exits hits the real function (no ``await_count``
-        # attr), which silently degrades into ``assert True``.
-        mock_delete = AsyncMock(return_value=True)
-        with (
-            patch(
-                "EvoScientist.sessions.thread_exists",
-                new=AsyncMock(return_value=True),
-            ),
-            patch("EvoScientist.sessions.delete_thread", new=mock_delete),
-            patch(
-                "EvoScientist.sessions.find_similar_threads",
-                new=AsyncMock(return_value=[]),
-            ),
-            patch(
-                "EvoScientist.sessions.list_threads",
-                new=AsyncMock(return_value=[]),
-            ),
-        ):
-            _run(DeleteCommand().execute(ctx, ["current"]))
-            assert mock_delete.await_count == 0
+        thread_store = FakeThreadStore(resolved_thread_id="current", deleted=True)
+        ctx, ui = _ctx(thread_id="current", thread_store=thread_store)
+        _run(DeleteCommand().execute(ctx, ["current"]))
+        assert ("delete_thread", "current") not in thread_store.calls
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Cannot delete the current session" in m for m in msgs)
 
     def test_happy_path_success(self):
         from EvoScientist.commands.implementation.session import DeleteCommand
 
-        ctx, ui = _ctx(thread_id="current")
-        with _patches(thread_exists=True, deleted=True):
-            _run(DeleteCommand().execute(ctx, ["other-thread"]))
+        ctx, ui = _ctx(
+            thread_id="current",
+            thread_store=FakeThreadStore(
+                resolved_thread_id="other-thread",
+                deleted=True,
+            ),
+        )
+        _run(DeleteCommand().execute(ctx, ["other-thread"]))
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Deleted session other-thread" in m for m in msgs)
 
@@ -89,26 +49,25 @@ class TestDeleteCommand:
         from EvoScientist.commands.implementation.session import DeleteCommand
 
         ctx, ui = _ctx()
-        with _patches(thread_exists=False, similar=[]):
-            _run(DeleteCommand().execute(ctx, ["missing"]))
+        _run(DeleteCommand().execute(ctx, ["missing"]))
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("not found" in m for m in msgs)
 
     def test_ambiguous_prefix(self):
         from EvoScientist.commands.implementation.session import DeleteCommand
 
-        ctx, ui = _ctx()
-        with _patches(thread_exists=False, similar=["abc-one", "abc-two"]):
-            _run(DeleteCommand().execute(ctx, ["abc"]))
+        ctx, ui = _ctx(thread_store=FakeThreadStore(matches=["abc-one", "abc-two"]))
+        _run(DeleteCommand().execute(ctx, ["abc"]))
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Ambiguous" in m for m in msgs)
 
     def test_prefix_resolves_to_unique_match(self):
         from EvoScientist.commands.implementation.session import DeleteCommand
 
-        ctx, ui = _ctx()
-        with _patches(thread_exists=False, similar=["abc-one"], deleted=True):
-            _run(DeleteCommand().execute(ctx, ["abc"]))
+        ctx, ui = _ctx(
+            thread_store=FakeThreadStore(resolved_thread_id="abc-one", deleted=True)
+        )
+        _run(DeleteCommand().execute(ctx, ["abc"]))
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Deleted session abc-one" in m for m in msgs)
 
@@ -116,8 +75,7 @@ class TestDeleteCommand:
         from EvoScientist.commands.implementation.session import DeleteCommand
 
         ctx, ui = _ctx()
-        with _patches(threads=[]):
-            _run(DeleteCommand().execute(ctx, []))
+        _run(DeleteCommand().execute(ctx, []))
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("No sessions to delete" in m for m in msgs)
 
@@ -136,6 +94,7 @@ class TestDeleteCommand:
                 "updated_at": None,
             }
         ]
-        with _patches(threads=threads):
-            _run(DeleteCommand().execute(ctx, []))
+        store = FakeThreadStore(threads=threads)
+        ctx.graph_gateway = FakeGraphGateway(thread_store=store)
+        _run(DeleteCommand().execute(ctx, []))
         ui.wait_for_thread_pick.assert_awaited_once()

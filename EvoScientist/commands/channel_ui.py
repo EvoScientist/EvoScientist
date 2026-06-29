@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from .base import CommandUI
+
+if TYPE_CHECKING:
+    from ..gateway import GraphGateway
 
 _logger = logging.getLogger(__name__)
 
@@ -21,14 +25,17 @@ class ChannelCommandUI(CommandUI):
     def __init__(
         self,
         channel_msg: Any,
+        *,
+        graph_gateway: GraphGateway,
         append_system_callback: Any = None,
-        start_new_session_callback: Any = None,
+        start_new_session_callback: Callable[[], Awaitable[None]] | None = None,
         handle_session_resume_callback: Any = None,
     ):
         self.msg = channel_msg
         self.append_system_callback = append_system_callback
         self.start_new_session_callback = start_new_session_callback
         self.handle_session_resume_callback = handle_session_resume_callback
+        self.graph_gateway = graph_gateway
         self._system_buffer: list[str] = []
 
     def _queue_system(
@@ -174,9 +181,9 @@ class ChannelCommandUI(CommandUI):
     def force_quit(self) -> None:
         self.request_quit()
 
-    def start_new_session(self) -> None:
+    async def start_new_session(self) -> None:
         if self.start_new_session_callback:
-            self.start_new_session_callback()
+            await self.start_new_session_callback()
         else:
             self.append_system(
                 "New session requested. Please restart the channel link or use /new if supported."
@@ -188,11 +195,9 @@ class ChannelCommandUI(CommandUI):
         mirror_local = self.handle_session_resume_callback is None
         if self.handle_session_resume_callback:
             await self.handle_session_resume_callback(thread_id, workspace_dir)
-        from ..sessions import get_thread_messages
-
         lines = [f"Resumed session: {thread_id}"]
         try:
-            messages = await get_thread_messages(thread_id)
+            messages = await self.graph_gateway.get_thread_messages(thread_id)
         except Exception as exc:
             _logger.exception(
                 "Failed to load saved history for resumed thread %s",
