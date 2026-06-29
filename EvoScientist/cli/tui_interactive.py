@@ -1973,7 +1973,11 @@ def run_textual_interactive(
 
                     _auto = self._hitl_auto_approve or get_runtime_auto_approve()
                     _allow = (
-                        [s.strip() for s in config.shell_allow_list.split(",") if s.strip()]
+                        [
+                            s.strip()
+                            for s in config.shell_allow_list.split(",")
+                            if s.strip()
+                        ]
                         if config.shell_allow_list
                         else []
                     )
@@ -1991,11 +1995,19 @@ def run_textual_interactive(
                         batch_decision = ActionDecision.APPROVE
                         batch_reason = ""
                         for _req in _areqs:
-                            _rname = _req.get("name", "") if isinstance(_req, dict) else ""
+                            _rname = (
+                                _req.get("name", "") if isinstance(_req, dict) else ""
+                            )
                             if _rname not in HITL_SHELL_TOOLS:
                                 continue
-                            _rargs = _req.get("args", {}) if isinstance(_req, dict) else {}
-                            _cmd = _rargs.get("command", "") if isinstance(_rargs, dict) else ""
+                            _rargs = (
+                                _req.get("args", {}) if isinstance(_req, dict) else {}
+                            )
+                            _cmd = (
+                                _rargs.get("command", "")
+                                if isinstance(_rargs, dict)
+                                else ""
+                            )
                             _v = resolve_action_decision(
                                 _cmd,
                                 auto_approve=_auto,

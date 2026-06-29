@@ -652,9 +652,7 @@ class InboundConsumer:
                     )
                     if not _has_rejected and (
                         session_key in self._auto_approve_sessions
-                        or all(
-                            v.decision == ActionDecision.APPROVE for v in verdicts
-                        )
+                        or all(v.decision == ActionDecision.APPROVE for v in verdicts)
                     ):
                         resume_map[_iid] = {
                             "decisions": [{"type": "approve"} for _ in range(n)]

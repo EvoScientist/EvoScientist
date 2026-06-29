@@ -141,16 +141,49 @@ _FORCED_INTERPRETER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 # Commands that are dangerous as pipe RHS (receiving piped data)
-_PIPE_NETWORKING_RHS = frozenset({
-    "nc", "ncat", "netcat", "ssh", "curl", "wget",
-    "telnet", "socat", "scp", "sftp", "rsync", "ftp",
-})
-_PIPE_DANGEROUS_RHS = frozenset({
-    # Interpreters (code execution via stdin)
-    "sh", "bash", "zsh", "dash", "ash", "ksh", "fish",
-    "python", "python3", "python2", "node", "bun", "deno",
-    "ruby", "perl", "php", "lua", "iex", "elixir",
-}) | _PIPE_NETWORKING_RHS
+_PIPE_NETWORKING_RHS = frozenset(
+    {
+        "nc",
+        "ncat",
+        "netcat",
+        "ssh",
+        "curl",
+        "wget",
+        "telnet",
+        "socat",
+        "scp",
+        "sftp",
+        "rsync",
+        "ftp",
+    }
+)
+_PIPE_DANGEROUS_RHS = (
+    frozenset(
+        {
+            # Interpreters (code execution via stdin)
+            "sh",
+            "bash",
+            "zsh",
+            "dash",
+            "ash",
+            "ksh",
+            "fish",
+            "python",
+            "python3",
+            "python2",
+            "node",
+            "bun",
+            "deno",
+            "ruby",
+            "perl",
+            "php",
+            "lua",
+            "iex",
+            "elixir",
+        }
+    )
+    | _PIPE_NETWORKING_RHS
+)
 
 # Patterns checked ONLY outside quoted strings (| and > are common inside regexes/code)
 _FORCED_UNQUOTED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -190,8 +223,12 @@ def _check_pipe_to_dangerous(command: str) -> str | None:
             continue
         if after_pipe and token.get("type") != "op":
             base = str(token.get("value", "")).split("/")[-1]
-            if base in _PIPE_DANGEROUS_RHS:
-                kind = "networking tool" if base in _PIPE_NETWORKING_RHS else "interpreter"
+            # Strip version suffixes: python3.11 → python3, lua5.4 → lua5
+            normalized = re.sub(r"[0-9.]+$", "", base) or base
+            if base in _PIPE_DANGEROUS_RHS or normalized in _PIPE_DANGEROUS_RHS:
+                kind = (
+                    "networking tool" if base in _PIPE_NETWORKING_RHS else "interpreter"
+                )
                 return f"pipes output to {kind} '{base}' ({kind.split()[0]} risk)"
             after_pipe = False
     return None

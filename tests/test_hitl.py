@@ -503,17 +503,19 @@ class TestConsumerHitlHelpers:
         from EvoScientist.backends import ActionDecision
         from EvoScientist.channels.consumer import _resolve_action_verdicts
 
-        # With default config (auto_approve=False, shell_allow_list=""),
-        # execute should NOT auto-approve
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = ""
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with (
+            patch("EvoScientist.config.settings.load_config", return_value=mock_cfg),
+            patch(
+                "EvoScientist.config.settings.get_runtime_auto_approve",
+                return_value=False,
+            ),
+        ):
             verdicts = _resolve_action_verdicts(
-                [
-                    {"name": "execute", "args": {"command": "rm -rf /"}},
-                ]
+                [{"name": "execute", "args": {"command": "rm -rf /"}}]
             )
         assert verdicts[0].decision == ActionDecision.PROMPT
 
@@ -526,11 +528,15 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = False
         mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = ""
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with (
+            patch("EvoScientist.config.settings.load_config", return_value=mock_cfg),
+            patch(
+                "EvoScientist.config.settings.get_runtime_auto_approve",
+                return_value=False,
+            ),
+        ):
             verdicts = _resolve_action_verdicts(
-                [
-                    {"name": "run_in_background", "args": {"command": "rm -rf /"}},
-                ]
+                [{"name": "run_in_background", "args": {"command": "rm -rf /"}}]
             )
         assert verdicts[0].decision == ActionDecision.PROMPT
 
@@ -542,11 +548,15 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = True
         mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = ""
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with (
+            patch("EvoScientist.config.settings.load_config", return_value=mock_cfg),
+            patch(
+                "EvoScientist.config.settings.get_runtime_auto_approve",
+                return_value=False,
+            ),
+        ):
             verdicts = _resolve_action_verdicts(
-                [
-                    {"name": "execute", "args": {"command": "ls -la"}},
-                ]
+                [{"name": "execute", "args": {"command": "ls -la"}}]
             )
         assert verdicts[0].decision == ActionDecision.APPROVE
 
@@ -558,11 +568,15 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = False
         mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = "ls,python"
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with (
+            patch("EvoScientist.config.settings.load_config", return_value=mock_cfg),
+            patch(
+                "EvoScientist.config.settings.get_runtime_auto_approve",
+                return_value=False,
+            ),
+        ):
             verdicts = _resolve_action_verdicts(
-                [
-                    {"name": "execute", "args": {"command": "ls -la"}},
-                ]
+                [{"name": "execute", "args": {"command": "ls -la"}}]
             )
         assert verdicts[0].decision == ActionDecision.APPROVE
 
