@@ -382,15 +382,6 @@ def run_textual_interactive(
             padding: 0 1;
             border-bottom: solid #0284c7;
         }
-        #completion-help {
-            display: none;
-            height: auto;
-            max-height: 8;
-            background: #1a1b26;
-            padding: 0 2;
-            color: #6b7280;
-            border-bottom: solid #334155;
-        }
         #status {
             height: 1;
             min-height: 1;
@@ -766,7 +757,6 @@ def run_textual_interactive(
             with Container(id="input-shell"):
                 yield Static("", id="queued-message")
                 yield Static("", id="completions")
-                yield Static("", id="completion-help")
                 with Horizontal(id="input-row"):
                     yield Static(">", id="input-cursor")
                     yield ChatTextArea(
@@ -2730,11 +2720,8 @@ def run_textual_interactive(
             self._comp_index = -1
             self._comp_suppress_changes = 0
             self.query_one("#completions", Static).display = False
-            self.query_one("#completion-help", Static).display = False
 
         def _render_completions(self) -> None:
-            from ..commands.manager import manager as _cmd_mgr
-
             comp_text = Text()
             last_cat = ""
             for i, candidate in enumerate(self._comp_items):
@@ -2756,25 +2743,6 @@ def run_textual_interactive(
                 if i < len(self._comp_items) - 1:
                     comp_text.append("\n")
             self.query_one("#completions", Static).update(comp_text)
-
-            help_widget = self.query_one("#completion-help", Static)
-            if 0 <= self._comp_index < len(self._comp_items):
-                sel = self._comp_items[self._comp_index]
-                cmd_obj = None
-                if sel.text.startswith("/"):
-                    cmd_obj = _cmd_mgr.get_command(sel.text)
-                else:
-                    prompt_text = self.query_one("#prompt", ChatTextArea).value.strip()
-                    parts = prompt_text.split()
-                    if parts:
-                        cmd_obj = _cmd_mgr.get_command(parts[0])
-                if cmd_obj:
-                    help_widget.update(Text(cmd_obj.build_help_text(), style="#9ca3af"))
-                    help_widget.display = True
-                else:
-                    help_widget.display = False
-            else:
-                help_widget.display = False
 
         # ── Slash commands ─────────────────────────────────────
 

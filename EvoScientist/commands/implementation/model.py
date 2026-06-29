@@ -49,7 +49,7 @@ class ModelCommand(Command):
     description = "Switch model (--save to persist)"
     category = "Model"
     examples: ClassVar[list[str]] = [
-        "/model claude-sonnet-4-20250514",
+        "/model claude-sonnet-4-6",
         "/model llama3 ollama --save",
     ]
     # ``--save`` is parsed manually in ``execute`` via ``"--save" in args``;

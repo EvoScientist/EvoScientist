@@ -228,7 +228,7 @@ class SlashCommandCompleter(Completer):
 
             result = compute_completions(text, len(text))
             if result.kind != "empty" and result.candidates:
-                for c in sorted(result.candidates, key=lambda c: c.text):
+                for c in result.candidates:
                     start_pos = c.replace_start - len(text)
                     yield Completion(
                         c.text,

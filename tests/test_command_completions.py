@@ -97,7 +97,16 @@ class TestSubcommandCompletions:
 
 
 class TestDynamicCompletions:
+    def _invalidate_mcp_cache(self):
+        from EvoScientist.commands.implementation.mcp import MCPCommand
+        from EvoScientist.commands.manager import manager
+
+        cmd = manager.get_command("/mcp")
+        if isinstance(cmd, MCPCommand):
+            cmd._invalidate_server_cache()
+
     def test_mcp_config_server_names(self):
+        self._invalidate_mcp_cache()
         fake_config = {"myserver": {}, "other": {}}
         with patch("EvoScientist.mcp.load_mcp_config", return_value=fake_config):
             r = compute_completions("/mcp config ", 12)
@@ -106,6 +115,7 @@ class TestDynamicCompletions:
         assert "other" in names
 
     def test_mcp_config_prefix_filters(self):
+        self._invalidate_mcp_cache()
         fake_config = {"myserver": {}, "other": {}}
         with patch("EvoScientist.mcp.load_mcp_config", return_value=fake_config):
             r = compute_completions("/mcp config my", 14)
@@ -113,6 +123,7 @@ class TestDynamicCompletions:
         assert names == ["myserver"]
 
     def test_mcp_remove_shows_servers(self):
+        self._invalidate_mcp_cache()
         fake_config = {"srv1": {}}
         with patch("EvoScientist.mcp.load_mcp_config", return_value=fake_config):
             r = compute_completions("/mcp remove ", 12)

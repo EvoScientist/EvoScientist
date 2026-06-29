@@ -76,9 +76,6 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
             return CompletionResult(CompletionKind.EMPTY, [])
 
         if exact_cmd and has_trailing_space:
-            if not exact_cmd.subcommands:
-                return CompletionResult(CompletionKind.EMPTY, [])
-            # Delegate to Command.get_completions for the trailing-space case
             completions = exact_cmd.get_completions([""])
             if completions:
                 insert_pos = len(before)
@@ -94,6 +91,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
                         for name, desc in completions
                     ],
                 )
+            return CompletionResult(CompletionKind.EMPTY, [])
 
         all_matches = [v for vs in by_cat.values() for v in vs]
         if not all_matches:

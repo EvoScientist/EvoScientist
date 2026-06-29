@@ -27,21 +27,32 @@ class MCPCommand(Command):
         "/mcp config myserver",
     ]
 
+    _server_names_cache: list[str] | None = None
+
+    def _get_server_names(self) -> list[str]:
+        if self._server_names_cache is None:
+            try:
+                from ...mcp import load_mcp_config
+
+                self._server_names_cache = list(load_mcp_config().keys())
+            except Exception:
+                return []
+        return self._server_names_cache
+
+    def _invalidate_server_cache(self) -> None:
+        self._server_names_cache = None
+
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
         if len(tokens) <= 1:
             return super().get_completions(tokens)
         subcmd = tokens[0].lower()
         if subcmd in ("config", "remove", "edit") and len(tokens) == 2:
-            try:
-                from ...mcp import load_mcp_config
-
-                config = load_mcp_config()
-                prefix = tokens[1].lower()
-                return [
-                    (name, "") for name in config if name.lower().startswith(prefix)
-                ]
-            except Exception:
-                return []
+            prefix = tokens[1].lower()
+            return [
+                (name, "")
+                for name in self._get_server_names()
+                if name.lower().startswith(prefix)
+            ]
         return super().get_completions(tokens)
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
@@ -57,10 +68,13 @@ class MCPCommand(Command):
             await self._mcp_config(ctx, subargs[0] if subargs else "")
         elif subcmd == "add":
             await self._mcp_add(ctx, subargs)
+            self._invalidate_server_cache()
         elif subcmd == "edit":
             await self._mcp_edit(ctx, subargs)
+            self._invalidate_server_cache()
         elif subcmd == "remove":
             await self._mcp_remove(ctx, subargs[0] if subargs else "")
+            self._invalidate_server_cache()
         elif subcmd == "install":
             from .mcp_install import InstallMCPCommand
 
