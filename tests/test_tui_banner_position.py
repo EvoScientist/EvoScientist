@@ -16,7 +16,6 @@ pilot so they exercise the actual production code path.
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -52,9 +51,6 @@ def _capture_app(monkeypatch) -> object:
     monkeypatch.setattr(App, "run_async", _no_run)
 
     fake_load_agent = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        "EvoScientist.cli._agent_loader.load_agent", fake_load_agent, raising=False
-    )
 
     @asynccontextmanager
     async def _fake_checkpointer(*_a, **_k):
@@ -73,12 +69,28 @@ def _capture_app(monkeypatch) -> object:
     monkeypatch.setattr(
         "EvoScientist.cli.history_suggester.HistorySuggester", _FakeSuggester
     )
+
+    class _FakeChannelRuntime:
+        def __init__(self, *_a, **_k):
+            self.agent = None
+            self.thread_id = None
+
+        def bind(self, *_a, **_k):
+            pass
+
+        def clear(self):
+            pass
+
     monkeypatch.setattr(
-        "EvoScientist.cli.tui_interactive.create_session_workspace",
-        lambda *_a, **_k: str(Path.cwd()),
-        raising=False,
+        "EvoScientist.commands.base.ChannelRuntime", _FakeChannelRuntime
     )
+
     monkeypatch.setattr("EvoScientist.cli.tui_interactive.mode", "dev", raising=False)
+    # Note: ``create_session_workspace`` and ``load_agent`` are passed
+    # as parameters to ``run_textual_interactive`` (the factory), so the
+    # closure inside ``EvoTextualInteractiveApp`` uses the fakes directly
+    # and the module-level ``create_session_workspace`` / ``load_agent``
+    # symbols never get a chance to run.
 
     # The factory is synchronous at the outer level — it drives its own loop
     # via ``nest_asyncio`` + ``loop.run_until_complete`` internally.
@@ -102,7 +114,10 @@ def _capture_app(monkeypatch) -> object:
 
     app = captured.get("app")
     if app is None:
-        pytest.skip("Could not capture EvoTextualInteractiveApp instance")
+        raise RuntimeError(
+            "EvoTextualInteractiveApp was not captured — _no_run was never "
+            "called, meaning the factory crashed before constructing the app."
+        )
     return app
 
 
@@ -111,7 +126,9 @@ def _capture_app(monkeypatch) -> object:
 # ---------------------------------------------------------------------------
 
 
-def test_clear_chat_resets_scroll_after_long_anchored_conversation(monkeypatch):
+def test_clear_chat_resets_scroll_after_long_anchored_conversation(
+    monkeypatch, run_async
+):
     """Repro of issue #301: clear after a long anchored stream → banner on top.
 
     Anchor is engaged (``_anchor_released`` False) at the end of every stream.
@@ -150,10 +167,10 @@ def test_clear_chat_resets_scroll_after_long_anchored_conversation(monkeypatch):
             )
             assert len(chat.children) == 2
 
-    _run(scenario)
+    run_async(scenario())
 
 
-def test_clear_chat_with_anchor_released_also_resets(monkeypatch):
+def test_clear_chat_with_anchor_released_also_resets(monkeypatch, run_async):
     """User scrolled up (anchor released) before /new → still lands at top."""
 
     async def scenario():
@@ -183,10 +200,10 @@ def test_clear_chat_with_anchor_released_also_resets(monkeypatch):
             )
             assert len(chat.children) == 2
 
-    _run(scenario)
+    run_async(scenario())
 
 
-def test_clear_chat_short_conversation_anchored(monkeypatch):
+def test_clear_chat_short_conversation_anchored(monkeypatch, run_async):
     """Even with a short conversation, anchor + clear should not push banner down."""
 
     async def scenario():
@@ -214,10 +231,10 @@ def test_clear_chat_short_conversation_anchored(monkeypatch):
 
             _assert_banner_at_top(chat, welcome, label="after /new on short convo")
 
-    _run(scenario)
+    run_async(scenario())
 
 
-def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
+def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch, run_async):
     """Repro of the user-reported scenario: clear → mount welcome banner →
     mount new-session → mount user message → mount assistant reply, in a
     normal-sized terminal where the resulting content fits in the viewport.
@@ -288,10 +305,10 @@ def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
                 ),
             )
 
-    _run(scenario)
+    run_async(scenario())
 
 
-def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
+def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch, run_async):
     """Regression for the second symptom of issue #301: after a short
     user/assistant turn that fits in the viewport, end-of-stream
     ``_anchor_chat`` must NOT leave the chat anchored.
@@ -343,10 +360,10 @@ def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
                 chat, welcome, label="after short turn + trailing mount"
             )
 
-    _run(scenario)
+    run_async(scenario())
 
 
-def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
+def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch, run_async):
     """When the conversation overflows, ``_anchor_chat`` must still engage
     the anchor so streaming output remains visible. The issue #301 fix
     only suppresses anchoring when content fits — long content must
@@ -381,7 +398,7 @@ def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
             )
             assert chat.scroll_y > 0, "long content must have positive scroll_y"
 
-    _run(scenario)
+    run_async(scenario())
 
 
 # ---------------------------------------------------------------------------
@@ -405,18 +422,3 @@ def _assert_banner_at_top(chat, welcome, label: str = "") -> None:
     assert chat.scroll_y <= 1, (
         f"banner must stay at top{suffix}, scroll_y={chat.scroll_y}"
     )
-
-
-def _run(coro_fn):
-    """Drive an async scenario in a fresh event loop, cancelling stragglers."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro_fn())
-    finally:
-        for t in asyncio.all_tasks(loop):
-            t.cancel()
-        try:
-            loop.run_until_complete(asyncio.sleep(0))
-        except Exception:
-            pass
-        loop.close()

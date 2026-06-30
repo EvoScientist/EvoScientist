@@ -658,8 +658,7 @@ def run_textual_interactive(
             # stale — relying on it (via ``_anchor_chat``) can re-engage the
             # anchor and let Textual's compositor push ``scroll_y`` negative
             # once the new (smaller) content lays out. Always reset.
-            container.anchor(False)
-            container.scroll_home(animate=False, immediate=True)
+            self._release_anchor_and_pin_top(container)
             self._chat_following = True
             self._new_content_below = False
 
@@ -1062,8 +1061,18 @@ def run_textual_interactive(
             if container.max_scroll_y > 0:
                 container.anchor()
             else:
-                container.anchor(False)
-                container.scroll_home(animate=False, immediate=True)
+                self._release_anchor_and_pin_top(container)
+
+        def _release_anchor_and_pin_top(self, container: VerticalScroll) -> None:
+            """Release any active anchor and force the viewport to the top.
+
+            See ``_anchor_chat`` for why this is needed: Textual's compositor
+            bypasses ``validate_scroll_y`` for anchored widgets, so a leftover
+            anchor with content shorter than the viewport lets ``scroll_y``
+            go negative and pushes the welcome banner out of view (issue #301).
+            """
+            container.anchor(False)
+            container.scroll_home(animate=False, immediate=True)
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1565,8 +1574,7 @@ def run_textual_interactive(
                             # was just removed). Release the anchor so the
                             # compositor doesn't pin scroll_y to a negative
                             # value on the next layout pass (issue #301).
-                            container.anchor(False)
-                            container.scroll_home(animate=False, immediate=True)
+                            self._release_anchor_and_pin_top(container)
                         event_type = state.handle_event(event)
 
                         new_phase = state.compute_phase()
