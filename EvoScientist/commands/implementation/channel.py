@@ -28,7 +28,6 @@ class ChannelCommand(Command):
         SubCommand("email", "Start Email channel"),
         SubCommand("imessage", "Start iMessage channel"),
     ]
-    examples: ClassVar[list[str]] = ["/channel telegram", "/channel stop telegram"]
 
     def needs_agent(self, args: list[str]) -> bool:
         # ``status`` and ``stop`` are introspection / teardown; they

@@ -2707,33 +2707,38 @@ def run_textual_interactive(
             is_file_dir = selected.text.startswith("@") and selected.text.rstrip(
                 '"'
             ).endswith("/")
-            self._apply_selected_completion()
+            with self.prevent(ChatTextArea.Changed):
+                self._apply_selected_completion()
             if not is_file_dir:
                 self._hide_completions()
             return True
 
         def _apply_selected_completion(self) -> None:
-            """Apply the currently selected completion to the input field."""
+            """Apply the currently selected completion to the input field.
+
+            Callers are responsible for suppressing or allowing Changed
+            events (e.g. ``self.prevent(ChatTextArea.Changed)`` around
+            the call when the popup should stay hidden).
+            """
             if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
                 return
             candidate = self._comp_items[self._comp_index]
             prompt = self.query_one("#prompt", ChatTextArea)
 
-            with self.prevent(ChatTextArea.Changed):
-                if candidate.text.startswith("@"):
-                    import re as _re
+            if candidate.text.startswith("@"):
+                import re as _re
 
-                    is_dir = candidate.text.rstrip('"').endswith("/")
-                    suffix = "" if is_dir else " "
-                    current = prompt.value
-                    m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', current)
-                    if m:
-                        new_val = current[: m.start()] + candidate.text + suffix
-                    else:
-                        new_val = current + candidate.text + suffix
-                    prompt.value = new_val
+                is_dir = candidate.text.rstrip('"').endswith("/")
+                suffix = "" if is_dir else " "
+                current = prompt.value
+                m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', current)
+                if m:
+                    new_val = current[: m.start()] + candidate.text + suffix
                 else:
-                    prompt.value = self._comp_base + candidate.text + " "
+                    new_val = current + candidate.text + suffix
+                prompt.value = new_val
+            else:
+                prompt.value = self._comp_base + candidate.text + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []

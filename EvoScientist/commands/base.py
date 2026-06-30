@@ -106,7 +106,6 @@ class Command(ABC):
     arguments: ClassVar[list[Argument]] = []
     category: ClassVar[str] = "General"
     subcommands: ClassVar[list[SubCommand]] = []
-    examples: ClassVar[list[str]] = []
     # When False, callers may dispatch this command without waiting for
     # the background agent load to finish — important so recovery
     # commands like ``/mcp add`` can run even when the MCP load is

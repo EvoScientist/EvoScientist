@@ -22,10 +22,6 @@ class MCPCommand(Command):
         SubCommand("remove", "Remove an MCP server"),
         SubCommand("install", "Browse and install MCP servers"),
     ]
-    examples: ClassVar[list[str]] = [
-        "/mcp add myserver npx @foo/bar",
-        "/mcp config myserver",
-    ]
 
     _server_names_cache: list[str] | None = None
 
