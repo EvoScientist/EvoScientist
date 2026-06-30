@@ -718,13 +718,10 @@ class TestCompletionLogic(unittest.TestCase):
         fake_input = _FakeInput()
         fake_completions = _FakeStatic()
 
-        fake_help = _FakeStatic()
-
         # Widget registry -----------------------------------------------
         _widgets = {
             ("#prompt", None): fake_input,
             ("#completions", None): fake_completions,
-            ("#completion-help", None): fake_help,
         }
 
         # Build stub --------------------------------------------------------
@@ -750,15 +747,12 @@ class TestCompletionLogic(unittest.TestCase):
                         )
                 self._comp_index: int = comp_index
                 self._comp_base: str = ""
-                self._comp_suppress_changes: int = 0
                 self._fake_input = fake_input
                 self._fake_completions = fake_completions
 
             def query_one(self, selector, widget_type=None):
                 if "prompt" in selector:
                     return fake_input
-                if "completion-help" in selector:
-                    return fake_help
                 if "completions" in selector:
                     return fake_completions
                 raise KeyError(f"Unknown selector: {selector!r}")
@@ -782,7 +776,6 @@ class TestCompletionLogic(unittest.TestCase):
                     return
                 if selected.text.startswith("@"):
                     self._hide_completions()
-                self._comp_suppress_changes = 2
 
             def _apply_selected_completion(self):
                 candidate = self._comp_items[self._comp_index]
@@ -799,9 +792,7 @@ class TestCompletionLogic(unittest.TestCase):
             def _hide_completions(self):
                 self._comp_items = []
                 self._comp_index = -1
-                self._comp_suppress_changes = 0
                 self.query_one("#completions").display = False
-                self.query_one("#completion-help").display = False
 
             def _render_completions(self):
                 comp_widget = self.query_one("#completions")

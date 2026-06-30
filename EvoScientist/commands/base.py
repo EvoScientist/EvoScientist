@@ -153,26 +153,6 @@ class Command(ABC):
             ]
         return []
 
-    def build_help_text(self) -> str:
-        """Build inline help string for the preview pane."""
-        parts: list[str] = []
-        usage = [self.name]
-        for arg in self.arguments:
-            usage.append(f"<{arg.name}>" if arg.required else f"[{arg.name}]")
-        parts.append(" ".join(usage))
-        parts.append(self.description)
-        if self.alias:
-            parts.append(f"Aliases: {', '.join(self.alias)}")
-        if self.subcommands:
-            parts.append("")
-            for sc in self.subcommands:
-                parts.append(f"  {sc.name:<14} {sc.description}")
-        if self.examples:
-            parts.append("")
-            for ex in self.examples:
-                parts.append(f"  {ex}")
-        return "\n".join(parts)
-
     @abstractmethod
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         """Execute the command with given context and arguments."""

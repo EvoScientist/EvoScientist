@@ -128,32 +128,3 @@ class TestDynamicCompletions:
         with patch("EvoScientist.mcp.load_mcp_config", return_value=fake_config):
             r = compute_completions("/mcp remove ", 12)
         assert [c.text for c in r.candidates] == ["srv1"]
-
-
-class TestBuildHelpText:
-    def test_includes_description(self):
-        from EvoScientist.commands.implementation.mcp import MCPCommand
-
-        text = MCPCommand().build_help_text()
-        assert "Manage MCP servers" in text
-
-    def test_includes_subcommands(self):
-        from EvoScientist.commands.implementation.mcp import MCPCommand
-
-        text = MCPCommand().build_help_text()
-        assert "config" in text
-        assert "install" in text
-
-    def test_includes_aliases(self):
-        from EvoScientist.commands.implementation.model_fallback import (
-            ModelFallbackCommand,
-        )
-
-        text = ModelFallbackCommand().build_help_text()
-        assert "/fallback" in text
-
-    def test_includes_examples(self):
-        from EvoScientist.commands.implementation.mcp import MCPCommand
-
-        text = MCPCommand().build_help_text()
-        assert "/mcp add myserver" in text

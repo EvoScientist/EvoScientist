@@ -450,7 +450,6 @@ def run_textual_interactive(
             self._comp_items: list = []
             self._comp_index: int = -1
             self._comp_base: str = ""
-            self._comp_suppress_changes: int = 0
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
@@ -2381,9 +2380,6 @@ def run_textual_interactive(
             ]
 
         def on_text_area_changed(self, event: ChatTextArea.Changed) -> None:
-            if self._comp_suppress_changes > 0:
-                self._comp_suppress_changes -= 1
-                return
 
             text = event.text_area.text
             comp_widget = self.query_one("#completions", Static)
@@ -2688,8 +2684,6 @@ def run_textual_interactive(
                 return
             if selected.text.startswith("@"):
                 self._hide_completions()
-            # Suppress the 2 Changed events from the value setter
-            self._comp_suppress_changes = 2
 
         def _handle_completion_enter(self) -> bool:
             """Called by ChatTextArea before submitting on Enter.
@@ -2716,7 +2710,6 @@ def run_textual_interactive(
             self._apply_selected_completion()
             if not is_file_dir:
                 self._hide_completions()
-                self._comp_suppress_changes = 2
             return True
 
         def _apply_selected_completion(self) -> None:
@@ -2726,25 +2719,25 @@ def run_textual_interactive(
             candidate = self._comp_items[self._comp_index]
             prompt = self.query_one("#prompt", ChatTextArea)
 
-            if candidate.text.startswith("@"):
-                import re as _re
+            with self.prevent(ChatTextArea.Changed):
+                if candidate.text.startswith("@"):
+                    import re as _re
 
-                is_dir = candidate.text.rstrip('"').endswith("/")
-                suffix = "" if is_dir else " "
-                current = prompt.value
-                m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', current)
-                if m:
-                    new_val = current[: m.start()] + candidate.text + suffix
+                    is_dir = candidate.text.rstrip('"').endswith("/")
+                    suffix = "" if is_dir else " "
+                    current = prompt.value
+                    m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', current)
+                    if m:
+                        new_val = current[: m.start()] + candidate.text + suffix
+                    else:
+                        new_val = current + candidate.text + suffix
+                    prompt.value = new_val
                 else:
-                    new_val = current + candidate.text + suffix
-                prompt.value = new_val
-            else:
-                prompt.value = self._comp_base + candidate.text + " "
+                    prompt.value = self._comp_base + candidate.text + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
-            self._comp_suppress_changes = 0
             self.query_one("#completions", Static).display = False
 
         def _render_completions(self) -> None:
