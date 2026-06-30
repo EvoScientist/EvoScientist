@@ -70,19 +70,10 @@ def _capture_app(monkeypatch) -> object:
         "EvoScientist.cli.history_suggester.HistorySuggester", _FakeSuggester
     )
 
-    class _FakeChannelRuntime:
-        def __init__(self, *_a, **_k):
-            self.agent = None
-            self.thread_id = None
-
-        def bind(self, *_a, **_k):
-            pass
-
-        def clear(self):
-            pass
-
     monkeypatch.setattr(
-        "EvoScientist.commands.base.ChannelRuntime", _FakeChannelRuntime
+        "EvoScientist.cli.tui_interactive._auto_start_channel",
+        lambda *_a, **_k: None,
+        raising=False,
     )
 
     monkeypatch.setattr("EvoScientist.cli.tui_interactive.mode", "dev", raising=False)
