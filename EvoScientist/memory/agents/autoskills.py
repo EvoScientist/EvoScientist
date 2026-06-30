@@ -1,0 +1,128 @@
+"""Slow background agent for proposing AutoSkills from EvoMemory."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from langchain_core.tools import BaseTool
+from langgraph.graph.state import CompiledStateGraph
+
+from ...backends import build_autoskill_agent_backend
+from ...config import get_effective_config
+from ..autoskills.proposals import autoskill_proposals_dir
+from ..autoskills.tools import (
+    create_inspect_autoskill_candidates_tool,
+    create_submit_autoskill_proposal_tool,
+)
+from ..project import resolve_project_id
+from ._factory import (
+    build_memory_agent_graph,
+    memory_agent_middleware,
+    resolve_memory_agent_paths,
+)
+
+_AUTOSKILLS_EXCLUDED_TOOLS = frozenset({"task", "write_todos"})
+
+
+def _autoskills_system_prompt(mode: str) -> str:
+    mode_value = getattr(mode, "value", mode)
+    action = (
+        "Stage proposals for human review."
+        if mode_value != "auto"
+        else (
+            "Stage proposals and let the proposal tool auto-promote only when "
+            "its validation and collision checks pass."
+        )
+    )
+    return (
+        "You synthesize reusable skills from EvoMemory observation clusters.\n\n"
+        "This is slow, conservative background maintenance. Always call "
+        "`inspect_autoskill_candidates` first. Consider only candidates that "
+        "are not already processed and do not already have a pending proposal. "
+        "Propose a skill only when the cluster shows a repeated, procedural "
+        "pattern that would materially improve future agent work.\n\n"
+        "Candidate relations are context, not automatic approval or rejection "
+        "rules. Use `complements` to understand supporting observations, "
+        "`contradicts` to capture caveats or conditions where a practice fails, "
+        "and `supersedes` to prefer newer guidance over older guidance. If the "
+        "relations reveal that no coherent reusable procedure exists, do not "
+        "propose a skill.\n\n"
+        "Use the installed `skill-creator` skill for skill design guidance. "
+        "Read its SKILL.md before drafting a proposal. Choose a concise, "
+        "lowercase kebab-case skill name; this name is the proposal id.\n\n"
+        "Create the proposal as an actual skill folder under "
+        "`/autoskill-proposals/<skill-name>/` using `write_file` and "
+        "`edit_file`. The folder must contain `SKILL.md` with valid YAML "
+        "frontmatter whose `name` matches `<skill-name>` and whose "
+        "`description` states when future agents should use it. Add bundled "
+        "references or scripts only when they remove real complexity. Keep the "
+        "skill concise and operational.\n\n"
+        "Use `execute` for lightweight validation when useful. Shell commands "
+        "run from the autoskill proposal root; keep generated files and logs "
+        "under `/autoskill-proposals/`. A useful validation command is "
+        "`python /skills/skill-creator/scripts/quick_validate.py "
+        "/autoskill-proposals/<skill-name> --strict`.\n\n"
+        "Do not create a skill for one-off project facts, ordinary summaries, "
+        "raw logs, weakly related observations, or clusters dominated by "
+        "semantic facts without a reusable procedure. Do not manually edit "
+        "`/skills` or `/memories`.\n\n"
+        "When the folder is ready, call `submit_autoskill_proposal` with the "
+        "exact skill_name, cluster_hash, source observation IDs, and rationale. "
+        "If it reports validation errors, edit the proposal folder and submit "
+        "again.\n\n"
+        f"{action}"
+    )
+
+
+def _autoskills_tools(
+    *,
+    memory_dir: str | Path,
+    workspace_dir: str | Path,
+    mode: str,
+) -> list[BaseTool]:
+    project_id = resolve_project_id(workspace_dir)
+    return [
+        create_inspect_autoskill_candidates_tool(
+            memory_dir=memory_dir,
+            project_id=project_id,
+        ),
+        create_submit_autoskill_proposal_tool(
+            memory_dir=memory_dir,
+            mode=mode,
+        ),
+    ]
+
+
+def build_autoskills_graph(
+    *,
+    memory_dir: str | Path | None = None,
+    workspace_dir: str | Path | None = None,
+) -> CompiledStateGraph:
+    """Build the registered LangGraph AutoSkills agent."""
+    cfg = get_effective_config()
+    agent_paths = resolve_memory_agent_paths(
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+    )
+    mode = cfg.memory_skill_synthesis_mode
+    proposals_dir = autoskill_proposals_dir(agent_paths.memory_dir)
+    return build_memory_agent_graph(
+        name="evomemory-autoskills",
+        system_prompt=_autoskills_system_prompt(mode),
+        tools=_autoskills_tools(
+            memory_dir=agent_paths.memory_dir,
+            workspace_dir=agent_paths.workspace_dir,
+            mode=mode,
+        ),
+        memory_dir=agent_paths.memory_dir,
+        workspace_dir=agent_paths.workspace_dir,
+        middleware=memory_agent_middleware(
+            excluded_tools=_AUTOSKILLS_EXCLUDED_TOOLS,
+        ),
+        skills=["/skills/"],
+        backend=build_autoskill_agent_backend(
+            memory_dir=agent_paths.memory_dir,
+            proposals_dir=proposals_dir,
+            sandbox_timeout=cfg.sandbox_execute_timeout,
+        ),
+    )

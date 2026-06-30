@@ -5,30 +5,22 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
-from ... import paths as _paths
 from ..observations import (
     create_link_observations_tool,
     create_read_memory_tool,
     create_search_observations_tool,
 )
 from ..project import resolve_project_id
+from ._factory import (
+    build_memory_agent_graph,
+    memory_agent_middleware,
+    resolve_memory_agent_paths,
+)
 
 logger = logging.getLogger(__name__)
-
-OBSERVATION_LINKER_RECURSION_LIMIT = 100
-_OBSERVATION_LINKER_EXCLUDED_TOOLS = frozenset(
-    {
-        "edit_file",
-        "execute",
-        "task",
-        "write_file",
-        "write_todos",
-    }
-)
 
 
 def _observation_linker_system_prompt() -> str:
@@ -79,40 +71,19 @@ def build_observation_linker_graph(
     workspace_dir: str | Path | None = None,
 ) -> CompiledStateGraph:
     """Build the registered LangGraph observation linker."""
-    from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
-
-    from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
-
-    worker_memory_dir = Path(
-        _paths.MEMORIES_DIR if memory_dir is None else memory_dir
-    ).expanduser()
-    worker_workspace_dir = Path(
-        _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
-    ).expanduser()
-    middleware: list[AgentMiddleware] = [
-        ToolErrorHandlerMiddleware(),
-        _ToolExclusionMiddleware(excluded=_OBSERVATION_LINKER_EXCLUDED_TOOLS),
-    ]
-    tools = _observation_linker_tools(
-        memory_dir=worker_memory_dir,
-        workspace_dir=worker_workspace_dir,
+    agent_paths = resolve_memory_agent_paths(
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
     )
-
-    from deepagents import create_deep_agent
-
-    from ...backends import build_memory_agent_backend
-    from ...EvoScientist import _ensure_auxiliary_chat_model
-
-    agent = create_deep_agent(
+    tools = _observation_linker_tools(
+        memory_dir=agent_paths.memory_dir,
+        workspace_dir=agent_paths.workspace_dir,
+    )
+    return build_memory_agent_graph(
         name="evomemory-observation-linker",
-        model=_ensure_auxiliary_chat_model(),
         system_prompt=_observation_linker_system_prompt(),
         tools=tools,
-        backend=build_memory_agent_backend(
-            workspace_dir=worker_workspace_dir,
-            memory_dir=worker_memory_dir,
-        ),
-        middleware=middleware,
-        subagents=[],
+        memory_dir=agent_paths.memory_dir,
+        workspace_dir=agent_paths.workspace_dir,
+        middleware=memory_agent_middleware(),
     )
-    return agent.with_config({"recursion_limit": OBSERVATION_LINKER_RECURSION_LIMIT})

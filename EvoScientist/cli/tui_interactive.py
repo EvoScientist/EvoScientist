@@ -690,6 +690,7 @@ def run_textual_interactive(
             self._background_tasks.add(refresh_task)
             refresh_task.add_done_callback(self._background_tasks.discard)
             self.append_system(f"New session: {self._conversation_tid}", style="green")
+            self._append_pending_skill_proposals_notice()
 
         async def handle_session_resume(
             self, thread_id: str, workspace_dir: str | None = None
@@ -710,10 +711,8 @@ def run_textual_interactive(
                 # WorkspaceMismatchError leaves the session pointing at the
                 # existing workspace. Other sync failures resume locally in
                 # the TUI while background workers may be unavailable.
-                from ..langgraph_dev.manager import (
-                    WorkspaceMismatchError,
-                    ensure_langgraph_dev,
-                )
+                from ..langgraph_dev.manager import WorkspaceMismatchError
+                from .commands import _sync_background_agent_server_workspace
                 from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
                 sync_widget = WorkspaceSyncWidget()
@@ -721,8 +720,7 @@ def run_textual_interactive(
                 await container.mount(sync_widget)
                 container.scroll_end(animate=False)
                 try:
-                    await asyncio.to_thread(
-                        ensure_langgraph_dev,
+                    await _sync_background_agent_server_workspace(
                         config,
                         workspace_dir=workspace_dir,
                     )
@@ -768,6 +766,7 @@ def run_textual_interactive(
             self._render_status()
             self.append_system(f"Resumed session: {thread_id}", style="green")
             await self._render_history(thread_id)
+            self._append_pending_skill_proposals_notice()
 
         async def flush(self) -> None:
             """No-op for TUI, messages are already delivered incrementally."""
@@ -816,6 +815,7 @@ def run_textual_interactive(
             # Show resume status
             if self._resume_warning:
                 self._append_system(self._resume_warning, style="yellow")
+                self._append_pending_skill_proposals_notice()
             elif self._resumed:
                 self._append_system(
                     f"Resumed session: {self._conversation_tid}",
@@ -823,9 +823,11 @@ def run_textual_interactive(
                 )
                 self.call_later(
                     lambda: asyncio.ensure_future(
-                        self._render_history(self._conversation_tid)
+                        self._render_history_then_pending_notice(self._conversation_tid)
                     )
                 )
+            else:
+                self._append_pending_skill_proposals_notice()
             # Startup notifications
             self.notify(
                 "EvoScientist is your research buddy.\n"
@@ -3091,6 +3093,17 @@ def run_textual_interactive(
                     channels=channels_info,
                 )
             )
+
+        async def _render_history_then_pending_notice(self, thread_id: str) -> None:
+            await self._render_history(thread_id)
+            self._append_pending_skill_proposals_notice()
+
+        def _append_pending_skill_proposals_notice(self) -> None:
+            from .commands import _pending_skill_proposals_message
+
+            message = _pending_skill_proposals_message()
+            if message:
+                self._append_system(message, style="yellow")
 
         def _render_status(self) -> None:
             status = self.query_one("#status", Static)
