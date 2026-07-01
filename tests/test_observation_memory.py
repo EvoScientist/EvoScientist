@@ -42,6 +42,7 @@ from EvoScientist.memory.observations import (
     create_read_memory_tool,
     create_search_observations_tool,
     link_observation_files,
+    list_observation_documents,
     read_observation_file,
     read_observation_id_from_path,
     record_observation_file,
@@ -674,6 +675,47 @@ def test_malformed_observation_frontmatter_is_skipped(tmp_path):
     )
     assert [hit["observation_id"] for hit in hits] == [valid["observation_id"]]
     assert worker_activity.snapshot_observation_relations(memories) == frozenset()
+
+
+def test_legacy_observation_source_without_session_id_still_reads(tmp_path):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    legacy = global_dir / "O-legacy.md"
+    legacy.write_text(
+        "---\n"
+        "id: O-legacy\n"
+        "created_at: 2026-01-01T00:00:00Z\n"
+        "summary: Legacy observation without session id.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        "---\n"
+        "Legacy body text.\n",
+        encoding="utf-8",
+    )
+
+    documents = list_observation_documents(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        observation_id="O-legacy",
+    )
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="Legacy body",
+    )
+
+    assert [document.observation_id for document in documents] == ["O-legacy"]
+    assert read is not None
+    assert read["observation_id"] == "O-legacy"
+    assert hits[0]["observation_id"] == "O-legacy"
 
 
 def test_link_observation_files_keeps_supersedes_directional(tmp_path):

@@ -68,21 +68,23 @@ class ObservationSourceFrontmatter(BaseModel):
 
     type: MemorySourceType
     agent: str = Field(min_length=1, strict=True)
-    session_id: str = Field(min_length=1, strict=True)
+    session_id: str | None = Field(default=None, min_length=1, strict=True)
 
     @field_validator("agent", "session_id")
     @classmethod
-    def _non_blank(cls, value: str) -> str:
-        if not value.strip():
+    def _non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
 
     def to_frontmatter_dict(self) -> dict[str, str]:
-        return {
+        payload = {
             "type": self.type.value,
             "agent": self.agent,
-            "session_id": self.session_id,
         }
+        if self.session_id is not None:
+            payload["session_id"] = self.session_id
+        return payload
 
 
 class ObservationFrontmatter(BaseModel):
