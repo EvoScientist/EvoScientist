@@ -86,10 +86,13 @@ def _normalize_hhmm(value: Any) -> str | None:
     if len(parts) != 2:
         return None
     hour, minute = parts
-    if not (hour.isdigit() and minute.isdigit()):
+    if not (hour.isdecimal() and minute.isdecimal()):
         return None
-    hour_int = int(hour)
-    minute_int = int(minute)
+    try:
+        hour_int = int(hour)
+        minute_int = int(minute)
+    except ValueError:
+        return None
     if not (0 <= hour_int <= 23 and 0 <= minute_int <= 59):
         return None
     return f"{hour_int:02d}:{minute_int:02d}"
