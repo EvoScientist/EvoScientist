@@ -2049,6 +2049,44 @@ def test_memory_worker_abort_queues_written_observations_for_linking(tmp_path):
     assert status.observations_recorded == 1
 
 
+def test_memory_worker_watcher_start_failure_queues_written_observations_for_linking(
+    tmp_path,
+):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_aborted=coordinator.record_worker_aborted,
+    )
+    worker_run = _memory_worker_run(
+        thread_id="worker-thread",
+        run_id="run-1",
+        workspace_dir=str(workspace_dir),
+    )
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_watcher_start_failed is not None
+    hooks.on_before_run(worker_run.thread_id)
+    hooks.on_started(worker_run)
+    observation = _record_test_observation(memory_dir)
+
+    hooks.on_watcher_start_failed(worker_run)
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.observations_recorded == 1
+
+
 def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
     context = _linker_context(
         memory_dir=tmp_path / "memories",

@@ -297,7 +297,7 @@ def _memory_worker_launch_hooks(
         on_finished=on_finished,
         on_aborted=on_aborted,
         on_status_unknown=on_status_unknown,
-        on_watcher_start_failed=on_status_unknown,
+        on_watcher_start_failed=on_aborted,
     )
 
 
