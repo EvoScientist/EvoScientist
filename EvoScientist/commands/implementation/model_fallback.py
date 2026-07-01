@@ -178,19 +178,13 @@ class ModelFallbackCommand(Command):
             return None
 
         from ...EvoScientist import _ensure_config
-        from ...llm.models import list_models_by_provider
+        from ...llm.models import list_model_picker_entries
 
         cfg = _ensure_config()
-        entries = list_models_by_provider()
-
-        ollama_base_url = getattr(cfg, "ollama_base_url", None)
-        if ollama_base_url:
-            from ...llm.ollama_discovery import discover_ollama_models
-
-            detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
-            for detected_name in detected:
-                entries.append((detected_name, detected_name, "ollama"))
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+        entries = await list_model_picker_entries(
+            getattr(cfg, "ollama_base_url", None),
+            include_custom_ollama=True,
+        )
 
         result = await ctx.ui.wait_for_model_pick(
             entries,
