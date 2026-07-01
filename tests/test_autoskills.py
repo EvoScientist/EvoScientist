@@ -250,6 +250,45 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
     assert list_skill_proposals(memory_dir)[0].status == "approved"
 
 
+def test_submit_autoskill_proposal_defaults_missing_created_at(tmp_path):
+    memory_dir = tmp_path / "memories"
+    _write_skill_folder(
+        memory_dir,
+        "timestamp-default",
+        "Use when testing autoskill proposal timestamp defaults.",
+        "# Timestamp default\n",
+    )
+    first = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="timestamp-default",
+        cluster_hash="cluster-1",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Initial proposal.",
+    )
+    manifest_path = (
+        autoskill_proposals_dir(memory_dir) / "timestamp-default" / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("created_at")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    second = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="timestamp-default",
+        cluster_hash="cluster-1",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Resubmitted proposal.",
+    )
+    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+    proposal = list_skill_proposals(memory_dir)[0]
+
+    assert first["submitted"] is True
+    assert second["submitted"] is True
+    assert saved["created_at"] != "None"
+    assert saved["created_at"].endswith("Z")
+    assert proposal.created_at == saved["created_at"]
+
+
 def test_approve_skill_proposal_is_scoped_to_recorded_workspace(tmp_path):
     memory_dir = tmp_path / "memories"
     workspace_a = tmp_path / "workspace-a"

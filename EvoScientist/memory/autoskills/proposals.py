@@ -95,6 +95,19 @@ def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _manifest_timestamp(manifest: dict[str, Any], key: str) -> str | None:
+    value = manifest.get(key)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _created_at_for_manifest(existing: dict[str, Any] | None) -> str:
+    if existing is None:
+        return _now()
+    return _manifest_timestamp(existing, "created_at") or _now()
+
+
 def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
     if workspace_dir is None:
         return None
@@ -107,6 +120,10 @@ def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
 def _proposal_from_manifest(
     path: Path, manifest: dict[str, Any]
 ) -> SkillProposal | None:
+    created_at = _manifest_timestamp(manifest, "created_at")
+    updated_at = _manifest_timestamp(manifest, "updated_at")
+    if created_at is None or updated_at is None:
+        return None
     try:
         source_ids = tuple(str(item) for item in manifest["source_observation_ids"])
         return SkillProposal(
@@ -115,8 +132,8 @@ def _proposal_from_manifest(
             description=str(manifest["description"]),
             status=str(manifest["status"]),
             path=path,
-            created_at=str(manifest["created_at"]),
-            updated_at=str(manifest["updated_at"]),
+            created_at=created_at,
+            updated_at=updated_at,
             cluster_hash=str(manifest["cluster_hash"]),
             source_observation_ids=source_ids,
             workspace_dir=(
@@ -371,7 +388,7 @@ def submit_autoskill_proposal(
             "path": proposal_virtual_path(skill_name),
         }
 
-    created_at = str(existing.get("created_at")) if existing else _now()
+    created_at = _created_at_for_manifest(existing)
     (proposal_dir / "RATIONALE.md").write_text(
         rationale.strip() + "\n", encoding="utf-8"
     )
