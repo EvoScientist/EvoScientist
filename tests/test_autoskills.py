@@ -200,6 +200,86 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
     assert list_skill_proposals(memory_dir)[0].status == "approved"
 
 
+def test_approve_skill_proposal_is_scoped_to_recorded_workspace(tmp_path):
+    memory_dir = tmp_path / "memories"
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+
+    _write_skill_folder(
+        memory_dir,
+        "workspace-owned",
+        "Use when validating workspace ownership for autoskills.",
+        "# Workspace owned\n",
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="workspace-owned",
+        cluster_hash="cluster-workspace-a",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="This proposal belongs to workspace A.",
+        workspace_dir=workspace_a,
+        project_id="P-a",
+    )
+
+    assert proposal["submitted"] is True
+    assert list_skill_proposals(memory_dir, workspace_dir=workspace_b) == []
+    wrong_workspace = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        workspace_dir=workspace_b,
+    )
+    right_workspace = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        workspace_dir=workspace_a,
+    )
+
+    assert wrong_workspace["approved"] is False
+    assert not (workspace_b / "skills" / "workspace-owned").exists()
+    assert right_workspace["approved"] is True
+    assert (workspace_a / "skills" / "workspace-owned" / "SKILL.md").exists()
+
+
+def test_submit_autoskill_proposal_does_not_overwrite_other_workspace(tmp_path):
+    memory_dir = tmp_path / "memories"
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    _write_skill_folder(
+        memory_dir,
+        "shared-name",
+        "Use when testing cross-workspace proposal name collisions.",
+        "# Shared name\n",
+    )
+
+    first = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="shared-name",
+        cluster_hash="cluster-a",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Workspace A owns this pending proposal.",
+        workspace_dir=workspace_a,
+        project_id="P-a",
+    )
+    second = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="shared-name",
+        cluster_hash="cluster-b",
+        source_observation_ids=["O-4", "O-5", "O-6"],
+        rationale="Workspace B must not take over the same proposal id.",
+        workspace_dir=workspace_b,
+        project_id="P-b",
+    )
+
+    assert first["submitted"] is True
+    assert second["submitted"] is False
+    assert "another workspace" in second["error"]
+    assert list_skill_proposals(memory_dir, workspace_dir=workspace_b) == []
+
+
 def test_submit_autoskill_proposal_rejects_invalid_generated_folder(tmp_path):
     memory_dir = tmp_path / "memories"
     _write_skill_folder(

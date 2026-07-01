@@ -43,6 +43,7 @@ def create_inspect_autoskill_candidates_tool(
     *,
     memory_dir: str | Path,
     project_id: str,
+    workspace_dir: str | Path,
 ) -> BaseTool:
     """Build the read-only candidate-inspection tool for AutoSkills."""
 
@@ -50,6 +51,7 @@ def create_inspect_autoskill_candidates_tool(
         candidates = autoskill_candidates(
             memory_dir=memory_dir,
             project_id=project_id,
+            workspace_dir=workspace_dir,
         )
         return json.dumps({"candidates": candidates}, ensure_ascii=False, default=str)
 
@@ -67,6 +69,8 @@ def create_submit_autoskill_proposal_tool(
     *,
     memory_dir: str | Path,
     mode: str,
+    workspace_dir: str | Path,
+    project_id: str,
 ) -> BaseTool:
     """Build the proposal-registration tool for AutoSkills."""
 
@@ -82,6 +86,8 @@ def create_submit_autoskill_proposal_tool(
             cluster_hash=cluster_hash,
             source_observation_ids=source_observation_ids,
             rationale=rationale,
+            workspace_dir=workspace_dir,
+            project_id=project_id,
         )
         if (
             proposal.get("status") == "pending"
@@ -90,6 +96,7 @@ def create_submit_autoskill_proposal_tool(
             approved = approve_skill_proposal(
                 memory_dir,
                 str(proposal["proposal_id"]),
+                workspace_dir=workspace_dir,
             )
             proposal["auto_approval"] = approved
         return json.dumps(proposal, ensure_ascii=False, default=str)

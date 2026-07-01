@@ -85,10 +85,13 @@ def _autoskills_tools(
         create_inspect_autoskill_candidates_tool(
             memory_dir=memory_dir,
             project_id=project_id,
+            workspace_dir=workspace_dir,
         ),
         create_submit_autoskill_proposal_tool(
             memory_dir=memory_dir,
             mode=mode,
+            workspace_dir=workspace_dir,
+            project_id=project_id,
         ),
     ]
 

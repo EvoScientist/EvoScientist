@@ -155,13 +155,17 @@ def autoskill_candidates(
     *,
     memory_dir: str | Path,
     project_id: str,
+    workspace_dir: str | Path | None = None,
 ) -> list[AutoskillCandidate]:
     """Return observation graph components worth showing to the AutoSkills agent."""
     documents = list_observation_documents(memory_dir=memory_dir, project_id=project_id)
     documents_by_id = {document.observation_id: document for document in documents}
     edges, relation_rows = _graph_edges(documents)
     relation_rows = _dedupe_relation_rows(relation_rows)
-    proposed_hashes = cluster_hashes_by_status(memory_dir)
+    proposed_hashes = cluster_hashes_by_status(
+        memory_dir,
+        workspace_dir=workspace_dir,
+    )
     processed_hashes = processed_cluster_hashes(memory_dir)
     candidates: list[AutoskillCandidate] = []
 

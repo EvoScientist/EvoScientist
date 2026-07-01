@@ -80,7 +80,12 @@ class AutoSkillsCommand(Command):
         from ...memory.autoskills.schedule import alist_autoskill_schedules
 
         cfg = get_effective_config()
-        pending = list_skill_proposals(paths.MEMORIES_DIR, status="pending")
+        workspace_dir = self._workspace_dir(ctx)
+        pending = list_skill_proposals(
+            paths.MEMORIES_DIR,
+            status="pending",
+            workspace_dir=workspace_dir,
+        )
         ctx.ui.append_system(
             (
                 "AutoSkills: "
@@ -110,7 +115,11 @@ class AutoSkillsCommand(Command):
         from ... import paths
         from ...memory.autoskills.proposals import list_skill_proposals
 
-        proposals = list_skill_proposals(paths.MEMORIES_DIR)
+        workspace_dir = self._workspace_dir(ctx)
+        proposals = list_skill_proposals(
+            paths.MEMORIES_DIR,
+            workspace_dir=workspace_dir,
+        )
         if not proposals:
             ctx.ui.append_system("No autoskill proposals.", style="dim")
             return
@@ -145,11 +154,12 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             return
+        workspace_dir = self._workspace_dir(ctx)
         result = await asyncio.to_thread(
             approve_skill_proposal,
             paths.MEMORIES_DIR,
             proposal_id,
-            skills_dir=paths.USER_SKILLS_DIR,
+            workspace_dir=workspace_dir,
         )
         if result.get("approved"):
             ctx.ui.append_system(
@@ -172,10 +182,12 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             return
+        workspace_dir = self._workspace_dir(ctx)
         result = await asyncio.to_thread(
             reject_skill_proposal,
             paths.MEMORIES_DIR,
             proposal_id,
+            workspace_dir=workspace_dir,
         )
         if result.get("rejected"):
             ctx.ui.append_system(
@@ -189,7 +201,7 @@ class AutoSkillsCommand(Command):
         from ...config import get_effective_config
         from ...memory.autoskills.schedule import arun_autoskill_now
 
-        workspace_dir = ctx.workspace_dir or "."
+        workspace_dir = self._workspace_dir(ctx)
         try:
             result = await arun_autoskill_now(
                 get_effective_config(),
@@ -212,6 +224,7 @@ class AutoSkillsCommand(Command):
         from ...config import get_effective_config, set_config_value
         from ...memory.autoskills.schedule import reconcile_autoskill_schedule
 
+        workspace_dir = self._workspace_dir(ctx)
         if not value:
             ctx.ui.append_system(
                 f"Missing value for {self._config_label(key)}.",
@@ -227,7 +240,6 @@ class AutoSkillsCommand(Command):
         cfg = get_effective_config()
         if ctx.config is not None and hasattr(ctx.config, key):
             setattr(ctx.config, key, getattr(cfg, key))
-        workspace_dir = ctx.workspace_dir or "."
         await asyncio.to_thread(
             reconcile_autoskill_schedule,
             cfg,
@@ -251,6 +263,12 @@ class AutoSkillsCommand(Command):
     @staticmethod
     def _display_value(value: object) -> object:
         return getattr(value, "value", value)
+
+    @staticmethod
+    def _workspace_dir(ctx: CommandContext) -> str:
+        from ... import paths
+
+        return str(ctx.workspace_dir or paths.WORKSPACE_ROOT)
 
     @staticmethod
     def _first_arg(args: list[str]) -> str | None:

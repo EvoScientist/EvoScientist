@@ -495,7 +495,10 @@ def _pending_skill_proposals_message() -> str | None:
         from .. import paths
         from ..memory.autoskills.proposals import pending_skill_proposal_count
 
-        count = pending_skill_proposal_count(paths.MEMORIES_DIR)
+        count = pending_skill_proposal_count(
+            paths.MEMORIES_DIR,
+            workspace_dir=paths.WORKSPACE_ROOT,
+        )
     except Exception:
         return None
     if not count:

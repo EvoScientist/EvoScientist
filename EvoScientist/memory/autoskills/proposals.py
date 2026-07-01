@@ -41,6 +41,8 @@ class SkillProposal:
     updated_at: str
     cluster_hash: str
     source_observation_ids: tuple[str, ...]
+    workspace_dir: str | None = None
+    project_id: str | None = None
     approved_skill_path: str | None = None
 
 
@@ -93,6 +95,15 @@ def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
+    if workspace_dir is None:
+        return None
+    text = str(workspace_dir).strip()
+    if not text:
+        return None
+    return str(Path(text).expanduser().resolve())
+
+
 def _proposal_from_manifest(
     path: Path, manifest: dict[str, Any]
 ) -> SkillProposal | None:
@@ -108,6 +119,14 @@ def _proposal_from_manifest(
             updated_at=str(manifest["updated_at"]),
             cluster_hash=str(manifest["cluster_hash"]),
             source_observation_ids=source_ids,
+            workspace_dir=(
+                str(manifest["workspace_dir"])
+                if manifest.get("workspace_dir")
+                else None
+            ),
+            project_id=str(manifest["project_id"])
+            if manifest.get("project_id")
+            else None,
             approved_skill_path=(
                 str(manifest["approved_skill_path"])
                 if manifest.get("approved_skill_path")
@@ -122,9 +141,11 @@ def list_skill_proposals(
     memory_dir: str | Path,
     *,
     status: str | None = None,
+    workspace_dir: str | Path | None = None,
 ) -> list[SkillProposal]:
     """List autoskill proposals recorded in memory."""
     proposals: list[SkillProposal] = []
+    normalized_workspace = _normalize_workspace_dir(workspace_dir)
     root = _proposal_root(memory_dir)
     if not root.exists():
         return proposals
@@ -135,19 +156,38 @@ def list_skill_proposals(
         proposal = _proposal_from_manifest(manifest_path.parent, manifest)
         if proposal is None:
             continue
+        if (
+            normalized_workspace is not None
+            and proposal.workspace_dir != normalized_workspace
+        ):
+            continue
         if status is not None and proposal.status != status:
             continue
         proposals.append(proposal)
     return proposals
 
 
-def pending_skill_proposal_count(memory_dir: str | Path) -> int:
-    return len(list_skill_proposals(memory_dir, status="pending"))
+def pending_skill_proposal_count(
+    memory_dir: str | Path,
+    *,
+    workspace_dir: str | Path | None = None,
+) -> int:
+    return len(
+        list_skill_proposals(
+            memory_dir,
+            status="pending",
+            workspace_dir=workspace_dir,
+        )
+    )
 
 
-def cluster_hashes_by_status(memory_dir: str | Path) -> dict[str, set[str]]:
+def cluster_hashes_by_status(
+    memory_dir: str | Path,
+    *,
+    workspace_dir: str | Path | None = None,
+) -> dict[str, set[str]]:
     by_status: dict[str, set[str]] = defaultdict(set)
-    for proposal in list_skill_proposals(memory_dir):
+    for proposal in list_skill_proposals(memory_dir, workspace_dir=workspace_dir):
         by_status[proposal.status].add(proposal.cluster_hash)
     return by_status
 
@@ -267,6 +307,8 @@ def submit_autoskill_proposal(
     cluster_hash: str,
     source_observation_ids: list[str],
     rationale: str,
+    workspace_dir: str | Path | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Validate and register a skill proposal folder written by the agent."""
     normalized_name = sanitize_skill_name(skill_name)
@@ -311,6 +353,24 @@ def submit_autoskill_proposal(
             "path": proposal_virtual_path(skill_name),
         }
 
+    normalized_workspace = _normalize_workspace_dir(workspace_dir)
+    existing_workspace = (
+        _normalize_workspace_dir(existing.get("workspace_dir")) if existing else None
+    )
+    if (
+        existing is not None
+        and normalized_workspace is not None
+        and existing_workspace is not None
+        and existing_workspace != normalized_workspace
+    ):
+        return {
+            "submitted": False,
+            "proposal_id": skill_name,
+            "status": existing.get("status", "pending"),
+            "error": "A pending proposal with this skill name belongs to another workspace",
+            "path": proposal_virtual_path(skill_name),
+        }
+
     created_at = str(existing.get("created_at")) if existing else _now()
     (proposal_dir / "RATIONALE.md").write_text(
         rationale.strip() + "\n", encoding="utf-8"
@@ -326,6 +386,10 @@ def submit_autoskill_proposal(
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
     }
+    if normalized_workspace is not None:
+        manifest["workspace_dir"] = normalized_workspace
+    if project_id:
+        manifest["project_id"] = str(project_id)
     _write_manifest(manifest_path, manifest)
     return {
         "submitted": True,
@@ -337,13 +401,18 @@ def submit_autoskill_proposal(
     }
 
 
-def _proposal_dir_by_id(memory_dir: str | Path, proposal_id: str) -> Path | None:
+def _proposal_dir_by_id(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    workspace_dir: str | Path | None = None,
+) -> Path | None:
     requested = proposal_id.strip()
     if not requested:
         return None
     matches = [
         proposal.path
-        for proposal in list_skill_proposals(memory_dir)
+        for proposal in list_skill_proposals(memory_dir, workspace_dir=workspace_dir)
         if proposal.proposal_id.startswith(requested)
     ]
     return matches[0] if len(matches) == 1 else None
@@ -354,9 +423,14 @@ def approve_skill_proposal(
     proposal_id: str,
     *,
     skills_dir: str | Path | None = None,
+    workspace_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Promote one pending proposal into the workspace-local skills tier."""
-    proposal_dir = _proposal_dir_by_id(memory_dir, proposal_id)
+    proposal_dir = _proposal_dir_by_id(
+        memory_dir,
+        proposal_id,
+        workspace_dir=workspace_dir,
+    )
     if proposal_dir is None:
         return {
             "approved": False,
@@ -388,7 +462,17 @@ def approve_skill_proposal(
             "error": "Proposal skill folder is invalid",
             "errors": errors,
         }
-    destination_root = Path(skills_dir or paths.USER_SKILLS_DIR).expanduser()
+    recorded_workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
+    if skills_dir is not None:
+        destination_root = Path(skills_dir).expanduser()
+    elif recorded_workspace is not None:
+        destination_root = Path(recorded_workspace) / "skills"
+    elif workspace_dir is not None:
+        destination_root = (
+            Path(_normalize_workspace_dir(workspace_dir) or ".") / "skills"
+        )
+    else:
+        destination_root = Path(paths.USER_SKILLS_DIR).expanduser()
     destination = destination_root / skill_name
     if destination.exists():
         return {
@@ -421,9 +505,18 @@ def approve_skill_proposal(
     }
 
 
-def reject_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str, Any]:
+def reject_skill_proposal(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    workspace_dir: str | Path | None = None,
+) -> dict[str, Any]:
     """Mark one pending proposal rejected."""
-    proposal_dir = _proposal_dir_by_id(memory_dir, proposal_id)
+    proposal_dir = _proposal_dir_by_id(
+        memory_dir,
+        proposal_id,
+        workspace_dir=workspace_dir,
+    )
     if proposal_dir is None:
         return {
             "rejected": False,
