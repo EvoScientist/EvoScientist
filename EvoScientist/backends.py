@@ -1255,9 +1255,8 @@ class AutoskillProposalSandboxBackend(CustomSandboxBackend):
 
     @staticmethod
     def _rewrite_autoskill_mount(command: str) -> str:
-        command = command.replace("/autoskill-proposals/", "./")
         return re.sub(
-            r"(^|[\s'\"(])/autoskill-proposals(?=$|[\s'\";|&)])",
+            r"(^|[\s'\"(=<>])/autoskill-proposals(?=/|$|[\s'\";|&)])",
             r"\1.",
             command,
         )
