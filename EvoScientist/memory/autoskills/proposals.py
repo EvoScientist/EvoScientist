@@ -479,15 +479,8 @@ def approve_skill_proposal(
             "error": "Proposal skill folder is invalid",
             "errors": errors,
         }
-    recorded_workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
     if skills_dir is not None:
         destination_root = Path(skills_dir).expanduser()
-    elif recorded_workspace is not None:
-        destination_root = Path(recorded_workspace) / "skills"
-    elif workspace_dir is not None:
-        destination_root = (
-            Path(_normalize_workspace_dir(workspace_dir) or ".") / "skills"
-        )
     else:
         destination_root = Path(paths.USER_SKILLS_DIR).expanduser()
     destination = destination_root / skill_name

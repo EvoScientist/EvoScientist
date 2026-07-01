@@ -4,6 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from EvoScientist import paths
 from EvoScientist.config import (
     EvoScientistConfig,
     MemorySkillSynthesisCadence,
@@ -291,10 +292,15 @@ def test_submit_autoskill_proposal_defaults_missing_created_at(tmp_path):
     assert proposal.created_at == saved["created_at"]
 
 
-def test_approve_skill_proposal_is_scoped_to_recorded_workspace(tmp_path):
+def test_approve_skill_proposal_is_scoped_to_recorded_workspace(
+    tmp_path,
+    monkeypatch,
+):
     memory_dir = tmp_path / "memories"
     workspace_a = tmp_path / "workspace-a"
     workspace_b = tmp_path / "workspace-b"
+    active_skills_dir = tmp_path / "active-skills"
+    monkeypatch.setattr(paths, "USER_SKILLS_DIR", active_skills_dir)
     workspace_a.mkdir()
     workspace_b.mkdir()
 
@@ -330,7 +336,7 @@ def test_approve_skill_proposal_is_scoped_to_recorded_workspace(tmp_path):
     assert wrong_workspace["approved"] is False
     assert not (workspace_b / "skills" / "workspace-owned").exists()
     assert right_workspace["approved"] is True
-    assert (workspace_a / "skills" / "workspace-owned" / "SKILL.md").exists()
+    assert (active_skills_dir / "workspace-owned" / "SKILL.md").exists()
 
 
 def test_submit_autoskill_proposal_does_not_overwrite_other_workspace(tmp_path):
@@ -388,6 +394,8 @@ def test_submit_tool_reads_live_autoskill_mode_without_rebuild(
     )
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
+    active_skills_dir = tmp_path / "active-skills"
+    monkeypatch.setattr(paths, "USER_SKILLS_DIR", active_skills_dir)
     workspace_dir.mkdir()
     tool = create_submit_autoskill_proposal_tool(
         memory_dir=memory_dir,
@@ -432,7 +440,7 @@ def test_submit_tool_reads_live_autoskill_mode_without_rebuild(
     assert review_payload["status"] == "pending"
     assert "auto_approval" not in review_payload
     assert auto_payload["auto_approval"]["approved"] is True
-    assert (workspace_dir / "skills" / "auto-mode-skill" / "SKILL.md").exists()
+    assert (active_skills_dir / "auto-mode-skill" / "SKILL.md").exists()
 
 
 def test_submit_autoskill_proposal_rejects_invalid_generated_folder(tmp_path):
