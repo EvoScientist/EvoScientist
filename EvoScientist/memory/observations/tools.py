@@ -204,6 +204,10 @@ def _runtime_config_value(runtime: ToolRuntime | None, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _runtime_project_id(runtime: ToolRuntime | None, default_project_id: str) -> str:
+    return _runtime_config_value(runtime, "evomemory_project_id") or default_project_id
+
+
 def _runtime_session_id(runtime: ToolRuntime | None) -> str | None:
     """Extract the source thread id from tool runtime metadata when present."""
     source_session_id = _runtime_config_value(runtime, "evomemory_source_session_id")
@@ -229,7 +233,7 @@ def _resolve_observation_context(
     if source_session_id is None:
         return None
     return _ObservationContext(
-        project_id=_runtime_config_value(runtime, "evomemory_project_id") or project_id,
+        project_id=_runtime_project_id(runtime, project_id),
         source_session_id=source_session_id,
         source_agent=_runtime_config_value(runtime, "evomemory_source_agent")
         or source_agent,
@@ -252,12 +256,9 @@ def create_search_observations_tool(
         runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None,
     ) -> str:
         search_mode = ObservationSearchMode(mode)
-        effective_project_id = (
-            _runtime_config_value(runtime, "evomemory_project_id") or project_id
-        )
         results = search_observation_files(
             memory_dir=memory_dir,
-            project_id=effective_project_id,
+            project_id=_runtime_project_id(runtime, project_id),
             query=query,
             scope=scope,
             memory_type=memory_type,
@@ -300,12 +301,9 @@ def create_read_memory_tool(
         runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None,
     ) -> str:
         requested_id = observation_id.strip()
-        effective_project_id = (
-            _runtime_config_value(runtime, "evomemory_project_id") or project_id
-        )
         result = read_observation_file(
             memory_dir=memory_dir,
-            project_id=effective_project_id,
+            project_id=_runtime_project_id(runtime, project_id),
             observation_id=requested_id,
         )
         if result is None:
@@ -414,12 +412,9 @@ def create_link_observations_tool(
         bidirectional: bool = True,
         runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None,
     ) -> str:
-        effective_project_id = (
-            _runtime_config_value(runtime, "evomemory_project_id") or project_id
-        )
         result = link_observation_files(
             memory_dir=memory_dir,
-            project_id=effective_project_id,
+            project_id=_runtime_project_id(runtime, project_id),
             source_observation_id=source_observation_id,
             target_observation_id=target_observation_id,
             reason=reason,
