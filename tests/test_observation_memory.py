@@ -43,6 +43,7 @@ from EvoScientist.memory.observations import (
     create_search_observations_tool,
     link_observation_files,
     list_observation_documents,
+    read_observation_document,
     read_observation_file,
     read_observation_id_from_path,
     record_observation_file,
@@ -716,6 +717,56 @@ def test_legacy_observation_source_without_session_id_still_reads(tmp_path):
     assert read is not None
     assert read["observation_id"] == "O-legacy"
     assert hits[0]["observation_id"] == "O-legacy"
+
+
+def test_unquoted_naive_yaml_timestamp_does_not_claim_utc(tmp_path):
+    observation = tmp_path / "O-naive.md"
+    observation.write_text(
+        "---\n"
+        "id: O-naive\n"
+        "created_at: 2026-01-01 12:30:00\n"
+        "summary: Legacy observation with naive YAML timestamp.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        "  session_id: thread-1\n"
+        "---\n"
+        "Legacy body text.\n",
+        encoding="utf-8",
+    )
+
+    document = read_observation_document(observation)
+
+    assert document is not None
+    metadata, _body = document
+    assert metadata.created_at == "2026-01-01T12:30:00"
+
+
+def test_unquoted_aware_yaml_timestamp_normalizes_to_utc(tmp_path):
+    observation = tmp_path / "O-aware.md"
+    observation.write_text(
+        "---\n"
+        "id: O-aware\n"
+        "created_at: 2026-01-01 12:30:00+02:00\n"
+        "summary: Legacy observation with aware YAML timestamp.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        "  session_id: thread-1\n"
+        "---\n"
+        "Legacy body text.\n",
+        encoding="utf-8",
+    )
+
+    document = read_observation_document(observation)
+
+    assert document is not None
+    metadata, _body = document
+    assert metadata.created_at == "2026-01-01T10:30:00Z"
 
 
 def test_link_observation_files_keeps_supersedes_directional(tmp_path):

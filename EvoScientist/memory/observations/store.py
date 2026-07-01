@@ -112,7 +112,8 @@ class ObservationFrontmatter(BaseModel):
         if isinstance(value, datetime):
             if value.tzinfo is not None:
                 value = value.astimezone(UTC)
-            return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+                return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+            return value.strftime("%Y-%m-%dT%H:%M:%S")
         if isinstance(value, date):
             return value.isoformat()
         return value
