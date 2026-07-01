@@ -721,7 +721,7 @@ def cmd_interactive(
             def _print_pending_skill_proposals_notice() -> None:
                 from .commands import _pending_skill_proposals_message
 
-                message = _pending_skill_proposals_message()
+                message = _pending_skill_proposals_message(state.get("workspace_dir"))
                 if message:
                     console.print(message, style="yellow")
 

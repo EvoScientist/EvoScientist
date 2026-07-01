@@ -489,7 +489,9 @@ def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
         )
 
 
-def _pending_skill_proposals_message() -> str | None:
+def _pending_skill_proposals_message(
+    workspace_dir: str | Path | None = None,
+) -> str | None:
     """Return a concise review reminder when autoskill proposals are waiting."""
     try:
         from .. import paths
@@ -497,7 +499,7 @@ def _pending_skill_proposals_message() -> str | None:
 
         count = pending_skill_proposal_count(
             paths.MEMORIES_DIR,
-            workspace_dir=paths.WORKSPACE_ROOT,
+            workspace_dir=workspace_dir or paths.WORKSPACE_ROOT,
         )
     except Exception:
         return None
@@ -505,7 +507,7 @@ def _pending_skill_proposals_message() -> str | None:
         return None
     return (
         f"EvoMemory has {count} autoskill proposal(s) ready for review. "
-        "Run /autoskills list."
+        "Run /autoskills review."
     )
 
 
