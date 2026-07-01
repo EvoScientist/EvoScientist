@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 from typing import ClassVar
 
 from rich.table import Table
@@ -9,6 +10,11 @@ from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 AUTOSKILLS_COMMAND = "/autoskills"
+_PROPOSAL_STATUSES = {
+    "review": "pending",
+    "approved": "approved",
+    "rejected": "rejected",
+}
 
 
 class AutoSkillsCommand(Command):
@@ -18,10 +24,12 @@ class AutoSkillsCommand(Command):
     alias: ClassVar[list[str]] = ["/skills-review"]
     description = "Review EvoMemory autoskill proposals"
     subcommands: ClassVar[list[SubCommand]] = [
-        SubCommand("status", "Show AutoSkills config and pending proposals"),
-        SubCommand("list", "List autoskill proposals"),
-        SubCommand("approve", "Approve a pending autoskill proposal by id"),
-        SubCommand("reject", "Reject a pending autoskill proposal by id"),
+        SubCommand("status", "Show AutoSkills config and proposals for review"),
+        SubCommand("help", "Show AutoSkills command examples"),
+        SubCommand("list", "List autoskill proposals, optionally filtered by status"),
+        SubCommand("review", "Review autoskill proposals awaiting a decision"),
+        SubCommand("approve", "Approve an autoskill proposal by id"),
+        SubCommand("reject", "Reject an autoskill proposal by id"),
         SubCommand("run", "Run AutoSkills once now"),
         SubCommand("on", "Enable periodic AutoSkills"),
         SubCommand("off", "Disable periodic AutoSkills"),
@@ -31,21 +39,25 @@ class AutoSkillsCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
-        sub = args[0].lower() if args else "status"
+        sub = args[0].lower() if args else "help"
         rest = args[1:]
-        if sub == "status":
+        if sub in {"help", "-h", "--help", "?"}:
+            self._show_help(ctx)
+        elif sub in {"status", "show"}:
             await self._status(ctx)
-        elif sub == "list":
-            await self._list(ctx)
-        elif sub == "approve":
+        elif sub in {"list", "ls", "proposals"}:
+            await self._list_command(ctx, rest)
+        elif sub == "review":
+            await self._list(ctx, status="pending")
+        elif sub in {"approve", "accept"}:
             await self._approve(ctx, self._first_arg(rest))
-        elif sub == "reject":
+        elif sub in {"reject", "deny", "decline"}:
             await self._reject(ctx, self._first_arg(rest))
-        elif sub == "run":
+        elif sub in {"run", "now"}:
             await self._run(ctx)
-        elif sub == "on":
+        elif sub in {"on", "enable"}:
             await self._set_config(ctx, "memory_skill_synthesis_enabled", "true")
-        elif sub == "off":
+        elif sub in {"off", "disable"}:
             await self._set_config(ctx, "memory_skill_synthesis_enabled", "false")
         elif sub == "mode":
             await self._set_config(
@@ -53,12 +65,18 @@ class AutoSkillsCommand(Command):
                 "memory_skill_synthesis_mode",
                 self._first_arg(rest),
             )
+        elif sub in {"auto", "automatic"}:
+            await self._set_config(ctx, "memory_skill_synthesis_mode", "auto")
+        elif sub == "manual":
+            await self._set_config(ctx, "memory_skill_synthesis_mode", "review")
         elif sub == "cadence":
             await self._set_config(
                 ctx,
                 "memory_skill_synthesis_cadence",
                 self._first_arg(rest),
             )
+        elif sub in {"nightly", "weekly", "monthly"}:
+            await self._set_config(ctx, "memory_skill_synthesis_cadence", sub)
         elif sub == "time":
             await self._set_config(
                 ctx,
@@ -66,12 +84,7 @@ class AutoSkillsCommand(Command):
                 self._first_arg(rest),
             )
         else:
-            ctx.ui.append_system("AutoSkills commands:", style="bold")
-            for item in self.subcommands:
-                ctx.ui.append_system(
-                    f"  {AUTOSKILLS_COMMAND} {item.name:<8} {item.description}",
-                    style="dim",
-                )
+            self._show_help(ctx, prefix=f"Unknown AutoSkills command: {sub}")
 
     async def _status(self, ctx: CommandContext) -> None:
         from ... import paths
@@ -97,9 +110,30 @@ class AutoSkillsCommand(Command):
             style="dim",
         )
         ctx.ui.append_system(
-            f"Pending autoskill proposal(s): {len(pending)}",
+            f"AutoSkill proposal(s) ready for review: {len(pending)}",
             style="yellow" if pending else "dim",
         )
+        if pending:
+            ctx.ui.append_system(
+                (
+                    f"Next: {AUTOSKILLS_COMMAND} review, then "
+                    f"{AUTOSKILLS_COMMAND} approve <id> or "
+                    f"{AUTOSKILLS_COMMAND} reject <id>."
+                ),
+                style="dim",
+            )
+        elif cfg.memory_skill_synthesis_enabled:
+            ctx.ui.append_system(
+                f"Next: {AUTOSKILLS_COMMAND} run to search now, or "
+                f"{AUTOSKILLS_COMMAND} help for commands.",
+                style="dim",
+            )
+        else:
+            ctx.ui.append_system(
+                f"Next: {AUTOSKILLS_COMMAND} run to search once, or "
+                f"{AUTOSKILLS_COMMAND} on to enable scheduled runs.",
+                style="dim",
+            )
         if cfg.memory_skill_synthesis_enabled:
             try:
                 rows = await alist_autoskill_schedules(cfg, limit=1)
@@ -111,20 +145,46 @@ class AutoSkillsCommand(Command):
                     style="dim",
                 )
 
-    async def _list(self, ctx: CommandContext) -> None:
+    async def _list_command(self, ctx: CommandContext, args: list[str]) -> None:
+        if not args or args[0].lower() == "all":
+            await self._list(ctx)
+            return
+        status = _PROPOSAL_STATUSES.get(args[0].lower())
+        if status is None:
+            ctx.ui.append_system(
+                f"Usage: {AUTOSKILLS_COMMAND} list [review|approved|rejected|all]",
+                style="yellow",
+            )
+            return
+        await self._list(ctx, status=status)
+
+    async def _list(self, ctx: CommandContext, *, status: str | None = None) -> None:
         from ... import paths
         from ...memory.autoskills.proposals import list_skill_proposals
 
         workspace_dir = self._workspace_dir(ctx)
         proposals = list_skill_proposals(
             paths.MEMORIES_DIR,
+            status=status,
             workspace_dir=workspace_dir,
         )
         if not proposals:
-            ctx.ui.append_system("No autoskill proposals.", style="dim")
+            if status:
+                label = self._status_label(status)
+                ctx.ui.append_system(
+                    f"No autoskill proposals {label}.",
+                    style="dim",
+                )
+            else:
+                ctx.ui.append_system("No autoskill proposals.", style="dim")
             return
 
-        table = Table(title="EvoMemory AutoSkill Proposals", show_header=True)
+        title = "EvoMemory AutoSkill Proposals"
+        if status:
+            title = (
+                f"EvoMemory AutoSkill Proposals {self._status_label(status).title()}"
+            )
+        table = Table(title=title, show_header=True)
         table.add_column("ID", style="cyan")
         table.add_column("AutoSkill", style="green")
         table.add_column("Status", style="yellow")
@@ -140,7 +200,8 @@ class AutoSkillsCommand(Command):
             )
         ctx.ui.mount_renderable(table)
         ctx.ui.append_system(
-            f"Use {AUTOSKILLS_COMMAND} approve <id> or {AUTOSKILLS_COMMAND} reject <id>.",
+            f"Use {AUTOSKILLS_COMMAND} approve <id> or "
+            f"{AUTOSKILLS_COMMAND} reject <id>.",
             style="dim",
         )
 
@@ -152,6 +213,10 @@ class AutoSkillsCommand(Command):
             ctx.ui.append_system(
                 f"Usage: {AUTOSKILLS_COMMAND} approve <id>",
                 style="yellow",
+            )
+            ctx.ui.append_system(
+                f"Run {AUTOSKILLS_COMMAND} review to copy a proposal ID.",
+                style="dim",
             )
             return
         workspace_dir = self._workspace_dir(ctx)
@@ -180,6 +245,10 @@ class AutoSkillsCommand(Command):
             ctx.ui.append_system(
                 f"Usage: {AUTOSKILLS_COMMAND} reject <id>",
                 style="yellow",
+            )
+            ctx.ui.append_system(
+                f"Run {AUTOSKILLS_COMMAND} review to copy a proposal ID.",
+                style="dim",
             )
             return
         workspace_dir = self._workspace_dir(ctx)
@@ -226,14 +295,22 @@ class AutoSkillsCommand(Command):
 
         workspace_dir = self._workspace_dir(ctx)
         if not value:
+            cfg = get_effective_config()
+            current = self._display_value(getattr(cfg, key))
             ctx.ui.append_system(
-                f"Missing value for {self._config_label(key)}.",
+                f"Current {self._config_label(key)}: {current}",
+                style="dim",
+            )
+            ctx.ui.append_system(
+                f"Usage: {self._config_usage(key)}",
                 style="yellow",
             )
             return
         if not await asyncio.to_thread(set_config_value, key, value):
+            valid = self._config_values(key)
+            suffix = f" Valid values: {valid}." if valid else ""
             ctx.ui.append_system(
-                f"Invalid value for {self._config_label(key)}: {value}",
+                f"Invalid value for {self._config_label(key)}: {value}.{suffix}",
                 style="red",
             )
             return
@@ -263,6 +340,83 @@ class AutoSkillsCommand(Command):
     @staticmethod
     def _display_value(value: object) -> object:
         return getattr(value, "value", value)
+
+    @staticmethod
+    def _enum_values(enum_type: type[Enum], *, separator: str = ", ") -> str:
+        return separator.join(str(member.value) for member in enum_type)
+
+    @classmethod
+    def _config_usage(cls, key: str) -> str:
+        from ...config import MemorySkillSynthesisCadence, MemorySkillSynthesisMode
+
+        if key == "memory_skill_synthesis_mode":
+            values = cls._enum_values(MemorySkillSynthesisMode, separator="|")
+            return f"{AUTOSKILLS_COMMAND} mode {values}"
+        if key == "memory_skill_synthesis_cadence":
+            values = cls._enum_values(MemorySkillSynthesisCadence, separator="|")
+            return f"{AUTOSKILLS_COMMAND} cadence {values}"
+        if key == "memory_skill_synthesis_time":
+            return f"{AUTOSKILLS_COMMAND} time HH:MM"
+        return f"{AUTOSKILLS_COMMAND} <value>"
+
+    @classmethod
+    def _config_values(cls, key: str) -> str | None:
+        from ...config import MemorySkillSynthesisCadence, MemorySkillSynthesisMode
+
+        if key == "memory_skill_synthesis_mode":
+            return cls._enum_values(MemorySkillSynthesisMode)
+        if key == "memory_skill_synthesis_cadence":
+            return cls._enum_values(MemorySkillSynthesisCadence)
+        if key == "memory_skill_synthesis_time":
+            return "24-hour local time, for example 03:00"
+        return None
+
+    @staticmethod
+    def _status_label(status: str) -> str:
+        if status == "pending":
+            return "ready for review"
+        return status
+
+    @staticmethod
+    def _show_help(ctx: CommandContext, *, prefix: str | None = None) -> None:
+        if prefix:
+            ctx.ui.append_system(prefix, style="yellow")
+        ctx.ui.append_system(
+            (
+                f"Usage: {AUTOSKILLS_COMMAND} "
+                "[status|review|approve|reject|run|on|off|mode|cadence|time]"
+            ),
+            style="bold",
+        )
+        table = Table(title="AutoSkills Commands", show_header=True)
+        table.add_column("Command", style="cyan")
+        table.add_column("Use when", style="dim")
+        rows = [
+            (AUTOSKILLS_COMMAND, "Show this command reference"),
+            (f"{AUTOSKILLS_COMMAND} status", "Show config and the next useful action"),
+            (f"{AUTOSKILLS_COMMAND} review", "Review proposals waiting for a decision"),
+            (f"{AUTOSKILLS_COMMAND} approve <id>", "Install a reviewed autoskill"),
+            (f"{AUTOSKILLS_COMMAND} reject <id>", "Dismiss a reviewed proposal"),
+            (f"{AUTOSKILLS_COMMAND} run", "Start a one-off background autoskill run"),
+            (f"{AUTOSKILLS_COMMAND} on|off", "Enable or disable scheduled runs"),
+            (f"{AUTOSKILLS_COMMAND} auto|manual", "Switch approval behavior"),
+            (
+                f"{AUTOSKILLS_COMMAND} nightly|weekly|monthly",
+                "Set the built-in schedule cadence",
+            ),
+            (f"{AUTOSKILLS_COMMAND} time 03:00", "Set the local schedule time"),
+            (
+                f"{AUTOSKILLS_COMMAND} list [status]",
+                "List all proposals or filter by review, approved, or rejected",
+            ),
+        ]
+        for command, description in rows:
+            table.add_row(command, description)
+        ctx.ui.mount_renderable(table)
+        ctx.ui.append_system(
+            "Aliases: /skills-review, ls, proposals, accept, deny, enable, disable, now.",
+            style="dim",
+        )
 
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
