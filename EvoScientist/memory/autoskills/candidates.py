@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from typing import TypedDict
 
@@ -173,11 +173,10 @@ def autoskill_candidates(
         component_docs = [
             documents_by_id[observation_id] for observation_id in sorted(component)
         ]
-        procedural_count = sum(
-            1
-            for document in component_docs
-            if document.memory_type == MemoryType.PROCEDURAL
+        memory_type_counts = Counter(
+            document.memory_type for document in component_docs
         )
+        procedural_count = memory_type_counts[MemoryType.PROCEDURAL]
         if len(component_docs) < MIN_CLUSTER_SIZE:
             continue
         if procedural_count < MIN_PROCEDURAL_OBSERVATIONS:
@@ -206,16 +205,8 @@ def autoskill_candidates(
                 "observation_ids": observation_ids,
                 "observation_count": len(observation_rows),
                 "procedural_count": procedural_count,
-                "semantic_count": sum(
-                    1
-                    for document in component_docs
-                    if document.memory_type == MemoryType.SEMANTIC
-                ),
-                "episodic_count": sum(
-                    1
-                    for document in component_docs
-                    if document.memory_type == MemoryType.EPISODIC
-                ),
+                "semantic_count": memory_type_counts[MemoryType.SEMANTIC],
+                "episodic_count": memory_type_counts[MemoryType.EPISODIC],
                 "observations": observation_rows,
                 "relations": component_relations,
                 "existing_pending_proposal": cluster_hash in proposed_hashes["pending"],

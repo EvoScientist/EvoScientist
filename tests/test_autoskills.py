@@ -115,6 +115,8 @@ def test_autoskill_candidates_use_linked_procedural_clusters(tmp_path):
         third["observation_id"],
     }
     assert candidates[0]["procedural_count"] == 2
+    assert candidates[0]["semantic_count"] == 1
+    assert candidates[0]["episodic_count"] == 0
     assert candidates[0]["existing_pending_proposal"] is False
     assert candidates[0]["already_processed"] is False
 
