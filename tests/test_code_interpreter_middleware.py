@@ -330,6 +330,56 @@ def test_subagent_graphs_use_filtered_graph_class():
     assert isinstance(_sub_graphs.data_analysis_agent, _EvoFilteredGraph)
 
 
+def test_strip_private_recurses_into_nested_subgraph_state():
+    """When ``subgraphs=True``, ``PregelTask.state`` holds a nested
+    ``StateSnapshot`` for the subgraph. Its ``values`` (and its own nested
+    tasks) can carry ``_quickjs_snapshot_payload`` just like the parent.
+    Recursion covers the compound leak path CodeRabbit flagged.
+    """
+    from langgraph.types import StateSnapshot
+
+    from EvoScientist.langgraph_dev.main_graph import _strip_private
+
+    nested_snap = StateSnapshot(
+        values={"_quickjs_snapshot_payload": b"n" * 1_400_000, "messages": []},
+        next=(),
+        config={},
+        metadata={"source": "loop", "step": 3},
+        created_at="2026-07-01T12:00:00Z",
+        parent_config=None,
+        tasks=(),
+        interrupts=(),
+    )
+
+    class FakeTask:
+        def __init__(self, state):
+            self.id = "sub-1"
+            self.name = "subgraph"
+            self.result = None
+            self.state = state
+
+        def _replace(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            return self
+
+    task_with_nested = FakeTask(nested_snap)
+    task_with_config_state = FakeTask({"configurable": {"thread_id": "t"}})
+    snap = MagicMock()
+    snap.values = {}
+    snap.metadata = {"source": "loop", "step": 5}
+    snap.tasks = (task_with_nested, task_with_config_state)
+    _strip_private(snap)
+    kwargs = snap._replace.call_args.kwargs
+    tasks_after = kwargs["tasks"]
+    # Nested StateSnapshot got recursively scrubbed.
+    assert "_quickjs_snapshot_payload" not in tasks_after[0].state.values
+    assert "messages" in tasks_after[0].state.values
+    # A dict (RunnableConfig-shaped) state passes through unchanged — we only
+    # recurse into ``StateSnapshot`` instances.
+    assert tasks_after[1].state == {"configurable": {"thread_id": "t"}}
+
+
 def test_strip_private_scrubs_delta_counters():
     """``metadata['counters_since_delta_snapshot']`` is a small
     ``{channel: [count, superstep]}`` bookkeeping map. Not a size problem,

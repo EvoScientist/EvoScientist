@@ -19,6 +19,7 @@ cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 """
 
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
 
@@ -49,6 +50,11 @@ def _strip_private(snap):
     * ``snap.metadata['counters_since_delta_snapshot']`` — DeltaChannel's
       snapshot cadence bookkeeping ``{channel: [count, superstep]}``. Tiny
       (~20 B) but exposes the private field name; strip for cleanliness.
+    * ``snap.tasks[*].state`` (nested ``StateSnapshot``) — populated when the
+      caller passes ``subgraphs=True``. Repeats all of the above surfaces
+      for each subgraph task, so recurse into it. Not exercised by the
+      current WebUI (which doesn't pass ``subgraphs=True`` on REST reads),
+      but SDK / curl / gRPC callers can.
     """
     if snap is None:
         return snap
@@ -80,14 +86,27 @@ def _strip_private(snap):
         new_tasks = []
         changed = False
         for t in tasks:
+            replace_kwargs: dict = {}
             result = getattr(t, "result", None)
             if isinstance(result, dict) and any(
                 k in result for k in _PRIVATE_STATE_FIELDS
             ):
-                scrubbed_result = {
+                replace_kwargs["result"] = {
                     k: v for k, v in result.items() if k not in _PRIVATE_STATE_FIELDS
                 }
-                new_tasks.append(t._replace(result=scrubbed_result))
+            # ``t.state`` is a ``RunnableConfig | StateSnapshot | None`` per
+            # ``PregelTask``'s typing. When ``subgraphs=True`` on the caller,
+            # this holds the subgraph's fully-materialized ``StateSnapshot`` —
+            # which repeats the same four leak surfaces (``values``,
+            # ``metadata.writes``, ``metadata.counters_since_delta_snapshot``,
+            # ``tasks[*].result/state``). Recurse so the whole tree is clean.
+            nested_state = getattr(t, "state", None)
+            if isinstance(nested_state, StateSnapshot):
+                scrubbed_state = _strip_private(nested_state)
+                if scrubbed_state is not nested_state:
+                    replace_kwargs["state"] = scrubbed_state
+            if replace_kwargs:
+                new_tasks.append(t._replace(**replace_kwargs))
                 changed = True
             else:
                 new_tasks.append(t)
