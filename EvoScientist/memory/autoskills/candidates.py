@@ -198,16 +198,12 @@ def autoskill_candidates(
             }
             for document in component_docs
         ]
-        cluster_hash = _short_hash(
-            {
-                "observations": observation_rows,
-                "relations": component_relations,
-            }
-        )
+        observation_ids = [row["id"] for row in observation_rows]
+        cluster_hash = _short_hash({"observation_ids": observation_ids})
         candidates.append(
             {
                 "cluster_hash": cluster_hash,
-                "observation_ids": [row["id"] for row in observation_rows],
+                "observation_ids": observation_ids,
                 "observation_count": len(observation_rows),
                 "procedural_count": procedural_count,
                 "semantic_count": sum(

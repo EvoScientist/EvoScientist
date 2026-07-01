@@ -170,6 +170,48 @@ def test_autoskill_candidates_surface_contradiction_clusters(tmp_path):
     )
 
 
+def test_autoskill_candidate_hash_ignores_mutable_relations(tmp_path):
+    memory_dir = tmp_path / "memories"
+    first = _record(
+        memory_dir,
+        summary="Use focused pytest before full suite.",
+        observation="Run the focused pytest file before the full test suite.",
+    )
+    second = _record(
+        memory_dir,
+        summary="Use ruff on changed Python modules.",
+        observation="Run ruff on changed modules before broad validation.",
+    )
+    third = _record(
+        memory_dir,
+        summary="Validation workflow benefits from narrow checks.",
+        observation="Narrow validation catches regressions before expensive checks.",
+        memory_type=MemoryType.SEMANTIC,
+    )
+    for source, target in ((first, second), (second, third)):
+        link_observation_files(
+            memory_dir=memory_dir,
+            project_id="P-project",
+            source_observation_id=source["observation_id"],
+            target_observation_id=target["observation_id"],
+            reason="These observations describe the same validation workflow.",
+        )
+
+    before = autoskill_candidates(memory_dir=memory_dir, project_id="P-project")[0]
+    link_observation_files(
+        memory_dir=memory_dir,
+        project_id="P-project",
+        source_observation_id=first["observation_id"],
+        target_observation_id=third["observation_id"],
+        reason="A later linker pass found another relation in the same cluster.",
+    )
+    after = autoskill_candidates(memory_dir=memory_dir, project_id="P-project")[0]
+
+    assert after["cluster_hash"] == before["cluster_hash"]
+    assert after["observation_ids"] == before["observation_ids"]
+    assert len(after["relations"]) > len(before["relations"])
+
+
 def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
