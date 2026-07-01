@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import yaml
@@ -104,6 +104,17 @@ class ObservationFrontmatter(BaseModel):
     def _non_blank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
+        return value
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def _coerce_yaml_timestamp(cls, value: object) -> object:
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(UTC)
+            return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if isinstance(value, date):
+            return value.isoformat()
         return value
 
     def to_frontmatter_dict(self) -> ObservationFrontmatterPayload:
