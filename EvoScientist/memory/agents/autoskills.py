@@ -24,16 +24,7 @@ from ._factory import (
 _AUTOSKILLS_EXCLUDED_TOOLS = frozenset({"task", "write_todos"})
 
 
-def _autoskills_system_prompt(mode: str) -> str:
-    mode_value = getattr(mode, "value", mode)
-    action = (
-        "Stage proposals for human review."
-        if mode_value != "auto"
-        else (
-            "Stage proposals and let the proposal tool auto-promote only when "
-            "its validation and collision checks pass."
-        )
-    )
+def _autoskills_system_prompt() -> str:
     return (
         "You synthesize reusable skills from EvoMemory observation clusters.\n\n"
         "This is slow, conservative background maintenance. Always call "
@@ -59,9 +50,8 @@ def _autoskills_system_prompt(mode: str) -> str:
         "skill concise and operational.\n\n"
         "Use `execute` for lightweight validation when useful. Shell commands "
         "run from the autoskill proposal root; keep generated files and logs "
-        "under `/autoskill-proposals/`. A useful validation command is "
-        "`python /skills/skill-creator/scripts/quick_validate.py "
-        "/autoskill-proposals/<skill-name> --strict`.\n\n"
+        "under `/autoskill-proposals/`. Do not shell into `/skills` or "
+        "`/memories`; read those through file tools instead.\n\n"
         "Do not create a skill for one-off project facts, ordinary summaries, "
         "raw logs, weakly related observations, or clusters dominated by "
         "semantic facts without a reusable procedure. Do not manually edit "
@@ -69,8 +59,7 @@ def _autoskills_system_prompt(mode: str) -> str:
         "When the folder is ready, call `submit_autoskill_proposal` with the "
         "exact skill_name, cluster_hash, source observation IDs, and rationale. "
         "If it reports validation errors, edit the proposal folder and submit "
-        "again.\n\n"
-        f"{action}"
+        "again."
     )
 
 
@@ -78,7 +67,6 @@ def _autoskills_tools(
     *,
     memory_dir: str | Path,
     workspace_dir: str | Path,
-    mode: str,
 ) -> list[BaseTool]:
     project_id = resolve_project_id(workspace_dir)
     return [
@@ -89,7 +77,6 @@ def _autoskills_tools(
         ),
         create_submit_autoskill_proposal_tool(
             memory_dir=memory_dir,
-            mode=mode,
             workspace_dir=workspace_dir,
             project_id=project_id,
         ),
@@ -107,15 +94,13 @@ def build_autoskills_graph(
         memory_dir=memory_dir,
         workspace_dir=workspace_dir,
     )
-    mode = cfg.memory_skill_synthesis_mode
     proposals_dir = autoskill_proposals_dir(agent_paths.memory_dir)
     return build_memory_agent_graph(
         name="evomemory-autoskills",
-        system_prompt=_autoskills_system_prompt(mode),
+        system_prompt=_autoskills_system_prompt(),
         tools=_autoskills_tools(
             memory_dir=agent_paths.memory_dir,
             workspace_dir=agent_paths.workspace_dir,
-            mode=mode,
         ),
         memory_dir=agent_paths.memory_dir,
         workspace_dir=agent_paths.workspace_dir,

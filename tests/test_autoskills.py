@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
-from EvoScientist.config import EvoScientistConfig, MemorySkillSynthesisCadence
+from EvoScientist.config import (
+    EvoScientistConfig,
+    MemorySkillSynthesisCadence,
+    MemorySkillSynthesisMode,
+    save_config,
+    set_config_value,
+)
 from EvoScientist.memory.autoskills.candidates import autoskill_candidates
 from EvoScientist.memory.autoskills.proposals import (
     approve_skill_proposal,
@@ -21,6 +28,7 @@ from EvoScientist.memory.autoskills.schedule import (
     autoskill_cron,
     reconcile_autoskill_schedule,
 )
+from EvoScientist.memory.autoskills.tools import create_submit_autoskill_proposal_tool
 from EvoScientist.memory.observations import (
     MemoryScope,
     MemorySourceType,
@@ -278,6 +286,70 @@ def test_submit_autoskill_proposal_does_not_overwrite_other_workspace(tmp_path):
     assert second["submitted"] is False
     assert "another workspace" in second["error"]
     assert list_skill_proposals(memory_dir, workspace_dir=workspace_b) == []
+
+
+def test_submit_tool_reads_live_autoskill_mode_without_rebuild(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config-home"))
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.find_dotenv",
+        lambda *a, **k: str(tmp_path / ".env"),
+    )
+    monkeypatch.delenv("EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_MODE", raising=False)
+    save_config(
+        EvoScientistConfig(
+            memory_skill_synthesis_mode=MemorySkillSynthesisMode.REVIEW,
+        )
+    )
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    tool = create_submit_autoskill_proposal_tool(
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+        project_id="P-project",
+    )
+
+    _write_skill_folder(
+        memory_dir,
+        "review-mode-skill",
+        "Use when testing review mode autoskill submissions.",
+        "# Review mode skill\n",
+    )
+    review_payload = json.loads(
+        tool.run(
+            {
+                "skill_name": "review-mode-skill",
+                "cluster_hash": "cluster-review",
+                "source_observation_ids": ["O-1", "O-2", "O-3"],
+                "rationale": "Review mode should only stage this proposal.",
+            }
+        )
+    )
+    set_config_value("memory_skill_synthesis_mode", "auto")
+    _write_skill_folder(
+        memory_dir,
+        "auto-mode-skill",
+        "Use when testing auto mode autoskill submissions.",
+        "# Auto mode skill\n",
+    )
+    auto_payload = json.loads(
+        tool.run(
+            {
+                "skill_name": "auto-mode-skill",
+                "cluster_hash": "cluster-auto",
+                "source_observation_ids": ["O-4", "O-5", "O-6"],
+                "rationale": "Auto mode should promote this proposal.",
+            }
+        )
+    )
+
+    assert review_payload["status"] == "pending"
+    assert "auto_approval" not in review_payload
+    assert auto_payload["auto_approval"]["approved"] is True
+    assert (workspace_dir / "skills" / "auto-mode-skill" / "SKILL.md").exists()
 
 
 def test_submit_autoskill_proposal_rejects_invalid_generated_folder(tmp_path):

@@ -8,6 +8,7 @@ from pathlib import Path
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
+from ...config import MemorySkillSynthesisMode, get_effective_config
 from .candidates import autoskill_candidates
 from .proposals import approve_skill_proposal, submit_autoskill_proposal
 
@@ -68,7 +69,6 @@ def create_inspect_autoskill_candidates_tool(
 def create_submit_autoskill_proposal_tool(
     *,
     memory_dir: str | Path,
-    mode: str,
     workspace_dir: str | Path,
     project_id: str,
 ) -> BaseTool:
@@ -91,7 +91,8 @@ def create_submit_autoskill_proposal_tool(
         )
         if (
             proposal.get("status") == "pending"
-            and getattr(mode, "value", mode) == "auto"
+            and get_effective_config().memory_skill_synthesis_mode
+            == MemorySkillSynthesisMode.AUTO
         ):
             approved = approve_skill_proposal(
                 memory_dir,
@@ -110,4 +111,5 @@ def create_submit_autoskill_proposal_tool(
             "the tool promotes the proposal only if validation and collision checks pass."
         ),
         args_schema=SubmitAutoskillProposalArgs,
+        infer_schema=False,
     )
