@@ -466,6 +466,8 @@ def _build_memory_worker_agent(
     middleware: list[AgentMiddleware] | None = None,
 ) -> CompiledStateGraph:
     """Create a background memory worker agent for one lifecycle hook."""
+    from ...backends import build_memory_worker_backend
+
     return build_memory_agent_graph(
         name=_memory_worker_agent_name(source_type),
         system_prompt=system_prompt,
@@ -484,6 +486,10 @@ def _build_memory_worker_agent(
             *(middleware or []),
         ],
         response_format=response_format,
+        backend=build_memory_worker_backend(
+            workspace_dir=workspace_dir,
+            memory_dir=memory_dir,
+        ),
     )
 
 

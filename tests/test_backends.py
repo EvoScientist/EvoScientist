@@ -12,6 +12,7 @@ from EvoScientist.backends import (
     CustomSandboxBackend,
     MemoryFilesystemBackend,
     MergedSkillsBackend,
+    ReadOnlyFilesystemBackend,
     convert_virtual_paths_in_command,
     prepare_sandbox_command,
     validate_command,
@@ -701,6 +702,27 @@ class TestVirtualMountResolution:
         assert result[1] == paths.GLOBAL_SKILLS_DIR
         assert result[2] == backends._BUILTIN_SKILLS_DIR
 
+    def test_merged_skills_read_only_primary_blocks_uploads(self, tmp_path):
+        user_dir = tmp_path / "user"
+        global_dir = tmp_path / "global"
+        builtin_dir = tmp_path / "builtin"
+        user_dir.mkdir()
+        global_dir.mkdir()
+        builtin_dir.mkdir()
+        backend = MergedSkillsBackend(
+            primary_dir=str(user_dir),
+            secondary_dir=str(builtin_dir),
+            global_dir=str(global_dir),
+            writable_primary=False,
+        )
+
+        responses = backend.upload_files([("/new-skill/SKILL.md", b"content")])
+
+        assert len(responses) == 1
+        assert responses[0].error is not None
+        assert "read-only" in responses[0].error
+        assert not (user_dir / "new-skill" / "SKILL.md").exists()
+
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
         """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
         execute successfully. Regression guard: USER_SKILLS_DIR must be in
@@ -867,6 +889,16 @@ class TestMemoryFilesystemBackend:
         assert not (tmp_path / "profile" / "NEW.md").exists()
         assert not (tmp_path / "observations" / "projects" / "P-1" / "O-1.md").exists()
 
+    def test_read_only_backend_blocks_uploads(self, tmp_path):
+        backend = ReadOnlyFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+        responses = backend.upload_files([("/blocked.txt", b"blocked")])
+
+        assert len(responses) == 1
+        assert responses[0].error is not None
+        assert "read-only" in responses[0].error
+        assert not (tmp_path / "blocked.txt").exists()
+
     def test_build_memory_agent_backend_routes_guarded_memories(self, tmp_path):
         workspace = tmp_path / "workspace"
         memories = tmp_path / "memories"
@@ -890,6 +922,39 @@ class TestMemoryFilesystemBackend:
         assert "workspace text" in text
         assert blocked_write.error == MemoryFilesystemBackend._RAW_WRITE_ERROR
         assert not (memories / "observations" / "global" / "O-1.md").exists()
+
+    def test_build_memory_worker_backend_allows_profile_edits_only(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        memories = tmp_path / "memories"
+        profile = memories / "profile" / "USER_PROFILE.md"
+        workspace.mkdir()
+        profile.parent.mkdir(parents=True)
+        (workspace / "README.md").write_text("workspace text\n", encoding="utf-8")
+        profile.write_text("old profile\n", encoding="utf-8")
+
+        backend = backends.build_memory_worker_backend(
+            workspace_dir=workspace,
+            memory_dir=memories,
+        )
+
+        workspace_edit = backend.edit("/README.md", "workspace", "changed")
+        profile_edit = backend.edit(
+            "/memories/profile/USER_PROFILE.md",
+            "old profile",
+            "new profile",
+        )
+        uploads = backend.upload_files([("/created.txt", b"created")])
+
+        assert workspace_edit.error is not None
+        assert "read-only" in workspace_edit.error
+        assert (workspace / "README.md").read_text(encoding="utf-8") == (
+            "workspace text\n"
+        )
+        assert profile_edit.error is None
+        assert profile.read_text(encoding="utf-8") == "new profile\n"
+        assert uploads[0].error is not None
+        assert "read-only" in uploads[0].error
+        assert not (workspace / "created.txt").exists()
 
 
 # === CustomSandboxBackend._resolve_path ===

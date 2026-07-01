@@ -788,7 +788,7 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
     """
     Read-only filesystem backend.
 
-    Allows read, ls, grep, glob operations but blocks write and edit.
+    Allows read, ls, grep, glob operations but blocks write, edit, and upload.
     Used for skills directory — agent can read skill definitions but cannot
     modify them.
     """
@@ -808,6 +808,15 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
         return EditResult(
             error="This directory is read-only. Edit operations are not permitted here."
         )
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(
+                path=file_path,
+                error="This directory is read-only. Upload operations are not permitted here.",
+            )
+            for file_path, _ in files
+        ]
 
 
 class MemoryFilesystemBackend(FilesystemBackend):
@@ -862,6 +871,32 @@ def build_memory_agent_backend(
 
     return CompositeBackend(
         default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
+        routes={
+            "/memories/": MemoryFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            )
+        },
+    )
+
+
+def build_memory_worker_backend(
+    *,
+    workspace_dir: str | Path,
+    memory_dir: str | Path,
+):
+    """Build the memory-worker backend.
+
+    Workers may update profile memory through /memories/profile/... and write
+    observations through structured tools. The workspace itself is read-only.
+    """
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=ReadOnlyFilesystemBackend(
+            root_dir=str(workspace_dir),
+            virtual_mode=True,
+        ),
         routes={
             "/memories/": MemoryFilesystemBackend(
                 root_dir=str(memory_dir),
