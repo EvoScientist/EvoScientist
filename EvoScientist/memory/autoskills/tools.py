@@ -9,6 +9,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 from ...config import MemorySkillSynthesisMode, get_effective_config
+from ...tools.skills_manager import list_skills
 from .candidates import autoskill_candidates
 from .proposals import approve_skill_proposal, submit_autoskill_proposal
 
@@ -38,6 +39,33 @@ class SubmitAutoskillProposalArgs(BaseModel):
             "a reusable skill."
         ),
     )
+    operation: str = Field(
+        default="create",
+        description=(
+            "Use 'create' for a new skill or 'update' when the proposal is a "
+            "change to an existing workspace/global skill."
+        ),
+    )
+    target_skill_name: str | None = Field(
+        default=None,
+        description=(
+            "For operation='update', the existing skill being updated. It must "
+            "match skill_name."
+        ),
+    )
+
+
+def _installed_skills_for_autoskill_context() -> list[dict[str, str]]:
+    return [
+        {
+            "name": skill.name,
+            "description": skill.description,
+            "source": skill.source,
+            "path": f"/skills/{skill.path.name}",
+        }
+        for skill in list_skills(include_system=False)
+        if skill.source in {"workspace", "global"}
+    ]
 
 
 def create_inspect_autoskill_candidates_tool(
@@ -54,14 +82,22 @@ def create_inspect_autoskill_candidates_tool(
             project_id=project_id,
             workspace_dir=workspace_dir,
         )
-        return json.dumps({"candidates": candidates}, ensure_ascii=False, default=str)
+        return json.dumps(
+            {
+                "candidates": candidates,
+                "installed_skills": _installed_skills_for_autoskill_context(),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
 
     return StructuredTool.from_function(
         func=_inspect_autoskill_candidates,
         name="inspect_autoskill_candidates",
         description=(
             "Inspect linked observation-memory clusters that may justify a "
-            "new reusable skill. Call this before proposing any skill."
+            "new reusable skill or an update to an existing skill. Call this "
+            "before proposing any skill."
         ),
     )
 
@@ -79,6 +115,8 @@ def create_submit_autoskill_proposal_tool(
         cluster_hash: str,
         source_observation_ids: list[str],
         rationale: str,
+        operation: str = "create",
+        target_skill_name: str | None = None,
     ) -> str:
         proposal = submit_autoskill_proposal(
             memory_dir=memory_dir,
@@ -86,6 +124,8 @@ def create_submit_autoskill_proposal_tool(
             cluster_hash=cluster_hash,
             source_observation_ids=source_observation_ids,
             rationale=rationale,
+            operation=operation,
+            target_skill_name=target_skill_name,
             workspace_dir=workspace_dir,
             project_id=project_id,
         )
@@ -107,8 +147,10 @@ def create_submit_autoskill_proposal_tool(
         name="submit_autoskill_proposal",
         description=(
             "Validate and register an autoskill proposal after creating its "
-            "folder under /autoskill-proposals/<skill-name>. In auto mode, "
-            "the tool promotes the proposal only if validation and collision checks pass."
+            "folder under /autoskill-proposals/<skill-name>. Set operation to "
+            "'update' when changing an existing workspace/global skill. In "
+            "auto mode, the tool promotes the proposal only if validation and "
+            "collision checks pass."
         ),
         args_schema=SubmitAutoskillProposalArgs,
         infer_schema=False,

@@ -36,14 +36,19 @@ class SkillProposal:
     skill_name: str
     description: str
     status: str
+    operation: str
     path: Path
     created_at: str
     updated_at: str
     cluster_hash: str
     source_observation_ids: tuple[str, ...]
+    target_skill_name: str | None = None
     workspace_dir: str | None = None
     project_id: str | None = None
     approved_skill_path: str | None = None
+
+
+_PROPOSAL_OPERATIONS = frozenset({"create", "update"})
 
 
 def _now() -> str:
@@ -108,6 +113,11 @@ def _created_at_for_manifest(existing: dict[str, Any] | None) -> str:
     return _manifest_timestamp(existing, "created_at") or _now()
 
 
+def _normalize_operation(value: object) -> str | None:
+    text = str(value or "create").strip().lower()
+    return text if text in _PROPOSAL_OPERATIONS else None
+
+
 def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
     if workspace_dir is None:
         return None
@@ -131,11 +141,17 @@ def _proposal_from_manifest(
             skill_name=str(manifest["skill_name"]),
             description=str(manifest["description"]),
             status=str(manifest["status"]),
+            operation=_normalize_operation(manifest.get("operation")) or "create",
             path=path,
             created_at=created_at,
             updated_at=updated_at,
             cluster_hash=str(manifest["cluster_hash"]),
             source_observation_ids=source_ids,
+            target_skill_name=(
+                str(manifest["target_skill_name"])
+                if manifest.get("target_skill_name")
+                else None
+            ),
             workspace_dir=(
                 str(manifest["workspace_dir"])
                 if manifest.get("workspace_dir")
@@ -317,6 +333,64 @@ def _validate_skill_proposal_dir(
     return not errors, errors, description_text
 
 
+def _skill_frontmatter_name(skill_dir: Path) -> str | None:
+    content, error = _read_skill_markdown(skill_dir / "SKILL.md")
+    if error is not None or content is None:
+        return None
+    frontmatter, error, _match = _parse_skill_frontmatter(content)
+    if error is not None or frontmatter is None:
+        return None
+    name = str(frontmatter.get("name", "")).strip()
+    return name or None
+
+
+def _find_installed_user_skill(
+    skill_name: str,
+    *,
+    skills_dir: str | Path | None = None,
+) -> Path | None:
+    roots = (
+        [Path(skills_dir).expanduser()]
+        if skills_dir is not None
+        else [Path(paths.USER_SKILLS_DIR).expanduser(), Path(paths.GLOBAL_SKILLS_DIR)]
+    )
+    for root in roots:
+        if not root.exists():
+            continue
+        direct = root / skill_name
+        if direct.is_dir() and (direct / "SKILL.md").is_file():
+            if _skill_frontmatter_name(direct) == skill_name:
+                return direct
+        for entry in root.iterdir():
+            if not entry.is_dir() or not (entry / "SKILL.md").is_file():
+                continue
+            if _skill_frontmatter_name(entry) == skill_name:
+                return entry
+    return None
+
+
+def _copy_proposed_skill(
+    proposal_dir: Path,
+    destination: Path,
+    *,
+    base_dir: Path | None = None,
+) -> None:
+    if not destination.exists():
+        if base_dir is not None:
+            shutil.copytree(base_dir, destination)
+        else:
+            destination.mkdir(parents=True, exist_ok=False)
+    for source_path in proposal_dir.rglob("*"):
+        if not source_path.is_file():
+            continue
+        relative = source_path.relative_to(proposal_dir)
+        if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target)
+
+
 def submit_autoskill_proposal(
     *,
     memory_dir: str | Path,
@@ -324,6 +398,8 @@ def submit_autoskill_proposal(
     cluster_hash: str,
     source_observation_ids: list[str],
     rationale: str,
+    operation: str = "create",
+    target_skill_name: str | None = None,
     workspace_dir: str | Path | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any]:
@@ -335,6 +411,41 @@ def submit_autoskill_proposal(
             "error": "skill_name must be lowercase kebab-case",
             "skill_name": skill_name,
         }
+    normalized_operation = _normalize_operation(operation)
+    if normalized_operation is None:
+        return {
+            "submitted": False,
+            "error": "operation must be 'create' or 'update'",
+            "skill_name": skill_name,
+        }
+    if normalized_operation == "create" and target_skill_name is not None:
+        return {
+            "submitted": False,
+            "error": "target_skill_name is only valid for update proposals",
+            "skill_name": skill_name,
+        }
+    if normalized_operation == "update":
+        target_name = sanitize_skill_name(target_skill_name or skill_name)
+        if target_name != (target_skill_name or skill_name):
+            return {
+                "submitted": False,
+                "error": "target_skill_name must be lowercase kebab-case",
+                "skill_name": skill_name,
+            }
+        if target_name != skill_name:
+            return {
+                "submitted": False,
+                "error": "update proposals must use the target skill name as skill_name",
+                "skill_name": skill_name,
+                "target_skill_name": target_name,
+            }
+        if _find_installed_user_skill(skill_name) is None:
+            return {
+                "submitted": False,
+                "error": f"No installed workspace/global skill named {skill_name!r} to update",
+                "skill_name": skill_name,
+                "operation": normalized_operation,
+            }
     cluster_text = cluster_hash.strip()
     if not cluster_text:
         return {"submitted": False, "error": "cluster_hash must not be empty"}
@@ -362,11 +473,20 @@ def submit_autoskill_proposal(
     proposal_dir = _proposal_root(memory_dir) / skill_name
     manifest_path = proposal_dir / "manifest.json"
     existing = _read_manifest(manifest_path) if manifest_path.exists() else None
-    if existing and existing.get("status") in {"approved", "rejected"}:
+    existing_status = str(existing.get("status", "")) if existing else ""
+    if existing_status == "rejected":
         return {
             "submitted": False,
             "proposal_id": skill_name,
-            "status": existing["status"],
+            "status": existing_status,
+            "path": proposal_virtual_path(skill_name),
+        }
+    existing_is_approved = existing_status == "approved"
+    if existing_is_approved and normalized_operation != "update":
+        return {
+            "submitted": False,
+            "proposal_id": skill_name,
+            "status": existing_status,
             "path": proposal_virtual_path(skill_name),
         }
 
@@ -388,7 +508,7 @@ def submit_autoskill_proposal(
             "path": proposal_virtual_path(skill_name),
         }
 
-    created_at = _created_at_for_manifest(existing)
+    created_at = _now() if existing_is_approved else _created_at_for_manifest(existing)
     (proposal_dir / "RATIONALE.md").write_text(
         rationale.strip() + "\n", encoding="utf-8"
     )
@@ -398,11 +518,14 @@ def submit_autoskill_proposal(
         "skill_name": skill_name,
         "description": description_text,
         "status": "pending",
+        "operation": normalized_operation,
         "created_at": created_at,
         "updated_at": _now(),
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
     }
+    if normalized_operation == "update":
+        manifest["target_skill_name"] = skill_name
     if normalized_workspace is not None:
         manifest["workspace_dir"] = normalized_workspace
     if project_id:
@@ -414,6 +537,8 @@ def submit_autoskill_proposal(
         "proposal_id": skill_name,
         "status": "pending",
         "skill_name": skill_name,
+        "operation": normalized_operation,
+        "target_skill_name": skill_name if normalized_operation == "update" else None,
         "path": proposal_virtual_path(skill_name),
     }
 
@@ -468,6 +593,8 @@ def approve_skill_proposal(
     skill_name = str(manifest.get("skill_name", "")).strip()
     if sanitize_skill_name(skill_name) != skill_name:
         return {"approved": False, "error": "Proposal skill name is invalid"}
+    operation = _normalize_operation(manifest.get("operation")) or "create"
+    target_skill_name = str(manifest.get("target_skill_name") or skill_name).strip()
     valid, errors, _description = _validate_skill_proposal_dir(
         memory_dir=memory_dir,
         skill_name=skill_name,
@@ -484,23 +611,46 @@ def approve_skill_proposal(
     else:
         destination_root = Path(paths.USER_SKILLS_DIR).expanduser()
     destination = destination_root / skill_name
-    if destination.exists():
+    base_skill_dir: Path | None = None
+    if operation == "create" and destination.exists():
         return {
             "approved": False,
             "proposal_id": manifest["proposal_id"],
             "error": f"Skill already exists: {destination}",
         }
+    if operation == "update":
+        if target_skill_name != skill_name:
+            return {
+                "approved": False,
+                "proposal_id": manifest["proposal_id"],
+                "error": "Update proposal target must match the proposed skill name",
+            }
+        local_match = _find_installed_user_skill(
+            skill_name,
+            skills_dir=destination_root,
+        )
+        if local_match is not None:
+            destination = local_match
+        else:
+            existing_global = _find_installed_user_skill(skill_name)
+            if existing_global is None:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest["proposal_id"],
+                    "error": f"No installed workspace/global skill named {skill_name!r} to update",
+                }
+            if destination.exists():
+                return {
+                    "approved": False,
+                    "proposal_id": manifest["proposal_id"],
+                    "error": (
+                        f"Local skill path already exists but does not match "
+                        f"{skill_name!r}: {destination}"
+                    ),
+                }
+            base_skill_dir = existing_global
 
-    destination.mkdir(parents=True, exist_ok=False)
-    for source_path in proposal_dir.rglob("*"):
-        if not source_path.is_file():
-            continue
-        relative = source_path.relative_to(proposal_dir)
-        if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
-            continue
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, target)
+    _copy_proposed_skill(proposal_dir, destination, base_dir=base_skill_dir)
 
     manifest["status"] = "approved"
     manifest["updated_at"] = _now()
@@ -511,6 +661,7 @@ def approve_skill_proposal(
         "approved": True,
         "proposal_id": manifest["proposal_id"],
         "skill_name": skill_name,
+        "operation": operation,
         "path": str(destination),
     }
 

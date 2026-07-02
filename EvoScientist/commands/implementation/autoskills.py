@@ -186,6 +186,7 @@ class AutoSkillsCommand(Command):
             )
         table = Table(title=title, show_header=True)
         table.add_column("ID", style="cyan")
+        table.add_column("Action", style="magenta")
         table.add_column("AutoSkill", style="green")
         table.add_column("Status", style="yellow")
         table.add_column("Observations", justify="right")
@@ -193,6 +194,7 @@ class AutoSkillsCommand(Command):
         for proposal in proposals:
             table.add_row(
                 proposal.proposal_id,
+                proposal.operation,
                 proposal.skill_name,
                 proposal.status,
                 str(len(proposal.source_observation_ids)),
@@ -227,8 +229,9 @@ class AutoSkillsCommand(Command):
             workspace_dir=workspace_dir,
         )
         if result.get("approved"):
+            verb = "Updated" if result.get("operation") == "update" else "Approved"
             ctx.ui.append_system(
-                f"Approved autoskill: {result['skill_name']} ({result['path']})",
+                f"{verb} autoskill: {result['skill_name']} ({result['path']})",
                 style="green",
             )
             ctx.ui.append_system(
