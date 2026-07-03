@@ -29,6 +29,53 @@ def test_resolve_stream_json_auto_mode(auto_mode, output_format, expected):
     assert _resolve_stream_json_auto_mode(auto_mode, output_format) is expected
 
 
+def _overrides_for(monkeypatch, argv):
+    """Invoke the CLI and capture the cli_overrides handed to get_effective_config,
+    aborting before the run actually starts."""
+    from typer.testing import CliRunner
+
+    import EvoScientist.config as cfg_mod
+    from EvoScientist.cli._app import app
+    from EvoScientist.stream.console import console
+
+    captured: dict[str, object] = {}
+
+    class _Stop(Exception):
+        """Sentinel to short-circuit the callback once overrides are captured."""
+
+    def _grab(overrides):
+        """Record the overrides dict, then abort before the heavy run path."""
+        captured["overrides"] = dict(overrides)
+        raise _Stop
+
+    monkeypatch.setattr(cfg_mod, "get_effective_config", _grab)
+    original_console_file = console.file
+    try:
+        CliRunner().invoke(app, argv, catch_exceptions=True)
+    finally:
+        console.file = original_console_file
+    return captured.get("overrides", {})
+
+
+def test_stream_json_defaults_auto_mode_on_in_overrides(monkeypatch):
+    """stream-json without the flag defaults auto-mode (and auto-approve) on."""
+    overrides = _overrides_for(
+        monkeypatch, ["-p", "hi", "--output-format", "stream-json"]
+    )
+    assert overrides.get("auto_mode") is True
+    assert overrides.get("auto_approve") is True
+
+
+def test_no_auto_mode_writes_explicit_false_override(monkeypatch):
+    """Explicit --no-auto-mode must write auto_mode=False so it wins over a config
+    that enables auto-mode (not silently fall back to the config default)."""
+    overrides = _overrides_for(
+        monkeypatch,
+        ["-p", "hi", "--output-format", "stream-json", "--no-auto-mode"],
+    )
+    assert overrides.get("auto_mode") is False
+
+
 def test_redirect_console_to_stderr():
     """redirect_console_to_stderr moves the shared console's output to stderr."""
     from EvoScientist.stream.console import console

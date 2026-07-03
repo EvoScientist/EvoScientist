@@ -2118,8 +2118,14 @@ def _main_callback(
         cli_overrides["auto_mode"] = True
         cli_overrides["auto_approve"] = True
         cli_overrides["enable_ask_user"] = False
-    elif ask_user:
-        cli_overrides["enable_ask_user"] = True
+    else:
+        # An explicit --no-auto-mode (auto_mode is False, not None) must win over
+        # a config file that enables auto-mode; without this the resolved-off
+        # value writes nothing and silently falls back to the config default.
+        if auto_mode is False:
+            cli_overrides["auto_mode"] = False
+        if ask_user:
+            cli_overrides["enable_ask_user"] = True
     if dangerous:
         cli_overrides["dangerous_mode"] = True
     if auth_mode:
