@@ -19,18 +19,45 @@ cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 """
 
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import StateSnapshot
+from langgraph.types import PregelTask, StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
 
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 
+# Sanity check on the LangGraph internals ``_strip_private`` scrubs. If any
+# of these attributes disappear or get renamed in a future upstream bump,
+# the assertion fires at import time — the deployment refuses to start,
+# instead of silently degrading (the filter would ``.get()`` its way to a
+# no-op and the private-field payload would come back on the wire without
+# anyone noticing until a user reports slow thread switches again).
+#
+# Doesn't cover every internal we depend on — ``metadata["writes"]`` /
+# ``metadata["counters_since_delta_snapshot"]`` dict keys aren't a canary
+# target because ``dict.get`` already tolerates their absence. What we
+# canary here is the ``NamedTuple`` field set: renames there would be the
+# highest-impact silent regression.
+_EXPECTED_SNAPSHOT_FIELDS = frozenset({"values", "metadata", "tasks"})
+_EXPECTED_TASK_FIELDS = frozenset({"result", "state"})
+
+_missing_snap = _EXPECTED_SNAPSHOT_FIELDS - set(StateSnapshot._fields)
+_missing_task = _EXPECTED_TASK_FIELDS - set(PregelTask._fields)
+if _missing_snap or _missing_task:
+    raise RuntimeError(
+        "LangGraph state shape drifted from the version _strip_private was "
+        f"written against. Missing StateSnapshot fields: {_missing_snap or set()}. "
+        f"Missing PregelTask fields: {_missing_task or set()}. Review "
+        "_strip_private and re-verify against the current upstream shape "
+        "before removing this assertion."
+    )
+
 
 def _strip_private(snap):
     """Strip ``PrivateStateAttr``-marked fields from a ``StateSnapshot``.
 
-    Verified against a live history response (`019f1cf3-...` thread, 1 touched
-    turn), the private field leaks on four surfaces — three trivial, one heavy:
+    Empirically verified against a live history response for a thread with
+    a single touched turn: the private field leaks on four surfaces — three
+    trivial, one heavy:
 
     * ``snap.values`` — the materialized channel state exposed as the main
       payload. For DeltaChannels this is the delta chain replayed into full
