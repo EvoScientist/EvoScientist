@@ -243,9 +243,7 @@ class TestLoadSaveReset:
         config_path = get_config_path()
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
-            "provider: openai\n"
-            "model: gpt-4o\n"
-            "default_workdir: /tmp/café\n",
+            "provider: openai\nmodel: gpt-4o\ndefault_workdir: /tmp/café\n",
             encoding="utf-8",
         )
 
