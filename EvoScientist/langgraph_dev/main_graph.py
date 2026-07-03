@@ -174,9 +174,8 @@ _agent.__class__ = _EvoFilteredGraph
 EvoScientist_agent = _agent
 
 
-def _apply_filter_to_subagent_graphs() -> None:
-    """Extend the class swap to every subagent graph registered in
-    ``langgraph.json``.
+def _apply_filter_to_all_registered_graphs() -> None:
+    """Extend the class swap to every graph registered in ``langgraph.json``.
 
     ``EvoScientist.py:_build_middleware_stack`` installs
     ``create_code_interpreter_middleware`` unconditionally — it's not gated
@@ -191,26 +190,43 @@ def _apply_filter_to_subagent_graphs() -> None:
     doesn't reach that endpoint and any real code_interpreter touch inside
     a subagent leaks the anchor snapshot verbatim.
 
+    Reads the graph registry straight from ``langgraph.json`` so a new
+    subagent added to the config picks up the swap automatically — no
+    hardcoded list to keep in sync.
+
     Idempotent (skips graphs already swapped) and safe on graphs that don't
     use the middleware — ``_strip_private`` returns snapshots unchanged when
-    the private field is absent.
+    the private field is absent. Best-effort: if the config is unreadable
+    or an entry can't be resolved, the deployment still starts — only the
+    unresolvable subagents remain unfiltered.
     """
-    from EvoScientist.langgraph_dev import graphs as _sub_graphs
+    import json
+    from importlib import import_module
+    from pathlib import Path
 
-    for name in (
-        "writing_agent",
-        "data_analysis_agent",
-        "scheduler",
-        "evomemory_subagent_worker",
-        "evomemory_turn_worker",
-        "evomemory_observation_linker",
-    ):
-        g = getattr(_sub_graphs, name, None)
-        if g is not None and not isinstance(g, _EvoFilteredGraph):
-            g.__class__ = _EvoFilteredGraph
+    config_path = Path(__file__).parent / "langgraph.json"
+    try:
+        config = json.loads(config_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+
+    for path in config.get("graphs", {}).values():
+        # Format: "module.dotted.path:attr_name"
+        if ":" not in path:
+            continue
+        module_path, attr = path.rsplit(":", 1)
+        try:
+            module = import_module(module_path)
+        except ImportError:
+            continue
+        graph = getattr(module, attr, None)
+        if isinstance(graph, CompiledStateGraph) and not isinstance(
+            graph, _EvoFilteredGraph
+        ):
+            graph.__class__ = _EvoFilteredGraph
 
 
-_apply_filter_to_subagent_graphs()
+_apply_filter_to_all_registered_graphs()
 
 
 __all__ = ["EvoScientist_agent"]
