@@ -15,7 +15,6 @@ Test groups:
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -48,6 +47,34 @@ from tests.conftest import run_async as _run
 from tests.fakes import FakeChannelConfig as _FakeConfig
 from tests.fakes import FakeGraphGateway, StubChannel
 
+
+class ManualClock:
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+async def _flush_debounce(ch: StubChannel, sender: str) -> None:
+    task = ch._debounce_tasks.get(sender)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await ch._process_buffered_messages(sender)
+
+
+async def _wait_for_async(predicate) -> None:
+    while not predicate():
+        await asyncio.sleep(0)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 1. DedupCache
 # ═══════════════════════════════════════════════════════════════════
@@ -69,9 +96,10 @@ class TestDedupCache:
         assert dc.is_duplicate("") is False
 
     def test_ttl_expiry(self):
-        dc = DedupCache(ttl_seconds=0.05)
+        clock = ManualClock()
+        dc = DedupCache(ttl_seconds=0.05, clock=clock)
         dc.is_duplicate("msg_001")
-        time.sleep(0.1)
+        clock.advance(0.051)
         # After TTL, the entry should be pruned
         assert dc.is_duplicate("msg_001") is False
 
@@ -759,7 +787,7 @@ class TestChannelDebounce:
                 metadata={"chat_id": "c1"},
             )
             await ch.queue_message(msg)
-            await asyncio.sleep(0.2)
+            await _flush_debounce(ch, "u1")
 
             # Check bus received the message
             assert bus.inbound.qsize() == 1
@@ -788,9 +816,8 @@ class TestChannelDebounce:
                     metadata={"chat_id": "c1"},
                 )
                 await ch.queue_message(msg)
-                await asyncio.sleep(0.01)
 
-            await asyncio.sleep(0.5)
+            await _flush_debounce(ch, "u1")
             assert bus.inbound.qsize() == 1
             received = await bus.consume_inbound()
             assert "part0" in received.content
@@ -845,9 +872,8 @@ class TestChannelDebounce:
                 metadata={"chat_id": "c2", "key": "val2"},
             )
             await ch.queue_message(msg1)
-            await asyncio.sleep(0.01)
             await ch.queue_message(msg2)
-            await asyncio.sleep(0.3)
+            await _flush_debounce(ch, "u1")
 
             received = await bus.consume_inbound()
             # BUG: metadata is from msg1 only; msg2's metadata is lost
@@ -862,7 +888,7 @@ class TestChannelTyping:
             ch = StubChannel()
             await ch.start_typing("c1")
             assert "c1" in ch._typing_tasks
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0)
             await ch.stop_typing("c1")
             assert "c1" not in ch._typing_tasks
 
@@ -1030,7 +1056,14 @@ class TestChannelManagerDispatch:
             ch = StubChannel()
             # Override send to track calls
             sent = []
-            ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or True)
+            sent_event = asyncio.Event()
+
+            async def send(msg):
+                sent.append(msg)
+                sent_event.set()
+                return True
+
+            ch.send = send
             mgr.register(ch)
 
             task = asyncio.create_task(mgr._dispatch_outbound())
@@ -1041,7 +1074,7 @@ class TestChannelManagerDispatch:
                     content="hello",
                 )
             )
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(sent_event.wait(), timeout=1.0)
             task.cancel()
             try:
                 await task
@@ -1068,7 +1101,10 @@ class TestChannelManagerDispatch:
                     content="hello",
                 )
             )
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(
+                _wait_for_async(lambda: bus.outbound_size == 0),
+                timeout=1.0,
+            )
             task.cancel()
             try:
                 await task
@@ -1085,8 +1121,10 @@ class TestChannelManagerDispatch:
             bus = MessageBus()
             mgr = ChannelManager(bus)
             ch = StubChannel()
+            failed_event = asyncio.Event()
 
             async def failing_send(msg):
+                failed_event.set()
                 return False  # Indicates failure
 
             ch.send = failing_send
@@ -1100,7 +1138,7 @@ class TestChannelManagerDispatch:
                     content="hello",
                 )
             )
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(failed_event.wait(), timeout=1.0)
             task.cancel()
             try:
                 await task
@@ -1121,7 +1159,13 @@ class TestChannelManagerDispatch:
             bus = MessageBus()
             mgr = ChannelManager(bus)
             ch = StubChannel()
-            ch.send_media = AsyncMock(return_value=False)
+            failed_event = asyncio.Event()
+
+            async def failing_send_media(**kwargs):
+                failed_event.set()
+                return False
+
+            ch.send_media = failing_send_media
             mgr.register(ch)
 
             task = asyncio.create_task(mgr._dispatch_outbound())
@@ -1133,7 +1177,7 @@ class TestChannelManagerDispatch:
                     media=["/tmp/file.png"],
                 )
             )
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(failed_event.wait(), timeout=1.0)
             task.cancel()
             try:
                 await task
@@ -1444,8 +1488,11 @@ class TestInboundConsumer:
             consumer = self._make_consumer()
             # Start and immediately stop
             task = asyncio.create_task(consumer.run())
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0)
             await consumer.stop()
+            await consumer.bus.publish_inbound(
+                BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="wake")
+            )
             await task
             assert consumer._stopping is True
 
@@ -1593,7 +1640,7 @@ class TestIntegration:
 
             # Now simulate the bus path via queue_message
             await ch.queue_message(inbound)
-            await asyncio.sleep(0.2)
+            await _flush_debounce(ch, "user1")
             assert bus.inbound_size == 1
 
         _run(_test())
@@ -1606,9 +1653,14 @@ class TestIntegration:
             mgr = ChannelManager(bus)
             ch = StubChannel()
             media_sent = []
-            ch.send_media = AsyncMock(
-                side_effect=lambda **kw: media_sent.append(kw) or True,
-            )
+            media_event = asyncio.Event()
+
+            async def send_media(**kw):
+                media_sent.append(kw)
+                media_event.set()
+                return True
+
+            ch.send_media = send_media
             ch.send = AsyncMock(return_value=True)
             mgr.register(ch)
 
@@ -1621,7 +1673,7 @@ class TestIntegration:
                     media=["/path/doc.pdf"],
                 )
             )
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(media_event.wait(), timeout=1.0)
             task.cancel()
             try:
                 await task

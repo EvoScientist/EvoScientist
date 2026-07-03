@@ -91,7 +91,7 @@ def test_stop_already_finished_is_graceful(tmp_path):
     assert "already finished" in bg.stop(pid)
 
 
-def test_exited_elapsed_is_frozen(tmp_path):
+def test_exited_elapsed_is_frozen(tmp_path, monkeypatch):
     """Elapsed for an exited process freezes at its runtime, it must not keep growing."""
     pid = bg.launch(_true_cmd(), str(tmp_path))
     assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
@@ -99,7 +99,7 @@ def test_exited_elapsed_is_frozen(tmp_path):
     proc = bg._PROCESSES[pid]
     assert proc.finished_ts is not None
     first = bg._elapsed(proc)
-    time.sleep(1.1)  # intentional: prove elapsed stays frozen, not ticking up
+    monkeypatch.setattr(bg.time, "time", lambda: proc.finished_ts + 100.0)
     assert bg._elapsed(proc) == first
 
 
