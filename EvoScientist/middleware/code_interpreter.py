@@ -30,7 +30,6 @@ Usage::
 from __future__ import annotations
 
 from langchain.agents.middleware.types import ModelRequest
-from langchain_core.messages import HumanMessage
 from langchain_quickjs import CodeInterpreterMiddleware
 
 # Defaults match the historical hardcoded values. Callers (the agent
@@ -46,41 +45,24 @@ _MEMORY_FIRST_INTERPRETER_PROMPT = (
 
 
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
-    """Code interpreter middleware with EvoScientist's memory preflight hint
-    and a conditional-snapshot optimization on top of upstream ``mode='thread'``.
+    """Code interpreter middleware with EvoScientist's memory preflight hint.
 
-    Under upstream's default (``mode='thread'``), ``after_agent`` snapshots the
-    QuickJS heap on every turn — even turns where the model didn't invoke the
-    eval tool. Empirically ~50 ms per turn of wasted ``create_snapshot()`` work
-    plus a per-turn write to the ``_quickjs_snapshot_payload`` delta channel.
-    We gate the write on whether any ``AIMessage`` since the last
-    ``HumanMessage`` actually called our tool.
-
-    Cross-turn REPL state is preserved: turns that do touch the REPL still
-    snapshot, and ``before_agent`` restore is unchanged.
+    ``after_agent`` / ``aafter_agent`` are intentionally NOT overridden. An
+    earlier "conditional snapshot" gate that skipped ``after_agent`` on turns
+    where ``code_interpreter`` wasn't called saved ~50 ms/turn of
+    ``create_snapshot()`` work, but also skipped the slot eviction upstream
+    performs in the same hook (``finally: self._registry.evict(thread_id)``
+    in ``langchain_quickjs.middleware.CodeInterpreterMiddleware.after_agent``).
+    ``before_agent`` restores the REPL on every turn that follows a touched
+    one via ``self._registry.get(thread_id)`` (get-or-create), so skipping
+    eviction leaked one ``ThreadWorker`` + QuickJS Runtime per persistent
+    ``thread_id`` that ever went touched → quiet. The regression test
+    ``test_after_agent_evicts_slot_on_untouched_turn`` guards against
+    reintroducing the gate.
     """
 
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
-
-    def _repl_touched_this_turn(self, state) -> bool:
-        for msg in reversed(state.get("messages", []) or []):
-            if isinstance(msg, HumanMessage):
-                return False
-            for tc in getattr(msg, "tool_calls", None) or []:
-                if tc.get("name") == self._tool_name:
-                    return True
-        return False
-
-    def after_agent(self, state, runtime):
-        if self._mode == "thread" and not self._repl_touched_this_turn(state):
-            return {}
-        return super().after_agent(state, runtime)
-
-    async def aafter_agent(self, state, runtime):
-        if self._mode == "thread" and not self._repl_touched_this_turn(state):
-            return {}
-        return await super().aafter_agent(state, runtime)
 
 
 # Read-only, batchable tools that benefit from being callable inside JS.

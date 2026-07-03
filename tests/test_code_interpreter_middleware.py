@@ -1,5 +1,5 @@
 """Regression tests for the code_interpreter PTC allowlist and the
-conditional-snapshot optimization on top of upstream ``mode="thread"``.
+``EvoCodeInterpreterMiddleware`` subclass shape.
 
 langchain-quickjs >=0.3 reserves the ``task`` sub-agent dispatch tool as the
 top-level REPL global and raises ``ValueError`` if ``task`` appears in the
@@ -9,15 +9,13 @@ allowlist (``task()`` stays reachable as the REPL global, with responseSchema).
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.middleware.code_interpreter import (
     _DEFAULT_PTC_ALLOWLIST,
-    EvoCodeInterpreterMiddleware,
     create_code_interpreter_middleware,
 )
 
@@ -65,131 +63,48 @@ def test_middleware_uses_thread_mode():
     assert mw._mode == "thread"
 
 
-def test_repl_touched_returns_false_when_no_eval_call():
+def test_after_agent_evicts_slot_on_untouched_turn():
+    """Regression guard against reintroducing a conditional-snapshot gate
+    that skips ``after_agent`` on untouched turns.
+
+    Upstream ``after_agent`` in ``langchain_quickjs/middleware.py`` performs
+    two things: snapshot the REPL AND evict the slot (``finally:
+    self._registry.evict(thread_id)``). ``before_agent`` restores the REPL
+    on any turn that follows a touched one via ``self._registry.get`` —
+    which is get-or-create. So if ``after_agent`` returns early without
+    evicting, one ``ThreadWorker`` + QuickJS Runtime leaks per persistent
+    ``thread_id`` that ever went touched → quiet.
+
+    Fix: don't override ``after_agent`` / ``aafter_agent`` at all — inherit
+    upstream's unconditional snapshot+evict behavior. This test creates a
+    slot the way ``before_agent`` would, calls ``after_agent`` with an
+    untouched-state input, and asserts the slot was evicted.
+    """
     mw = create_code_interpreter_middleware()
-    state = {
+    tid = mw._fallback_thread_id
+
+    # Simulate the slot creation that ``before_agent`` performs when it sees
+    # a prior turn's snapshot payload in state.
+    mw._registry.get(tid)
+    assert len(mw._registry._slots) == 1
+
+    # Untouched-turn state: no ``code_interpreter`` tool call between the
+    # last ``HumanMessage`` and end. Under the earlier buggy gate this
+    # returned ``{}`` without evicting — leaking the slot created above.
+    untouched_state = {
+        "_quickjs_snapshot_payload": b"payload-from-prior-turn",
         "messages": [
-            HumanMessage(content="hi"),
-            AIMessage(content="hello"),
-        ]
+            HumanMessage(content="thanks"),
+            AIMessage(content="you're welcome"),
+        ],
     }
-    assert mw._repl_touched_this_turn(state) is False
+    mw.after_agent(untouched_state, runtime=None)
 
-
-def test_repl_touched_returns_true_when_tool_called_this_turn():
-    mw = create_code_interpreter_middleware()
-    state = {
-        "messages": [
-            HumanMessage(content="run some js"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "code_interpreter", "args": {"code": "1+1"}, "id": "t1"}
-                ],
-            ),
-            ToolMessage(content="2", tool_call_id="t1"),
-        ]
-    }
-    assert mw._repl_touched_this_turn(state) is True
-
-
-def test_repl_touched_ignores_prior_turn_calls():
-    """A ``code_interpreter`` call in an earlier turn (before the last
-    ``HumanMessage``) must not trigger a snapshot for the current turn."""
-    mw = create_code_interpreter_middleware()
-    state = {
-        "messages": [
-            HumanMessage(content="run some js"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "code_interpreter", "args": {"code": "1+1"}, "id": "t1"}
-                ],
-            ),
-            ToolMessage(content="2", tool_call_id="t1"),
-            HumanMessage(content="say hi"),
-            AIMessage(content="hi"),
-        ]
-    }
-    assert mw._repl_touched_this_turn(state) is False
-
-
-def test_after_agent_skips_snapshot_when_untouched(monkeypatch):
-    """``after_agent`` must return ``{}`` — no state write, no
-    ``create_snapshot()`` — when the eval tool wasn't called this turn."""
-    mw = create_code_interpreter_middleware()
-    state = {"messages": [HumanMessage(content="hi"), AIMessage(content="hello")]}
-
-    called = []
-
-    def fake_super_after(self, state, runtime):
-        called.append("super")
-        return {"_quickjs_snapshot_payload": b"anchor"}
-
-    monkeypatch.setattr(
-        EvoCodeInterpreterMiddleware.__mro__[1], "after_agent", fake_super_after
+    assert len(mw._registry._slots) == 0, (
+        "after_agent must evict the slot even on untouched turns, because "
+        "before_agent already restored a REPL that owns a ThreadWorker + "
+        "QuickJS Runtime. Skipping eviction leaks those resources."
     )
-    assert mw.after_agent(state, runtime=None) == {}
-    assert called == []
-
-
-def test_after_agent_delegates_when_touched(monkeypatch):
-    mw = create_code_interpreter_middleware()
-    state = {
-        "messages": [
-            HumanMessage(content="run some js"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "code_interpreter", "args": {"code": "1+1"}, "id": "t1"}
-                ],
-            ),
-        ]
-    }
-
-    def fake_super_after(self, state, runtime):
-        return {"_quickjs_snapshot_payload": b"anchor"}
-
-    monkeypatch.setattr(
-        EvoCodeInterpreterMiddleware.__mro__[1], "after_agent", fake_super_after
-    )
-    result = mw.after_agent(state, runtime=None)
-    assert result == {"_quickjs_snapshot_payload": b"anchor"}
-
-
-def test_aafter_agent_skips_snapshot_when_untouched(monkeypatch):
-    mw = create_code_interpreter_middleware()
-    state = {"messages": [HumanMessage(content="hi"), AIMessage(content="hello")]}
-
-    super_mock = AsyncMock(return_value={"_quickjs_snapshot_payload": b"anchor"})
-    monkeypatch.setattr(
-        EvoCodeInterpreterMiddleware.__mro__[1], "aafter_agent", super_mock
-    )
-    assert asyncio.run(mw.aafter_agent(state, runtime=None)) == {}
-    super_mock.assert_not_awaited()
-
-
-def test_aafter_agent_delegates_when_touched(monkeypatch):
-    mw = create_code_interpreter_middleware()
-    state = {
-        "messages": [
-            HumanMessage(content="run some js"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "code_interpreter", "args": {"code": "1+1"}, "id": "t1"}
-                ],
-            ),
-        ]
-    }
-
-    super_mock = AsyncMock(return_value={"_quickjs_snapshot_payload": b"anchor"})
-    monkeypatch.setattr(
-        EvoCodeInterpreterMiddleware.__mro__[1], "aafter_agent", super_mock
-    )
-    result = asyncio.run(mw.aafter_agent(state, runtime=None))
-    assert result == {"_quickjs_snapshot_payload": b"anchor"}
-    super_mock.assert_awaited_once()
 
 
 def test_evo_filtered_graph_strips_private_snapshot_field():
