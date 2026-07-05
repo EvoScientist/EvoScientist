@@ -245,6 +245,7 @@ class TestEnsureLanggraphDev:
         cfg.enable_async_subagents = False
         cfg.memory_workers_enabled = False
         cfg.enable_scheduler = False  # scheduler crons also require the backend
+        cfg.memory_skill_synthesis_enabled = False
         cfg.langgraph_dev_port = 6174
         cfg.langgraph_dev_file_persistence = True
         with (
@@ -271,6 +272,7 @@ class TestEnsureLanggraphDev:
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
         cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
         cfg.enable_scheduler = True
         assert manager.needs_langgraph_dev(cfg) is True
         cfg.enable_scheduler = False

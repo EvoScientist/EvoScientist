@@ -788,7 +788,7 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
     """
     Read-only filesystem backend.
 
-    Allows read, ls, grep, glob operations but blocks write and edit.
+    Allows read, ls, grep, glob operations but blocks write, edit, and upload.
     Used for skills directory — agent can read skill definitions but cannot
     modify them.
     """
@@ -808,6 +808,15 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
         return EditResult(
             error="This directory is read-only. Edit operations are not permitted here."
         )
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(
+                path=file_path,
+                error="This directory is read-only. Upload operations are not permitted here.",
+            )
+            for file_path, _ in files
+        ]
 
 
 class MemoryFilesystemBackend(FilesystemBackend):
@@ -852,8 +861,12 @@ class MemoryFilesystemBackend(FilesystemBackend):
         ]
 
 
-def build_memory_agent_backend(*, workspace_dir: str | Path, memory_dir: str | Path):
-    """Build the workspace backend with guarded `/memories/` routing."""
+def build_memory_agent_backend(
+    *,
+    workspace_dir: str | Path,
+    memory_dir: str | Path,
+):
+    """Build the standard memory-agent backend with guarded `/memories/` routing."""
     from deepagents.backends import CompositeBackend
 
     return CompositeBackend(
@@ -863,6 +876,70 @@ def build_memory_agent_backend(*, workspace_dir: str | Path, memory_dir: str | P
                 root_dir=str(memory_dir),
                 virtual_mode=True,
             )
+        },
+    )
+
+
+def build_memory_worker_backend(
+    *,
+    workspace_dir: str | Path,
+    memory_dir: str | Path,
+):
+    """Build the memory-worker backend.
+
+    Workers may update profile memory through /memories/profile/... and write
+    observations through structured tools. The workspace itself is read-only.
+    """
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=ReadOnlyFilesystemBackend(
+            root_dir=str(workspace_dir),
+            virtual_mode=True,
+        ),
+        routes={
+            "/memories/": MemoryFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            )
+        },
+    )
+
+
+def build_autoskill_agent_backend(
+    *,
+    memory_dir: str | Path,
+    proposals_dir: str | Path,
+    sandbox_timeout: int = 300,
+):
+    """Build the AutoSkills backend.
+
+    AutoSkills has a different security model from ordinary memory
+    maintenance: it can read memories and installed skills, write proposal
+    folders, and run shell validation from the proposal root.
+    """
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=AutoskillProposalSandboxBackend(
+            root_dir=str(proposals_dir),
+            timeout=sandbox_timeout,
+        ),
+        routes={
+            "/memories/": ReadOnlyFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            ),
+            "/skills/": MergedSkillsBackend(
+                primary_dir=str(paths.USER_SKILLS_DIR),
+                global_dir=str(paths.GLOBAL_SKILLS_DIR),
+                secondary_dir=str(_BUILTIN_SKILLS_DIR),
+                writable_primary=False,
+            ),
+            "/autoskill-proposals/": FilesystemBackend(
+                root_dir=str(proposals_dir),
+                virtual_mode=True,
+            ),
         },
     )
 
@@ -885,8 +962,12 @@ class MergedSkillsBackend(BackendProtocol):
         primary_dir: str,
         secondary_dir: str,
         global_dir: str | None = None,
+        writable_primary: bool = True,
     ):
-        self._primary = FilesystemBackend(root_dir=primary_dir, virtual_mode=True)
+        primary_backend = (
+            FilesystemBackend if writable_primary else ReadOnlyFilesystemBackend
+        )
+        self._primary = primary_backend(root_dir=primary_dir, virtual_mode=True)
         self._global = (
             ReadOnlyFilesystemBackend(root_dir=global_dir, virtual_mode=True)
             if global_dir
@@ -1191,3 +1272,50 @@ class CustomSandboxBackend(LocalShellBackend):
             )
 
         return response
+
+
+class AutoskillProposalSandboxBackend(CustomSandboxBackend):
+    """Shell backend rooted at the autoskill proposal directory.
+
+    File-tool writes through this backend are blocked; proposal writes go
+    through the `/autoskill-proposals/` route. Shell commands run with cwd set
+    to the proposal root so validation commands can inspect generated skill
+    folders without executing in the user's project workspace.
+    """
+
+    _RAW_WRITE_ERROR = (
+        "Raw workspace writes are blocked for AutoSkills. Write proposal files "
+        "under /autoskill-proposals/<skill-name>/."
+    )
+
+    @staticmethod
+    def _rewrite_autoskill_mount(command: str) -> str:
+        return re.sub(
+            r"(^|[\s'\"(=<>])/autoskill-proposals(?=/|$|[\s'\";|&)])",
+            r"\1.",
+            command,
+        )
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(error=self._RAW_WRITE_ERROR)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        return EditResult(error=self._RAW_WRITE_ERROR)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(path=file_path, error=self._RAW_WRITE_ERROR)
+            for file_path, _ in files
+        ]
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        return super().execute(
+            self._rewrite_autoskill_mount(command),
+            timeout=timeout,
+        )

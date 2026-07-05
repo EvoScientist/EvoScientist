@@ -11,8 +11,9 @@ import logging
 import os
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_type_hints
 
 import yaml
 from dotenv import find_dotenv, load_dotenv
@@ -59,7 +60,43 @@ class MemoryObservationWriter(StrEnum):
                 )
 
 
+class MemorySkillSynthesisMode(StrEnum):
+    """Configured AutoSkills approval behavior."""
+
+    REVIEW = "review"
+    AUTO = "auto"
+
+
+class MemorySkillSynthesisCadence(StrEnum):
+    """Preset cadence for the built-in AutoSkills schedule."""
+
+    NIGHTLY = "nightly"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
 DEFAULT_MEMORY_OBSERVATION_WRITER = MemoryObservationWriter.ALL
+DEFAULT_MEMORY_SKILL_SYNTHESIS_MODE = MemorySkillSynthesisMode.REVIEW
+DEFAULT_MEMORY_SKILL_SYNTHESIS_CADENCE = MemorySkillSynthesisCadence.WEEKLY
+DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME = "03:00"
+
+
+def _normalize_hhmm(value: Any) -> str | None:
+    parts = str(value).strip().split(":")
+    if len(parts) != 2:
+        return None
+    hour, minute = parts
+    if not (hour.isdecimal() and minute.isdecimal()):
+        return None
+    try:
+        hour_int = int(hour)
+        minute_int = int(minute)
+    except ValueError:
+        return None
+    if not (0 <= hour_int <= 23 and 0 <= minute_int <= 59):
+        return None
+    return f"{hour_int:02d}:{minute_int:02d}"
+
 
 # =============================================================================
 # Configuration paths
@@ -220,6 +257,16 @@ class EvoScientistConfig:
     # Post-turn and post-subagent memory workers. Disable for no-background-memory
     # controls while still allowing live agents to read configured memory.
     memory_workers_enabled: bool = True
+    # Slow EvoMemory maintenance that periodically scans observation clusters
+    # and drafts reusable skills.
+    memory_skill_synthesis_enabled: bool = True
+    memory_skill_synthesis_mode: MemorySkillSynthesisMode = (
+        DEFAULT_MEMORY_SKILL_SYNTHESIS_MODE
+    )
+    memory_skill_synthesis_cadence: MemorySkillSynthesisCadence = (
+        DEFAULT_MEMORY_SKILL_SYNTHESIS_CADENCE
+    )
+    memory_skill_synthesis_time: str = DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -411,18 +458,18 @@ class EvoScientistConfig:
         if self.dangerous_mode:
             self.auto_approve = True
 
-        try:
-            writer = MemoryObservationWriter(
-                str(self.memory_observation_writer).strip().lower()
-            )
-        except ValueError:
+        _normalize_str_enum_fields(self)
+
+        synthesis_time = _normalize_hhmm(self.memory_skill_synthesis_time)
+        if synthesis_time is None:
             logging.getLogger(__name__).warning(
-                "Invalid memory_observation_writer %r; falling back to %s.",
-                self.memory_observation_writer,
-                DEFAULT_MEMORY_OBSERVATION_WRITER.value,
+                "Invalid memory_skill_synthesis_time %r; falling back to %s.",
+                self.memory_skill_synthesis_time,
+                DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME,
             )
-            writer = DEFAULT_MEMORY_OBSERVATION_WRITER
-        self.memory_observation_writer = writer
+            self.memory_skill_synthesis_time = DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME
+        else:
+            self.memory_skill_synthesis_time = synthesis_time
 
 
 @dataclass(frozen=True)
@@ -518,9 +565,7 @@ def reset_config() -> None:
 
 def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
     """Return a plain serializable config dict."""
-    data = asdict(config)
-    data["memory_observation_writer"] = config.memory_observation_writer.value
-    return data
+    return {key: _plain_config_value(value) for key, value in asdict(config).items()}
 
 
 # =============================================================================
@@ -542,6 +587,8 @@ def _coerce_value(value: Any, field_type: Any) -> Any:
         ValueError: If the value cannot be coerced.
         TypeError: If the value cannot be coerced.
     """
+    if _is_str_enum_type(field_type):
+        return field_type(str(value).strip().lower())
     if field_type == "bool" or field_type is bool:
         if isinstance(value, str):
             return value.lower() in ("true", "1", "yes", "on")
@@ -551,6 +598,48 @@ def _coerce_value(value: Any, field_type: Any) -> Any:
     if field_type == "float" or field_type is float:
         return float(value)
     return str(value)
+
+
+def _plain_config_value(value: Any) -> Any:
+    """Return the persisted/user-facing representation for a config value."""
+    return value.value if isinstance(value, StrEnum) else value
+
+
+@lru_cache(maxsize=1)
+def _config_field_types() -> dict[str, Any]:
+    """Return resolved dataclass annotations for config fields."""
+    return get_type_hints(EvoScientistConfig)
+
+
+def _config_field_type(key: str, fallback: Any) -> Any:
+    """Return the resolved dataclass annotation for a config field."""
+    return _config_field_types().get(key, fallback)
+
+
+def _is_str_enum_type(field_type: Any) -> bool:
+    return isinstance(field_type, type) and issubclass(field_type, StrEnum)
+
+
+def _normalize_str_enum_fields(config: EvoScientistConfig) -> None:
+    """Normalize all StrEnum config fields, falling back to field defaults."""
+    for field in fields(config):
+        field_type = _config_field_type(field.name, field.type)
+        if not _is_str_enum_type(field_type):
+            continue
+
+        raw_value = getattr(config, field.name)
+        try:
+            value = _coerce_value(raw_value, field_type)
+        except (ValueError, TypeError):
+            default = field.default
+            logging.getLogger(__name__).warning(
+                "Invalid %s %r; falling back to %s.",
+                field.name,
+                raw_value,
+                _plain_config_value(default),
+            )
+            value = default
+        setattr(config, field.name, value)
 
 
 def get_config_value(key: str) -> Any:
@@ -564,9 +653,7 @@ def get_config_value(key: str) -> Any:
     """
     config = load_config()
     value = getattr(config, key, None)
-    if isinstance(value, MemoryObservationWriter):
-        return value.value
-    return value
+    return _plain_config_value(value)
 
 
 def set_config_value(key: str, value: Any) -> bool:
@@ -587,7 +674,7 @@ def set_config_value(key: str, value: Any) -> bool:
 
     # Type coercion based on field type
     field_info = next(f for f in fields(EvoScientistConfig) if f.name == key)
-    field_type = field_info.type
+    field_type = _config_field_type(key, field_info.type)
 
     # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
     # (_coerce_value(True, int) would turn it into 1 and slip past).
@@ -601,10 +688,9 @@ def set_config_value(key: str, value: Any) -> bool:
 
     if key == "sandbox_execute_timeout" and value <= 0:
         return False
-    if key == "memory_observation_writer":
-        try:
-            value = MemoryObservationWriter(str(value).strip().lower())
-        except ValueError:
+    if key == "memory_skill_synthesis_time":
+        value = _normalize_hhmm(value)
+        if value is None:
             return False
 
     setattr(config, key, value)
@@ -681,6 +767,10 @@ _ENV_MAPPINGS = {
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
     "memory_observation_writer": "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
     "memory_workers_enabled": "EVOSCIENTIST_MEMORY_WORKERS_ENABLED",
+    "memory_skill_synthesis_enabled": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_ENABLED",
+    "memory_skill_synthesis_mode": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_MODE",
+    "memory_skill_synthesis_cadence": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_CADENCE",
+    "memory_skill_synthesis_time": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_TIME",
 }
 
 
@@ -715,7 +805,10 @@ def get_effective_config(
                 f for f in fields(EvoScientistConfig) if f.name == config_key
             )
             try:
-                data[config_key] = _coerce_value(env_value, field_info.type)
+                data[config_key] = _coerce_value(
+                    env_value,
+                    _config_field_type(config_key, field_info.type),
+                )
             except (ValueError, TypeError):
                 pass
 
