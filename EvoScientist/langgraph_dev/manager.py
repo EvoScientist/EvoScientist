@@ -94,6 +94,8 @@ def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
         return True
     if config.enable_scheduler:
         return True
+    if config.memory_skill_synthesis_enabled:
+        return True
     memory_controls = MemoryControls.from_config(config)
     return memory_controls.worker_needed(
         MemoryObservationTarget.TURN_WORKER

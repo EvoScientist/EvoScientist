@@ -592,6 +592,26 @@ def list_models_by_provider() -> list[tuple[str, str, str]]:
     return result
 
 
+async def list_model_picker_entries(
+    ollama_base_url: str | None,
+    *,
+    include_custom_ollama: bool,
+) -> list[tuple[str, str, str]]:
+    """Return model picker entries, optionally including local Ollama models."""
+    entries = list_models_by_provider()
+    if ollama_base_url:
+        from .ollama_discovery import discover_ollama_models
+
+        for detected_name in await discover_ollama_models(
+            ollama_base_url,
+            timeout=1.5,
+        ):
+            entries.append((detected_name, detected_name, "ollama"))
+        if include_custom_ollama:
+            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    return entries
+
+
 def get_model_info(model: str) -> tuple[str, str] | None:
     """Get the (model_id, provider) tuple for a short name.
 

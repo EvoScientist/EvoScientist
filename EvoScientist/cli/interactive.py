@@ -718,6 +718,13 @@ def cmd_interactive(
             # in scope — define the ``rich_ui`` adapter here rather than
             # at the outer function level.
 
+            def _print_pending_skill_proposals_notice() -> None:
+                from .commands import _pending_skill_proposals_message
+
+                message = _pending_skill_proposals_message(state.get("workspace_dir"))
+                if message:
+                    console.print(message, style="yellow")
+
             async def _on_start_new_session() -> None:
                 """NewCommand callback — rotate workspace (if not fixed),
                 issue a new thread id, reset session-scoped status fields,
@@ -742,6 +749,7 @@ def cmd_interactive(
                         f"[dim]Workspace:[/dim] [cyan]"
                         f"{_shorten_path(state['workspace_dir'])}[/cyan]\n"
                     )
+                _print_pending_skill_proposals_notice()
 
             async def _on_handle_session_resume(
                 thread_id: str, workspace_dir: str | None
@@ -800,6 +808,7 @@ def cmd_interactive(
                     )
                 console.print()
                 await _render_history(thread_id)
+                _print_pending_skill_proposals_notice()
 
             # Rich CLI collapses ``request_quit`` / ``force_quit`` into the
             # same "break the prompt loop" effect — there's no equivalent
@@ -851,6 +860,7 @@ def cmd_interactive(
                     provider,
                     state["ui_backend"],
                 )
+            _print_pending_skill_proposals_notice()
 
             # ---- Channel queue processing (bus → main thread) ----
 

@@ -16,6 +16,7 @@ from ..gateway.background_runs import (
     alaunch_background_run,
     launch_background_run,
 )
+from ..langgraph_dev.sdk import messages_input
 from .observations import build_observation_linker_index_context
 from .scheduler import ObservationLinkerContext
 from .source_context import MemorySourceContext, _trajectory_for_prompt
@@ -108,14 +109,7 @@ def _memory_worker_run_payload(
     metadata = _memory_worker_metadata(context)
     payload: BackgroundRunPayload = {
         "assistant_id": _memory_worker_graph_id(context.source_type),
-        "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": _memory_worker_user_prompt(context),
-                }
-            ]
-        },
+        "input": messages_input(_memory_worker_user_prompt(context)),
         "metadata": metadata,
         "config": {
             "configurable": {
@@ -185,14 +179,7 @@ def _observation_linker_run_payload(
 ) -> BackgroundRunPayload:
     payload: BackgroundRunPayload = {
         "assistant_id": OBSERVATION_LINKER_GRAPH_ID,
-        "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": _observation_linker_user_prompt(context),
-                }
-            ]
-        },
+        "input": messages_input(_observation_linker_user_prompt(context)),
         "metadata": _observation_linker_metadata(context),
         "config": {
             "configurable": {
@@ -297,7 +284,7 @@ def _memory_worker_launch_hooks(
         on_finished=on_finished,
         on_aborted=on_aborted,
         on_status_unknown=on_status_unknown,
-        on_watcher_start_failed=on_status_unknown,
+        on_watcher_start_failed=on_aborted,
     )
 
 

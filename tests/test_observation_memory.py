@@ -42,6 +42,8 @@ from EvoScientist.memory.observations import (
     create_read_memory_tool,
     create_search_observations_tool,
     link_observation_files,
+    list_observation_documents,
+    read_observation_document,
     read_observation_file,
     read_observation_id_from_path,
     record_observation_file,
@@ -674,6 +676,97 @@ def test_malformed_observation_frontmatter_is_skipped(tmp_path):
     )
     assert [hit["observation_id"] for hit in hits] == [valid["observation_id"]]
     assert worker_activity.snapshot_observation_relations(memories) == frozenset()
+
+
+def test_legacy_observation_source_without_session_id_still_reads(tmp_path):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    legacy = global_dir / "O-legacy.md"
+    legacy.write_text(
+        "---\n"
+        "id: O-legacy\n"
+        "created_at: 2026-01-01T00:00:00Z\n"
+        "summary: Legacy observation without session id.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        "---\n"
+        "Legacy body text.\n",
+        encoding="utf-8",
+    )
+
+    documents = list_observation_documents(
+        memory_dir=memories,
+        project_id="P-project",
+    )
+    read = read_observation_file(
+        memory_dir=memories,
+        project_id="P-project",
+        observation_id="O-legacy",
+    )
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="Legacy body",
+    )
+
+    assert [document.observation_id for document in documents] == ["O-legacy"]
+    assert read is not None
+    assert read["observation_id"] == "O-legacy"
+    assert hits[0]["observation_id"] == "O-legacy"
+
+
+def test_unquoted_naive_yaml_timestamp_does_not_claim_utc(tmp_path):
+    observation = tmp_path / "O-naive.md"
+    observation.write_text(
+        "---\n"
+        "id: O-naive\n"
+        "created_at: 2026-01-01 12:30:00\n"
+        "summary: Legacy observation with naive YAML timestamp.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        "  session_id: thread-1\n"
+        "---\n"
+        "Legacy body text.\n",
+        encoding="utf-8",
+    )
+
+    document = read_observation_document(observation)
+
+    assert document is not None
+    metadata, _body = document
+    assert metadata.created_at == "2026-01-01T12:30:00"
+
+
+def test_unquoted_aware_yaml_timestamp_normalizes_to_utc(tmp_path):
+    observation = tmp_path / "O-aware.md"
+    observation.write_text(
+        "---\n"
+        "id: O-aware\n"
+        "created_at: 2026-01-01 12:30:00+02:00\n"
+        "summary: Legacy observation with aware YAML timestamp.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        "  session_id: thread-1\n"
+        "---\n"
+        "Legacy body text.\n",
+        encoding="utf-8",
+    )
+
+    document = read_observation_document(observation)
+
+    assert document is not None
+    metadata, _body = document
+    assert metadata.created_at == "2026-01-01T10:30:00Z"
 
 
 def test_link_observation_files_keeps_supersedes_directional(tmp_path):
@@ -1994,6 +2087,44 @@ def test_memory_worker_abort_queues_written_observations_for_linking(tmp_path):
             workspace_dir=str(workspace_dir),
         )
     )
+
+    assert launched == [
+        _linker_context(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            observation_ids=(observation["observation_id"],),
+        )
+    ]
+    status = worker_activity.memory_worker_status()
+    assert status.is_running is False
+    assert status.observations_recorded == 1
+
+
+def test_memory_worker_watcher_start_failure_queues_written_observations_for_linking(
+    tmp_path,
+):
+    memory_dir = tmp_path / "memories"
+    workspace_dir = tmp_path / "workspace"
+    launched: list[memory_scheduler.ObservationLinkerContext] = []
+    coordinator = memory_scheduler.MemoryScheduler(launch_linker=launched.append)
+
+    hooks = memory_launch._memory_worker_launch_hooks(
+        memory_dir,
+        on_worker_aborted=coordinator.record_worker_aborted,
+    )
+    worker_run = _memory_worker_run(
+        thread_id="worker-thread",
+        run_id="run-1",
+        workspace_dir=str(workspace_dir),
+    )
+    assert hooks.on_before_run is not None
+    assert hooks.on_started is not None
+    assert hooks.on_watcher_start_failed is not None
+    hooks.on_before_run(worker_run.thread_id)
+    hooks.on_started(worker_run)
+    observation = _record_test_observation(memory_dir)
+
+    hooks.on_watcher_start_failed(worker_run)
 
     assert launched == [
         _linker_context(
