@@ -107,18 +107,22 @@ def cancel_scheduled_task(cron_id: str) -> str:
 
     if not crons.is_available():
         return "Scheduler unavailable: the langgraph dev backend is not running."
-    if not cron_id.strip():
+    if not (requested_id := cron_id.strip()):
         # Empty prefix would match (and delete) the only cron — refuse it.
         return "Provide the id (or a prefix) of the task to cancel."
     try:
         rows = crons.list_schedules()
         # B2: collect ALL prefix matches before acting to detect ambiguity.
-        matches = [r for r in rows if str(r.get("cron_id", "")).startswith(cron_id)]
+        matches = [
+            r for r in rows if str(r.get("cron_id", "")).startswith(requested_id)
+        ]
         if not matches:
-            return f"No scheduled task matching '{cron_id}'."
+            return f"No scheduled task matching '{requested_id}'."
         if len(matches) > 1:
             ids = ", ".join(str(r.get("cron_id", ""))[:8] for r in matches)
-            return f"Multiple schedules match '{cron_id}' ({ids}) — use a longer id."
+            return (
+                f"Multiple schedules match '{requested_id}' ({ids}) — use a longer id."
+            )
         target = str(matches[0]["cron_id"])
         crons.delete_schedule(target)
     except Exception as e:

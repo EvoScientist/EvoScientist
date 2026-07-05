@@ -653,6 +653,15 @@ def run_textual_interactive(
             for child in list(container.children):
                 if child is not welcome:
                     child.remove()
+            # Issue #301: unconditionally release the anchor and pin to the
+            # top after wiping. The children removed above are laid out
+            # asynchronously, so a ``max_scroll_y`` check at this moment is
+            # stale — relying on it (via ``_anchor_chat``) can re-engage the
+            # anchor and let Textual's compositor push ``scroll_y`` negative
+            # once the new (smaller) content lays out. Always reset.
+            self._release_anchor_and_pin_top(container)
+            self._chat_following = True
+            self._new_content_below = False
 
         def request_quit(self) -> None:
             self.action_request_quit()
@@ -682,6 +691,7 @@ def run_textual_interactive(
             self._background_tasks.add(refresh_task)
             refresh_task.add_done_callback(self._background_tasks.discard)
             self.append_system(f"New session: {self._conversation_tid}", style="green")
+            self._append_pending_skill_proposals_notice()
 
         async def handle_session_resume(
             self, thread_id: str, workspace_dir: str | None = None
@@ -702,10 +712,8 @@ def run_textual_interactive(
                 # WorkspaceMismatchError leaves the session pointing at the
                 # existing workspace. Other sync failures resume locally in
                 # the TUI while background workers may be unavailable.
-                from ..langgraph_dev.manager import (
-                    WorkspaceMismatchError,
-                    ensure_langgraph_dev,
-                )
+                from ..langgraph_dev.manager import WorkspaceMismatchError
+                from .commands import _sync_background_agent_server_workspace
                 from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
                 sync_widget = WorkspaceSyncWidget()
@@ -713,8 +721,7 @@ def run_textual_interactive(
                 await container.mount(sync_widget)
                 container.scroll_end(animate=False)
                 try:
-                    await asyncio.to_thread(
-                        ensure_langgraph_dev,
+                    await _sync_background_agent_server_workspace(
                         config,
                         workspace_dir=workspace_dir,
                     )
@@ -760,6 +767,7 @@ def run_textual_interactive(
             self._render_status()
             self.append_system(f"Resumed session: {thread_id}", style="green")
             await self._render_history(thread_id)
+            self._append_pending_skill_proposals_notice()
 
         async def flush(self) -> None:
             """No-op for TUI, messages are already delivered incrementally."""
@@ -808,6 +816,7 @@ def run_textual_interactive(
             # Show resume status
             if self._resume_warning:
                 self._append_system(self._resume_warning, style="yellow")
+                self._append_pending_skill_proposals_notice()
             elif self._resumed:
                 self._append_system(
                     f"Resumed session: {self._conversation_tid}",
@@ -815,9 +824,11 @@ def run_textual_interactive(
                 )
                 self.call_later(
                     lambda: asyncio.ensure_future(
-                        self._render_history(self._conversation_tid)
+                        self._render_history_then_pending_notice(self._conversation_tid)
                     )
                 )
+            else:
+                self._append_pending_skill_proposals_notice()
             # Startup notifications
             self.notify(
                 "EvoScientist is your research buddy.\n"
@@ -1037,10 +1048,34 @@ def run_textual_interactive(
         # ── Widget helpers ─────────────────────────────────────
 
         def _anchor_chat(self, container: VerticalScroll | None = None) -> None:
-            """Re-engage the scroll anchor so the viewport pins to the bottom."""
+            """Re-engage the scroll anchor so the viewport pins to the bottom.
+
+            Only engages the anchor when the chat content actually overflows
+            the viewport. Textual's compositor (see ``textual._compositor``)
+            recomputes ``scroll_y`` for anchored widgets via ``set_reactive``
+            — which bypasses the validator — so when anchored content is
+            shorter than the viewport, ``scroll_y`` goes negative and the
+            welcome banner drops below the visible region (issue #301).
+            When content fits, we instead release any prior anchor and pin
+            the viewport to the top.
+            """
             if container is None:
                 container = self.query_one("#chat", VerticalScroll)
-            container.anchor()
+            if container.max_scroll_y > 0:
+                container.anchor()
+            else:
+                self._release_anchor_and_pin_top(container)
+
+        def _release_anchor_and_pin_top(self, container: VerticalScroll) -> None:
+            """Release any active anchor and force the viewport to the top.
+
+            See ``_anchor_chat`` for why this is needed: Textual's compositor
+            bypasses ``validate_scroll_y`` for anchored widgets, so a leftover
+            anchor with content shorter than the viewport lets ``scroll_y``
+            go negative and pushes the welcome banner out of view (issue #301).
+            """
+            container.anchor(False)
+            container.scroll_home(animate=False, immediate=True)
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1537,6 +1572,12 @@ def run_textual_interactive(
                                 container.anchor()
                                 self._chat_following = True
                                 self._new_content_below = False
+                        elif container.is_anchored:
+                            # Content no longer overflows (e.g. loading widget
+                            # was just removed). Release the anchor so the
+                            # compositor doesn't pin scroll_y to a negative
+                            # value on the next layout pass (issue #301).
+                            self._release_anchor_and_pin_top(container)
                         event_type = state.handle_event(event)
 
                         new_phase = state.compute_phase()
@@ -3096,6 +3137,17 @@ def run_textual_interactive(
                     channels=channels_info,
                 )
             )
+
+        async def _render_history_then_pending_notice(self, thread_id: str) -> None:
+            await self._render_history(thread_id)
+            self._append_pending_skill_proposals_notice()
+
+        def _append_pending_skill_proposals_notice(self) -> None:
+            from .commands import _pending_skill_proposals_message
+
+            message = _pending_skill_proposals_message(self._workspace_dir)
+            if message:
+                self._append_system(message, style="yellow")
 
         def _render_status(self) -> None:
             status = self.query_one("#status", Static)

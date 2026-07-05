@@ -428,7 +428,13 @@ EvoSci --ui cli                   # classic CLI (lightweight)
 EvoSci --ui webui                 # browser workspace UI (needs Node/npx)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
+EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
 ```
+
+`--output-format stream-json` makes a single-shot (`-p`) run emit its native
+events as line-delimited JSON on stdout (one object per line), with all human
+output on stderr — the integration surface for headless clients (e.g. an agent
+runtime). See [docs/stream-json.md](docs/stream-json.md) for the event schema.
 
 </details>
 

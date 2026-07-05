@@ -23,6 +23,7 @@ attribute), not the yaml-driven factory.
 """
 
 from EvoScientist.memory.agents import (
+    build_autoskills_graph,
     build_memory_worker_graph,
     build_observation_linker_graph,
 )
@@ -35,3 +36,4 @@ scheduler = build_async_subagent_graph("scheduler")
 evomemory_subagent_worker = build_memory_worker_graph(MemorySourceType.SUBAGENT)
 evomemory_turn_worker = build_memory_worker_graph(MemorySourceType.TURN)
 evomemory_observation_linker = build_observation_linker_graph()
+evomemory_autoskills = build_autoskills_graph()
