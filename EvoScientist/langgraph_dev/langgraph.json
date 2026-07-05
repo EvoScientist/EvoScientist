@@ -6,7 +6,9 @@
         "data-analysis-agent": "EvoScientist.langgraph_dev.graphs:data_analysis_agent",
         "scheduler": "EvoScientist.langgraph_dev.graphs:scheduler",
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
-        "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker"
+        "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker",
+        "evomemory-observation-linker": "EvoScientist.langgraph_dev.graphs:evomemory_observation_linker",
+        "evomemory-autoskills": "EvoScientist.langgraph_dev.graphs:evomemory_autoskills"
     },
     "checkpointer": {
         "backend": "custom",
@@ -14,5 +16,8 @@
     },
     "config": {
         "recursion_limit": 1000000
+    },
+    "http": {
+        "app": "EvoScientist.langgraph_dev.http:app"
     }
 }

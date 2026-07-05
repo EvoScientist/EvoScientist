@@ -472,9 +472,44 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
             spinner="dots",
         ):
             ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+            _reconcile_autoskill_schedule(config, workspace_dir=workspace_dir)
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+
+def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
+    """Best-effort reconciliation for EvoMemory's hidden AutoSkills cron."""
+    try:
+        from ..memory.autoskills.schedule import reconcile_autoskill_schedule
+
+        reconcile_autoskill_schedule(config, workspace_dir=workspace_dir)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to reconcile EvoMemory AutoSkills schedule", exc_info=True
+        )
+
+
+def _pending_skill_proposals_message(
+    workspace_dir: str | Path | None = None,
+) -> str | None:
+    """Return a concise review reminder when autoskill proposals are waiting."""
+    try:
+        from .. import paths
+        from ..memory.autoskills.proposals import pending_skill_proposal_count
+
+        count = pending_skill_proposal_count(
+            paths.MEMORIES_DIR,
+            workspace_dir=workspace_dir or paths.WORKSPACE_ROOT,
+        )
+    except Exception:
+        return None
+    if not count:
+        return None
+    return (
+        f"EvoMemory has {count} autoskill proposal(s) ready for review. "
+        "Run /autoskills review."
+    )
 
 
 async def _sync_background_agent_server_workspace(
@@ -499,6 +534,11 @@ async def _sync_background_agent_server_workspace(
     with console.status(status_message, spinner="dots"):
         await asyncio.to_thread(
             ensure_langgraph_dev,
+            config,
+            workspace_dir=workspace_dir,
+        )
+        await asyncio.to_thread(
+            _reconcile_autoskill_schedule,
             config,
             workspace_dir=workspace_dir,
         )

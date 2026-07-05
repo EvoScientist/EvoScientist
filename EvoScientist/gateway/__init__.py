@@ -6,6 +6,7 @@ package for thread/run operations instead of reaching directly into
 ``sessions.py``, ``stream.events``, or the LangGraph SDK.
 """
 
+from . import background_runs
 from .local import LocalGraphGateway, LocalThreadStore
 from .runtime import (
     RuntimeGatewayBackend,
@@ -44,5 +45,6 @@ __all__ = [
     "RuntimeGateways",
     "ThreadResolution",
     "ThreadStore",
+    "background_runs",
     "create_runtime_gateways",
 ]

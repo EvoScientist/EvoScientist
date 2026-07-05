@@ -305,17 +305,18 @@ def _inject_subagent_middleware(
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
-        MemoryLifecycleRole,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_runtime_context_middleware,
+        default_memory_scheduler,
     )
 
     cfg = cfg if cfg is not None else _ensure_config()
     memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    memory_scheduler = default_memory_scheduler()
     for sa in subs:
         name = str(sa.get("name") or "sub-agent")
         source_type = MemorySourceType.SUBAGENT
@@ -329,6 +330,7 @@ def _inject_subagent_middleware(
             enable_observation_tool=memory_controls.observation_tool_enabled(
                 MemoryObservationTarget.AGENT
             ),
+            memory_scheduler=memory_scheduler,
         )
         middleware = [
             # Subagents share the main agent's model: use the threaded
@@ -347,8 +349,9 @@ def _inject_subagent_middleware(
                     memory_dir,
                     workspace_dir=workspace_dir,
                     project_id=memory_middleware.project_id,
-                    role=MemoryLifecycleRole.SUBAGENT,
+                    source_type=MemorySourceType.SUBAGENT,
                     source_agent=name,
+                    memory_scheduler=memory_scheduler,
                 )
             )
         sa.setdefault("middleware", []).extend(middleware)
@@ -593,9 +596,13 @@ def load_mcp_and_build_kwargs(
 
 def _get_default_backend():
     """Build the default composite backend from current paths."""
-    from deepagents.backends import CompositeBackend, FilesystemBackend
+    from deepagents.backends import CompositeBackend
 
-    from .backends import CustomSandboxBackend, MergedSkillsBackend
+    from .backends import (
+        CustomSandboxBackend,
+        MemoryFilesystemBackend,
+        MergedSkillsBackend,
+    )
 
     cfg = _ensure_config()
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
@@ -617,7 +624,7 @@ def _get_default_backend():
         global_dir=global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
-    mem_backend = FilesystemBackend(
+    mem_backend = MemoryFilesystemBackend(
         root_dir=memory_dir,
         virtual_mode=True,
     )
@@ -660,7 +667,6 @@ def _get_default_middleware(
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
-        MemoryLifecycleRole,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_code_interpreter_middleware,
@@ -670,6 +676,7 @@ def _get_default_middleware(
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
+        default_memory_scheduler,
         load_fallback_chain,
     )
 
@@ -682,6 +689,7 @@ def _get_default_middleware(
         MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
     )
     memory_controls = MemoryControls.from_config(cfg)
+    memory_scheduler = default_memory_scheduler()
     worker_target = (
         MemoryObservationTarget.SUBAGENT_WORKER
         if for_async_subagent
@@ -701,6 +709,7 @@ def _get_default_middleware(
         enable_observation_tool=memory_controls.observation_tool_enabled(
             MemoryObservationTarget.AGENT
         ),
+        memory_scheduler=memory_scheduler,
     )
     # Main-agent tool selection may use the auxiliary model; async sub-agents
     # keep the main model (they do real work, not a one-off helper call).
@@ -747,12 +756,9 @@ def _get_default_middleware(
                 memory_dir,
                 workspace_dir=workspace_dir,
                 project_id=memory_middleware.project_id,
-                role=(
-                    MemoryLifecycleRole.SUBAGENT
-                    if for_async_subagent
-                    else MemoryLifecycleRole.TURN
-                ),
+                source_type=source_type,
                 source_agent=memory_source_agent,
+                memory_scheduler=memory_scheduler,
             )
         )
 
@@ -892,10 +898,14 @@ def create_cli_agent(
     import os as _os
 
     from deepagents import create_deep_agent
-    from deepagents.backends import CompositeBackend, FilesystemBackend
+    from deepagents.backends import CompositeBackend
 
     from . import paths as _paths
-    from .backends import CustomSandboxBackend, MergedSkillsBackend
+    from .backends import (
+        CustomSandboxBackend,
+        MemoryFilesystemBackend,
+        MergedSkillsBackend,
+    )
 
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
@@ -943,7 +953,7 @@ def create_cli_agent(
         global_dir=_global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
-    mem_backend = FilesystemBackend(
+    mem_backend = MemoryFilesystemBackend(
         root_dir=_mem_dir,
         virtual_mode=True,
     )

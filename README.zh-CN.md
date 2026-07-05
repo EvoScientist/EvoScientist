@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.1.9" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -130,11 +130,12 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 ## ✨ 特性
 
 - **🤖 多智能体协作** — 6 个子智能体（规划、调研、编码、调试、分析、写作）协同工作。
-- **🧠 自进化记忆** — 用户画像与观察记录每轮自动提炼，跨会话持续进化。
+- **🧠 自进化记忆** — 每轮自动提炼并连成知识图谱，跨会话持续进化。
 - **🌐 多模型供应商** — Anthropic、OpenAI、Google、MiniMax、NVIDIA——一处配置，随时切换。
 - **📱 多渠道接入** — CLI 为中心；Telegram、Slack、飞书、微信等——共享同一智能体会话。
 - **🖥️ Desktop WebUI** — 单终端 `--ui webui` 启动带工作区面板的 Web 应用。
 - **🔬 科学工作流** — 需求采集 → 规划 → 执行 → 评估 → 撰写 → 验证。
+- **⏰ 定时任务** — 以 cron 风格的计划自动执行重复性研究——自行运行并回报结果。
 - **🔄 代码生成模式** — More Effort（迭代精修），持续迭代提升代码生成质量。
 - **⚡ 自适应工具** — 每轮对话智能筛选相关工具，减少干扰提升效率。
 - **✂️ 上下文编辑** — 根据对话状态动态改写系统提示词。
@@ -158,6 +159,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 6 月 26 日]** **[v0.2.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.0)** — **自主化里程碑。** 定时任务：用 `/schedule` 或自然语言设置 cron 风格的重复运行，无人值守执行并对 shell 访问做安全门控；记忆自连成图：相互关联的观察记录连成知识图谱（互补 / 矛盾 / 取代）并持续生长；新增只读 **`GET /api/models`** 端点，向 WebUI 模型选择器暴露模型注册表；主智能体现在始终保留记忆工具；依赖：deepagents 0.6.12 / langchain-quickjs 0.3.2。
 - **[2026 年 6 月 23 日]** **[v0.1.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.9)** — 新安装热修复：deepagents 0.6.11 / langchain-quickjs 0.3 将 `task` 保留为 REPL 全局后,首次对话即崩溃（`The subagent `task` tool cannot be exposed via `ptc``）。从 code-interpreter 的 PTC 白名单移除 `task`（`task()` 仍作为 REPL 全局可用,异步分发工具继续保留在 PTC 中），并将 deepagents pin 升级到 `~=0.6.11`。
 - **[2026 年 6 月 22 日]** **[v0.1.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.8)** — LangGraph gateway 层：CLI / TUI / serve / channel 共用、UI 无关的图与线程访问；OpenRouter Anthropic prompt caching **默认开启**（通过 `openrouter_anthropic_prompt_cache=false` 关闭）；命令名互为前缀时 Enter 现在能正确提交斜杠命令；pre-commit ruff 升级。
 - **[2026 年 6 月 16 日]** **[v0.1.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.7)** — 记忆检索：agent 在每个任务开始前对历史 observation 做 preflight 检索（`search_observations` 关键词排序检索 + `read_memory`）；多级斜杠命令补全（带子命令感知）；Windows 稳定性修复（async MCP 工具执行 + 中断后图状态恢复、`cmd.exe` 路径转义）；含空格的虚拟路径处理；deepagents 0.6.10。

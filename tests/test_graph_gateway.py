@@ -314,12 +314,8 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     )
     client = FakeLangGraphClient(threads)
 
-    def _client_factory(_base_url, _headers):
-        return client
-
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=_client_factory,
+        client=client,
     )
 
     async def _run():
@@ -393,8 +389,7 @@ def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
     ]
     threads = FakeLangGraphThreadsClient(threads=rows)
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     result = run_async(store.list_threads(limit=0))
@@ -419,8 +414,7 @@ def test_langgraph_server_thread_store_positive_limit_uses_single_search():
         ]
     )
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     result = run_async(store.list_threads(limit=2))
@@ -441,8 +435,7 @@ def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():
         ]
     )
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     result = run_async(store.resolve_thread_id_prefix("abc"))
@@ -468,8 +461,7 @@ def test_langgraph_server_thread_store_prefix_resolution_pages_all_threads():
     )
     threads = FakeLangGraphThreadsClient(threads=rows)
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     result = run_async(store.resolve_thread_id_prefix("older-thread"))
@@ -492,8 +484,7 @@ def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
         ]
     )
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     result = run_async(store.resolve_thread_id_prefix(thread_id))
@@ -514,8 +505,7 @@ def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
         ]
     )
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     result = run_async(store.resolve_thread_id_prefix(thread_id))
@@ -541,8 +531,7 @@ def test_langgraph_server_thread_store_clones_thread_with_metadata():
         ]
     )
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     cloned_thread_id = run_async(
@@ -569,8 +558,7 @@ def test_langgraph_server_thread_store_rejects_copy_without_thread_id():
         copy_response=None,
     )
     store = LangGraphServerThreadStore(
-        base_url="http://localhost:2024",
-        client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+        client=FakeLangGraphClient(threads),
     )
 
     async def _run():
@@ -586,8 +574,7 @@ def test_langgraph_server_gateway_clones_thread():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -617,13 +604,9 @@ def test_runtime_gateways_can_use_langgraph_server_backend():
     threads = FakeLangGraphThreadsClient()
     client = FakeLangGraphClient(threads)
 
-    def _client_factory(_base_url, _headers):
-        return client
-
     runtime_gateways = create_runtime_gateways(
         backend="langgraph_server",
-        base_url="http://localhost:2024",
-        client_factory=_client_factory,
+        langgraph_client=client,
     )
 
     gateway = runtime_gateways.graph_gateway
@@ -640,8 +623,7 @@ def test_langgraph_server_gateway_reads_state_values():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -672,8 +654,7 @@ def test_langgraph_server_gateway_messages_apply_summarization_event():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -692,8 +673,7 @@ def test_langgraph_server_gateway_updates_state_values():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -740,8 +720,7 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -841,8 +820,7 @@ def _collect_server_gateway_stream(
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -940,8 +918,7 @@ def test_langgraph_server_gateway_emits_state_interrupt_before_done():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -1014,8 +991,7 @@ def test_langgraph_server_gateway_streams_subagent_protocol_events():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 
@@ -1067,8 +1043,7 @@ def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
-            base_url="http://localhost:2024",
-            client_factory=lambda _base_url, _headers: FakeLangGraphClient(threads),
+            client=FakeLangGraphClient(threads),
         )
     )
 

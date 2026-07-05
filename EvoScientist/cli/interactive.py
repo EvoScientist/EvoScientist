@@ -5,7 +5,6 @@ import logging
 import queue
 import random
 import sys
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -86,7 +85,7 @@ from .status_bar import (
 from .tui_interactive import run_textual_interactive
 from .tui_runtime import resolve_ui_backend, run_streaming
 
-_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 90.0
+_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
 _MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
 _MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
 
@@ -719,6 +718,13 @@ def cmd_interactive(
             # in scope — define the ``rich_ui`` adapter here rather than
             # at the outer function level.
 
+            def _print_pending_skill_proposals_notice() -> None:
+                from .commands import _pending_skill_proposals_message
+
+                message = _pending_skill_proposals_message(state.get("workspace_dir"))
+                if message:
+                    console.print(message, style="yellow")
+
             async def _on_start_new_session() -> None:
                 """NewCommand callback — rotate workspace (if not fixed),
                 issue a new thread id, reset session-scoped status fields,
@@ -743,6 +749,7 @@ def cmd_interactive(
                         f"[dim]Workspace:[/dim] [cyan]"
                         f"{_shorten_path(state['workspace_dir'])}[/cyan]\n"
                     )
+                _print_pending_skill_proposals_notice()
 
             async def _on_handle_session_resume(
                 thread_id: str, workspace_dir: str | None
@@ -801,6 +808,7 @@ def cmd_interactive(
                     )
                 console.print()
                 await _render_history(thread_id)
+                _print_pending_skill_proposals_notice()
 
             # Rich CLI collapses ``request_quit`` / ``force_quit`` into the
             # same "break the prompt loop" effect — there's no equivalent
@@ -852,6 +860,7 @@ def cmd_interactive(
                     provider,
                     state["ui_backend"],
                 )
+            _print_pending_skill_proposals_notice()
 
             # ---- Channel queue processing (bus → main thread) ----
 
@@ -1534,65 +1543,39 @@ def _wait_for_memory_workers_before_exit(
 ) -> None:
     """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
     try:
-        from ..memory.worker_activity import memory_worker_observed_outputs
+        from ..memory.worker_activity import (
+            MemoryActivityPhase,
+            MemoryWorkerStatusSnapshot,
+            wait_for_memory_pipeline_idle,
+        )
     except Exception:
         return
 
-    deadline = time.monotonic() + timeout_seconds
     announced = False
-    saved_announced = False
-    announced_saved_counts: tuple[int, int] | None = None
-    output_seen_at: float | None = None
-    observed_status = None
-    while True:
-        now = time.monotonic()
-        try:
-            observed = memory_worker_observed_outputs()
-        except Exception:
-            return
 
-        if not observed.is_running:
-            saved_counts = (observed.observations_recorded, observed.profile_updates)
-            if saved_counts != (0, 0) and saved_counts != announced_saved_counts:
-                saved = []
-                if observed.observations_recorded:
-                    saved.append(f"{observed.observations_recorded} observation(s)")
-                if observed.profile_updates:
-                    saved.append(f"{observed.profile_updates} profile update(s)")
-                if saved:
-                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
-            return
+    def print_saved(observed: MemoryWorkerStatusSnapshot) -> None:
+        saved = []
+        if observed.observations_recorded:
+            saved.append(f"{observed.observations_recorded} observation(s)")
+        if observed.profile_updates:
+            saved.append(f"{observed.profile_updates} profile update(s)")
+        if saved:
+            console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
 
-        if observed.observations_recorded or observed.profile_updates:
-            if output_seen_at is None:
-                output_seen_at = now
-            observed_status = observed
-            if (
-                now - output_seen_at >= _MEMORY_WORKER_OUTPUT_GRACE_SECONDS
-                and not saved_announced
-            ):
-                saved = []
-                if observed_status and observed_status.observations_recorded:
-                    saved.append(
-                        f"{observed_status.observations_recorded} observation(s)"
-                    )
-                if observed_status and observed_status.profile_updates:
-                    saved.append(f"{observed_status.profile_updates} profile update(s)")
-                if saved:
-                    console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
-                    saved_announced = True
-                    announced_saved_counts = (
-                        observed_status.observations_recorded,
-                        observed_status.profile_updates,
-                    )
-
-        if now >= deadline:
-            console.print(
-                "[dim]EvoMemory worker is still running; shutting down.[/dim]"
-            )
-            return
-
+    def print_waiting(phase: MemoryActivityPhase) -> None:
+        nonlocal announced
         if not announced:
-            console.print("[dim]Waiting for EvoMemory worker...[/dim]")
+            console.print(f"[dim]Waiting for EvoMemory {phase}...[/dim]")
             announced = True
-        time.sleep(_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS)
+
+    def print_timeout(phase: MemoryActivityPhase) -> None:
+        console.print(f"[dim]EvoMemory {phase} is still running; shutting down.[/dim]")
+
+    wait_for_memory_pipeline_idle(
+        timeout_seconds=timeout_seconds,
+        poll_seconds=_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS,
+        output_grace_seconds=_MEMORY_WORKER_OUTPUT_GRACE_SECONDS,
+        on_saved=print_saved,
+        on_waiting=print_waiting,
+        on_timeout=print_timeout,
+    )

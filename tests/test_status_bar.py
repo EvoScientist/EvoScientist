@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 from typing import ClassVar
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 from EvoScientist.cli.status_bar import (
@@ -21,11 +21,29 @@ from EvoScientist.cli.status_bar import (
     status_style_name,
     trim_status_text,
 )
+from EvoScientist.memory import worker_activity
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _render_fragments(fragments: list[tuple[str, str]]) -> str:
     return "".join(text for _, text in fragments)
+
+
+@pytest.fixture
+def reset_memory_activity():
+    worker_activity.reset_memory_worker_status_for_tests()
+    yield
+    worker_activity.reset_memory_worker_status_for_tests()
+
+
+def _default_snapshot() -> SessionStatusSnapshot:
+    return SessionStatusSnapshot(
+        model_full="openai/gpt-6",
+        model_short="gpt-6",
+        context_tokens=12_345,
+        context_window=128_000,
+        context_percent=10,
+    )
 
 
 def test_build_status_fragments_wide_layout():
@@ -52,83 +70,100 @@ def test_build_status_fragments_wide_layout():
     assert "3m" in rendered
 
 
-def test_build_status_fragments_shows_memory_worker_indicator(monkeypatch):
-    monkeypatch.setattr(
-        "EvoScientist.cli.status_bar.get_memory_worker_status",
-        lambda: SimpleNamespace(
-            is_running=False,
-            profile_updates=4,
-            observations_recorded=5,
-        ),
+def test_build_status_fragments_shows_saved_memory_counts(
+    tmp_path,
+    reset_memory_activity,
+):
+    memory_dir = tmp_path / "memories"
+    before = worker_activity.snapshot_memory_outputs(memory_dir)
+    worker_activity.mark_memory_worker_started(
+        thread_id="thread-1",
+        run_id="run-1",
+        memory_dir=memory_dir,
+        before_outputs=before,
     )
-    snapshot = SessionStatusSnapshot(
-        model_full="openai/gpt-6",
-        model_short="gpt-6",
-        context_tokens=12_345,
-        context_window=128_000,
-        context_percent=10,
+    profile = memory_dir / "profile" / "USER_PROFILE.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("# User profile\n\n- remembered\n", encoding="utf-8")
+    observation = memory_dir / "observations" / "global" / "O-1.md"
+    observation.parent.mkdir(parents=True)
+    observation.write_text("# Observation\n", encoding="utf-8")
+    worker_activity.mark_memory_worker_finished("thread-1", "run-1")
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            _default_snapshot(),
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
     )
 
-    fragments = build_status_fragments(
-        snapshot,
-        datetime.now() - timedelta(minutes=3),
-        100,
-    )
-
-    assert any(
-        style == "class:status-bar-warn" and text.strip() for style, text in fragments
-    )
+    assert "Saved 1 profile edit, 1 observation" in rendered
 
 
 def test_build_status_fragments_shows_memory_worker_indicator_when_running(
-    monkeypatch,
+    tmp_path,
+    reset_memory_activity,
 ):
-    monkeypatch.setattr(
-        "EvoScientist.cli.status_bar.get_memory_worker_status",
-        lambda: SimpleNamespace(
-            is_running=True,
-            profile_updates=0,
-            observations_recorded=0,
-        ),
-    )
-    snapshot = SessionStatusSnapshot(
-        model_full="openai/gpt-6",
-        model_short="gpt-6",
-        context_tokens=12_345,
-        context_window=128_000,
-        context_percent=10,
+    worker_activity.mark_memory_worker_started(
+        thread_id="thread-1",
+        run_id="run-1",
+        memory_dir=tmp_path / "memories",
     )
 
+    rendered = _render_fragments(
+        build_status_fragments(
+            _default_snapshot(),
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "🧠" in rendered
+
+
+def test_build_status_fragments_shows_observation_linker_indicator_when_running(
+    reset_memory_activity,
+):
+    worker_activity.mark_observation_linker_started(
+        thread_id="thread-1",
+        run_id="run-1",
+    )
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            _default_snapshot(),
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "🔗" in rendered
+    assert "🧠" not in rendered
+
+
+def test_build_status_fragments_shows_linked_relation_count(
+    reset_memory_activity,
+):
+    worker_activity.mark_observation_relations_linked(1)
+
+    rendered = _render_fragments(
+        build_status_fragments(
+            _default_snapshot(),
+            datetime.now() - timedelta(minutes=3),
+            100,
+        )
+    )
+
+    assert "Created 1 memory link" in rendered
+    assert "🔗" not in rendered
+
+
+def test_build_status_fragments_hides_memory_indicator_when_idle(
+    reset_memory_activity,
+):
     fragments = build_status_fragments(
-        snapshot,
-        datetime.now() - timedelta(minutes=3),
-        100,
-    )
-
-    assert any(
-        style == "class:status-bar-warn" and text.strip() for style, text in fragments
-    )
-
-
-def test_build_status_fragments_hides_memory_indicator_when_idle(monkeypatch):
-    monkeypatch.setattr(
-        "EvoScientist.cli.status_bar.get_memory_worker_status",
-        lambda: SimpleNamespace(
-            is_running=False,
-            profile_updates=0,
-            observations_recorded=0,
-        ),
-    )
-    snapshot = SessionStatusSnapshot(
-        model_full="openai/gpt-6",
-        model_short="gpt-6",
-        context_tokens=12_345,
-        context_window=128_000,
-        context_percent=10,
-    )
-
-    fragments = build_status_fragments(
-        snapshot,
+        _default_snapshot(),
         datetime.now() - timedelta(minutes=3),
         100,
     )

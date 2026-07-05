@@ -15,6 +15,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "create_cli_agent": (".EvoScientist", "create_cli_agent"),
     # Backends
     "CustomSandboxBackend": (".backends", "CustomSandboxBackend"),
+    "MemoryFilesystemBackend": (".backends", "MemoryFilesystemBackend"),
     "ReadOnlyFilesystemBackend": (".backends", "ReadOnlyFilesystemBackend"),
     # Configuration
     "EvoScientistConfig": (".config", "EvoScientistConfig"),

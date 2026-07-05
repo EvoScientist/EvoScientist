@@ -17,39 +17,27 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from langgraph_sdk.schema import Cron, Run
 
+from ..langgraph_dev.sdk import (
+    configured_langgraph_dev_url,
+    default_scheduler_timezone,
+    get_langgraph_sync_client,
+    messages_input,
+)
+
 SCHEDULER_GRAPH_ID = "scheduler"
 SCHEDULED_RUN_KIND = "scheduled_task"
 
 
 def _scheduler_url() -> str:
-    from ..EvoScientist import _ensure_config
-
-    cfg = _ensure_config()
-    port = int(getattr(cfg, "langgraph_dev_port", 6174))
-    return f"http://localhost:{port}"
+    return configured_langgraph_dev_url()
 
 
 def _client():
-    from langgraph_sdk import get_sync_client
-
-    return get_sync_client(url=_scheduler_url(), headers={"x-auth-scheme": "langsmith"})
+    return get_langgraph_sync_client(url=_scheduler_url())
 
 
 def _default_timezone() -> str | None:
-    from ..EvoScientist import _ensure_config
-
-    tz = getattr(_ensure_config(), "scheduler_default_timezone", "") or ""
-    if tz:
-        return tz
-    # Resolve the host's real IANA zone (e.g. "Asia/Shanghai") so absolute-time
-    # schedules fire in local time and track DST. Falls back to None (-> UTC in
-    # the cron backend) when the local zone can't be determined.
-    try:
-        from tzlocal import get_localzone_name
-
-        return get_localzone_name()
-    except Exception:
-        return None
+    return default_scheduler_timezone()
 
 
 def is_available() -> bool:
@@ -68,7 +56,7 @@ def create_schedule(
     return _client().crons.create(
         assistant_id=SCHEDULER_GRAPH_ID,
         schedule=schedule,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input=messages_input(prompt),
         metadata={"run_kind": SCHEDULED_RUN_KIND, "name": name, "prompt": prompt},
         timezone=timezone or _default_timezone(),
     )
@@ -109,7 +97,7 @@ def run_now(prompt: str) -> Run:
     return client.runs.create(
         thread_id=str(thread["thread_id"]),
         assistant_id=SCHEDULER_GRAPH_ID,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input=messages_input(prompt),
         metadata={
             "run_kind": SCHEDULED_RUN_KIND,
             "name": "manual-run",
