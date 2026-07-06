@@ -216,7 +216,9 @@ def test_agent_uses_filtered_graph_class():
     ``_strip_private`` and ``_EvoFilteredGraph`` in isolation don't prove the
     swap ran; every other test in this file passes even if someone drops the
     swap line. This asserts the compiled agent is actually the filtered
-    subclass at module-load time.
+    subclass at module-load time, and that the subclass survives
+    ``Pregel.copy(update=...)`` — the call langgraph-api makes in
+    ``get_graph`` before yielding the graph to endpoint handlers.
     """
     from EvoScientist.langgraph_dev.main_graph import (
         EvoScientist_agent,
@@ -224,25 +226,40 @@ def test_agent_uses_filtered_graph_class():
     )
 
     assert isinstance(EvoScientist_agent, _EvoFilteredGraph)
+    assert isinstance(EvoScientist_agent.copy(update={}), _EvoFilteredGraph)
 
 
-def test_subagent_graphs_use_filtered_graph_class():
-    """Subagents get ``create_code_interpreter_middleware`` unconditionally
+def test_all_registered_graphs_use_filtered_graph_class():
+    """Every graph registered in ``langgraph.json`` (main + all subagents)
+    gets the ``__class__`` swap via ``_apply_filter_to_all_registered_graphs``.
+    Iterating the config directly matches the auto-detect refactor: adding
+    a new subagent to ``langgraph.json`` should not require a corresponding
+    test update.
+
+    Subagents get ``create_code_interpreter_middleware`` unconditionally
     (``EvoScientist.py:_build_middleware_stack``), so they can touch the
     QuickJS REPL and write ``_quickjs_snapshot_payload`` on their own
     checkpoint namespace. Async subagents also get their own ``thread_id``
     and their ``/threads/{id}/state`` endpoint runs on their own compiled
-    graph — without a subclass swap on those graphs, our filter would miss
-    that endpoint entirely.
+    graph — without the swap on those graphs, our filter would miss that
+    endpoint entirely.
     """
-    # Importing ``main_graph`` triggers the swap loop. ``data_analysis_agent``
-    # was empirically confirmed to have ``EvoCodeInterpreterMiddleware`` wired
-    # in (per its checkpoint routing channels observed in the live SQLite DB).
-    # If ANY subagent must be swapped, it's this one.
-    from EvoScientist.langgraph_dev import graphs as _sub_graphs
+    import json
+    from importlib import import_module
+    from pathlib import Path
+
+    # Import triggers ``main_graph``'s swap loop.
+    from EvoScientist.langgraph_dev import main_graph
     from EvoScientist.langgraph_dev.main_graph import _EvoFilteredGraph
 
-    assert isinstance(_sub_graphs.data_analysis_agent, _EvoFilteredGraph)
+    config_path = Path(main_graph.__file__).parent / "langgraph.json"
+    config = json.loads(config_path.read_text())
+    for name, path in config["graphs"].items():
+        module_path, attr = path.rsplit(":", 1)
+        graph = getattr(import_module(module_path), attr)
+        assert isinstance(graph, _EvoFilteredGraph), (
+            f"graph {name!r} ({path}) did not receive the class swap"
+        )
 
 
 def test_strip_private_recurses_into_nested_subgraph_state():

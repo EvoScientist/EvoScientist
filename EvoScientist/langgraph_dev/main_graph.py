@@ -145,10 +145,26 @@ def _strip_private(snap):
 class _EvoFilteredGraph(CompiledStateGraph):
     """Filters ``PrivateStateAttr``-marked state fields from checkpoint reads.
 
-    ``Pregel.copy`` (langgraph.pregel.main:921) uses ``self.__class__(**attrs)``
-    so this subclass survives the ``graph_obj.copy(update=...)`` call in
+    ``Pregel.copy`` uses ``self.__class__(**attrs)`` so this subclass
+    survives the ``graph_obj.copy(update=...)`` call in
     ``langgraph_api.graph.get_graph`` that binds the checkpointer / store
     before yielding to endpoint handlers.
+
+    **Known gap — streaming paths.** The overrides only cover ``get_state``
+    / ``get_state_history``. On this compiled graph,
+    ``self.output_channels`` correctly excludes ``_quickjs_snapshot_payload``
+    (respects ``OmitFromSchema(output=True)``), but
+    ``self.stream_channels_asis`` includes it alongside other private
+    fields (``jump_to``, ``_summarization_event``) — the two lists are
+    built by ``langgraph.graph.state``'s graph builder and only the first
+    checks the output schema. So a client streaming with
+    ``stream_mode="values"`` or ``stream_mode="events"`` (which fall back
+    to ``stream_channels_asis`` when ``output_keys`` is ``None``) can pull
+    the anchor blob in per-run event data. Empirically the WebUI's
+    ``stream_mode=["updates"]`` path is clean, so this is transient per-run
+    rather than the persistent per-getState download this PR targets.
+    Filter here first; extend into the stream layer if a client relying on
+    ``values`` / ``events`` reports it.
     """
 
     async def aget_state(self, config, *, subgraphs=False):
