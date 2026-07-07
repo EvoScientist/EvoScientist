@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from types import SimpleNamespace
 
@@ -917,16 +916,16 @@ class _AsyncFakeCrons:
         return [{"cron_id": "cron-async"}]
 
 
-def test_alist_autoskill_schedules_uses_async_client_and_explicit_limit(monkeypatch):
+async def test_alist_autoskill_schedules_uses_async_client_and_explicit_limit(
+    monkeypatch,
+):
     crons = _AsyncFakeCrons()
     client = SimpleNamespace(crons=crons)
     monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: client)
 
-    rows = asyncio.run(
-        alist_autoskill_schedules(
-            EvoScientistConfig(),
-            limit=3,
-        )
+    rows = await alist_autoskill_schedules(
+        EvoScientistConfig(),
+        limit=3,
     )
 
     assert rows == [{"cron_id": "cron-async"}]
