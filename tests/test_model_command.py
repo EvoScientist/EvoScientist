@@ -467,6 +467,7 @@ class TestApplyModelIntegration:
             chat_model=None,
             *,
             on_mcp_progress=None,
+            events=None,
         ):
             # The pure path threads the freshly built chat model in; bind it
             # directly instead of re-deriving via _ensure_chat_model.
@@ -557,6 +558,7 @@ class TestApplyModelPreservesConfigByReference:
             chat_model=None,
             *,
             on_mcp_progress=None,
+            events=None,
         ):
             return MagicMock(name="fake-agent")
 
@@ -690,6 +692,7 @@ class TestApplyModelLoadAgentFailureTransactional:
             chat_model=None,
             *,
             on_mcp_progress=None,
+            events=None,
         ):
             # The pure path writes no globals; mimic a failure partway through
             # agent wiring (middleware build, deepagents, MCP reconnect, ...).

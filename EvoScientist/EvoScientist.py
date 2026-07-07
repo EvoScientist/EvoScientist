@@ -752,7 +752,6 @@ def _get_default_middleware(
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(
             model=tool_selector_model,
-            track_stream_selection=not for_async_subagent,
             events=events,
         ),
         # Interpreter prompt must land before runtime/memory context, so this

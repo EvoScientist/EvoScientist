@@ -410,32 +410,29 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selector_reasoning_delta_is_suppressed(self):
         """Selector reasoning must not appear as main-agent thinking."""
-        import EvoScientist.middleware.tool_selector as selector_mod
+        from EvoScientist.stream.sink import FrontendEventSink
 
-        original_active = selector_mod._selector_active
-        selector_mod._selector_active = True
-        try:
-            agent = FakeV3Agent(
-                [
-                    protocol_event(
-                        "messages",
-                        (
-                            {
-                                "event": "content-block-delta",
-                                "index": 0,
-                                "delta": {
-                                    "type": "reasoning-delta",
-                                    "reasoning": "selector-only thought",
-                                },
+        sink = FrontendEventSink()
+        sink.on_tool_selection_started(30)  # selector call in flight
+        agent = FakeV3Agent(
+            [
+                protocol_event(
+                    "messages",
+                    (
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "reasoning-delta",
+                                "reasoning": "selector-only thought",
                             },
-                            {},
-                        ),
-                    )
-                ]
-            )
-            events = await collect_events(agent)
-        finally:
-            selector_mod._selector_active = original_active
+                        },
+                        {},
+                    ),
+                )
+            ]
+        )
+        events = await collect_events(agent, events=sink)
 
         assert not any(
             e.get("type") == "thinking" and e.get("content") == "selector-only thought"
@@ -444,19 +441,16 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
-        import EvoScientist.middleware.tool_selector as selector_mod
+        from EvoScientist.stream.sink import FrontendEventSink
 
-        original_active = selector_mod._selector_active
-        selector_mod._selector_active = True
-        try:
-            message = AIMessage(
-                additional_kwargs={"reasoning_content": "selector whole thought"},
-                content="",
-            )
-            agent = FakeV3Agent([protocol_event("messages", (message, {}))])
-            events = await collect_events(agent)
-        finally:
-            selector_mod._selector_active = original_active
+        sink = FrontendEventSink()
+        sink.on_tool_selection_started(30)
+        message = AIMessage(
+            additional_kwargs={"reasoning_content": "selector whole thought"},
+            content="",
+        )
+        agent = FakeV3Agent([protocol_event("messages", (message, {}))])
+        events = await collect_events(agent, events=sink)
 
         assert not any(
             e.get("type") == "thinking" and e.get("content") == "selector whole thought"
@@ -779,32 +773,25 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selection_flushes_before_tool_only_step(self):
         """Selector UI event is emitted even when selection is followed only by a tool."""
-        import EvoScientist.middleware.tool_selector as selector_mod
+        from EvoScientist.stream.sink import FrontendEventSink
 
-        original_selected = selector_mod._current_selected_tools
-        original_total = selector_mod._total_tools_count
-        original_last = selector_mod._last_emitted_tools
-        selector_mod._current_selected_tools = ["read_file"]
-        selector_mod._total_tools_count = 3
-        selector_mod._last_emitted_tools = []
-        try:
-            output = ToolMessage(
-                content="File content",
-                name="read_file",
-                tool_call_id="tc1",
-            )
-            agent = FakeV3Agent(
-                [
-                    message_delta('{"tools":["read_file"]}'),
-                    tool_started("read_file", {"path": "notes.txt"}),
-                    tool_finished(output),
-                ]
-            )
-            events = await collect_events(agent)
-        finally:
-            selector_mod._current_selected_tools = original_selected
-            selector_mod._total_tools_count = original_total
-            selector_mod._last_emitted_tools = original_last
+        # The frontend sink holds a pending selection (1 of 3 tools) — the
+        # suppressor must surface it before the tool-only step.
+        sink = FrontendEventSink()
+        sink.on_tool_selection(["read_file"], 3)
+        output = ToolMessage(
+            content="File content",
+            name="read_file",
+            tool_call_id="tc1",
+        )
+        agent = FakeV3Agent(
+            [
+                message_delta('{"tools":["read_file"]}'),
+                tool_started("read_file", {"path": "notes.txt"}),
+                tool_finished(output),
+            ]
+        )
+        events = await collect_events(agent, events=sink)
 
         event_types = [e["type"] for e in events]
         assert event_types.index("tool_selection") < event_types.index("tool_call")

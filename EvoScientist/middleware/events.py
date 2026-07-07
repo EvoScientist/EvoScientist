@@ -68,12 +68,46 @@ class MiddlewareEventSink(Protocol):
         ...
 
 
+class ToolSelectionView(Protocol):
+    """Read side of the tool-selection state the stream suppressor consumes.
+
+    A frontend sink both *records* tool-selection facts (via the
+    :class:`MiddlewareEventSink` write side) and *exposes* them here so
+    ``stream/tool_selection.py`` can decide whether to suppress selector chatter
+    and when to surface the selection widget. Ownership lives in the frontend;
+    the stream layer only reads. :class:`NoOpSink` implements this as "never
+    active, nothing pending" so headless stacks render no widget.
+    """
+
+    @property
+    def tool_selection_active(self) -> bool:
+        """Whether a selection LLM call is currently in flight."""
+        ...
+
+    def tool_selection_pending(self) -> bool:
+        """Whether an unconsumed selection result is waiting to render."""
+        ...
+
+    def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
+        """Consume the pending selection once, applying dedup-vs-last-emitted.
+
+        Returns ``(had_pending, render)``:
+
+        * ``had_pending`` — a pending selection existed and was consumed.
+        * ``render`` — the tool list to display, or ``None`` when the selection
+          should not render (it kept every tool, or duplicates the last one
+          shown). ``None`` with ``had_pending=True`` still counts as consumed.
+        """
+        ...
+
+
 class NoOpSink:
-    """Default sink: drops every event.
+    """Default sink: drops every event and never renders a selection.
 
     Used for headless / gateway / deploy paths and for every subagent stack,
     where there is no frontend to render middleware events. Trivially
-    thread-safe and non-blocking.
+    thread-safe and non-blocking. Implements both the write
+    (:class:`MiddlewareEventSink`) and read (:class:`ToolSelectionView`) sides.
     """
 
     __slots__ = ()
@@ -89,3 +123,14 @@ class NoOpSink:
 
     def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
         pass
+
+    # --- ToolSelectionView (read side) -----------------------------------
+    @property
+    def tool_selection_active(self) -> bool:
+        return False
+
+    def tool_selection_pending(self) -> bool:
+        return False
+
+    def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
+        return (False, None)

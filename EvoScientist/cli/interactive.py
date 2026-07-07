@@ -448,7 +448,17 @@ def cmd_interactive(
         on_progress=_on_mcp_progress,
     )
 
-    runtime_gateways = create_runtime_gateways()
+    # One frontend event sink for the whole session — injected into the agent's
+    # middleware (write side) and the local gateway's streaming path (read side)
+    # so both share one owner. It survives agent rebuilds (/model, /new, MCP
+    # reload) because the session, not the agent, holds it.
+    from ..stream.sink import FrontendEventSink
+
+    event_sink = FrontendEventSink(
+        fallback_display=lambda text, style: console.print(text, style=style)
+    )
+
+    runtime_gateways = create_runtime_gateways(events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
     requested_thread_id = thread_id
 
@@ -486,6 +496,7 @@ def cmd_interactive(
             workspace_dir=state["workspace_dir"],
             checkpointer=checkpointer,
             config=config,
+            events=event_sink,
         )
 
     async def _await_agent_ready() -> "CompiledStateGraph":

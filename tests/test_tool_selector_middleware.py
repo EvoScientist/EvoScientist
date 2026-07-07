@@ -1,4 +1,4 @@
-"""Tests for LLMToolSelectorMiddleware integration."""
+"""Tests for LLMToolSelectorMiddleware integration and the event-sink handoff."""
 
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -8,9 +8,30 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from EvoScientist.middleware.tool_selector import (
     _ConditionalToolSelectorMiddleware,
-    _ToolSelectionTrackerMiddleware,
     create_tool_selector_middleware,
 )
+from EvoScientist.stream.emitter import StreamEventEmitter
+from EvoScientist.stream.sink import FrontendEventSink
+from EvoScientist.stream.tool_selection import _ToolSelectionSuppressor
+
+
+class _RecordingSink:
+    """Records selection lifecycle calls for assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def on_tool_selection_started(self, total_tools: int) -> None:
+        self.calls.append(("started", total_tools))
+
+    def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
+        self.calls.append(("selection", list(selected), total_tools))
+
+    def on_tool_selection_ended(self) -> None:
+        self.calls.append(("ended",))
+
+    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
+        pass
 
 
 def _tool(name: str) -> BaseTool:
@@ -36,17 +57,6 @@ def _mock_model():
     return m
 
 
-def _patched_create():
-    """Create tool selector middleware without real LLM init."""
-    return [
-        _ConditionalToolSelectorMiddleware(
-            selector_factory=MagicMock(return_value=MagicMock()),
-            threshold=20,
-        ),
-        _ToolSelectionTrackerMiddleware(),
-    ]
-
-
 # Helper: patches needed to call create_tool_selector_middleware without LLM
 def _factory_patches():
     return (
@@ -68,12 +78,13 @@ def _factory_patches():
 # ---------------------------------------------------------------------------
 
 
-def test_create_tool_selector_returns_list():
+def test_create_tool_selector_returns_single_middleware():
     p1, p2, p3 = _factory_patches()
     with p1, p2, p3:
         result = create_tool_selector_middleware()
         assert isinstance(result, list)
-        assert len(result) == 2
+        assert len(result) == 1
+        assert type(result[0]).__name__ == "_ConditionalToolSelectorMiddleware"
 
 
 def test_create_tool_selector_always_include():
@@ -106,17 +117,19 @@ def test_custom_threshold():
 
 
 # ---------------------------------------------------------------------------
-# Conditional + tracker unit tests
+# Conditional selector unit tests
 # ---------------------------------------------------------------------------
 
 
 def test_conditional_skips_below_threshold():
-    """When tools <= threshold, selector is skipped."""
+    """When tools <= threshold, selector is skipped and nothing is reported."""
     mock_selector = MagicMock()
     selector_factory = MagicMock(return_value=mock_selector)
+    sink = _RecordingSink()
     cond = _ConditionalToolSelectorMiddleware(
         selector_factory=selector_factory,
         threshold=10,
+        events=sink,
     )
 
     request = MagicMock()
@@ -127,6 +140,7 @@ def test_conditional_skips_below_threshold():
     handler.assert_called_once_with(request)
     selector_factory.assert_not_called()
     mock_selector.wrap_model_call.assert_not_called()
+    assert sink.calls == []  # no selection ran → no events
 
 
 def test_conditional_runs_above_threshold():
@@ -148,58 +162,52 @@ def test_conditional_runs_above_threshold():
     handler.assert_not_called()
 
 
-def test_selector_active_flag():
-    """_selector_active flag is True during selection, False after."""
-    import EvoScientist.middleware.tool_selector as ts_mod
-
-    mock_selector = MagicMock()
+def test_selection_lifecycle_reported_to_sink():
+    """started(total) → selection(selected, total) → ended, reported to the sink."""
+    # The fake selector filters the request down to two named tools before
+    # calling the downstream handler.
+    filtered = _request([_tool("read_file"), _tool("think_tool")])
 
     def fake_selector_call(request, handler):
-        assert ts_mod._selector_active is True
-        return handler(request)
+        return handler(filtered)
 
+    mock_selector = MagicMock()
     mock_selector.wrap_model_call.side_effect = fake_selector_call
+    sink = _RecordingSink()
     cond = _ConditionalToolSelectorMiddleware(
         selector_factory=MagicMock(return_value=mock_selector),
         threshold=5,
+        events=sink,
     )
 
-    request = MagicMock()
-    request.tools = [MagicMock() for _ in range(10)]
-    handler = MagicMock()
+    request = _request([_tool(f"t{i}") for i in range(10)])
+    cond.wrap_model_call(request, MagicMock())
 
-    cond.wrap_model_call(request, handler)
-    assert ts_mod._selector_active is False
+    assert sink.calls[0] == ("started", 10)
+    assert ("selection", ["read_file", "think_tool"], 10) in sink.calls
+    assert sink.calls[-1] == ("ended",)
 
 
-def test_selector_can_disable_stream_tracking():
-    """Selection can run without touching the main-agent stream/UI globals."""
-    import EvoScientist.middleware.tool_selector as ts_mod
-
+def test_selector_failure_reports_ended_without_selection():
+    """A selector that raises before the handler surfaces no selection event."""
     mock_selector = MagicMock()
-
-    def fake_selector_call(request, handler):
-        assert ts_mod._selector_active is False
-        return handler(request)
-
-    mock_selector.wrap_model_call.side_effect = fake_selector_call
+    mock_selector.wrap_model_call.side_effect = RuntimeError("no structured output")
+    sink = _RecordingSink()
     cond = _ConditionalToolSelectorMiddleware(
         selector_factory=MagicMock(return_value=mock_selector),
         threshold=5,
-        track_stream_selection=False,
+        events=sink,
     )
 
-    ts_mod._total_tools_count = 99
-    request = MagicMock()
-    request.tools = [MagicMock() for _ in range(10)]
+    request = _request([_tool(f"t{i}") for i in range(10)])
     handler = MagicMock()
-
     cond.wrap_model_call(request, handler)
 
-    mock_selector.wrap_model_call.assert_called_once()
-    handler.assert_called_once()
-    assert ts_mod._selector_active is False
-    assert ts_mod._total_tools_count == 99
+    # Falls back to all tools; only started/ended reported, no selection.
+    handler.assert_called_once_with(request)
+    assert ("started", 10) in sink.calls
+    assert not any(c[0] == "selection" for c in sink.calls)
+    assert sink.calls[-1] == ("ended",)
 
 
 def test_selector_always_includes_available_memory_tools():
@@ -278,22 +286,56 @@ def test_selector_resolved_once_across_repeated_requests():
     assert mock_selector.wrap_model_call.call_count == 3
 
 
-def test_tracker_captures_tools():
-    """Tracker middleware captures tool names from request."""
-    tracker = _ToolSelectionTrackerMiddleware()
-    tool1 = _tool("read_file")
-    tool2 = _tool("execute")
+# ---------------------------------------------------------------------------
+# R1: consume-once + dedup render sequences (sink + suppressor)
+# ---------------------------------------------------------------------------
 
-    request = MagicMock()
-    request.tools = [tool1, tool2]
-    handler = MagicMock()
 
-    tracker.wrap_model_call(request, handler)
-    handler.assert_called_once_with(request)
+def _drive_selection(sink, suppressor, selected, total):
+    """Mimic one selection turn: sink records it, the suppressor observes the
+    selector JSON block, then a flush surfaces (or not) the UI event."""
+    sink.on_tool_selection_started(total)
+    sink.on_tool_selection(selected, total)
+    sink.on_tool_selection_ended()
+    # Suppressor observes the selector's structured-output tool block.
+    suppressor.observe_tool_block("ToolSelectionResponse")
+    return suppressor.flush_selection()
 
-    import EvoScientist.middleware.tool_selector as ts_mod
 
-    assert ts_mod._current_selected_tools == ["read_file", "execute"]
+def test_render_sequences_table():
+    """select → render; same selection again → no repeat; new selection → render."""
+    cases = [
+        # (label, selected, total, expect_render)
+        ("first selection renders", ["read_file", "think_tool"], 5, True),
+        ("same selection again does not repeat", ["read_file", "think_tool"], 5, False),
+        ("new selection renders", ["execute", "think_tool"], 5, True),
+        ("kept-all selection does not render", ["a", "b", "c"], 3, False),
+    ]
+    sink = FrontendEventSink()
+    suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
+
+    for label, selected, total, expect_render in cases:
+        events = _drive_selection(sink, suppressor, selected, total)
+        rendered = [e for e in events if e.get("type") == "tool_selection"]
+        if expect_render:
+            assert rendered, f"{label}: expected a tool_selection event"
+            assert rendered[0]["tools"] == selected, label
+        else:
+            assert not rendered, f"{label}: expected no tool_selection event"
+
+
+def test_consume_is_once_only():
+    """A pending selection renders once; a second flush yields nothing."""
+    sink = FrontendEventSink()
+    suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
+
+    first = _drive_selection(sink, suppressor, ["read_file"], 3)
+    assert any(e.get("type") == "tool_selection" for e in first)
+
+    # No new selection recorded; the observation flag was consumed.
+    suppressor.observe_tool_block("ToolSelectionResponse")
+    second = suppressor.flush_selection()
+    assert not any(e.get("type") == "tool_selection" for e in second)
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +345,12 @@ def test_tracker_captures_tools():
 
 @patch(
     "EvoScientist.middleware.create_tool_selector_middleware",
-    side_effect=lambda *a, **kw: _patched_create(),
+    side_effect=lambda *a, **kw: [
+        _ConditionalToolSelectorMiddleware(
+            selector_factory=MagicMock(return_value=MagicMock()),
+            threshold=20,
+        )
+    ],
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
@@ -321,7 +368,6 @@ def test_default_middleware_includes_tool_selector(mock_config, mock_model, mock
     mw = _get_default_middleware()
     type_names = [type(m).__name__ for m in mw]
     assert "_ConditionalToolSelectorMiddleware" in type_names
-    assert "_ToolSelectionTrackerMiddleware" in type_names
 
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
@@ -339,7 +385,12 @@ def test_subagent_no_tool_selector(mock_model):
 
 @patch(
     "EvoScientist.middleware.create_tool_selector_middleware",
-    side_effect=lambda *a, **kw: _patched_create(),
+    side_effect=lambda *a, **kw: [
+        _ConditionalToolSelectorMiddleware(
+            selector_factory=MagicMock(return_value=MagicMock()),
+            threshold=20,
+        )
+    ],
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
@@ -359,7 +410,6 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     type_names = [type(m).__name__ for m in mw]
 
     ts_idx = type_names.index("_ConditionalToolSelectorMiddleware")
-    tracker_idx = type_names.index("_ToolSelectionTrackerMiddleware")
     te_idx = type_names.index("ToolErrorHandlerMiddleware")
     mem_idx = type_names.index("EvoMemoryMiddleware")
-    assert te_idx < ts_idx < tracker_idx < mem_idx
+    assert te_idx < ts_idx < mem_idx

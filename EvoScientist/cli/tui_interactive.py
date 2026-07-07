@@ -294,7 +294,15 @@ def run_textual_interactive(
 
         config = get_effective_config()
 
-    runtime_gateways = create_runtime_gateways()
+    # One frontend event sink for the whole TUI session — injected into the
+    # agent's middleware (write side) and the local gateway's streaming path
+    # (read side). The fallback-notice display is bound to the App's
+    # _append_system once the App exists (on_mount); tool-selection needs no
+    # display hook (its widget is mounted from the stream event).
+    from ..stream.sink import FrontendEventSink
+
+    event_sink = FrontendEventSink()
+    runtime_gateways = create_runtime_gateways(events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
 
     try:
@@ -516,6 +524,7 @@ def run_textual_interactive(
             self._agent_loader.start(
                 workspace_dir=workspace,
                 checkpointer=self._checkpointer,
+                events=getattr(self._runtime_gateways.graph_gateway, "events", None),
             )
 
         def _mount_mcp_loader_widget(self) -> None:

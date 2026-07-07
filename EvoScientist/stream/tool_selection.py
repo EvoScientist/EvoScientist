@@ -1,15 +1,26 @@
 """Tool-selection stream suppression helpers."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .emitter import StreamEventEmitter
 
+if TYPE_CHECKING:
+    from ..middleware.events import ToolSelectionView
+
 
 class _ToolSelectionSuppressor:
-    """Suppress selector model JSON while preserving the UI selection event."""
+    """Suppress selector model JSON while preserving the UI selection event.
 
-    def __init__(self, emitter: StreamEventEmitter) -> None:
+    Reads its selection state from the injected frontend sink (a
+    :class:`~EvoScientist.middleware.events.ToolSelectionView`) rather than
+    process globals: ``tool_selection_active`` gates chatter suppression and
+    ``consume_tool_selection`` yields the deduped list to surface. The sink
+    owns the state; this class only observes the stream and asks the sink.
+    """
+
+    def __init__(self, emitter: StreamEventEmitter, sink: "ToolSelectionView") -> None:
         self._emitter = emitter
+        self._sink = sink
         self._buffering = False
         self._buffer = ""
         self._was_active = False
@@ -93,17 +104,11 @@ class _ToolSelectionSuppressor:
             return True
         return self._selector_call_active() or self._selection_pending()
 
-    @staticmethod
-    def _selector_call_active() -> bool:
-        import EvoScientist.middleware.tool_selector as selector_mod
+    def _selector_call_active(self) -> bool:
+        return bool(self._sink.tool_selection_active)
 
-        return bool(selector_mod._selector_active)
-
-    @staticmethod
-    def _selection_pending() -> bool:
-        import EvoScientist.middleware.tool_selector as selector_mod
-
-        return bool(selector_mod._current_selected_tools)
+    def _selection_pending(self) -> bool:
+        return bool(self._sink.tool_selection_pending())
 
     def flush_selection(self) -> list[dict[str, Any]]:
         return self._emit_selection_if_ready("")
@@ -119,17 +124,13 @@ class _ToolSelectionSuppressor:
     def _emit_selection_if_ready(self, text: str) -> list[dict[str, Any]]:
         if not self._was_active:
             return []
-        import EvoScientist.middleware.tool_selector as selector_mod
-
-        if selector_mod._current_selected_tools:
+        had_pending, render = self._sink.consume_tool_selection()
+        if had_pending:
+            # Pending consumed (once) — clear our observation flag regardless of
+            # whether the sink chose to render it (dedup / kept-all cases).
             self._was_active = False
-            selected = selector_mod._current_selected_tools
-            selector_mod._current_selected_tools = []
-            if len(selected) < selector_mod._total_tools_count and sorted(
-                selected
-            ) != sorted(selector_mod._last_emitted_tools):
-                selector_mod._last_emitted_tools = list(selected)
-                return [self._emitter.tool_selection(list(selected)).data]
+            if render is not None:
+                return [self._emitter.tool_selection(render).data]
         elif text:
             self._was_active = False
         return []

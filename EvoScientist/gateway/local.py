@@ -19,6 +19,8 @@ from .types import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..middleware.events import ToolSelectionView
+
 
 @dataclass(frozen=True, slots=True)
 class LocalThreadStore:
@@ -61,9 +63,16 @@ class LocalThreadStore:
 
 @dataclass(slots=True)
 class LocalGraphGateway:
-    """Gateway backed by the current in-process graph and session helpers."""
+    """Gateway backed by the current in-process graph and session helpers.
+
+    ``events`` is the frontend event sink for this runtime — the same instance
+    injected into the agent's middleware. The streaming path reads it so the
+    tool-selection suppressor and the middleware share one owner. ``None`` (the
+    default, and every headless / server runtime) means no selection widget.
+    """
 
     thread_store: ThreadStore = field(default_factory=LocalThreadStore)
+    events: ToolSelectionView | None = None
 
     async def create_thread(
         self,
@@ -155,6 +164,7 @@ class LocalGraphGateway:
             request.thread_id,
             metadata=request.metadata,
             media=request.media,
+            events=self.events,
         )
         try:
             async for event in inner:
