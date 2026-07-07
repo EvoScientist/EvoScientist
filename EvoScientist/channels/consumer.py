@@ -20,6 +20,24 @@ from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import InboundMessage, OutboundMessage
+from .interaction import (
+    APPROVAL_TIMEOUT_FEEDBACK,
+    APPROVED_AUTO_FEEDBACK,
+    APPROVED_FEEDBACK,
+    ASK_USER_TIMEOUT,
+    ASK_USER_TIMEOUT_FEEDBACK,
+    HITL_APPROVAL_TIMEOUT,
+    OTHER_PROMPT,
+    REJECTED_FEEDBACK,
+)
+from .interaction import approval_prompt_metadata as _approval_prompt_metadata
+from .interaction import config_auto_approve as _should_auto_approve
+from .interaction import format_approval_prompt as _format_approval_prompt
+from .interaction import format_question_prompt as _format_question_prompt
+from .interaction import is_cancel_reply as _is_cancel_reply
+from .interaction import is_stop_command as _is_stop_command
+from .interaction import parse_approval_reply as _parse_approval_reply
+from .interaction import parse_choice_answer as _parse_choice_answer
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +46,10 @@ T = TypeVar("T")
 _MAX_CHAT_LOCKS = 10_000
 _MAX_SESSIONS = 10_000
 _MAX_HITL_ROUNDS = 50
-_HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for HITL approval reply
-_ASK_USER_TIMEOUT = (
-    300.0  # seconds to wait for ask_user reply (longer for thinking time)
-)
+# Per-flow timeout defaults now live in ``channels.interaction`` (single
+# source shared with the CLI bridge); aliased here for local readability.
+_HITL_APPROVAL_TIMEOUT = HITL_APPROVAL_TIMEOUT
+_ASK_USER_TIMEOUT = ASK_USER_TIMEOUT
 
 
 @dataclass
@@ -106,104 +124,6 @@ def _join_subagent_text(buffers: dict[str, tuple[str, list[str]]]) -> str:
             for i, chs in enumerate(chunk_lists, 1):
                 sections.append(f"[{display_name} #{i}]: {''.join(chs)}")
     return "\n\n".join(sections)
-
-
-def _should_auto_approve(action_requests: list[dict]) -> bool:
-    """Check if all action requests can be auto-approved via config.
-
-    Returns True if no manual approval is needed (config auto_approve,
-    non-execute tools, or shell_allow_list match).
-    """
-    if not action_requests:
-        return True
-
-    try:
-        from ..config.settings import HITL_SHELL_TOOLS, load_config
-
-        cfg = load_config()
-    except Exception:
-        return False  # fail-closed
-
-    if cfg.auto_approve:
-        return True
-
-    shell_allow_list = (
-        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
-        if cfg.shell_allow_list
-        else []
-    )
-
-    for req in action_requests:
-        name = req.get("name", "")
-        if name not in HITL_SHELL_TOOLS:
-            continue
-        args = req.get("args", {})
-        command = args.get("command", "") if isinstance(args, dict) else ""
-        cmd = command.strip()
-        if not any(cmd.startswith(prefix) for prefix in shell_allow_list):
-            return False
-    return True
-
-
-def _format_approval_prompt(
-    action_requests: list[dict], *, with_buttons: bool = False
-) -> str:
-    """Format an approval prompt as a text message for channel users.
-
-    When *with_buttons* is True, the trailing "Reply: 1=Approve..."
-    instruction is dropped — the buttons replace the textual cue.
-    """
-    lines = ["\u26a0\ufe0f Approval Required\n"]
-    for i, req in enumerate(action_requests, 1):
-        name = req.get("name", "")
-        args = req.get("args", {})
-        if isinstance(args, dict):
-            command = args.get("command", args.get("path", ""))
-        else:
-            command = ""
-        if command:
-            lines.append(f"  {i}. {name}: {command}")
-        else:
-            lines.append(f"  {i}. {name}")
-    if not with_buttons:
-        lines.append("")
-        lines.append("Reply: 1=Approve, 2=Reject, 3=Approve all")
-        lines.append("(Auto-reject in 2 min if no reply)")
-    return "\n".join(lines)
-
-
-def _parse_approval_reply(text: str) -> str | None:
-    """Parse a channel user's reply as an approval decision.
-
-    Returns "approve", "reject", "auto", or None if not recognized.
-    """
-    t = text.strip().lower()
-    if t in ("1", "y", "yes", "approve", "ok"):
-        return "approve"
-    if t in ("2", "n", "no", "reject"):
-        return "reject"
-    if t in ("3", "a", "auto", "approve all"):
-        return "auto"
-    return None
-
-
-def _approval_prompt_metadata(
-    base_metadata: dict | None, *, with_buttons: bool
-) -> dict:
-    """Outbound metadata for the HITL approval prompt.
-
-    When *with_buttons* is True, attaches Approve/Reject/Auto buttons whose
-    values match ``_parse_approval_reply`` so a click flows through the same
-    path as a typed ``"1"``/``"2"``/``"3"`` reply.
-    """
-    metadata = dict(base_metadata or {})
-    if with_buttons:
-        metadata["buttons"] = [
-            {"text": "Approve", "value": "1", "type": "primary"},
-            {"text": "Reject", "value": "2", "type": "danger"},
-            {"text": "Approve all", "value": "3"},
-        ]
-    return metadata
 
 
 @dataclass
@@ -676,7 +596,7 @@ class InboundConsumer:
                         OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
-                            content="⏰ Approval timed out. Action rejected.",
+                            content=APPROVAL_TIMEOUT_FEEDBACK,
                             metadata=msg.metadata,
                         )
                     )
@@ -689,9 +609,9 @@ class InboundConsumer:
                 # the user approved when they just walked away.
                 if pending.event.is_set():
                     feedback_text = {
-                        "approve": "\u2705 已批准",
-                        "auto": "\u2705 已批准（后续自动通过）",
-                        "reject": "\u274c 已拒绝",
+                        "approve": APPROVED_FEEDBACK,
+                        "auto": APPROVED_AUTO_FEEDBACK,
+                        "reject": REJECTED_FEEDBACK,
                     }.get(decision)
                     if feedback_text:
                         await self.bus.publish_outbound(
@@ -800,8 +720,10 @@ class InboundConsumer:
     ) -> dict:
         """Handle an ask_user interrupt: send questions to channel, collect answers.
 
-        Mirrors the logic of ``cli.channel.channel_ask_user_prompt`` but runs
-        fully async inside the consumer event loop.
+        Uses the shared grammar in :mod:`channels.interaction` (prompt
+        formatting, choice parsing, stop-command handling) so serve mode
+        and the CLI bridge cannot drift.  ``/stop`` is checked *before*
+        the reply is parsed (G3), matching the CLI path.
 
         Returns a dict suitable for ``Command(resume=...)``:
         ``{"answers": [...], "status": "answered"}`` or
@@ -814,44 +736,21 @@ class InboundConsumer:
         total = len(questions)
         answers: list[str] = []
 
-        for i, q in enumerate(questions):
-            q_text = q.get("question", "")
-            q_type = q.get("type", "text")
-            required = q.get("required", True)
-
-            # -- Format question header --
-            if total == 1:
-                header = "\u2753 Quick check-in from EvoScientist\n"
-            else:
-                header = f"\u2753 Question {i + 1}/{total}\n"
-
-            lines: list[str] = [header, f"{i + 1}. {q_text}"]
-            if not required:
-                lines[-1] += " (optional)"
-
-            if q_type == "multiple_choice":
-                choices = q.get("choices", [])
-                for j, choice in enumerate(choices):
-                    label = choice.get("value", str(choice))
-                    letter = chr(ord("A") + j)
-                    lines.append(f"   {letter}. {label}")
-                other_letter = chr(ord("A") + len(choices))
-                lines.append(f"   {other_letter}. Other")
-                letters = "/".join(chr(ord("A") + k) for k in range(len(choices) + 1))
-                lines.append(f"\nReply with a letter ({letters}), or 'cancel'.")
-            else:
-                skip_hint = " Leave empty to skip." if not required else ""
-                lines.append(f"\nReply with your answer, or 'cancel'.{skip_hint}")
-
-            # -- Send question --
+        async def _send(content: str) -> None:
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="\n".join(lines),
+                    content=content,
                     metadata=msg.metadata,
                 )
             )
+
+        for i, q in enumerate(questions):
+            q_type = q.get("type", "text")
+
+            # -- Send question --
+            await _send(_format_question_prompt(q, i, total))
 
             # -- Wait for user reply --
             reply = await self._wait_for_ask_user_reply(
@@ -860,59 +759,36 @@ class InboundConsumer:
             )
 
             if not reply:
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content="\u23f0 Response timed out.",
-                        metadata=msg.metadata,
-                    )
-                )
+                await _send(ASK_USER_TIMEOUT_FEEDBACK)
                 return {"status": "cancelled"}
 
             raw = reply.strip()
-            if raw.lower() == "cancel":
+            if _is_stop_command(raw):
+                return {"status": "cancelled"}
+            if _is_cancel_reply(raw):
                 return {"status": "cancelled"}
 
             # -- Parse answer --
             if q_type == "multiple_choice":
                 choices = q.get("choices", [])
-                other_letter = chr(ord("A") + len(choices))
-                if len(raw) == 1 and raw.upper() == other_letter:
-                    # "Other" selected — ask for free-form input
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                            content="Please type your answer:",
-                            metadata=msg.metadata,
-                        )
-                    )
+                kind, value = _parse_choice_answer(raw, choices)
+                if kind == "other":
+                    # "Other" selected -- ask for free-form input
+                    await _send(OTHER_PROMPT)
                     other_reply = await self._wait_for_ask_user_reply(
                         session_key,
                         _ASK_USER_TIMEOUT,
                     )
                     if not other_reply:
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content="\u23f0 Response timed out.",
-                                metadata=msg.metadata,
-                            )
-                        )
+                        await _send(ASK_USER_TIMEOUT_FEEDBACK)
                         return {"status": "cancelled"}
-                    if other_reply.strip().lower() == "cancel":
+                    if _is_stop_command(other_reply):
+                        return {"status": "cancelled"}
+                    if _is_cancel_reply(other_reply):
                         return {"status": "cancelled"}
                     answers.append(other_reply.strip())
-                elif len(raw) == 1 and raw.upper().isalpha():
-                    idx = ord(raw.upper()) - ord("A")
-                    if 0 <= idx < len(choices):
-                        answers.append(choices[idx].get("value", raw))
-                    else:
-                        answers.append(raw)
                 else:
-                    answers.append(raw)
+                    answers.append(value)
             else:
                 answers.append(raw)
 

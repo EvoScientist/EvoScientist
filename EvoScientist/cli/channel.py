@@ -24,6 +24,23 @@ from typing import TYPE_CHECKING, Any
 from rich.panel import Panel
 from rich.text import Text
 
+from ..channels.interaction import (
+    APPROVAL_TIMEOUT_FEEDBACK,
+    APPROVED_AUTO_FEEDBACK,
+    APPROVED_FEEDBACK,
+    ASK_USER_TIMEOUT,
+    ASK_USER_TIMEOUT_FEEDBACK,
+    HITL_APPROVAL_TIMEOUT,
+    OTHER_PROMPT,
+    approval_prompt_metadata,
+    decision_feedback,
+    format_approval_prompt,
+    format_question_prompt,
+    is_cancel_reply,
+    is_stop_command,
+    parse_approval_reply,
+    parse_choice_answer,
+)
 from ..commands.base import ChannelRuntime
 from ..stream.console import console
 
@@ -458,11 +475,10 @@ _pending_hitl: dict[str, dict] = {}  # "channel:chat_id" -> {event, reply}
 _hitl_lock = threading.Lock()
 _hitl_auto_approve: set[str] = set()  # "channel:chat_id" keys with auto-approve
 
-_HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for HITL approval reply
-_ASK_USER_TIMEOUT = (
-    300.0  # seconds to wait for ask_user reply (longer for thinking time)
-)
-_STOP_COMMANDS = frozenset(("/stop", "/cancel"))
+# Per-flow timeout defaults are shared with the consumer via
+# ``channels.interaction`` (single source of truth for the grammar).
+_HITL_APPROVAL_TIMEOUT = HITL_APPROVAL_TIMEOUT
+_ASK_USER_TIMEOUT = ASK_USER_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +612,10 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
     return True
 
 
-def _is_stop_command(content: str | None) -> bool:
-    """Whether incoming content is a stop/cancel slash command."""
-    return (content or "").strip().lower() in _STOP_COMMANDS
+# Stop-command detection now lives in ``channels.interaction`` (shared with
+# the consumer). Kept as a module alias so the bus fast-path call sites read
+# naturally and stay import-stable.
+_is_stop_command = is_stop_command
 
 
 def _register_hitl_wait(channel_type: str, chat_id: str) -> threading.Event:
@@ -679,36 +696,9 @@ def channel_ask_user_prompt(
     answers: list[str] = []
 
     for i, q in enumerate(questions):
-        q_text = q.get("question", "")
         q_type = q.get("type", "text")
-        required = q.get("required", True)
 
-        # Format single question
-        if total == 1:
-            header = "\u2753 Quick check-in from EvoScientist\n"
-        else:
-            header = f"\u2753 Question {i + 1}/{total}\n"
-
-        lines = [header, f"{i + 1}. {q_text}"]
-        if not required:
-            lines[-1] += " (optional)"
-
-        if q_type == "multiple_choice":
-            choices = q.get("choices", [])
-            for j, choice in enumerate(choices):
-                label = choice.get("value", str(choice))
-                letter = chr(ord("A") + j)
-                lines.append(f"   {letter}. {label}")
-            other_letter = chr(ord("A") + len(choices))
-            lines.append(f"   {other_letter}. Other")
-            lines.append(
-                f"\nReply with a letter ({'/'.join(chr(ord('A') + k) for k in range(len(choices) + 1))}), or 'cancel'."
-            )
-        else:
-            skip_hint = " Leave empty to skip." if not required else ""
-            lines.append(f"\nReply with your answer, or 'cancel'.{skip_hint}")
-
-        if not _send("\n".join(lines)):
+        if not _send(format_question_prompt(q, i, total)):
             return {"status": "cancelled"}
 
         # Wait for reply
@@ -717,42 +707,36 @@ def channel_ask_user_prompt(
         reply_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
 
         if not replied or not reply_text:
-            _send("\u23f0 Response timed out.")
+            _send(ASK_USER_TIMEOUT_FEEDBACK)
             return {"status": "cancelled"}
 
         raw = reply_text.strip()
-        if _is_stop_command(raw):
+        if is_stop_command(raw):
             return {"status": "cancelled"}
-        if raw.lower() == "cancel":
+        if is_cancel_reply(raw):
             return {"status": "cancelled"}
 
         # Parse answer
         if q_type == "multiple_choice":
             choices = q.get("choices", [])
-            other_letter = chr(ord("A") + len(choices))
-            if len(raw) == 1 and raw.upper() == other_letter:
-                # Other selected — ask for free-form input
-                if not _send("Please type your answer:"):
+            kind, value = parse_choice_answer(raw, choices)
+            if kind == "other":
+                # Other selected -- ask for free-form input
+                if not _send(OTHER_PROMPT):
                     return {"status": "cancelled"}
                 hitl_event = _register_hitl_wait(msg.channel_type, msg.chat_id)
                 replied = hitl_event.wait(timeout=_ASK_USER_TIMEOUT)
                 other_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
                 if not replied or not other_text:
-                    _send("\u23f0 Response timed out.")
+                    _send(ASK_USER_TIMEOUT_FEEDBACK)
                     return {"status": "cancelled"}
-                if _is_stop_command(other_text):
+                if is_stop_command(other_text):
                     return {"status": "cancelled"}
-                if other_text.strip().lower() == "cancel":
+                if is_cancel_reply(other_text):
                     return {"status": "cancelled"}
                 answers.append(other_text.strip())
-            elif len(raw) == 1 and raw.upper().isalpha():
-                idx = ord(raw.upper()) - ord("A")
-                if 0 <= idx < len(choices):
-                    answers.append(choices[idx].get("value", raw))
-                else:
-                    answers.append(raw)
             else:
-                answers.append(raw)
+                answers.append(value)
         else:
             answers.append(raw)
 
@@ -771,11 +755,6 @@ def channel_hitl_prompt(
     Returns approval decisions list on approve/auto, or None on reject/timeout.
     """
     from ..channels.bus.events import OutboundMessage
-    from ..channels.consumer import (
-        _approval_prompt_metadata,
-        _format_approval_prompt,
-        _parse_approval_reply,
-    )
 
     # Check session auto-approve (set by a previous "3" reply)
     session_key = f"{msg.channel_type}:{msg.chat_id}"
@@ -793,9 +772,7 @@ def channel_hitl_prompt(
         _manager.get_channel(msg.channel_type) if _manager is not None else None
     )
     has_buttons = channel_obj is not None and channel_obj.capabilities.inline_buttons
-    approval_metadata = _approval_prompt_metadata(
-        msg.metadata, with_buttons=has_buttons
-    )
+    approval_metadata = approval_prompt_metadata(msg.metadata, with_buttons=has_buttons)
 
     def _send(content: str, *, metadata: dict | None = None) -> bool:
         """Send a message to the channel user.  Returns True on success."""
@@ -819,7 +796,7 @@ def channel_hitl_prompt(
             return False
 
     # 1. Send approval prompt
-    prompt_text = _format_approval_prompt(action_requests, with_buttons=has_buttons)
+    prompt_text = format_approval_prompt(action_requests, with_buttons=has_buttons)
     if not _send(prompt_text, metadata=approval_metadata):
         return None
 
@@ -829,31 +806,26 @@ def channel_hitl_prompt(
     reply_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
 
     if not replied or not reply_text:
-        _send("\u23f0 Approval timed out. Action rejected.")
+        _send(APPROVAL_TIMEOUT_FEEDBACK)
         return None
 
-    if _is_stop_command(reply_text):
+    if is_stop_command(reply_text):
         # `/stop` already got its own immediate ack from the bus fast-path.
         # Treat it as a pure cancel signal here so we don't send a second,
         # contradictory "Unrecognized reply" message.
         return None
 
     # 3. Parse decision
-    decision = _parse_approval_reply(reply_text)
+    decision = parse_approval_reply(reply_text)
     if decision == "auto":
         _hitl_auto_approve.add(session_key)
-        _send("\u2705 已批准（后续自动通过）")
+        _send(APPROVED_AUTO_FEEDBACK)
         return [{"type": "approve"} for _ in action_requests]
     if decision == "approve":
-        _send("\u2705 已批准")
+        _send(APPROVED_FEEDBACK)
         return [{"type": "approve"} for _ in action_requests]
 
-    feedback = (
-        "\u274c 已拒绝"
-        if decision == "reject"
-        else "Unrecognized reply. Action rejected."
-    )
-    _send(feedback)
+    _send(decision_feedback(decision))
     return None
 
 
