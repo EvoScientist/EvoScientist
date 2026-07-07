@@ -7,7 +7,6 @@ import pytest
 
 from EvoScientist.channels.base import ChannelError, OutboundMessage
 from EvoScientist.channels.dingtalk.channel import DingTalkChannel, DingTalkConfig
-from tests.conftest import run_async as _run
 
 
 class TestDingTalkConfig:
@@ -41,30 +40,30 @@ class TestDingTalkChannel:
         assert channel._running is False
         assert channel.name == "dingtalk"
 
-    def test_start_raises_without_credentials(self):
+    async def test_start_raises_without_credentials(self):
         config = DingTalkConfig(client_id="", client_secret="")
         channel = DingTalkChannel(config)
         with pytest.raises(ChannelError, match="client_id and client_secret"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_without_client_id(self):
+    async def test_start_raises_without_client_id(self):
         config = DingTalkConfig(client_id="", client_secret="secret")
         channel = DingTalkChannel(config)
         with pytest.raises(ChannelError, match="client_id and client_secret"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_without_client_secret(self):
+    async def test_start_raises_without_client_secret(self):
         config = DingTalkConfig(client_id="id", client_secret="")
         channel = DingTalkChannel(config)
         with pytest.raises(ChannelError, match="client_id and client_secret"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_stop_when_not_running(self):
+    async def test_stop_when_not_running(self):
         config = DingTalkConfig(client_id="test-id", client_secret="test-secret")
         channel = DingTalkChannel(config)
-        _run(channel.stop())
+        await channel.stop()
 
-    def test_send_returns_false_without_client(self):
+    async def test_send_returns_false_without_client(self):
         config = DingTalkConfig(client_id="test-id", client_secret="test-secret")
         channel = DingTalkChannel(config)
         msg = OutboundMessage(
@@ -73,7 +72,7 @@ class TestDingTalkChannel:
             content="hello",
             metadata={"chat_id": "user123"},
         )
-        result = _run(channel.send(msg))
+        result = await channel.send(msg)
         assert result is False
 
     def test_capabilities(self):
@@ -130,20 +129,20 @@ class TestDingTalkWsMessageParsing:
         channel._token_expires = 9999999999
         return channel
 
-    def test_system_ping_ack(self):
+    async def test_system_ping_ack(self):
         channel = self._make_channel()
         data = {
             "type": "SYSTEM",
             "headers": {"topic": "ping", "messageId": "ping-1"},
             "data": "pong-data",
         }
-        _run(channel._on_ws_message(data))
+        await channel._on_ws_message(data)
         channel._ws_session.send_str.assert_called_once()
         sent = json.loads(channel._ws_session.send_str.call_args[0][0])
         assert sent["code"] == 200
         assert sent["data"] == "pong-data"
 
-    def test_callback_text_message(self):
+    async def test_callback_text_message(self):
         channel = self._make_channel()
         channel._enqueue_raw = AsyncMock()
 
@@ -158,14 +157,14 @@ class TestDingTalkWsMessageParsing:
             "headers": {"messageId": "msg-1", "contentType": "application/json"},
             "data": json.dumps(payload),
         }
-        _run(channel._on_ws_message(data))
+        await channel._on_ws_message(data)
         channel._enqueue_raw.assert_called_once()
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.text == "hello bot"
         assert raw.sender_id == "staff123"
         assert raw.is_group is False
 
-    def test_callback_group_message_mention(self):
+    async def test_callback_group_message_mention(self):
         channel = self._make_channel()
         channel._enqueue_raw = AsyncMock()
 
@@ -181,12 +180,12 @@ class TestDingTalkWsMessageParsing:
             "headers": {"messageId": "msg-2"},
             "data": json.dumps(payload),
         }
-        _run(channel._on_ws_message(data))
+        await channel._on_ws_message(data)
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.is_group is True
         assert raw.was_mentioned is True
 
-    def test_callback_group_no_mention(self):
+    async def test_callback_group_no_mention(self):
         channel = self._make_channel()
         channel._enqueue_raw = AsyncMock()
 
@@ -201,12 +200,12 @@ class TestDingTalkWsMessageParsing:
             "headers": {"messageId": "msg-3"},
             "data": json.dumps(payload),
         }
-        _run(channel._on_ws_message(data))
+        await channel._on_ws_message(data)
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.is_group is True
         assert raw.was_mentioned is False
 
-    def test_ignores_non_callback(self):
+    async def test_ignores_non_callback(self):
         channel = self._make_channel()
         channel._enqueue_raw = AsyncMock()
 
@@ -215,10 +214,10 @@ class TestDingTalkWsMessageParsing:
             "headers": {"messageId": "msg-x"},
             "data": "{}",
         }
-        _run(channel._on_ws_message(data))
+        await channel._on_ws_message(data)
         channel._enqueue_raw.assert_not_called()
 
-    def test_ignores_empty_content(self):
+    async def test_ignores_empty_content(self):
         channel = self._make_channel()
         channel._enqueue_raw = AsyncMock()
 
@@ -232,20 +231,20 @@ class TestDingTalkWsMessageParsing:
             "headers": {"messageId": "msg-e"},
             "data": json.dumps(payload),
         }
-        _run(channel._on_ws_message(data))
+        await channel._on_ws_message(data)
         channel._enqueue_raw.assert_not_called()
 
-    def test_non_dict_data_ignored(self):
+    async def test_non_dict_data_ignored(self):
         channel = self._make_channel()
         channel._enqueue_raw = AsyncMock()
-        _run(channel._on_ws_message("not a dict"))
+        await channel._on_ws_message("not a dict")
         channel._enqueue_raw.assert_not_called()
 
 
 class TestDingTalkSendChunk:
     """Test _send_chunk with mocked HTTP client."""
 
-    def test_send_chunk_calls_api(self):
+    async def test_send_chunk_calls_api(self):
         config = DingTalkConfig(client_id="test-app", client_secret="test-secret")
         channel = DingTalkChannel(config)
         channel._access_token = "fake-token"
@@ -256,7 +255,7 @@ class TestDingTalkSendChunk:
         channel._http_client = MagicMock()
         channel._http_client.post = AsyncMock(return_value=mock_response)
 
-        _run(channel._send_chunk("user1", "formatted", "raw text", None, {}))
+        await channel._send_chunk("user1", "formatted", "raw text", None, {})
         channel._http_client.post.assert_called_once()
         call_args = channel._http_client.post.call_args
         body = call_args.kwargs.get("json") or call_args[1].get("json")
@@ -273,21 +272,21 @@ class TestDingTalkChannelRegistration:
 
 
 class TestDingTalkProbe:
-    def test_missing_credentials(self):
+    async def test_missing_credentials(self):
         from EvoScientist.channels.dingtalk.probe import validate_dingtalk
 
-        ok, msg = _run(validate_dingtalk("", ""))
+        ok, msg = await validate_dingtalk("", "")
         assert ok is False
         assert "required" in msg
 
-    def test_missing_client_id(self):
+    async def test_missing_client_id(self):
         from EvoScientist.channels.dingtalk.probe import validate_dingtalk
 
-        ok, _msg = _run(validate_dingtalk("", "secret"))
+        ok, _msg = await validate_dingtalk("", "secret")
         assert ok is False
 
-    def test_missing_client_secret(self):
+    async def test_missing_client_secret(self):
         from EvoScientist.channels.dingtalk.probe import validate_dingtalk
 
-        ok, _msg = _run(validate_dingtalk("id", ""))
+        ok, _msg = await validate_dingtalk("id", "")
         assert ok is False

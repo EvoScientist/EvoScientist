@@ -17,7 +17,6 @@ from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer, _join_subagent_text
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
-from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway
 from tests.fakes import StubChannel as _StubChannel
 from tests.stream_v3_fakes import (
@@ -82,7 +81,7 @@ class TestSubagentTextEmitter:
 class TestStreamAgentEventsSubagentText:
     """Verify sub-agent text chunks yield subagent_text events."""
 
-    def test_subagent_text_emitted_for_subagent_chunks(self):
+    async def test_subagent_text_emitted_for_subagent_chunks(self):
         """When a sub-agent produces text, subagent_text events should appear."""
         namespace = ("sub", "research")
         agent = FakeV3Agent(
@@ -93,23 +92,23 @@ class TestStreamAgentEventsSubagentText:
             ],
             subagents=[FakeSubagent(namespace, "research-agent")],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         assert len(sa_text) == 1
         assert "Sub-agent finding" in sa_text[0]["content"]
         # instance_id must be present and non-empty
         assert sa_text[0].get("instance_id"), "instance_id must be a non-empty string"
 
-    def test_subagent_text_not_emitted_for_main_agent(self):
+    async def test_subagent_text_not_emitted_for_main_agent(self):
         """Main agent text should produce 'text' events, not 'subagent_text'."""
         agent = FakeV3Agent([message_delta("Main agent reply.")])
-        events = collect_events(agent)
+        events = await collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         text_events = [e for e in events if e.get("type") == "text"]
         assert len(sa_text) == 0
         assert len(text_events) == 1
 
-    def test_multiple_subagent_text_chunks_all_emitted(self):
+    async def test_multiple_subagent_text_chunks_all_emitted(self):
         """Multiple text chunks from a sub-agent all yield subagent_text events."""
         namespace = ("sub", "a")
         agent = FakeV3Agent(
@@ -120,7 +119,7 @@ class TestStreamAgentEventsSubagentText:
             ],
             subagents=[FakeSubagent(namespace, "research-agent")],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         assert len(sa_text) == 3
         combined = "".join(e["content"] for e in sa_text)
@@ -132,7 +131,7 @@ class TestStreamAgentEventsSubagentText:
         assert len(ids) == 1, f"Expected 1 unique instance_id, got {ids}"
         assert all(e.get("instance_id") for e in sa_text)
 
-    def test_parallel_same_name_agents_get_distinct_instance_ids(self):
+    async def test_parallel_same_name_agents_get_distinct_instance_ids(self):
         """Two sub-agents with the same display name but different namespaces
         produce subagent_text events with different instance_id values.
 
@@ -154,7 +153,7 @@ class TestStreamAgentEventsSubagentText:
                 FakeSubagent(ns2, "research-agent"),
             ],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         sa_text = [e for e in events if e.get("type") == "subagent_text"]
         assert len(sa_text) == 3
 
@@ -211,7 +210,7 @@ def _make_consumer(stream_events: list[dict], **kw):
 class TestConsumerSubagentTextFallback:
     """InboundConsumer should use sub-agent text as fallback when main agent is silent."""
 
-    def test_subagent_text_used_when_no_final_content(self):
+    async def test_subagent_text_used_when_no_final_content(self):
         """When the main agent produces no text, sub-agent text becomes the response."""
         events = [
             {
@@ -230,27 +229,24 @@ class TestConsumerSubagentTextFallback:
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="analyze papers",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="analyze papers",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "Found 3 relevant papers. Key insight: X is Y."
-            assert outbound.channel == "stub"
+        assert outbound.content == "Found 3 relevant papers. Key insight: X is Y."
+        assert outbound.channel == "stub"
 
-            await consumer.stop()
-            await task
+        await consumer.stop()
+        await task
 
-        _run(_test())
-
-    def test_final_content_takes_priority_over_subagent_text(self):
+    async def test_final_content_takes_priority_over_subagent_text(self):
         """When the main agent produces text, sub-agent text is ignored."""
         events = [
             {
@@ -264,26 +260,23 @@ class TestConsumerSubagentTextFallback:
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="test",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="test",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "Here is my summary."
+        assert outbound.content == "Here is my summary."
 
-            await consumer.stop()
-            await task
+        await consumer.stop()
+        await task
 
-        _run(_test())
-
-    def test_duplicate_thinking_not_relayed_across_resume_rounds(self):
+    async def test_duplicate_thinking_not_relayed_across_resume_rounds(self):
         """Repeated thinking from resumed rounds should only be sent once."""
         bus = MessageBus()
         mgr = ChannelManager(bus)
@@ -329,30 +322,27 @@ class TestConsumerSubagentTextFallback:
             return_value={"answers": ["yes"], "status": "answered"}
         )
 
-        async def _test():
-            await bus.publish_inbound(
-                BusInbound(
-                    channel="stub",
-                    sender_id="u1",
-                    chat_id="c1",
-                    content="analyze papers",
-                )
+        await bus.publish_inbound(
+            BusInbound(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="analyze papers",
             )
+        )
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "final answer"
-            assert channel.send_thinking_message.await_count == 1
-            call = channel.send_thinking_message.await_args_list[0]
-            assert call.args[1] == thinking.rstrip()
+        assert outbound.content == "final answer"
+        assert channel.send_thinking_message.await_count == 1
+        call = channel.send_thinking_message.await_args_list[0]
+        assert call.args[1] == thinking.rstrip()
 
-            await consumer.stop()
-            await task
+        await consumer.stop()
+        await task
 
-        _run(_test())
-
-    def test_new_thinking_relayed_after_resume(self):
+    async def test_new_thinking_relayed_after_resume(self):
         """Genuinely different thinking in round 2 should be sent."""
         bus = MessageBus()
         mgr = ChannelManager(bus)
@@ -399,58 +389,52 @@ class TestConsumerSubagentTextFallback:
             return_value={"answers": ["yes"], "status": "answered"}
         )
 
-        async def _test():
-            await bus.publish_inbound(
-                BusInbound(
-                    channel="stub",
-                    sender_id="u1",
-                    chat_id="c1",
-                    content="analyze papers",
-                )
+        await bus.publish_inbound(
+            BusInbound(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="analyze papers",
             )
+        )
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "final answer"
-            assert channel.send_thinking_message.await_count == 2
-            call1 = channel.send_thinking_message.await_args_list[0]
-            call2 = channel.send_thinking_message.await_args_list[1]
-            assert call1.args[1] == thinking_r1.rstrip()
-            assert call2.args[1] == thinking_r2.rstrip()
+        assert outbound.content == "final answer"
+        assert channel.send_thinking_message.await_count == 2
+        call1 = channel.send_thinking_message.await_args_list[0]
+        call2 = channel.send_thinking_message.await_args_list[1]
+        assert call1.args[1] == thinking_r1.rstrip()
+        assert call2.args[1] == thinking_r2.rstrip()
 
-            await consumer.stop()
-            await task
+        await consumer.stop()
+        await task
 
-        _run(_test())
-
-    def test_no_response_fallback_when_both_empty(self):
+    async def test_no_response_fallback_when_both_empty(self):
         """When both final_content and subagent_text are empty, 'No response' is used."""
         events = [
             {"type": "done", "content": ""},
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="test",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="test",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "No response"
+        assert outbound.content == "No response"
 
-            await consumer.stop()
-            await task
+        await consumer.stop()
+        await task
 
-        _run(_test())
-
-    def test_done_content_overrides_subagent_text(self):
+    async def test_done_content_overrides_subagent_text(self):
         """Done event with content takes priority over sub-agent text buffer."""
         events = [
             {
@@ -463,24 +447,21 @@ class TestConsumerSubagentTextFallback:
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="test",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="test",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "Final summary from done event."
+        assert outbound.content == "Final summary from done event."
 
-            await consumer.stop()
-            await task
-
-        _run(_test())
+        await consumer.stop()
+        await task
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -560,7 +541,7 @@ class TestJoinSubagentText:
 class TestConsumerParallelSubagentFallback:
     """Consumer should group parallel sub-agent text by agent name."""
 
-    def test_parallel_agents_grouped_with_attribution(self):
+    async def test_parallel_agents_grouped_with_attribution(self):
         """Multiple sub-agents produce grouped, attributed output."""
         events = [
             {
@@ -585,27 +566,24 @@ class TestConsumerParallelSubagentFallback:
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="test",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="test",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert "[research]: Found papers. Key insight." in outbound.content
-            assert "[analysis]: Metric is high." in outbound.content
+        assert "[research]: Found papers. Key insight." in outbound.content
+        assert "[analysis]: Metric is high." in outbound.content
 
-            await consumer.stop()
-            await task
+        await consumer.stop()
+        await task
 
-        _run(_test())
-
-    def test_single_agent_no_attribution_prefix(self):
+    async def test_single_agent_no_attribution_prefix(self):
         """Single sub-agent fallback has no [name]: prefix."""
         events = [
             {
@@ -618,31 +596,28 @@ class TestConsumerParallelSubagentFallback:
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="test",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="test",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            assert outbound.content == "Only agent."
-            assert "[research]" not in outbound.content
+        assert outbound.content == "Only agent."
+        assert "[research]" not in outbound.content
 
-            await consumer.stop()
-            await task
-
-        _run(_test())
+        await consumer.stop()
+        await task
 
 
 class TestConsumerSameNameInterleaved:
     """Two instances of the same agent type with interleaved chunks."""
 
-    def test_same_name_interleaved_chunks_separated_by_instance_id(self):
+    async def test_same_name_interleaved_chunks_separated_by_instance_id(self):
         """Two research-agent instances with different instance_ids are properly separated.
 
         With the instance_id fix, chunks are keyed by instance_id so
@@ -678,32 +653,29 @@ class TestConsumerSameNameInterleaved:
         ]
         consumer, bus = _make_consumer(events)
 
-        async def _test():
-            msg = BusInbound(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="test",
-            )
-            await bus.publish_inbound(msg)
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="test",
+        )
+        await bus.publish_inbound(msg)
 
-            task = asyncio.create_task(consumer.run())
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
 
-            # Fixed: instances are now properly separated with numbered labels
-            assert (
-                "[research-agent #1]: Instance-1 sentence A. Instance-1 sentence B."
-                in outbound.content
-            )
-            assert (
-                "[research-agent #2]: Instance-2 sentence X. Instance-2 sentence Y."
-                in outbound.content
-            )
+        # Fixed: instances are now properly separated with numbered labels
+        assert (
+            "[research-agent #1]: Instance-1 sentence A. Instance-1 sentence B."
+            in outbound.content
+        )
+        assert (
+            "[research-agent #2]: Instance-2 sentence X. Instance-2 sentence Y."
+            in outbound.content
+        )
 
-            await consumer.stop()
-            await task
-
-        _run(_test())
+        await consumer.stop()
+        await task
 
 
 class TestDelegationPromptSummarize:

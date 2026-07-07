@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from EvoScientist.stream.events import stream_agent_events
-from tests.conftest import run_async
 
 
 async def async_iter(items: Iterable[Any]) -> AsyncIterator[Any]:
@@ -17,24 +16,20 @@ async def async_iter(items: Iterable[Any]) -> AsyncIterator[Any]:
         yield item
 
 
-def collect_events(
+async def collect_events(
     agent,
     message: str = "hi",
     thread_id: str = "t1",
 ):
-    """Collect stream_agent_events output for synchronous tests."""
-
-    async def _run():
-        events = []
-        async for ev in stream_agent_events(
-            agent,
-            message,
-            thread_id,
-        ):
-            events.append(ev)
-        return events
-
-    return run_async(_run())
+    """Collect stream_agent_events output for tests."""
+    events = []
+    async for ev in stream_agent_events(
+        agent,
+        message,
+        thread_id,
+    ):
+        events.append(ev)
+    return events
 
 
 def protocol_event(
