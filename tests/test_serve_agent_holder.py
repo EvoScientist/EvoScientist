@@ -27,7 +27,6 @@ from EvoScientist.cli.commands import (
 from EvoScientist.commands.base import ChannelRuntime
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.gateway import RuntimeGateways, ThreadStore
-from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -71,7 +70,7 @@ def _runtime_state(
     )
 
 
-def test_hook_updates_runtime_state_on_agent_swap():
+async def test_hook_updates_runtime_state_on_agent_swap():
     """``/model`` mutates ``ctx.agent`` to a new handle — the hook must
     push that handle into the shared runtime state so the outer poll loop sees
     it on the next message."""
@@ -86,12 +85,12 @@ def test_hook_updates_runtime_state_on_agent_swap():
     cmd = MagicMock()
     cmd.name = "/model"
 
-    _run(hook(ctx, original_agent, cmd))
+    await hook(ctx, original_agent, cmd)
 
     assert state.agent is new_agent
 
 
-def test_hook_syncs_channel_runtime():
+async def test_hook_syncs_channel_runtime():
     """Other readers (the bus) look at ``ChannelRuntime.agent``; the
     hook keeps the runtime in sync with the runtime state update."""
     original_agent = _agent("original-agent")
@@ -109,13 +108,13 @@ def test_hook_syncs_channel_runtime():
     cmd = MagicMock()
     cmd.name = "/model"
 
-    _run(hook(ctx, original_agent, cmd))
+    await hook(ctx, original_agent, cmd)
 
     assert runtime.agent is new_agent
     assert runtime.thread_id == "t"
 
 
-def test_hook_noop_when_agent_unchanged():
+async def test_hook_noop_when_agent_unchanged():
     """Commands like ``/evoskills`` don't touch ``ctx.agent`` — the
     runtime state must stay put."""
     original_agent = _agent("original-agent")
@@ -128,12 +127,12 @@ def test_hook_noop_when_agent_unchanged():
     cmd = MagicMock()
     cmd.name = "/evoskills"
 
-    _run(hook(ctx, original_agent, cmd))
+    await hook(ctx, original_agent, cmd)
 
     assert state.agent is original_agent
 
 
-def test_hook_noop_when_ctx_agent_is_none():
+async def test_hook_noop_when_ctx_agent_is_none():
     """Guard against commands that reset ``ctx.agent`` to ``None`` —
     we never want to write ``None`` into runtime state."""
     original_agent = _agent("original-agent")
@@ -146,12 +145,12 @@ def test_hook_noop_when_ctx_agent_is_none():
     cmd = MagicMock()
     cmd.name = "/whatever"
 
-    _run(hook(ctx, original_agent, cmd))
+    await hook(ctx, original_agent, cmd)
 
     assert state.agent is original_agent
 
 
-def test_hook_updates_thread_id_on_resume():
+async def test_hook_updates_thread_id_on_resume():
     """``/resume`` mutates ``ctx.thread_id`` — the hook must push the
     new id into runtime state so the outer poll loop runs subsequent
     messages on the resumed thread."""
@@ -166,12 +165,12 @@ def test_hook_updates_thread_id_on_resume():
     cmd = MagicMock()
     cmd.name = "/resume"
 
-    _run(hook(ctx, agent, cmd))
+    await hook(ctx, agent, cmd)
 
     assert state.thread_id == "new-tid"
 
 
-def test_hook_updates_workspace_dir_on_resume():
+async def test_hook_updates_workspace_dir_on_resume():
     """`/resume` can restore a different workspace; serve must reload for it."""
     cfg = _config()
     old_agent = _agent("old-agent")
@@ -201,7 +200,7 @@ def test_hook_updates_workspace_dir_on_resume():
             return_value=reloaded_agent,
         ) as load_agent,
     ):
-        _run(hook(ctx, old_agent, cmd))
+        await hook(ctx, old_agent, cmd)
 
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/restored-ws")
     load_agent.assert_called_once_with(workspace_dir="/restored-ws", config=cfg)
@@ -209,7 +208,7 @@ def test_hook_updates_workspace_dir_on_resume():
     assert state.agent is reloaded_agent
 
 
-def test_hook_syncs_channel_runtime_thread_id():
+async def test_hook_syncs_channel_runtime_thread_id():
     """The bus reads ``ChannelRuntime.thread_id``; hook must sync it
     alongside the runtime state update."""
     agent = _agent("a")
@@ -224,12 +223,12 @@ def test_hook_syncs_channel_runtime_thread_id():
     cmd = MagicMock()
     cmd.name = "/resume"
 
-    _run(hook(ctx, agent, cmd))
+    await hook(ctx, agent, cmd)
 
     assert runtime.thread_id == "new-tid"
 
 
-def test_hook_noop_when_thread_id_unchanged():
+async def test_hook_noop_when_thread_id_unchanged():
     """Most commands don't touch thread_id — runtime state stays put."""
     agent = _agent("a")
     state = _runtime_state(agent=agent, thread_id="same-tid")
@@ -241,12 +240,12 @@ def test_hook_noop_when_thread_id_unchanged():
     cmd = MagicMock()
     cmd.name = "/evoskills"
 
-    _run(hook(ctx, agent, cmd))
+    await hook(ctx, agent, cmd)
 
     assert state.thread_id == "same-tid"
 
 
-def test_hook_skips_resume_warning_when_thread_unchanged():
+async def test_hook_skips_resume_warning_when_thread_unchanged():
     """Bare ``/resume`` with no argument prints usage but leaves
     ``ctx.thread_id`` unchanged — the in-memory-state warning must NOT
     fire because no resume actually happened."""
@@ -261,13 +260,13 @@ def test_hook_skips_resume_warning_when_thread_unchanged():
     cmd = MagicMock()
     cmd.name = "/resume"
 
-    _run(hook(ctx, agent, cmd))
+    await hook(ctx, agent, cmd)
 
     ctx.ui.append_system.assert_not_called()
     ctx.ui.flush.assert_not_called()
 
 
-def test_hook_emits_resume_warning_when_thread_changed():
+async def test_hook_emits_resume_warning_when_thread_changed():
     """``/resume <tid>`` that actually changes thread_id must surface
     the in-memory-state warning via ``ctx.ui``."""
     agent = _agent("a")
@@ -283,7 +282,7 @@ def test_hook_emits_resume_warning_when_thread_changed():
     cmd = MagicMock()
     cmd.name = "/resume"
 
-    _run(hook(ctx, agent, cmd))
+    await hook(ctx, agent, cmd)
 
     ctx.ui.append_system.assert_called_once()
     warn_text, warn_kwargs = (
@@ -296,7 +295,7 @@ def test_hook_emits_resume_warning_when_thread_changed():
     ctx.ui.flush.assert_awaited_once()
 
 
-def test_start_new_session_cb_rotates_thread_id():
+async def test_start_new_session_cb_rotates_thread_id():
     """``/new`` via channel calls this callback — must generate a new
     thread id, push into runtime state, and sync the channel runtime."""
     agent = _agent("a")
@@ -311,13 +310,13 @@ def test_start_new_session_cb_rotates_thread_id():
         state,
         runtime,
     )
-    _run(cb())
+    await cb()
 
     assert state.thread_id == "freshly-generated-tid"
     assert runtime.thread_id == "freshly-generated-tid"
 
 
-def test_start_new_session_cb_leaves_agent_alone():
+async def test_start_new_session_cb_leaves_agent_alone():
     """``/new`` rotates thread only — agent handle must stay put
     (serve's agent is a single pre-loaded instance, not per-thread)."""
     agent = _agent("a")
@@ -328,12 +327,12 @@ def test_start_new_session_cb_leaves_agent_alone():
     )
 
     cb = _make_serve_start_new_session_cb(state)
-    _run(cb())
+    await cb()
 
     assert state.agent is agent
 
 
-def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
+async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     cfg = _config()
     old_agent = _agent("old-agent")
     reloaded_agent = _agent("reloaded-agent")
@@ -364,7 +363,7 @@ def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
             side_effect=_load_agent,
         ) as load_agent,
     ):
-        _run(cb("new-tid", "/new-ws"))
+        await cb("new-tid", "/new-ws")
 
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/new-ws")
     load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
@@ -376,7 +375,7 @@ def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     assert runtime.agent is reloaded_agent
 
 
-def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
+async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
     cfg = _config()
     old_agent = _agent("old-agent")
     reloaded_agent = _agent("reloaded-agent")
@@ -399,7 +398,7 @@ def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
             return_value=reloaded_agent,
         ),
     ):
-        _run(cb("abc12345-resumed-tid", "/new-ws"))
+        await cb("abc12345-resumed-tid", "/new-ws")
 
     hook = _make_serve_cmd_completed_hook(state, runtime, config=cfg)
     ctx = MagicMock()
@@ -410,14 +409,14 @@ def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
     cmd = MagicMock()
     cmd.name = "/resume"
 
-    _run(hook(ctx, reloaded_agent, cmd))
+    await hook(ctx, reloaded_agent, cmd)
 
     ctx.ui.append_system.assert_called_once()
     assert "in-memory state" in ctx.ui.append_system.call_args.args[0]
     ctx.ui.flush.assert_awaited_once()
 
 
-def test_serve_resume_callback_preserves_state_when_sync_fails():
+async def test_serve_resume_callback_preserves_state_when_sync_fails():
     cfg = _config()
     old_agent = _agent("old-agent")
     loaded_but_not_adopted = _agent("loaded-but-not-adopted")
@@ -442,7 +441,7 @@ def test_serve_resume_callback_preserves_state_when_sync_fails():
         patch("EvoScientist.cli.commands.set_active_workspace") as set_active,
         pytest.raises(RuntimeError, match="workspace conflict"),
     ):
-        _run(cb("new-tid", "/new-ws"))
+        await cb("new-tid", "/new-ws")
 
     load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
     set_active.assert_called_once_with("/old-ws")
@@ -455,7 +454,7 @@ def test_serve_resume_callback_preserves_state_when_sync_fails():
     assert runtime.thread_id == "old-tid"
 
 
-def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
+async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
     cfg = _config()
     old_agent = _agent("old-agent")
     state = _runtime_state(
@@ -479,7 +478,7 @@ def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
         ) as sync_server,
         pytest.raises(RuntimeError, match="load failed"),
     ):
-        _run(cb("new-tid", "/new-ws"))
+        await cb("new-tid", "/new-ws")
 
     load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
     set_active.assert_called_once_with("/old-ws")
@@ -493,7 +492,7 @@ def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
     assert runtime.thread_id == "old-tid"
 
 
-def test_hook_handles_both_agent_and_thread_swap():
+async def test_hook_handles_both_agent_and_thread_swap():
     """Edge case: a command that changes both (hypothetical). Both
     updates must land in runtime state."""
     old_agent = _agent("old-agent")
@@ -506,7 +505,7 @@ def test_hook_handles_both_agent_and_thread_swap():
     ctx.thread_id = "new-tid"
     cmd = MagicMock()
 
-    _run(hook(ctx, old_agent, cmd))
+    await hook(ctx, old_agent, cmd)
 
     assert state.agent is new_agent
     assert state.thread_id == "new-tid"

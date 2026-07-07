@@ -20,7 +20,6 @@ from EvoScientist.gateway import (
 )
 from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
 from EvoScientist.stream import display as display_mod
-from tests.conftest import run_async
 from tests.fakes import (
     FakeGraphGateway,
     FakeLangGraphClient,
@@ -30,7 +29,7 @@ from tests.fakes import (
 )
 
 
-def test_local_gateway_streams_from_injected_streamer():
+async def test_local_gateway_streams_from_injected_streamer():
     seen: dict[str, Any] = {}
 
     async def _streamer(agent, message, thread_id, **kwargs):
@@ -60,7 +59,7 @@ def test_local_gateway_streams_from_injected_streamer():
         return [event async for event in gateway.stream_events(request)]
 
     with patch("EvoScientist.stream.events.stream_agent_events", new=_streamer):
-        events = run_async(_collect())
+        events = await _collect()
 
     assert events == [
         {"type": "text", "content": "hi"},
@@ -75,7 +74,7 @@ def test_local_gateway_streams_from_injected_streamer():
     }
 
 
-def test_local_graph_gateway_delegates_thread_operations():
+async def test_local_graph_gateway_delegates_thread_operations():
     thread_store = FakeThreadStore(
         generated_thread_id="new12345",
         threads=[{"thread_id": "abc12345"}],
@@ -102,7 +101,7 @@ def test_local_graph_gateway_delegates_thread_operations():
             "deleted": await gateway.delete_thread("abc12345"),
         }
 
-    result = run_async(_run())
+    result = await _run()
 
     assert result["created"] == "new12345"
     assert result["threads"] == [{"thread_id": "abc12345"}]
@@ -132,16 +131,14 @@ def test_local_graph_gateway_delegates_thread_operations():
     ]
 
 
-def test_local_graph_gateway_reads_state_values():
+async def test_local_graph_gateway_reads_state_values():
     agent = MagicMock()
     agent.aget_state = AsyncMock(
         return_value=SimpleNamespace(values={"async_tasks": {"task-1": {}}})
     )
     gateway = LocalGraphGateway()
 
-    values = run_async(
-        gateway.get_state_values(GraphTarget(local_graph=agent), "abc12345")
-    )
+    values = await gateway.get_state_values(GraphTarget(local_graph=agent), "abc12345")
 
     assert values == {"async_tasks": {"task-1": {}}}
     agent.aget_state.assert_awaited_once_with(
@@ -149,17 +146,15 @@ def test_local_graph_gateway_reads_state_values():
     )
 
 
-def test_local_graph_gateway_updates_state_values():
+async def test_local_graph_gateway_updates_state_values():
     agent = MagicMock()
     agent.aupdate_state = AsyncMock()
     gateway = LocalGraphGateway()
 
-    run_async(
-        gateway.update_state_values(
-            GraphTarget(local_graph=agent),
-            "abc12345",
-            {"_summarization_event": {"cutoff_index": 2}},
-        )
+    await gateway.update_state_values(
+        GraphTarget(local_graph=agent),
+        "abc12345",
+        {"_summarization_event": {"cutoff_index": 2}},
     )
 
     agent.aupdate_state.assert_awaited_once_with(
@@ -169,7 +164,7 @@ def test_local_graph_gateway_updates_state_values():
     )
 
 
-def test_local_stream_events_delegates_aclose_to_inner():
+async def test_local_stream_events_delegates_aclose_to_inner():
     cleanup_ran = False
 
     async def _streamer(_agent, _message, _thread_id, **_kwargs):
@@ -194,7 +189,7 @@ def test_local_stream_events_delegates_aclose_to_inner():
         assert cleanup_ran is True
 
     with patch("EvoScientist.stream.events.stream_agent_events", new=_streamer):
-        run_async(_run())
+        await _run()
 
 
 def test_run_streaming_can_consume_injected_gateway():
@@ -228,7 +223,7 @@ def test_run_streaming_can_consume_injected_gateway():
     ]
 
 
-def test_resume_command_consumes_context_gateway():
+async def test_resume_command_consumes_context_gateway():
     from EvoScientist.commands.base import CommandContext
     from EvoScientist.commands.implementation.session import ResumeCommand
 
@@ -246,7 +241,7 @@ def test_resume_command_consumes_context_gateway():
         graph_gateway=FakeGraphGateway(thread_store=thread_store),
     )
 
-    run_async(ResumeCommand().execute(ctx, ["abc"]))
+    await ResumeCommand().execute(ctx, ["abc"])
 
     assert ctx.thread_id == "abc12345"
     assert ctx.workspace_dir == "/restored"
@@ -287,7 +282,7 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     assert seen["gateway"].thread_store is thread_store
 
 
-def test_langgraph_server_thread_store_delegates_to_sdk_threads():
+async def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     threads = FakeLangGraphThreadsClient(
         threads=[
             {
@@ -335,7 +330,7 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
             "deleted": await store.delete_thread("abc12345"),
         }
 
-    result = run_async(_run())
+    result = await _run()
 
     assert result["created"] == "server-thread"
     assert len(threads.created) == 1
@@ -379,7 +374,7 @@ def test_langgraph_server_thread_store_delegates_to_sdk_threads():
     assert threads.deleted == ["abc12345"]
 
 
-def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
+async def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
     rows = [
         {
             "thread_id": f"thread-{index}",
@@ -392,7 +387,7 @@ def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
         client=FakeLangGraphClient(threads),
     )
 
-    result = run_async(store.list_threads(limit=0))
+    result = await store.list_threads(limit=0)
 
     assert [row["thread_id"] for row in result] == [
         f"thread-{index}" for index in range(_THREAD_SEARCH_LIMIT + 1)
@@ -403,7 +398,7 @@ def test_langgraph_server_thread_store_limit_zero_pages_all_threads():
     ]
 
 
-def test_langgraph_server_thread_store_positive_limit_uses_single_search():
+async def test_langgraph_server_thread_store_positive_limit_uses_single_search():
     threads = FakeLangGraphThreadsClient(
         threads=[
             {
@@ -417,7 +412,7 @@ def test_langgraph_server_thread_store_positive_limit_uses_single_search():
         client=FakeLangGraphClient(threads),
     )
 
-    result = run_async(store.list_threads(limit=2))
+    result = await store.list_threads(limit=2)
 
     assert [row["thread_id"] for row in result] == ["thread-0", "thread-1"]
     assert [(search["limit"], search["offset"]) for search in threads.searches] == [
@@ -425,7 +420,7 @@ def test_langgraph_server_thread_store_positive_limit_uses_single_search():
     ]
 
 
-def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():
+async def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():
     threads = FakeLangGraphThreadsClient(
         threads=[
             {
@@ -438,14 +433,14 @@ def test_langgraph_server_thread_store_prefix_resolution_skips_exact_lookup():
         client=FakeLangGraphClient(threads),
     )
 
-    result = run_async(store.resolve_thread_id_prefix("abc"))
+    result = await store.resolve_thread_id_prefix("abc")
 
     assert result == ("abc12345", [])
     assert threads.gets == []
     assert len(threads.searches) == 1
 
 
-def test_langgraph_server_thread_store_prefix_resolution_pages_all_threads():
+async def test_langgraph_server_thread_store_prefix_resolution_pages_all_threads():
     rows = [
         {
             "thread_id": f"thread-{index}",
@@ -464,7 +459,7 @@ def test_langgraph_server_thread_store_prefix_resolution_pages_all_threads():
         client=FakeLangGraphClient(threads),
     )
 
-    result = run_async(store.resolve_thread_id_prefix("older-thread"))
+    result = await store.resolve_thread_id_prefix("older-thread")
 
     assert result == ("older-thread-match", [])
     assert [(search["limit"], search["offset"]) for search in threads.searches] == [
@@ -473,7 +468,7 @@ def test_langgraph_server_thread_store_prefix_resolution_pages_all_threads():
     ]
 
 
-def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
+async def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
     thread_id = "019ed9e4-4253-7f62-b50f-f0470a4b3c9f"
     threads = FakeLangGraphThreadsClient(
         threads=[
@@ -487,14 +482,14 @@ def test_langgraph_server_thread_store_uuid_resolution_uses_exact_lookup():
         client=FakeLangGraphClient(threads),
     )
 
-    result = run_async(store.resolve_thread_id_prefix(thread_id))
+    result = await store.resolve_thread_id_prefix(thread_id)
 
     assert result == (thread_id, [])
     assert threads.gets == [thread_id]
     assert threads.searches == []
 
 
-def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
+async def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
     thread_id = "019ed9e4-4253-7f62-b50f-f0470a4b3c9f"
     threads = FakeLangGraphThreadsClient(
         threads=[
@@ -508,7 +503,7 @@ def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
         client=FakeLangGraphClient(threads),
     )
 
-    result = run_async(store.resolve_thread_id_prefix(thread_id))
+    result = await store.resolve_thread_id_prefix(thread_id)
 
     assert result == (None, [])
     assert threads.gets == [thread_id]
@@ -517,7 +512,7 @@ def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
     ]
 
 
-def test_langgraph_server_thread_store_clones_thread_with_metadata():
+async def test_langgraph_server_thread_store_clones_thread_with_metadata():
     clone_metadata = {
         "clone_purpose": "memory_extraction",
         "source_thread_id": "source-thread",
@@ -534,8 +529,8 @@ def test_langgraph_server_thread_store_clones_thread_with_metadata():
         client=FakeLangGraphClient(threads),
     )
 
-    cloned_thread_id = run_async(
-        store.clone_thread("source-thread", metadata=clone_metadata)
+    cloned_thread_id = await store.clone_thread(
+        "source-thread", metadata=clone_metadata
     )
 
     assert cloned_thread_id == "source-thread-copy"
@@ -552,7 +547,7 @@ def test_langgraph_server_thread_store_clones_thread_with_metadata():
     }
 
 
-def test_langgraph_server_thread_store_rejects_copy_without_thread_id():
+async def test_langgraph_server_thread_store_rejects_copy_without_thread_id():
     threads = FakeLangGraphThreadsClient(
         threads=[{"thread_id": "source-thread", "metadata": {"graph_id": "agent"}}],
         copy_response=None,
@@ -565,10 +560,10 @@ def test_langgraph_server_thread_store_rejects_copy_without_thread_id():
         await store.clone_thread("source-thread")
 
     with pytest.raises(RuntimeError, match="did not return a cloned thread id"):
-        run_async(_run())
+        await _run()
 
 
-def test_langgraph_server_gateway_clones_thread():
+async def test_langgraph_server_gateway_clones_thread():
     threads = FakeLangGraphThreadsClient(
         threads=[{"thread_id": "source-thread", "metadata": {"graph_id": "agent"}}]
     )
@@ -578,12 +573,10 @@ def test_langgraph_server_gateway_clones_thread():
         )
     )
 
-    cloned_thread_id = run_async(
-        gateway.clone_thread(
-            "source-thread",
-            metadata={"clone_purpose": "manual"},
-            target=GraphTarget(graph_id="agent"),
-        )
+    cloned_thread_id = await gateway.clone_thread(
+        "source-thread",
+        metadata={"clone_purpose": "manual"},
+        target=GraphTarget(graph_id="agent"),
     )
 
     assert cloned_thread_id == "source-thread-copy"
@@ -592,12 +585,12 @@ def test_langgraph_server_gateway_clones_thread():
     ]
 
 
-def test_local_graph_gateway_clone_thread_is_explicitly_unsupported():
+async def test_local_graph_gateway_clone_thread_is_explicitly_unsupported():
     async def _run():
         await LocalGraphGateway().clone_thread("source-thread")
 
     with pytest.raises(NotImplementedError, match="does not support thread cloning"):
-        run_async(_run())
+        await _run()
 
 
 def test_runtime_gateways_can_use_langgraph_server_backend():
@@ -616,7 +609,7 @@ def test_runtime_gateways_can_use_langgraph_server_backend():
     assert gateway.thread_store is runtime_gateways.thread_store
 
 
-def test_langgraph_server_gateway_reads_state_values():
+async def test_langgraph_server_gateway_reads_state_values():
     threads = FakeLangGraphThreadsClient(
         threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
         states={"abc12345": {"values": {"async_tasks": {"task-1": {}}}}},
@@ -627,12 +620,12 @@ def test_langgraph_server_gateway_reads_state_values():
         )
     )
 
-    values = run_async(gateway.get_state_values(GraphTarget(), "abc12345"))
+    values = await gateway.get_state_values(GraphTarget(), "abc12345")
 
     assert values == {"async_tasks": {"task-1": {}}}
 
 
-def test_langgraph_server_gateway_messages_apply_summarization_event():
+async def test_langgraph_server_gateway_messages_apply_summarization_event():
     threads = FakeLangGraphThreadsClient(
         threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
         states={
@@ -658,7 +651,7 @@ def test_langgraph_server_gateway_messages_apply_summarization_event():
         )
     )
 
-    messages = run_async(gateway.get_thread_messages("abc12345"))
+    messages = await gateway.get_thread_messages("abc12345")
 
     assert len(messages) == 2
     assert isinstance(messages[0], AIMessage)
@@ -667,7 +660,7 @@ def test_langgraph_server_gateway_messages_apply_summarization_event():
     assert messages[1].content == "third"
 
 
-def test_langgraph_server_gateway_updates_state_values():
+async def test_langgraph_server_gateway_updates_state_values():
     threads = FakeLangGraphThreadsClient(
         threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
     )
@@ -677,12 +670,10 @@ def test_langgraph_server_gateway_updates_state_values():
         )
     )
 
-    run_async(
-        gateway.update_state_values(
-            GraphTarget(),
-            "abc12345",
-            {"_summarization_event": {"cutoff_index": 2}},
-        )
+    await gateway.update_state_values(
+        GraphTarget(),
+        "abc12345",
+        {"_summarization_event": {"cutoff_index": 2}},
     )
 
     assert threads.state_updates == [
@@ -690,7 +681,7 @@ def test_langgraph_server_gateway_updates_state_values():
     ]
 
 
-def test_langgraph_server_gateway_streams_root_protocol_events():
+async def test_langgraph_server_gateway_streams_root_protocol_events():
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -737,7 +728,7 @@ def test_langgraph_server_gateway_streams_root_protocol_events():
             )
         ]
 
-    events = run_async(_collect())
+    events = await _collect()
 
     assert len(threads.created) == 1
     assert threads.created[0]["thread_id"] == "abc12345"
@@ -804,7 +795,7 @@ def _root_message_finish() -> dict[str, object]:
     }
 
 
-def _collect_server_gateway_stream(
+async def _collect_server_gateway_stream(
     events: list[dict[str, object]],
     *,
     state_messages: list[dict[str, object]] | None = None,
@@ -832,11 +823,11 @@ def _collect_server_gateway_stream(
             )
         ]
 
-    return run_async(_collect())
+    return await _collect()
 
 
-def test_langgraph_server_gateway_streams_value_message_snapshots():
-    events = _collect_server_gateway_stream(
+async def test_langgraph_server_gateway_streams_value_message_snapshots():
+    events = await _collect_server_gateway_stream(
         [
             _value_snapshot([_OLD_AI, _HUMAN]),
             _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
@@ -850,8 +841,8 @@ def test_langgraph_server_gateway_streams_value_message_snapshots():
     ]
 
 
-def test_langgraph_server_gateway_values_do_not_duplicate_message_stream():
-    events = _collect_server_gateway_stream(
+async def test_langgraph_server_gateway_values_do_not_duplicate_message_stream():
+    events = await _collect_server_gateway_stream(
         [
             _root_text_delta("new"),
             _root_message_finish(),
@@ -866,8 +857,8 @@ def test_langgraph_server_gateway_values_do_not_duplicate_message_stream():
     ]
 
 
-def test_langgraph_server_gateway_ignores_non_root_value_messages():
-    events = _collect_server_gateway_stream(
+async def test_langgraph_server_gateway_ignores_non_root_value_messages():
+    events = await _collect_server_gateway_stream(
         [
             _value_snapshot(
                 [{"type": "ai", "content": "subagent text", "id": "subagent-ai"}],
@@ -880,7 +871,7 @@ def test_langgraph_server_gateway_ignores_non_root_value_messages():
     assert events[-1] == {"type": "done", "content": "", "response": ""}
 
 
-def test_langgraph_server_gateway_emits_state_interrupt_before_done():
+async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[],
@@ -930,7 +921,7 @@ def test_langgraph_server_gateway_emits_state_interrupt_before_done():
             )
         ]
 
-    events = run_async(_collect())
+    events = await _collect()
 
     assert events == [
         {
@@ -954,7 +945,7 @@ def test_langgraph_server_gateway_emits_state_interrupt_before_done():
     ]
 
 
-def test_langgraph_server_gateway_streams_subagent_protocol_events():
+async def test_langgraph_server_gateway_streams_subagent_protocol_events():
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -1003,7 +994,7 @@ def test_langgraph_server_gateway_streams_subagent_protocol_events():
             )
         ]
 
-    events = run_async(_collect())
+    events = await _collect()
 
     assert events == [
         {
@@ -1028,7 +1019,7 @@ def test_langgraph_server_gateway_streams_subagent_protocol_events():
     ]
 
 
-def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
+async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
     from langgraph.types import Command
 
     stream = FakeLangGraphThreadStream(
@@ -1058,7 +1049,7 @@ def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
             )
         ]
 
-    events = run_async(_collect())
+    events = await _collect()
 
     assert stream.run.starts == []
     assert stream.run.responses == [

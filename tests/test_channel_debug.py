@@ -11,8 +11,6 @@ from EvoScientist.channels.debug import (
     emit_debug_event_if,
 )
 
-from .conftest import run_async
-
 
 def test_debug_trace_enabled_from_bool():
     assert debug_trace_enabled(True) is True
@@ -75,10 +73,10 @@ def _make_channel_context(*, debug_trace=True, name="test_channel"):
     return {"channel": channel}
 
 
-def test_middleware_dedup_emits_structured_event(caplog):
+async def test_middleware_dedup_emits_structured_event(caplog):
     from EvoScientist.channels.middleware import DedupMiddleware
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         mw = DedupMiddleware()
         ctx = _make_channel_context()
         raw = _make_raw(message_id="dup1")
@@ -91,49 +89,40 @@ def test_middleware_dedup_emits_structured_event(caplog):
         caplog.clear()
         result = await mw.process_inbound(raw, ctx)
         assert result is None
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "middleware_dedup_drop" in caplog.text
     assert "message_id=dup1" in caplog.text
 
 
-def test_middleware_allowlist_emits_structured_event(caplog):
+async def test_middleware_allowlist_emits_structured_event(caplog):
     from EvoScientist.channels.middleware import AllowListMiddleware
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         mw = AllowListMiddleware(allowed_senders={"allowed_user"})
         ctx = _make_channel_context()
         raw = _make_raw(sender_id="blocked_user")
         result = await mw.process_inbound(raw, ctx)
         assert result is None
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "middleware_allowlist_drop" in caplog.text
     assert "reason=sender_not_allowed" in caplog.text
 
 
-def test_middleware_mention_gating_emits_structured_event(caplog):
+async def test_middleware_mention_gating_emits_structured_event(caplog):
     from EvoScientist.channels.middleware import MentionGatingMiddleware
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         mw = MentionGatingMiddleware(require_mention="group")
         ctx = _make_channel_context()
         raw = _make_raw(is_group=True, was_mentioned=False)
         result = await mw.process_inbound(raw, ctx)
         assert result is None
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "middleware_mention_drop" in caplog.text
     assert "policy=group" in caplog.text
 
 
-def test_typing_manager_emits_trace_events(caplog):
+async def test_typing_manager_emits_trace_events(caplog):
     from EvoScientist.channels.middleware import TypingManager
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         send_action = AsyncMock(side_effect=RuntimeError("typing api down"))
         mgr = TypingManager(
             send_action,
@@ -144,17 +133,14 @@ def test_typing_manager_emits_trace_events(caplog):
         await mgr.start("chat1")
         await asyncio.sleep(0.01)
         await mgr.stop("chat1")
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "typing_error" in caplog.text
     assert "chat_id=chat1" in caplog.text
 
 
-def test_ack_reaction_emits_error_traces(caplog):
+async def test_ack_reaction_emits_error_traces(caplog):
     from EvoScientist.channels.middleware import AckReactionMiddleware
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         send_fn = AsyncMock()
         remove_fn = AsyncMock(side_effect=RuntimeError("remove failed"))
         ack = AckReactionMiddleware(
@@ -178,16 +164,13 @@ def test_ack_reaction_emits_error_traces(caplog):
         send_fn.reset_mock()
         send_fn.side_effect = RuntimeError("api down")
         await ack.send_ack("chat2", "msg2")
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "ack_send_error" in caplog.text
     assert "ack_remove_error" in caplog.text
     assert "api down" in caplog.text
     assert "remove failed" in caplog.text
 
 
-def test_inbound_raw_event_emitted(caplog):
+async def test_inbound_raw_event_emitted(caplog):
     """Integration-style: _enqueue_raw emits inbound_raw at the top."""
     from EvoScientist.channels.base import Channel, RawIncoming
 
@@ -218,19 +201,16 @@ def test_inbound_raw_event_emitted(caplog):
     config.ack_scope = "off"
     config.dedup_ttl = 3600
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         with patch.object(Channel, "__abstractmethods__", set()):
             ch = _TestChannel(config)
         raw = RawIncoming(sender_id="u1", chat_id="c1", text="hi", message_id="m1")
         await ch._enqueue_raw(raw)
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "inbound_raw" in caplog.text
     assert "sender_id=u1" in caplog.text
 
 
-def test_format_fallback_emits_event(caplog):
+async def test_format_fallback_emits_event(caplog):
     """_send_with_format_fallback emits outbound_format_fallback on fallback."""
     from EvoScientist.channels.base import Channel
 
@@ -268,13 +248,10 @@ def test_format_fallback_emits_event(caplog):
         if call_count == 1:
             raise ValueError("parse error in formatted text")
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         with patch.object(Channel, "__abstractmethods__", set()):
             ch = _TestChannel(config)
         await ch._send_with_format_fallback(_failing_send, "<b>hi</b>", "hi")
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "outbound_format_fallback" in caplog.text
     assert call_count == 2
 
@@ -304,7 +281,7 @@ def test_trace_mixin_trace_event(caplog):
     assert "key=val" in caplog.text
 
 
-def test_standalone_dispatcher_treats_false_send_as_error(caplog):
+async def test_standalone_dispatcher_treats_false_send_as_error(caplog):
     from EvoScientist.channels.bus import MessageBus
     from EvoScientist.channels.bus.events import OutboundMessage
     from EvoScientist.channels.standalone import standalone_outbound_dispatcher
@@ -315,7 +292,7 @@ def test_standalone_dispatcher_treats_false_send_as_error(caplog):
     channel.send = AsyncMock(return_value=False)
     bus = MessageBus()
 
-    async def _run():
+    with caplog.at_level(logging.DEBUG):
         task = asyncio.create_task(standalone_outbound_dispatcher(bus, channel))
         await bus.publish_outbound(
             OutboundMessage(channel="test", chat_id="c1", content="hi")
@@ -326,14 +303,11 @@ def test_standalone_dispatcher_treats_false_send_as_error(caplog):
             await task
         except asyncio.CancelledError:
             pass
-
-    with caplog.at_level(logging.DEBUG):
-        run_async(_run())
     assert "standalone_dispatch_error" in caplog.text
     assert "send() returned False" in caplog.text
 
 
-def test_standalone_dispatcher_sends_media():
+async def test_standalone_dispatcher_sends_media():
     from EvoScientist.channels.bus import MessageBus
     from EvoScientist.channels.bus.events import OutboundMessage
     from EvoScientist.channels.standalone import standalone_outbound_dispatcher
@@ -345,21 +319,16 @@ def test_standalone_dispatcher_sends_media():
     channel.send_media = AsyncMock(return_value=True)
     bus = MessageBus()
 
-    async def _run():
-        task = asyncio.create_task(standalone_outbound_dispatcher(bus, channel))
-        await bus.publish_outbound(
-            OutboundMessage(
-                channel="test", chat_id="c1", content="", media=["/tmp/a.png"]
-            )
-        )
-        await asyncio.sleep(0.05)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    run_async(_run())
+    task = asyncio.create_task(standalone_outbound_dispatcher(bus, channel))
+    await bus.publish_outbound(
+        OutboundMessage(channel="test", chat_id="c1", content="", media=["/tmp/a.png"])
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
     channel.send_media.assert_awaited_once_with(
         recipient="c1",
         file_path="/tmp/a.png",
