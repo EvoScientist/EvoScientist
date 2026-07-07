@@ -22,6 +22,12 @@ rather than growing a third driver copy.
 
 from __future__ import annotations
 
+import asyncio
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from .capabilities import ChannelCapabilities
+
 # ── timeout constants ──────────────────────────────────────────────────
 # Per-flow defaults.  HITL approval is short (a yes/no gate); ask_user is
 # longer because the human may need thinking time.
@@ -294,3 +300,206 @@ class ApprovalPolicy:
         if self.is_session_granted(session_key) or config_auto_approve(action_requests):
             return approve_decisions(action_requests)
         return None
+
+
+# ── transport adapter + reply registry ─────────────────────────────────
+
+
+class InteractionIO(Protocol):
+    """One conversation partner on one channel chat.
+
+    A transport adapter: the engine coroutines below drive a human
+    interaction entirely through this interface, so the same protocol
+    logic runs over the consumer's async loop and over the CLI bus loop.
+
+    Attributes
+    ----------
+    capabilities:
+        The channel's :class:`ChannelCapabilities` — the engine reads
+        ``inline_buttons`` to decide whether to attach approval buttons.
+    base_metadata:
+        The default outbound metadata for this chat (echoed back on each
+        send unless the engine supplies richer metadata, e.g. buttons).
+    """
+
+    capabilities: ChannelCapabilities
+    base_metadata: dict | None
+
+    async def send(self, content: str, *, metadata: dict | None = None) -> bool:
+        """Send *content* to the user; return True on success."""
+        ...
+
+    async def wait_reply(self, *, timeout: float) -> str | None:
+        """Wait for the user's next reply; return None on timeout."""
+        ...
+
+
+class PendingReplyRegistry:
+    """Route "the next message from this chat" into a waiting coroutine.
+
+    One instance per process (the consumer owns one on its loop; the CLI
+    bridge owns one on the bus loop).  ``register`` / ``wait`` are used by
+    an :class:`InteractionIO` adapter to block for a reply; the inbound
+    interception point calls ``try_resolve`` to hand a message to that
+    waiter instead of enqueuing it as a fresh turn.
+
+    Asyncio-based: register/resolve must happen on the same event loop.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, asyncio.Future[str]] = {}
+
+    def register(self, session_key: str) -> asyncio.Future[str]:
+        """Create and store a future awaiting the next reply for *session_key*."""
+        loop = asyncio.get_running_loop()
+        # A stale waiter for the same chat should never linger; cancel it
+        # so its coroutine unwinds instead of hanging until timeout.
+        stale = self._pending.get(session_key)
+        if stale is not None and not stale.done():
+            stale.cancel()
+        fut: asyncio.Future[str] = loop.create_future()
+        self._pending[session_key] = fut
+        return fut
+
+    def try_resolve(self, session_key: str, content: str) -> bool:
+        """Deliver *content* to a pending waiter.  Returns True if consumed."""
+        fut = self._pending.get(session_key)
+        if fut is not None and not fut.done():
+            fut.set_result(content)
+            return True
+        return False
+
+    def discard(self, session_key: str) -> None:
+        """Drop any pending waiter for *session_key* (idempotent)."""
+        self._pending.pop(session_key, None)
+
+    async def wait(self, session_key: str, timeout: float) -> str | None:
+        """Register, await a reply for *timeout* seconds, then clean up.
+
+        Returns the reply text, or ``None`` on timeout / cancellation.
+        """
+        fut = self.register(session_key)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except (TimeoutError, asyncio.CancelledError):
+            return None
+        finally:
+            # Identity-safe: only drop *our* slot, never a newer waiter that
+            # re-registered on the same chat while we were unwinding.
+            if self._pending.get(session_key) is fut:
+                self._pending.pop(session_key, None)
+
+    def clear(self) -> None:
+        """Cancel and forget every pending waiter (shutdown / test hygiene)."""
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+
+    def __contains__(self, session_key: str) -> bool:
+        return session_key in self._pending
+
+
+# ── engine coroutines ──────────────────────────────────────────────────
+
+
+async def resolve_ask_user(
+    questions: list[dict], io: InteractionIO, *, timeout: float = ASK_USER_TIMEOUT
+) -> dict:
+    """Drive an ask_user interrupt to a resume payload.
+
+    Sends each question in turn, collects answers, and handles the choice
+    grammar (letters + the "Other" free-form sub-flow).  ``/stop`` and
+    ``cancel`` are checked *before* parsing every reply.
+
+    Returns a dict suitable for ``Command(resume=...)``:
+    ``{"answers": [...], "status": "answered"}`` or ``{"status": "cancelled"}``.
+    """
+    if not questions:
+        return {"answers": [], "status": "answered"}
+
+    total = len(questions)
+    answers: list[str] = []
+
+    for i, q in enumerate(questions):
+        if not await io.send(format_question_prompt(q, i, total)):
+            return {"status": "cancelled"}
+
+        reply = await io.wait_reply(timeout=timeout)
+        if not reply:
+            await io.send(ASK_USER_TIMEOUT_FEEDBACK)
+            return {"status": "cancelled"}
+
+        raw = reply.strip()
+        if is_stop_command(raw) or is_cancel_reply(raw):
+            return {"status": "cancelled"}
+
+        if q.get("type", "text") == "multiple_choice":
+            choices = q.get("choices", [])
+            kind, value = parse_choice_answer(raw, choices)
+            if kind == "other":
+                if not await io.send(OTHER_PROMPT):
+                    return {"status": "cancelled"}
+                other = await io.wait_reply(timeout=timeout)
+                if not other:
+                    await io.send(ASK_USER_TIMEOUT_FEEDBACK)
+                    return {"status": "cancelled"}
+                if is_stop_command(other) or is_cancel_reply(other):
+                    return {"status": "cancelled"}
+                answers.append(other.strip())
+            else:
+                answers.append(value)
+        else:
+            answers.append(raw)
+
+    return {"answers": answers, "status": "answered"}
+
+
+async def resolve_approval(
+    action_requests: list,
+    io: InteractionIO,
+    policy: ApprovalPolicy,
+    session_key: str,
+    *,
+    timeout: float = HITL_APPROVAL_TIMEOUT,
+) -> list[dict] | None:
+    """Drive a HITL approval interrupt to a decisions payload.
+
+    Auto-resolves via *policy* (session grant or config rule) without
+    prompting.  Otherwise sends the approval prompt (with capability-driven
+    buttons), waits for a reply, and parses it.  ``/stop`` cancels silently
+    (it already got its own ack from the transport's stop fast-path).
+
+    Returns an approve-all ``decisions`` list on approve/auto, or ``None``
+    on reject / unrecognized / timeout / stop.
+    """
+    auto = policy.auto_decision(session_key, action_requests)
+    if auto is not None:
+        return auto
+
+    has_buttons = bool(io.capabilities.inline_buttons)
+    prompt = format_approval_prompt(action_requests, with_buttons=has_buttons)
+    metadata = approval_prompt_metadata(io.base_metadata, with_buttons=has_buttons)
+    if not await io.send(prompt, metadata=metadata):
+        return None
+
+    reply = await io.wait_reply(timeout=timeout)
+    if not reply:
+        await io.send(APPROVAL_TIMEOUT_FEEDBACK)
+        return None
+
+    if is_stop_command(reply):
+        return None
+
+    decision = parse_approval_reply(reply)
+    if decision == "auto":
+        policy.grant_session(session_key)
+        await io.send(APPROVED_AUTO_FEEDBACK)
+        return approve_decisions(action_requests)
+    if decision == "approve":
+        await io.send(APPROVED_FEEDBACK)
+        return approve_decisions(action_requests)
+
+    # reject or unrecognized — send the matching feedback, then decline.
+    await io.send(decision_feedback(decision))
+    return None

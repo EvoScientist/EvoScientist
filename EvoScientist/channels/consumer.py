@@ -20,24 +20,22 @@ from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import InboundMessage, OutboundMessage
+from .capabilities import ChannelCapabilities
 from .interaction import (
-    APPROVAL_TIMEOUT_FEEDBACK,
-    APPROVED_AUTO_FEEDBACK,
-    APPROVED_FEEDBACK,
     ASK_USER_TIMEOUT,
-    ASK_USER_TIMEOUT_FEEDBACK,
     HITL_APPROVAL_TIMEOUT,
-    OTHER_PROMPT,
-    REJECTED_FEEDBACK,
+    ApprovalPolicy,
+    InteractionIO,
+    PendingReplyRegistry,
+    resolve_approval,
+    resolve_ask_user,
 )
-from .interaction import approval_prompt_metadata as _approval_prompt_metadata
-from .interaction import config_auto_approve as _should_auto_approve
-from .interaction import format_approval_prompt as _format_approval_prompt
-from .interaction import format_question_prompt as _format_question_prompt
-from .interaction import is_cancel_reply as _is_cancel_reply
-from .interaction import is_stop_command as _is_stop_command
-from .interaction import parse_approval_reply as _parse_approval_reply
-from .interaction import parse_choice_answer as _parse_choice_answer
+
+# Backwards-compatible re-exports for existing test imports; the canonical
+# implementations live in ``channels.interaction``.
+from .interaction import config_auto_approve as _should_auto_approve  # noqa: F401
+from .interaction import format_approval_prompt as _format_approval_prompt  # noqa: F401
+from .interaction import parse_approval_reply as _parse_approval_reply  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -126,22 +124,40 @@ def _join_subagent_text(buffers: dict[str, tuple[str, list[str]]]) -> str:
     return "\n\n".join(sections)
 
 
-@dataclass
-class _PendingInterrupt:
-    """Stored state for a pending HITL interrupt awaiting channel user reply."""
+class _ConsumerIO(InteractionIO):
+    """:class:`InteractionIO` over the consumer's bus + reply registry.
 
-    thread_id: str
-    action_requests: list
-    event: asyncio.Event  # set when user replies
-    decision: str | None = None  # "approve", "reject", "auto"
+    Publishes prompts through ``bus.publish_outbound`` and blocks for
+    replies on the consumer's shared :class:`PendingReplyRegistry` — both
+    on the consumer's own event loop, so the engine runs natively async
+    here with no thread hand-off.
+    """
 
+    def __init__(
+        self, consumer: InboundConsumer, msg: InboundMessage, session_key: str
+    ) -> None:
+        self._consumer = consumer
+        self._msg = msg
+        self._session_key = session_key
+        channel = consumer._get_channel(msg.channel)
+        self.capabilities = (
+            channel.capabilities if channel is not None else ChannelCapabilities()
+        )
+        self.base_metadata = msg.metadata
 
-@dataclass
-class _PendingAskUserReply:
-    """Stored state for a pending ask_user question awaiting channel user reply."""
+    async def send(self, content: str, *, metadata: dict | None = None) -> bool:
+        await self._consumer.bus.publish_outbound(
+            OutboundMessage(
+                channel=self._msg.channel,
+                chat_id=self._msg.chat_id,
+                content=content,
+                metadata=metadata if metadata is not None else self._msg.metadata,
+            )
+        )
+        return True
 
-    event: asyncio.Event  # set when user replies
-    reply: str | None = None  # raw reply text
+    async def wait_reply(self, *, timeout: float) -> str | None:
+        return await self._consumer._reply_registry.wait(self._session_key, timeout)
 
 
 class InboundConsumer:
@@ -230,12 +246,12 @@ class InboundConsumer:
         # Metrics
         self._metrics = ConsumerMetrics()
 
-        # HITL: pending interrupts per session_key, and auto-approve sessions
-        self._pending_interrupts: dict[str, _PendingInterrupt] = {}
-        self._auto_approve_sessions: set[str] = set()
-
-        # ask_user: pending reply per session_key
-        self._pending_ask_user_replies: dict[str, _PendingAskUserReply] = {}
+        # Interaction engine state: one reply registry (routes the next
+        # message from a chat into a waiting prompt) and one approval
+        # policy (config rule + session "Approve all" grants), shared by
+        # the ask_user and HITL flows via ``channels.interaction``.
+        self._reply_registry = PendingReplyRegistry()
+        self._approval_policy = ApprovalPolicy()
 
     async def _get_thread_id(self, sender_id: str) -> str:
         """Get or create a thread ID for the given sender.
@@ -360,26 +376,13 @@ class InboundConsumer:
 
         self._metrics.total_processed += 1
 
-        # ask_user: check if this message is a reply to a pending question.
-        # Must be checked BEFORE HITL approval — any text is a valid answer.
-        if session_key in self._pending_ask_user_replies:
-            pending_ask = self._pending_ask_user_replies[session_key]
-            pending_ask.reply = msg.content
-            pending_ask.event.set()
-            return  # consumed as ask_user answer
-
-        # HITL: check if this message is a reply to a pending approval
-        if session_key in self._pending_interrupts:
-            pending = self._pending_interrupts[session_key]
-            decision = _parse_approval_reply(msg.content)
-            if decision is not None:
-                pending.decision = decision
-                pending.event.set()
-                return  # don't process as a new agent message
-            # Unrecognized reply — treat as new message, cancel pending
-            pending.decision = "reject"
-            pending.event.set()
-            del self._pending_interrupts[session_key]
+        # Reply interception: if a prompt (ask_user question or HITL
+        # approval) is waiting on this chat, hand it this message instead
+        # of starting a fresh agent turn.  The engine parses it (stop /
+        # cancel / choice / approval grammar), so the registry only routes
+        # raw text — one path for both flows.
+        if self._reply_registry.try_resolve(session_key, msg.content):
+            return
 
         async with self._chat_locks[session_key]:
             await self._stream_with_hitl(msg, channel, thread_id, session_key)
@@ -529,109 +532,23 @@ class InboundConsumer:
                     stream_input = Command(resume=result)
                     continue
 
-                # HITL: resolve the interrupt
+                # HITL: resolve the interrupt through the shared engine.
+                # ``resolve_approval`` handles session/config auto-approve,
+                # the approval prompt (with capability-driven buttons), the
+                # reply wait, parsing (incl. /stop), and feedback strings.
                 action_reqs = interrupt_data.get("action_requests", [])
-                n = len(action_reqs) or 1
-
-                # Session auto-approve (user previously chose "Approve all")
-                if session_key in self._auto_approve_sessions:
-                    stream_input = Command(
-                        resume={"decisions": [{"type": "approve"} for _ in range(n)]}
-                    )
-                    continue
-
-                # Config auto-approve (auto_approve, non-execute, allow_list)
-                if _should_auto_approve(action_reqs):
-                    stream_input = Command(
-                        resume={"decisions": [{"type": "approve"} for _ in range(n)]}
-                    )
-                    continue
-
-                # Needs user approval — send prompt to channel
-                has_buttons = (
-                    channel is not None and channel.capabilities.inline_buttons
+                io = _ConsumerIO(self, msg, session_key)
+                decisions = await resolve_approval(
+                    action_reqs,
+                    io,
+                    self._approval_policy,
+                    session_key,
+                    timeout=_HITL_APPROVAL_TIMEOUT,
                 )
-                prompt_text = _format_approval_prompt(
-                    action_reqs, with_buttons=has_buttons
-                )
-                approval_metadata = _approval_prompt_metadata(
-                    msg.metadata, with_buttons=has_buttons
-                )
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=prompt_text,
-                        metadata=approval_metadata,
-                    )
-                )
+                if decisions is None:
+                    return  # reject / timeout / stop — end the turn
 
-                # Wait for user reply
-                pending = _PendingInterrupt(
-                    thread_id=thread_id,
-                    action_requests=action_reqs,
-                    event=asyncio.Event(),
-                )
-                self._pending_interrupts[session_key] = pending
-
-                timed_out = False
-                try:
-                    await asyncio.wait_for(
-                        pending.event.wait(),
-                        timeout=_HITL_APPROVAL_TIMEOUT,
-                    )
-                except TimeoutError:
-                    timed_out = True
-                finally:
-                    # Unregister BEFORE any further await so a late reply can't flip
-                    # the decision back to approve during the notification round-trip.
-                    self._pending_interrupts.pop(session_key, None)
-
-                if timed_out:
-                    # Reject on timeout (fail-closed; matches cli/channel.py). Decision
-                    # is a local constant, not pending.decision, so it can't be
-                    # overwritten by a late reply after we unregistered above.
-                    decision = "reject"
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                            content=APPROVAL_TIMEOUT_FEEDBACK,
-                            metadata=msg.metadata,
-                        )
-                    )
-                else:
-                    decision = pending.decision or "reject"
-
-                # Visible confirmation so the click/reply registers (QQ has no
-                # message recall API for C2C).  Only fires when the user
-                # actually responded — silent on timeout to avoid claiming
-                # the user approved when they just walked away.
-                if pending.event.is_set():
-                    feedback_text = {
-                        "approve": APPROVED_FEEDBACK,
-                        "auto": APPROVED_AUTO_FEEDBACK,
-                        "reject": REJECTED_FEEDBACK,
-                    }.get(decision)
-                    if feedback_text:
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content=feedback_text,
-                                metadata=msg.metadata,
-                            )
-                        )
-
-                if decision == "reject":
-                    return
-
-                if decision == "auto":
-                    self._auto_approve_sessions.add(session_key)
-
-                stream_input = Command(
-                    resume={"decisions": [{"type": "approve"} for _ in range(n)]}
-                )
+                stream_input = Command(resume={"decisions": decisions})
                 # continue to next HITL round
 
         except TimeoutError:
@@ -693,106 +610,27 @@ class InboundConsumer:
 
     # ── ask_user helpers ──
 
-    async def _wait_for_ask_user_reply(
-        self,
-        session_key: str,
-        timeout: float,
-    ) -> str | None:
-        """Register a pending ask_user slot and wait for the user to reply.
-
-        Returns the raw reply text, or ``None`` on timeout.
-        """
-        pending = _PendingAskUserReply(event=asyncio.Event())
-        self._pending_ask_user_replies[session_key] = pending
-        try:
-            await asyncio.wait_for(pending.event.wait(), timeout=timeout)
-        except TimeoutError:
-            pass
-        finally:
-            self._pending_ask_user_replies.pop(session_key, None)
-        return pending.reply
-
     async def _resolve_ask_user(
         self,
         msg: InboundMessage,
         event_data: dict,
         session_key: str,
     ) -> dict:
-        """Handle an ask_user interrupt: send questions to channel, collect answers.
+        """Handle an ask_user interrupt via the shared engine.
 
-        Uses the shared grammar in :mod:`channels.interaction` (prompt
-        formatting, choice parsing, stop-command handling) so serve mode
-        and the CLI bridge cannot drift.  ``/stop`` is checked *before*
-        the reply is parsed (G3), matching the CLI path.
+        Delegates the whole question/answer flow (prompt formatting, choice
+        + "Other" grammar, ``/stop`` handling) to
+        :func:`channels.interaction.resolve_ask_user` over a
+        :class:`_ConsumerIO` adapter, so serve mode and the CLI bridge
+        cannot drift.
 
         Returns a dict suitable for ``Command(resume=...)``:
         ``{"answers": [...], "status": "answered"}`` or
         ``{"status": "cancelled"}``.
         """
         questions = event_data.get("questions", [])
-        if not questions:
-            return {"answers": [], "status": "answered"}
-
-        total = len(questions)
-        answers: list[str] = []
-
-        async def _send(content: str) -> None:
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=content,
-                    metadata=msg.metadata,
-                )
-            )
-
-        for i, q in enumerate(questions):
-            q_type = q.get("type", "text")
-
-            # -- Send question --
-            await _send(_format_question_prompt(q, i, total))
-
-            # -- Wait for user reply --
-            reply = await self._wait_for_ask_user_reply(
-                session_key,
-                _ASK_USER_TIMEOUT,
-            )
-
-            if not reply:
-                await _send(ASK_USER_TIMEOUT_FEEDBACK)
-                return {"status": "cancelled"}
-
-            raw = reply.strip()
-            if _is_stop_command(raw):
-                return {"status": "cancelled"}
-            if _is_cancel_reply(raw):
-                return {"status": "cancelled"}
-
-            # -- Parse answer --
-            if q_type == "multiple_choice":
-                choices = q.get("choices", [])
-                kind, value = _parse_choice_answer(raw, choices)
-                if kind == "other":
-                    # "Other" selected -- ask for free-form input
-                    await _send(OTHER_PROMPT)
-                    other_reply = await self._wait_for_ask_user_reply(
-                        session_key,
-                        _ASK_USER_TIMEOUT,
-                    )
-                    if not other_reply:
-                        await _send(ASK_USER_TIMEOUT_FEEDBACK)
-                        return {"status": "cancelled"}
-                    if _is_stop_command(other_reply):
-                        return {"status": "cancelled"}
-                    if _is_cancel_reply(other_reply):
-                        return {"status": "cancelled"}
-                    answers.append(other_reply.strip())
-                else:
-                    answers.append(value)
-            else:
-                answers.append(raw)
-
-        return {"answers": answers, "status": "answered"}
+        io = _ConsumerIO(self, msg, session_key)
+        return await resolve_ask_user(questions, io, timeout=_ASK_USER_TIMEOUT)
 
     # ── internal ──
 

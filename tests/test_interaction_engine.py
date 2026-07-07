@@ -1,0 +1,333 @@
+"""Stage 2 tests for the interaction engine coroutines + reply registry.
+
+The engine (:func:`resolve_ask_user`, :func:`resolve_approval`) is pure
+async with an injected :class:`InteractionIO`, so it is exercised here with
+a scripted ``FakeIO``: assert the prompts it emits and feed it the replies
+a user would send.  Covers the whole grammar — single/multi question,
+optional, choice letters, "Other", timeout, ``/stop``, approve / reject /
+approve-all, and capability-driven button formatting (R3).
+"""
+
+import asyncio
+
+from EvoScientist.channels import interaction as I
+from EvoScientist.channels.capabilities import ChannelCapabilities
+
+# ═══════════════════════════════════════════════════════════════════════
+# Scripted fake IO
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class FakeIO(I.InteractionIO):
+    """A scripted :class:`InteractionIO`.
+
+    *replies* is the queue of reply strings ``wait_reply`` hands back in
+    order; a ``None`` entry (or exhausting the queue) simulates a timeout.
+    Every ``send`` is recorded as ``(content, metadata)`` in ``sent``.
+    """
+
+    def __init__(self, replies=None, *, capabilities=None, base_metadata=None):
+        self.capabilities = capabilities or ChannelCapabilities()
+        self.base_metadata = base_metadata
+        self._replies = list(replies or [])
+        self.sent: list[tuple[str, dict | None]] = []
+        self.send_ok = True
+
+    async def send(self, content, *, metadata=None):
+        self.sent.append((content, metadata))
+        return self.send_ok
+
+    async def wait_reply(self, *, timeout):
+        if not self._replies:
+            return None
+        return self._replies.pop(0)
+
+    @property
+    def contents(self):
+        return [c for c, _ in self.sent]
+
+
+QQ_CAPS = ChannelCapabilities(inline_buttons=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# resolve_ask_user
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestResolveAskUser:
+    async def test_empty_questions(self):
+        io = FakeIO()
+        result = await I.resolve_ask_user([], io)
+        assert result == {"answers": [], "status": "answered"}
+        assert io.sent == []
+
+    async def test_single_text_answered(self):
+        io = FakeIO(["CIFAR-10"])
+        result = await I.resolve_ask_user(
+            [{"question": "Which dataset?", "type": "text"}], io
+        )
+        assert result == {"answers": ["CIFAR-10"], "status": "answered"}
+        assert "Quick check-in" in io.contents[0]
+
+    async def test_multi_question_answered(self):
+        io = FakeIO(["ans1", "ans2"])
+        result = await I.resolve_ask_user(
+            [
+                {"question": "Q1?", "type": "text"},
+                {"question": "Q2?", "type": "text"},
+            ],
+            io,
+        )
+        assert result == {"answers": ["ans1", "ans2"], "status": "answered"}
+        assert io.contents[0].startswith("❓ Question 1/2")
+        assert io.contents[1].startswith("❓ Question 2/2")
+
+    async def test_choice_letter(self):
+        io = FakeIO(["B"])
+        q = {
+            "question": "Which?",
+            "type": "multiple_choice",
+            "choices": [{"value": "CIFAR-10"}, {"value": "ImageNet"}],
+        }
+        result = await I.resolve_ask_user([q], io)
+        assert result == {"answers": ["ImageNet"], "status": "answered"}
+
+    async def test_choice_other_subflow(self):
+        # "C" is the Other letter for two choices; then a free-form answer.
+        io = FakeIO(["C", "my custom dataset"])
+        q = {
+            "question": "Which?",
+            "type": "multiple_choice",
+            "choices": [{"value": "CIFAR-10"}, {"value": "ImageNet"}],
+        }
+        result = await I.resolve_ask_user([q], io)
+        assert result == {"answers": ["my custom dataset"], "status": "answered"}
+        assert io.contents[1] == I.OTHER_PROMPT
+
+    async def test_optional_suffix_in_prompt(self):
+        io = FakeIO(["ans"])
+        await I.resolve_ask_user(
+            [{"question": "Notes?", "type": "text", "required": False}], io
+        )
+        assert "(optional)" in io.contents[0]
+        assert "Leave empty to skip." in io.contents[0]
+
+    async def test_timeout_first_question(self):
+        io = FakeIO([])  # no replies -> timeout
+        result = await I.resolve_ask_user([{"question": "Q?", "type": "text"}], io)
+        assert result == {"status": "cancelled"}
+        assert io.contents[-1] == I.ASK_USER_TIMEOUT_FEEDBACK
+
+    async def test_timeout_in_other_subflow(self):
+        io = FakeIO(["C"])  # picks Other, then times out on free-form
+        q = {
+            "question": "Which?",
+            "type": "multiple_choice",
+            "choices": [{"value": "A"}, {"value": "B"}],
+        }
+        result = await I.resolve_ask_user([q], io)
+        assert result == {"status": "cancelled"}
+        assert io.contents[-1] == I.ASK_USER_TIMEOUT_FEEDBACK
+
+    async def test_stop_command_cancels(self):
+        io = FakeIO(["/stop"])
+        result = await I.resolve_ask_user([{"question": "Q?", "type": "text"}], io)
+        assert result == {"status": "cancelled"}
+        # /stop is a pure cancel — no timeout notice sent.
+        assert I.ASK_USER_TIMEOUT_FEEDBACK not in io.contents
+
+    async def test_stop_command_in_other_subflow(self):
+        io = FakeIO(["C", "/stop"])
+        q = {
+            "question": "Which?",
+            "type": "multiple_choice",
+            "choices": [{"value": "A"}, {"value": "B"}],
+        }
+        result = await I.resolve_ask_user([q], io)
+        assert result == {"status": "cancelled"}
+
+    async def test_cancel_reply(self):
+        io = FakeIO(["cancel"])
+        result = await I.resolve_ask_user([{"question": "Q?", "type": "text"}], io)
+        assert result == {"status": "cancelled"}
+
+    async def test_send_failure_cancels(self):
+        io = FakeIO(["ans"])
+        io.send_ok = False
+        result = await I.resolve_ask_user([{"question": "Q?", "type": "text"}], io)
+        assert result == {"status": "cancelled"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# resolve_approval
+# ═══════════════════════════════════════════════════════════════════════
+
+
+REQS = [{"name": "execute", "args": {"command": "rm -rf /tmp/x"}}]
+
+
+class TestResolveApproval:
+    async def test_session_granted_short_circuits(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        p = I.ApprovalPolicy()
+        p.grant_session("tg:c1")
+        io = FakeIO()
+        result = await I.resolve_approval(REQS, io, p, "tg:c1")
+        assert result == [{"type": "approve"}]
+        assert io.sent == []  # no prompt, silent
+
+    async def test_config_auto_approve_short_circuits(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: True)
+        io = FakeIO()
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result == [{"type": "approve"}]
+        assert io.sent == []
+
+    async def test_approve(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["1"])
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result == [{"type": "approve"}]
+        assert io.contents[0].startswith("⚠️ Approval Required")
+        assert io.contents[-1] == I.APPROVED_FEEDBACK
+
+    async def test_reject(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["2"])
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result is None
+        assert io.contents[-1] == I.REJECTED_FEEDBACK
+
+    async def test_approve_all_grants_session(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["3"])
+        p = I.ApprovalPolicy()
+        result = await I.resolve_approval(REQS, io, p, "tg:c1")
+        assert result == [{"type": "approve"}]
+        assert io.contents[-1] == I.APPROVED_AUTO_FEEDBACK
+        assert p.is_session_granted("tg:c1")  # future prompts auto-approve
+
+    async def test_multi_request_approve_length(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        reqs = [
+            {"name": "execute", "args": {"command": "a"}},
+            {"name": "execute", "args": {"command": "b"}},
+        ]
+        io = FakeIO(["1"])
+        result = await I.resolve_approval(reqs, io, I.ApprovalPolicy(), "tg:c1")
+        assert result == [{"type": "approve"}, {"type": "approve"}]
+
+    async def test_unrecognized_reply(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["huh?"])
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result is None
+        assert io.contents[-1] == I.UNRECOGNIZED_FEEDBACK
+
+    async def test_timeout(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO([])  # times out
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result is None
+        assert io.contents[-1] == I.APPROVAL_TIMEOUT_FEEDBACK
+
+    async def test_stop_command_silent_cancel(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["/stop"])
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result is None
+        # /stop already got its own ack; no reject/unrecognized feedback here.
+        assert I.REJECTED_FEEDBACK not in io.contents
+        assert I.UNRECOGNIZED_FEEDBACK not in io.contents
+
+    async def test_send_failure_declines(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["1"])
+        io.send_ok = False
+        result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        assert result is None
+
+    # ── R3: button-capability formatting + payload normalization ──
+
+    async def test_buttons_attached_when_capable(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["1"], capabilities=QQ_CAPS, base_metadata={"chat": "x"})
+        await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        prompt, metadata = io.sent[0]
+        # Button channels drop the textual "Reply: 1=..." cue.
+        assert "Reply: 1=Approve" not in prompt
+        assert metadata["buttons"] == [
+            {"text": "Approve", "value": "1", "type": "primary"},
+            {"text": "Reject", "value": "2", "type": "danger"},
+            {"text": "Approve all", "value": "3"},
+        ]
+        assert metadata["chat"] == "x"  # base metadata preserved
+
+    async def test_no_buttons_when_incapable(self, monkeypatch):
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["1"])  # default caps: no inline_buttons
+        await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
+        prompt, metadata = io.sent[0]
+        assert "Reply: 1=Approve, 2=Reject, 3=Approve all" in prompt
+        assert "buttons" not in (metadata or {})
+
+    async def test_button_press_payload_normalizes(self, monkeypatch):
+        # A button click delivers its `value` ("3") through the same reply
+        # path; the engine must treat it exactly like a typed "3".
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(["3"], capabilities=QQ_CAPS)
+        p = I.ApprovalPolicy()
+        result = await I.resolve_approval(REQS, io, p, "tg:c1")
+        assert result == [{"type": "approve"}]
+        assert p.is_session_granted("tg:c1")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PendingReplyRegistry
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPendingReplyRegistry:
+    async def test_register_wait_resolve(self):
+        reg = I.PendingReplyRegistry()
+
+        async def _resolver():
+            # Give wait() a tick to register before resolving.
+            await asyncio.sleep(0.01)
+            assert reg.try_resolve("s1", "hello") is True
+
+        got, _ = await asyncio.gather(reg.wait("s1", timeout=1.0), _resolver())
+        assert got == "hello"
+        assert "s1" not in reg  # cleaned up after wait
+
+    async def test_wait_timeout_returns_none(self):
+        reg = I.PendingReplyRegistry()
+        got = await reg.wait("s1", timeout=0.02)
+        assert got is None
+        assert "s1" not in reg
+
+    def test_try_resolve_no_pending(self):
+        reg = I.PendingReplyRegistry()
+        assert reg.try_resolve("nope", "x") is False
+
+    async def test_reregister_cancels_stale(self):
+        reg = I.PendingReplyRegistry()
+        first = asyncio.ensure_future(reg.wait("s1", timeout=1.0))
+        await asyncio.sleep(0.01)  # let first register
+        # A second interaction on the same chat re-registers, cancelling the
+        # first waiter so it unwinds promptly (returns None) instead of
+        # hanging until its own timeout.
+        new_fut = reg.register("s1")
+        assert await first is None
+        # The stale waiter's cleanup must not evict the newer registration.
+        assert reg._pending.get("s1") is new_fut
+        reg.discard("s1")
+
+    async def test_clear_cancels_all(self):
+        reg = I.PendingReplyRegistry()
+        fut = asyncio.ensure_future(reg.wait("s1", timeout=1.0))
+        await asyncio.sleep(0.01)
+        reg.clear()
+        got = await fut
+        assert got is None
