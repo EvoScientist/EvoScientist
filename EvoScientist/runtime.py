@@ -49,9 +49,9 @@ class AgentRuntime:
     on first use, so pure-server processes never pay for the thread.
     """
 
-    #: How long ``run_sync`` waits for cancellation to settle after a
-    #: ``KeyboardInterrupt`` before re-raising it (seconds).
-    _KI_CANCEL_WAIT = 2.0
+    #: How long ``run_sync`` waits for cancellation to settle before
+    #: re-raising the original interruption (seconds).
+    _CANCEL_WAIT = 2.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -138,10 +138,9 @@ class AgentRuntime:
         * Called *on* the runtime thread → :class:`RuntimeError`. Blocking the
           loop from inside itself is exactly the bug ``nest_asyncio`` has been
           hiding; we make it loud.
-        * ``KeyboardInterrupt`` while waiting → cancel the future (which cancels
-          the underlying task thread-safely), wait briefly for cancellation to
-          settle, then re-raise ``KeyboardInterrupt``. This preserves every
-          existing Ctrl+C contract.
+        * Timeout or ``KeyboardInterrupt`` while waiting → cancel the future
+          (which cancels the underlying task thread-safely), wait briefly for
+          cancellation to settle, then re-raise the original interruption.
         """
         if self._is_on_runtime_thread():
             coro.close()
@@ -152,13 +151,20 @@ class AgentRuntime:
         future = self.submit(coro)
         try:
             return future.result(timeout)
-        except KeyboardInterrupt:
-            future.cancel()
-            try:
-                future.result(self._KI_CANCEL_WAIT)
-            except (Exception, asyncio.CancelledError):
-                pass
+        except concurrent.futures.TimeoutError:
+            if timeout is not None and not future.done():
+                self._cancel_and_drain_future(future)
             raise
+        except KeyboardInterrupt:
+            self._cancel_and_drain_future(future)
+            raise
+
+    def _cancel_and_drain_future(self, future: concurrent.futures.Future) -> None:
+        future.cancel()
+        try:
+            future.result(self._CANCEL_WAIT)
+        except (Exception, asyncio.CancelledError):
+            pass
 
     def spawn(
         self,
@@ -264,14 +270,15 @@ class AgentRuntime:
         with self._lock:
             thread = self._thread
             loop = self._loop
+            if thread is None or loop is None:
+                return
+            if thread is threading.current_thread():
+                raise RuntimeError(
+                    "close() called on the evosci-runtime loop thread; call it "
+                    "from another thread so shutdown can join the runtime safely"
+                )
             self._thread = None
             self._loop = None
-        if thread is None or loop is None:
-            return
-        if thread is threading.current_thread():
-            # atexit runs on the main thread, so this should not happen; guard
-            # anyway — a thread cannot join itself.
-            return
         if thread.is_alive():
             try:
                 drain = asyncio.run_coroutine_threadsafe(self._drain(loop), loop)

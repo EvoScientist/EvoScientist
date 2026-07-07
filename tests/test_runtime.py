@@ -7,6 +7,7 @@ and from worker threads, exactly as the sync frontends will.
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import threading
 import time
@@ -210,6 +211,50 @@ def test_run_sync_keyboardinterrupt_cancels_and_reraises(rt, monkeypatch):
     assert cancelled.wait(5), "underlying task was not cancelled on Ctrl+C"
 
 
+def test_run_sync_timeout_cancels_underlying_task(rt, monkeypatch):
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def long_task():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    real_submit = rt.submit
+
+    class _TimeoutOnFirstResult:
+        def __init__(self, fut):
+            self._fut = fut
+            self._raised = False
+
+        def result(self, timeout=None):
+            if not self._raised:
+                self._raised = True
+                # Ensure the task is genuinely running before the timeout.
+                started.wait(5)
+                raise concurrent.futures.TimeoutError
+            return self._fut.result(timeout)
+
+        def cancel(self):
+            return self._fut.cancel()
+
+        def done(self):
+            return self._fut.done()
+
+    def fake_submit(coro):
+        return _TimeoutOnFirstResult(real_submit(coro))
+
+    monkeypatch.setattr(rt, "submit", fake_submit)
+
+    with pytest.raises(concurrent.futures.TimeoutError):
+        rt.run_sync(long_task(), timeout=1)
+
+    assert cancelled.wait(5), "underlying task was not cancelled on timeout"
+
+
 # -- spawn -----------------------------------------------------------------
 
 
@@ -319,6 +364,21 @@ def test_close_is_idempotent_and_safe_before_start(rt):
     rt.start()
     rt.close(timeout=5.0)
     rt.close(timeout=5.0)  # already closed — no-op
+
+
+def test_close_from_runtime_thread_raises_without_detaching_runtime(rt):
+    async def close_from_runtime_thread():
+        with pytest.raises(RuntimeError, match="runtime loop thread"):
+            rt.close(timeout=5.0)
+        return threading.current_thread().name
+
+    assert rt.run_sync(close_from_runtime_thread()) == "evosci-runtime"
+
+    thread = rt._thread
+    assert thread is not None
+    assert thread.is_alive()
+    assert rt.loop is not None
+    assert rt.run_sync(asyncio.sleep(0, result="still-running")) == "still-running"
 
 
 # -- the single turn slot --------------------------------------------------
