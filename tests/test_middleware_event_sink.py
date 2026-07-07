@@ -46,6 +46,9 @@ class _SlowSink:
     def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
         self._record("fallback")
 
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        self._record("notice")
+
 
 def test_noopsink_satisfies_protocol():
     sink = NoOpSink()

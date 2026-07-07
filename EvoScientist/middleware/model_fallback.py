@@ -3,7 +3,9 @@
 Uses LangChain's AgentMiddleware to intercept model calls.  When the primary
 model raises an exception, the middleware walks the configured fallback chain,
 trying each alternative model in order.  Every fallback attempt and its
-outcome is surfaced to the user via the registered UI callback.
+outcome is reported to the injected event sink (the fallback transition via the
+structured ``on_model_fallback``; the surrounding narration via
+``emit_fallback_notice``), and the frontend sink renders it.
 
 Errors that indicate a client-side bug (malformed request / HTTP 400) or a
 context-length breach are not eligible for fallback and are re-raised
@@ -28,9 +30,6 @@ if TYPE_CHECKING:
     from .events import MiddlewareEventSink
 
 logger = logging.getLogger(__name__)
-
-_ui_emit_fn: Callable[[str, str], None] | None = None
-"""UI callback registered by the CLI/TUI entrypoint.  ``None`` until set."""
 
 _fallback_chain_lock = threading.Lock()
 _fallback_chain: list[tuple[str, str]] = []
@@ -64,40 +63,6 @@ _AUTH_ERROR_PATTERNS: list[str] = [
 
 These are intentionally *not* treated as non-fallbackable because a different
 provider in the chain may have valid credentials."""
-
-
-def set_ui_emit(fn: Callable[[str, str], None] | None) -> None:
-    """Register (or clear) the UI callback for fallback status messages.
-
-    Args:
-        fn: Callable with signature ``fn(text, style)`` where *style* is a
-            Rich style string (``"yellow"``, ``"red"``, ``"green"``).
-            Pass ``None`` to unregister.
-    """
-    global _ui_emit_fn
-    _ui_emit_fn = fn
-
-
-def _emit(text: str, style: str = "yellow") -> None:
-    """Surface a fallback status message to the user.
-
-    Dispatches to the registered UI callback when available (TUI mode),
-    otherwise falls back to the shared Rich console on stdout (CLI mode).
-
-    Args:
-        text: Plain-text message to display.
-        style: Rich style string applied to the message.
-    """
-    if _ui_emit_fn is not None:
-        try:
-            _ui_emit_fn(text, style)
-            return
-        except Exception:
-            pass
-
-    from ..stream.console import console
-
-    console.print(text, style=style)
 
 
 def get_fallback_chain() -> list[tuple[str, str]]:
@@ -238,6 +203,7 @@ async def _try_fallbacks(
     request: ModelRequest,
     invoke: Callable[[ModelRequest], Awaitable[ModelResponse]],
     primary_exc: Exception,
+    events: MiddlewareEventSink,
 ) -> ModelResponse:
     """Walk the fallback chain, trying each model until one succeeds.
 
@@ -250,6 +216,9 @@ async def _try_fallbacks(
         request: The original model request.
         invoke: Async callable that invokes the handler on a request.
         primary_exc: The exception raised by the primary model.
+        events: Injected event sink. The fallback *transition* is reported via
+            the structured ``on_model_fallback``; the surrounding narration
+            (header / outcome / exhaustion) via ``emit_fallback_notice``.
 
     Returns:
         The ``ModelResponse`` from the first successful fallback.
@@ -259,44 +228,48 @@ async def _try_fallbacks(
     """
     from ..llm.models import get_chat_model
 
-    _emit(
+    events.emit_fallback_notice(
         f"Primary model failed: {type(primary_exc).__name__}: {primary_exc}",
-        style="yellow",
+        "yellow",
     )
     logger.warning(
         "Primary model failed: %s: %s", type(primary_exc).__name__, primary_exc
     )
 
     last_exc = primary_exc
+    from_label = "primary model"
     for model_name, provider in get_fallback_chain():
-        _emit(
-            f"  -> Falling back to {model_name} ({provider}) "
-            f"due to: {type(last_exc).__name__}: {last_exc}",
-            style="yellow",
+        # Structured transition: the frontend formats the "  -> Falling back to
+        # {to} due to: {reason}" line (to carries the provider, reason the exc).
+        events.on_model_fallback(
+            from_label,
+            f"{model_name} ({provider})",
+            f"{type(last_exc).__name__}: {last_exc}",
         )
         try:
             fallback_model = get_chat_model(model=model_name, provider=provider)
             fb_request = request.override(model=fallback_model)
             result = await invoke(fb_request)
-            _emit(
+            events.emit_fallback_notice(
                 f"  Fallback to {model_name} ({provider}) succeeded",
-                style="green",
+                "green",
             )
             logger.info("Fallback to %s (%s) succeeded", model_name, provider)
             return result
         except Exception as fb_exc:
             reason = _is_non_fallbackable(fb_exc)
             if reason is not None:
-                _emit(
+                events.emit_fallback_notice(
                     f"  {model_name} hit non-fallbackable error ({reason}) "
                     f"-- aborting fallback chain",
-                    style="red",
+                    "red",
                 )
                 raise
             last_exc = fb_exc
-            _emit(
+            from_label = f"{model_name} ({provider})"
+            events.emit_fallback_notice(
                 f"  x {model_name} also failed: {type(fb_exc).__name__}: {fb_exc}",
-                style="red",
+                "red",
             )
             logger.warning(
                 "Fallback %s (provider=%s) failed: %s: %s",
@@ -306,7 +279,9 @@ async def _try_fallbacks(
                 fb_exc,
             )
 
-    _emit("  All fallbacks exhausted -- re-raising last error", style="red")
+    events.emit_fallback_notice(
+        "  All fallbacks exhausted -- re-raising last error", "red"
+    )
     raise last_exc
 
 
@@ -314,6 +289,7 @@ def _guard_and_fallback(
     primary_exc: Exception,
     request: ModelRequest,
     invoke: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    events: MiddlewareEventSink,
 ) -> Awaitable[ModelResponse]:
     """Check non-fallbackable conditions, then delegate to ``_try_fallbacks``.
 
@@ -321,6 +297,7 @@ def _guard_and_fallback(
         primary_exc: The exception raised by the primary model.
         request: The original model request.
         invoke: Async callable that invokes the handler on a request.
+        events: Injected event sink for fallback narration.
 
     Returns:
         Coroutine that resolves to the fallback ``ModelResponse``.
@@ -330,12 +307,12 @@ def _guard_and_fallback(
     """
     reason = _is_non_fallbackable(primary_exc)
     if reason is not None:
-        _emit(
+        events.emit_fallback_notice(
             f"Model error ({reason}) -- not eligible for fallback, re-raising",
-            style="red",
+            "red",
         )
         raise primary_exc
-    return _try_fallbacks(request, invoke, primary_exc)
+    return _try_fallbacks(request, invoke, primary_exc, events)
 
 
 class ModelFallbackMiddleware(AgentMiddleware):
@@ -373,7 +350,9 @@ class ModelFallbackMiddleware(AgentMiddleware):
 
             import asyncio
 
-            return asyncio.run(_guard_and_fallback(exc, request, _sync_invoke))
+            return asyncio.run(
+                _guard_and_fallback(exc, request, _sync_invoke, self._events)
+            )
 
     async def awrap_model_call(
         self,
@@ -385,4 +364,4 @@ class ModelFallbackMiddleware(AgentMiddleware):
         try:
             return await handler(request)
         except Exception as exc:
-            return await _guard_and_fallback(exc, request, handler)
+            return await _guard_and_fallback(exc, request, handler, self._events)

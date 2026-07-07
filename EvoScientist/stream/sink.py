@@ -38,6 +38,17 @@ class FrontendEventSink:
         self._last_emitted: list[str] = []
         self._fallback_display = fallback_display
 
+    def set_fallback_display(
+        self, fallback_display: Callable[[str, str], None] | None
+    ) -> None:
+        """(Re)bind the fallback-notice display sink.
+
+        Frontends whose display target only exists after construction (the TUI
+        binds its ``_append_system`` on mount, clears it on exit) use this
+        instead of the constructor argument.
+        """
+        self._fallback_display = fallback_display
+
     # --- MiddlewareEventSink write side (any thread) ---------------------
     def on_tool_selection_started(self, total_tools: int) -> None:
         with self._lock:

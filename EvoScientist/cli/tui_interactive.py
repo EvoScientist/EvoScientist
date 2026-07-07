@@ -803,11 +803,13 @@ def run_textual_interactive(
             yield Static("", id="status")
 
         def on_mount(self) -> None:
-            # Register fallback middleware UI callback so messages appear
-            # as SystemMessage widgets in the chat container.
-            from ..middleware.model_fallback import set_ui_emit
-
-            set_ui_emit(lambda text, style: self._append_system(text, style))
+            # Bind the session sink's fallback-notice display so model-fallback
+            # messages appear as SystemMessage widgets in the chat container.
+            sink = getattr(self._runtime_gateways.graph_gateway, "events", None)
+            if sink is not None and hasattr(sink, "set_fallback_display"):
+                sink.set_fallback_display(
+                    lambda text, style: self._append_system(text, style)
+                )
 
             self._render_welcome()
             self._render_status()
@@ -2979,9 +2981,9 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
-            from ..middleware.model_fallback import set_ui_emit
-
-            set_ui_emit(None)
+            sink = getattr(self._runtime_gateways.graph_gateway, "events", None)
+            if sink is not None and hasattr(sink, "set_fallback_display"):
+                sink.set_fallback_display(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None

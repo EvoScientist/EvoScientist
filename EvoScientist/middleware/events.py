@@ -67,6 +67,19 @@ class MiddlewareEventSink(Protocol):
         """A model call fell back from ``from_model`` to ``to_model``."""
         ...
 
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        """Render a pre-formatted fallback lifecycle line.
+
+        Transitional shim: the structured
+        :meth:`on_model_fallback` covers the fallback *transition*, but the
+        non-transition narration the fallback middleware still emits — the
+        primary-failure header, per-attempt outcome, chain exhaustion, and the
+        non-fallbackable rejection — arrives here as pre-formatted ``(text,
+        style)`` so the exact user-facing narration is preserved while
+        formatting migrates to the frontend.
+        """
+        ...
+
 
 class ToolSelectionView(Protocol):
     """Read side of the tool-selection state the stream suppressor consumes.
@@ -122,6 +135,9 @@ class NoOpSink:
         pass
 
     def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
+        pass
+
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         pass
 
     # --- ToolSelectionView (read side) -----------------------------------
