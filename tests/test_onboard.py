@@ -1369,6 +1369,7 @@ class TestRunOnboard:
                 "claude-sonnet-4-6",  # Model
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider (a different company)
+                "api_key",  # Auxiliary OpenAI auth mode
                 "gpt-5.5",  # Auxiliary model
                 "daemon",  # Workspace mode
                 True,  # Show thinking
@@ -1392,11 +1393,60 @@ class TestRunOnboard:
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
         assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_auth_mode == "api_key"
         # The auxiliary provider's key is stored in its per-provider field.
         assert final_config.openai_api_key == "sk-aux-openai"
         # Main agent is untouched.
         assert final_config.provider == "anthropic"
         assert final_config.model == "claude-sonnet-4-6"
+
+    def test_auxiliary_openai_oauth_skips_api_key(self):
+        """Auxiliary OpenAI now uses the shared auth flow and skips keys on OAuth."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+            patch(
+                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
+            ),
+            patch(
+                "EvoScientist.ccproxy_manager.check_ccproxy_auth",
+                return_value=(False, "not authenticated"),
+            ) as mock_auth,
+        ):
+            mock_load.return_value = EvoScientistConfig()
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Auxiliary provider
+                "oauth",  # OpenAI auth mode
+                "gpt-5.5",  # Auxiliary model
+            ]
+            mock_q.text.return_value.ask.side_effect = [
+                "",  # ccproxy port (keep default)
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [
+                False,  # Do not log in to Codex now
+                True,  # Save config
+            ]
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_auth_mode == "oauth"
+        assert final_config.openai_api_key == ""
+        mock_q.password.assert_not_called()
+        mock_auth.assert_called_once_with("codex")
 
     def test_auxiliary_custom_provider_collects_base_url(self):
         """Regression for the custom-provider fix: a custom auxiliary provider

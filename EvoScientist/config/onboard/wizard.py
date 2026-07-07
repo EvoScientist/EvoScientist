@@ -129,6 +129,12 @@ _PROVIDER_KEY_ATTR = {
     "custom-anthropic": "custom_anthropic_api_key",
 }
 
+_MINIMAX_GLOBAL_BASE_URL = "https://api.minimax.io/anthropic"
+_CUSTOM_PROVIDER_BASE_URL = {
+    "custom-openai": ("custom_openai_base_url", "CUSTOM_OPENAI_BASE_URL"),
+    "custom-anthropic": ("custom_anthropic_base_url", "CUSTOM_ANTHROPIC_BASE_URL"),
+}
+
 
 def _autosave(config: EvoScientistConfig) -> None:
     """Persist current config to disk between phases.
@@ -140,6 +146,174 @@ def _autosave(config: EvoScientistConfig) -> None:
         save_config(config)
     except Exception:
         pass
+
+
+def _configure_provider_base_url(
+    config: EvoScientistConfig,
+    provider: str,
+    *,
+    strict: bool,
+) -> list[str]:
+    """Configure provider-specific base URL/region and return Ollama models."""
+    if provider in _CUSTOM_PROVIDER_BASE_URL:
+        attr_name, env_name = _CUSTOM_PROVIDER_BASE_URL[provider]
+        current_base_url = getattr(config, attr_name) or os.environ.get(env_name, "")
+        if strict:
+            if not current_base_url:
+                raise RuntimeError(
+                    f"--non-interactive: {provider} provider needs a base URL. "
+                    f"Set the {env_name} env var or run without --non-interactive."
+                )
+            setattr(config, attr_name, current_base_url)
+        else:
+            setattr(
+                config,
+                attr_name,
+                _step_base_url(config, current_value=current_base_url),
+            )
+    elif provider == "minimax":
+        if strict:
+            config.minimax_base_url = (
+                config.minimax_base_url or _MINIMAX_GLOBAL_BASE_URL
+            )
+        else:
+            config.minimax_base_url = _step_minimax_region(config)
+    elif provider == "ollama":
+        if strict:
+            config.ollama_base_url = (
+                config.ollama_base_url
+                or os.environ.get("OLLAMA_BASE_URL", "")
+                or "http://localhost:11434"
+            )
+        else:
+            ollama_url, ollama_detected_models = _step_ollama_base_url(config)
+            config.ollama_base_url = ollama_url
+            return ollama_detected_models
+    return []
+
+
+def _configure_provider_auth_mode(
+    config: EvoScientistConfig,
+    provider: str,
+    *,
+    strict: bool,
+    reset_stale_oauth_modes: bool,
+) -> None:
+    """Configure Anthropic/OpenAI auth mode for the selected provider."""
+    if provider == "anthropic":
+        if strict:
+            config.anthropic_auth_mode = "api_key"
+        else:
+            config.anthropic_auth_mode = _step_anthropic_auth_mode(config)
+    elif provider == "openai":
+        if strict:
+            config.openai_auth_mode = "api_key"
+        else:
+            config.openai_auth_mode = _step_openai_auth_mode(config)
+    elif reset_stale_oauth_modes:
+        config.anthropic_auth_mode = "api_key"
+        config.openai_auth_mode = "api_key"
+
+
+def _provider_uses_oauth(config: EvoScientistConfig, provider: str) -> bool:
+    return (provider == "anthropic" and config.anthropic_auth_mode == "oauth") or (
+        provider == "openai" and config.openai_auth_mode == "oauth"
+    )
+
+
+def _apply_preset_provider_api_key(
+    config: EvoScientistConfig,
+    provider: str,
+    preset_api_key: str,
+    *,
+    skip_validation: bool,
+) -> None:
+    """Validate and store a CLI-supplied provider API key."""
+    if not skip_validation:
+        from .helpers import _provider_key_info
+
+        _info = _provider_key_info(config, provider)
+        validate_fn = _info[2] if _info else None
+        if validate_fn is not None:
+            console.print("  [dim]Validating preset API key...[/dim]", end="")
+            valid, msg = validate_fn(preset_api_key)
+            if valid:
+                console.print(f"\r  [green]✓ {msg}[/green]      ")
+            else:
+                console.print(f"\r  [red]✗ {msg}[/red]      ")
+                raise RuntimeError(
+                    f"--api-key rejected by {provider} validator: {msg}. "
+                    "Pass --skip-validation to override."
+                )
+
+    key_attr = _PROVIDER_KEY_ATTR.get(provider, "openai_api_key")
+    setattr(config, key_attr, preset_api_key)
+    console.print(
+        f"  [green]✓ API key: ***{preset_api_key[-4:]}[/green]   [dim](--api-key)[/dim]"
+    )
+
+
+def _configure_provider_api_key(
+    config: EvoScientistConfig,
+    provider: str,
+    *,
+    skip_validation: bool,
+    preset_api_key: str | None = None,
+    require_api_key=None,
+) -> None:
+    """Configure provider API key unless the provider does not need one."""
+    if provider == "ollama" or _provider_uses_oauth(config, provider):
+        return
+
+    key_attr = _PROVIDER_KEY_ATTR.get(provider, "openai_api_key")
+    if preset_api_key is not None:
+        _apply_preset_provider_api_key(
+            config,
+            provider,
+            preset_api_key,
+            skip_validation=skip_validation,
+        )
+        return
+
+    if require_api_key is not None:
+        require_api_key()
+    new_key = _step_provider_api_key(config, provider, skip_validation)
+    if new_key is not None:
+        setattr(config, key_attr, new_key)
+    elif not getattr(config, key_attr):
+        _print_step_skipped("API Key", "not set")
+
+
+def _configure_provider_connection(
+    config: EvoScientistConfig,
+    provider: str,
+    *,
+    strict: bool,
+    skip_validation: bool,
+    preset_api_key: str | None = None,
+    require_api_key=None,
+    reset_stale_oauth_modes: bool,
+) -> list[str]:
+    """Configure provider base URL/region, auth mode, and API key."""
+    ollama_detected_models = _configure_provider_base_url(
+        config,
+        provider,
+        strict=strict,
+    )
+    _configure_provider_auth_mode(
+        config,
+        provider,
+        strict=strict,
+        reset_stale_oauth_modes=reset_stale_oauth_modes,
+    )
+    _configure_provider_api_key(
+        config,
+        provider,
+        skip_validation=skip_validation,
+        preset_api_key=preset_api_key,
+        require_api_key=require_api_key,
+    )
+    return ollama_detected_models
 
 
 # Sections offered in Keep/Modify/Reset → which step labels they enable.
@@ -479,102 +653,18 @@ def run_onboard(
                         provider = _step_provider(config)
                         config.provider = provider
 
-                    # Step 2a: Base URL (custom-openai, custom-anthropic,
-                    # minimax, ollama). In strict non-interactive mode we
-                    # never call the interactive _step_base_url /
-                    # _step_minimax_region / _step_ollama_base_url helpers —
-                    # fall back to the existing config value or the
-                    # CUSTOM_*_BASE_URL / OLLAMA_BASE_URL env var instead.
-                    # If neither is set for a provider that needs it, raise
-                    # so the user sees the same "missing required answer"
-                    # error as for other required prompts.
-                    if provider == "custom-openai":
-                        current_base_url = (
-                            config.custom_openai_base_url
-                            or os.environ.get("CUSTOM_OPENAI_BASE_URL", "")
-                        )
-                        if strict:
-                            if not current_base_url:
-                                raise RuntimeError(
-                                    "--non-interactive: custom-openai provider "
-                                    "needs a base URL. Set the "
-                                    "CUSTOM_OPENAI_BASE_URL env var or run "
-                                    "without --non-interactive."
-                                )
-                            config.custom_openai_base_url = current_base_url
-                        else:
-                            config.custom_openai_base_url = _step_base_url(
-                                config, current_value=current_base_url
-                            )
-                    elif provider == "custom-anthropic":
-                        current_base_url = (
-                            config.custom_anthropic_base_url
-                            or os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", "")
-                        )
-                        if strict:
-                            if not current_base_url:
-                                raise RuntimeError(
-                                    "--non-interactive: custom-anthropic "
-                                    "provider needs a base URL. Set the "
-                                    "CUSTOM_ANTHROPIC_BASE_URL env var or run "
-                                    "without --non-interactive."
-                                )
-                            config.custom_anthropic_base_url = current_base_url
-                        else:
-                            config.custom_anthropic_base_url = _step_base_url(
-                                config, current_value=current_base_url
-                            )
-                    elif provider == "minimax":
-                        if strict:
-                            # MiniMax has 2 region URLs; default to whatever
-                            # is already in config, else the Global endpoint.
-                            config.minimax_base_url = (
-                                config.minimax_base_url
-                                or "https://api.minimax.io/anthropic"
-                            )
-                        else:
-                            config.minimax_base_url = _step_minimax_region(config)
-                    elif provider == "ollama":
-                        if strict:
-                            # Ollama: existing config value > env var >
-                            # localhost default. Skip the live connection
-                            # validation under strict — model discovery
-                            # happens at runtime anyway.
-                            config.ollama_base_url = (
-                                config.ollama_base_url
-                                or os.environ.get("OLLAMA_BASE_URL", "")
-                                or "http://localhost:11434"
-                            )
-                            # ollama_detected_models stays [] — model picker
-                            # will fall back to free-text or the preset.
-                        else:
-                            ollama_url, ollama_detected_models = _step_ollama_base_url(
-                                config
-                            )
-                            config.ollama_base_url = ollama_url
-
-                    # Step 2b: Auth mode (Anthropic or OpenAI — API key vs OAuth).
-                    # In strict non-interactive mode we assume "api_key".
-                    # The prompt offers a `← Back` choice that raises GoBack so
-                    # the user can re-pick the provider without exiting the wizard.
                     try:
-                        if provider == "anthropic":
-                            if strict:
-                                config.anthropic_auth_mode = "api_key"
-                            else:
-                                config.anthropic_auth_mode = _step_anthropic_auth_mode(
-                                    config
-                                )
-                        elif provider == "openai":
-                            if strict:
-                                config.openai_auth_mode = "api_key"
-                            else:
-                                config.openai_auth_mode = _step_openai_auth_mode(config)
-                        else:
-                            # Non-Anthropic/OpenAI provider: reset OAuth modes to
-                            # avoid stale oauth config triggering ccproxy at startup.
-                            config.anthropic_auth_mode = "api_key"
-                            config.openai_auth_mode = "api_key"
+                        ollama_detected_models = _configure_provider_connection(
+                            config,
+                            provider,
+                            strict=strict,
+                            skip_validation=skip_validation,
+                            preset_api_key=_preset("api_key"),
+                            require_api_key=lambda provider=provider: _require(
+                                "api_key", f"{provider} API key"
+                            ),
+                            reset_stale_oauth_modes=True,
+                        )
                     except GoBack:
                         # User picked "← Back" — restore config to its state at the
                         # top of this iteration (drops any base_url / region /
@@ -594,60 +684,8 @@ def run_onboard(
                         ollama_detected_models = []
                         console.print("  [dim]↩ Returning to provider selection.[/dim]")
                         continue
-                    break  # auth_mode succeeded — exit sub-loop
+                    break  # Provider setup succeeded — exit sub-loop
 
-                # Step 2c: Provider API Key (skip for Ollama and pure OAuth)
-                _skip_api_key = (
-                    provider == "ollama"
-                    or (
-                        provider == "anthropic"
-                        and config.anthropic_auth_mode == "oauth"
-                    )
-                    or (provider == "openai" and config.openai_auth_mode == "oauth")
-                )
-                if not _skip_api_key:
-                    key_attr = _PROVIDER_KEY_ATTR.get(provider, "openai_api_key")
-                    preset_api_key = _preset("api_key")
-                    if preset_api_key is not None:
-                        # Validate the preset key against the same validator
-                        # the interactive path uses, unless --skip-validation
-                        # was passed. Interactive flow shows a "Save anyway?"
-                        # confirm on failure; the non-interactive path has no
-                        # way to ask, so a failed validation is fatal.
-                        if not skip_validation:
-                            from .helpers import _provider_key_info
-
-                            _info = _provider_key_info(config, provider)
-                            validate_fn = _info[2] if _info else None
-                            if validate_fn is not None:
-                                console.print(
-                                    "  [dim]Validating preset API key...[/dim]",
-                                    end="",
-                                )
-                                valid, msg = validate_fn(preset_api_key)
-                                if valid:
-                                    console.print(f"\r  [green]✓ {msg}[/green]      ")
-                                else:
-                                    console.print(f"\r  [red]✗ {msg}[/red]      ")
-                                    raise RuntimeError(
-                                        f"--api-key rejected by {provider} "
-                                        f"validator: {msg}. Pass "
-                                        "--skip-validation to override."
-                                    )
-                        setattr(config, key_attr, preset_api_key)
-                        console.print(
-                            f"  [green]✓ API key: ***{preset_api_key[-4:]}[/green]"
-                            "   [dim](--api-key)[/dim]"
-                        )
-                    else:
-                        _require("api_key", f"{provider} API key")
-                        new_key = _step_provider_api_key(
-                            config, provider, skip_validation
-                        )
-                        if new_key is not None:
-                            setattr(config, key_attr, new_key)
-                        elif not getattr(config, key_attr):
-                            _print_step_skipped("API Key", "not set")
                 _autosave(config)
             else:
                 # Provider section skipped — keep prior provider value to drive
@@ -680,44 +718,43 @@ def run_onboard(
                         "kept current" if config.auxiliary_model else "not set",
                     )
                 elif _step_auxiliary_enable(config):
-                    # Assemble: pick provider -> base URL (custom) -> key -> model,
-                    # mirroring the main flow's order. Keys/base URLs are stored
-                    # per provider, so when the auxiliary provider matches the main
-                    # one they're already set and the user just keeps them (Enter).
-                    # Ollama needs no key. Re-runs default to the saved auxiliary
-                    # provider/model rather than the main ones.
-                    aux_provider = _step_provider(
-                        config,
-                        label="co-pilot",
-                        default_value=config.auxiliary_provider,
-                    )
-                    config.auxiliary_provider = aux_provider
-                    if aux_provider == "custom-openai":
-                        config.custom_openai_base_url = _step_base_url(
+                    from .prompter import GoBack
+
+                    aux_ollama_detected_models: list[str] = []
+                    while True:
+                        loop_snapshot = copy.deepcopy(config)
+                        aux_provider = _step_provider(
                             config,
-                            current_value=config.custom_openai_base_url
-                            or os.environ.get("CUSTOM_OPENAI_BASE_URL", ""),
+                            label="co-pilot",
+                            default_value=config.auxiliary_provider,
                         )
-                    elif aux_provider == "custom-anthropic":
-                        config.custom_anthropic_base_url = _step_base_url(
-                            config,
-                            current_value=config.custom_anthropic_base_url
-                            or os.environ.get("CUSTOM_ANTHROPIC_BASE_URL", ""),
-                        )
-                    elif aux_provider == "minimax":
-                        config.minimax_base_url = _step_minimax_region(config)
-                    if aux_provider != "ollama":
-                        aux_key_attr = _PROVIDER_KEY_ATTR.get(
-                            aux_provider, "openai_api_key"
-                        )
-                        new_aux_key = _step_provider_api_key(
-                            config, aux_provider, skip_validation
-                        )
-                        if new_aux_key is not None:
-                            setattr(config, aux_key_attr, new_aux_key)
+                        config.auxiliary_provider = aux_provider
+                        try:
+                            aux_ollama_detected_models = _configure_provider_connection(
+                                config,
+                                aux_provider,
+                                strict=False,
+                                skip_validation=skip_validation,
+                                reset_stale_oauth_modes=False,
+                            )
+                        except GoBack:
+                            for field_name in vars(loop_snapshot):
+                                setattr(
+                                    config,
+                                    field_name,
+                                    getattr(loop_snapshot, field_name),
+                                )
+                            aux_ollama_detected_models = []
+                            console.print(
+                                "  [dim]↩ Returning to co-pilot provider "
+                                "selection.[/dim]"
+                            )
+                            continue
+                        break
                     config.auxiliary_model = _step_model(
                         config,
                         aux_provider,
+                        ollama_detected_models=aux_ollama_detected_models,
                         label="co-pilot",
                         default_value=config.auxiliary_model,
                     )
