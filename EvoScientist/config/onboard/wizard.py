@@ -284,6 +284,22 @@ def _configure_provider_api_key(
         _print_step_skipped("API Key", "not set")
 
 
+def _provider_connection_configured(config: EvoScientistConfig, provider: str) -> bool:
+    """Return True when provider-level setup can be safely reused."""
+    if provider == "ollama":
+        return bool(config.ollama_base_url)
+    if provider == "custom-openai" and not config.custom_openai_base_url:
+        return False
+    if provider == "custom-anthropic" and not config.custom_anthropic_base_url:
+        return False
+    if provider == "minimax" and not config.minimax_base_url:
+        return False
+    if _provider_uses_oauth(config, provider):
+        return True
+    key_attr = _PROVIDER_KEY_ATTR.get(provider, "openai_api_key")
+    return bool(getattr(config, key_attr))
+
+
 def _configure_provider_connection(
     config: EvoScientistConfig,
     provider: str,
@@ -729,27 +745,40 @@ def run_onboard(
                             default_value=config.auxiliary_provider,
                         )
                         config.auxiliary_provider = aux_provider
-                        try:
-                            aux_ollama_detected_models = _configure_provider_connection(
-                                config,
-                                aux_provider,
-                                strict=False,
-                                skip_validation=skip_validation,
-                                reset_stale_oauth_modes=False,
+                        if (
+                            aux_provider == config.provider
+                            and _provider_connection_configured(config, aux_provider)
+                        ):
+                            if aux_provider == "ollama":
+                                aux_ollama_detected_models = ollama_detected_models
+                            _print_step_skipped(
+                                "Co-pilot credentials",
+                                "reusing main provider settings",
                             )
-                        except GoBack:
-                            for field_name in vars(loop_snapshot):
-                                setattr(
-                                    config,
-                                    field_name,
-                                    getattr(loop_snapshot, field_name),
+                        else:
+                            try:
+                                aux_ollama_detected_models = (
+                                    _configure_provider_connection(
+                                        config,
+                                        aux_provider,
+                                        strict=False,
+                                        skip_validation=skip_validation,
+                                        reset_stale_oauth_modes=False,
+                                    )
                                 )
-                            aux_ollama_detected_models = []
-                            console.print(
-                                "  [dim]↩ Returning to co-pilot provider "
-                                "selection.[/dim]"
-                            )
-                            continue
+                            except GoBack:
+                                for field_name in vars(loop_snapshot):
+                                    setattr(
+                                        config,
+                                        field_name,
+                                        getattr(loop_snapshot, field_name),
+                                    )
+                                aux_ollama_detected_models = []
+                                console.print(
+                                    "  [dim]↩ Returning to co-pilot provider "
+                                    "selection.[/dim]"
+                                )
+                                continue
                         break
                     config.auxiliary_model = _step_model(
                         config,

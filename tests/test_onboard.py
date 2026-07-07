@@ -1400,6 +1400,88 @@ class TestRunOnboard:
         assert final_config.provider == "anthropic"
         assert final_config.model == "claude-sonnet-4-6"
 
+    def test_auxiliary_same_provider_reuses_main_credentials(self):
+        """Same-provider co-pilot should not imply separate credentials exist."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="openai",
+                model="gpt-5.5",
+                openai_api_key="sk-main-openai",
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Same provider as the main model
+                "gpt-5.5",  # Auxiliary model
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_api_key == "sk-main-openai"
+        mock_q.password.assert_not_called()
+        assert mock_q.select.return_value.ask.call_count == 3
+
+    def test_auxiliary_same_provider_prompts_when_shared_key_missing(self):
+        """Same-provider reuse should not hide a missing shared API key."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+            patch(
+                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
+            ),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="openai",
+                model="gpt-5.5",
+                openai_auth_mode="api_key",
+                openai_api_key="",
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Same provider as the main model
+                "api_key",  # Shared OpenAI auth mode
+                "gpt-5.5",  # Auxiliary model
+            ]
+            mock_q.password.return_value.ask.side_effect = [
+                "sk-shared-openai",
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_auth_mode == "api_key"
+        assert final_config.openai_api_key == "sk-shared-openai"
+        mock_q.password.assert_called_once()
+        assert mock_q.select.return_value.ask.call_count == 4
+
     def test_auxiliary_openai_oauth_skips_api_key(self):
         """Auxiliary OpenAI now uses the shared auth flow and skips keys on OAuth."""
         from EvoScientist.config.onboard.wizard import run_onboard
