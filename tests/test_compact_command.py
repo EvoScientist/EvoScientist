@@ -4,13 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import GraphTarget
-from tests.conftest import run_async as _run
 from tests.fakes import FakeCommandUI, FakeGraphGateway
 
 _TARGET = GraphTarget()
 
 
-def _compact(
+async def _compact(
     graph_gateway: FakeGraphGateway,
     *,
     thread_id: str = "tid-1",
@@ -18,30 +17,28 @@ def _compact(
 ):
     from EvoScientist.cli.commands import compact_conversation
 
-    return _run(
-        compact_conversation(
-            graph_gateway=graph_gateway,
-            thread_id=thread_id,
-            target=_TARGET,
-            input_tokens_hint=input_tokens_hint,
-        )
+    return await compact_conversation(
+        graph_gateway=graph_gateway,
+        thread_id=thread_id,
+        target=_TARGET,
+        input_tokens_hint=input_tokens_hint,
     )
 
 
 class TestCompactGuards:
     """Guard conditions that return early without touching the middleware."""
 
-    def test_empty_messages(self):
+    async def test_empty_messages(self):
         graph_gateway = FakeGraphGateway(state_values={"messages": []})
 
-        result = _compact(graph_gateway)
+        result = await _compact(graph_gateway)
         assert result.status == "noop"
         assert "no messages" in result.message
 
-    def test_state_read_failure(self):
+    async def test_state_read_failure(self):
         graph_gateway = FakeGraphGateway(state_error=RuntimeError("DB gone"))
 
-        result = _compact(graph_gateway)
+        result = await _compact(graph_gateway)
         assert result.status == "error"
         assert "Failed to read state" in result.message
 
@@ -49,7 +46,7 @@ class TestCompactGuards:
 class TestCompactCutoffZero:
     """When cutoff == 0, conversation is within retention budget."""
 
-    def test_nothing_to_compact_short_conversation(self):
+    async def test_nothing_to_compact_short_conversation(self):
         msgs = [MagicMock() for _ in range(3)]
         graph_gateway = FakeGraphGateway(state_values={"messages": msgs})
 
@@ -79,7 +76,7 @@ class TestCompactCutoffZero:
                 return_value=500,
             ),
         ):
-            result = _compact(graph_gateway)
+            result = await _compact(graph_gateway)
 
         assert result.status == "noop"
         assert "within the retention budget" in result.message
@@ -89,7 +86,7 @@ class TestCompactCutoffZero:
 class TestCompactNegligibleSavings:
     """When cutoff > 0 but savings are too small to be worth it."""
 
-    def test_skip_when_few_messages_and_low_tokens(self):
+    async def test_skip_when_few_messages_and_low_tokens(self):
         msgs = [MagicMock() for _ in range(15)]
         graph_gateway = FakeGraphGateway(
             state_values={"messages": msgs, "_summarization_event": None}
@@ -126,14 +123,14 @@ class TestCompactNegligibleSavings:
                 side_effect=lambda x: next(token_values),
             ),
         ):
-            result = _compact(graph_gateway)
+            result = await _compact(graph_gateway)
 
         assert result.status == "noop"
         assert "not worth" in result.message
         # No LLM call should have been made
         mock_middleware_inst._acreate_summary.assert_not_called()
 
-    def test_still_compacts_when_few_messages_but_high_tokens(self):
+    async def test_still_compacts_when_few_messages_but_high_tokens(self):
         """2 messages but they account for >2% of tokens — should compact."""
         from langchain_core.messages import HumanMessage
 
@@ -178,7 +175,7 @@ class TestCompactNegligibleSavings:
                 side_effect=lambda x: next(token_values),
             ),
         ):
-            result = _compact(graph_gateway)
+            result = await _compact(graph_gateway)
 
         assert result.status == "ok"
         assert len(graph_gateway.updated_states) == 1
@@ -187,7 +184,7 @@ class TestCompactNegligibleSavings:
 class TestCompactSuccess:
     """Normal compaction flow."""
 
-    def test_manual_threshold_blocks_low_context_compaction(self):
+    async def test_manual_threshold_blocks_low_context_compaction(self):
         msgs = [MagicMock() for _ in range(20)]
         graph_gateway = FakeGraphGateway(
             state_values={"messages": msgs, "_summarization_event": None}
@@ -217,7 +214,7 @@ class TestCompactSuccess:
                 return_value=30_000,
             ),
         ):
-            result = _compact(graph_gateway)
+            result = await _compact(graph_gateway)
 
         assert result.status == "noop"
         assert "40%" in result.message
@@ -225,7 +222,7 @@ class TestCompactSuccess:
         mock_middleware_inst._determine_cutoff_index.assert_not_called()
         mock_middleware_inst._acreate_summary.assert_not_called()
 
-    def test_successful_compaction(self):
+    async def test_successful_compaction(self):
         from langchain_core.messages import HumanMessage
 
         msgs = [MagicMock() for _ in range(20)]
@@ -273,7 +270,7 @@ class TestCompactSuccess:
                 side_effect=lambda x: next(token_values),
             ),
         ):
-            result = _compact(graph_gateway)
+            result = await _compact(graph_gateway)
 
         assert result.status == "ok"
         assert result.messages_compacted == 15
@@ -291,7 +288,7 @@ class TestCompactSuccess:
         assert "_summarization_event" in event_data
         assert event_data["_summarization_event"]["cutoff_index"] == 15
 
-    def test_offload_failure_non_fatal(self):
+    async def test_offload_failure_non_fatal(self):
         """Offload failure should not prevent compaction."""
         from langchain_core.messages import HumanMessage
 
@@ -335,7 +332,7 @@ class TestCompactSuccess:
                 return_value=1000,
             ),
         ):
-            result = _compact(graph_gateway)
+            result = await _compact(graph_gateway)
 
         assert result.status == "ok"
         assert len(graph_gateway.updated_states) == 1
@@ -377,7 +374,7 @@ class TestRenderCompactResult:
 class TestCompactCommandUI:
     """TUI-specific compact progress indicator behavior."""
 
-    def test_command_uses_tui_indicator_when_available(self):
+    async def test_command_uses_tui_indicator_when_available(self):
         from EvoScientist.cli.commands import CompactResult
         from EvoScientist.commands.base import CommandContext
         from EvoScientist.commands.implementation.session import CompactCommand
@@ -413,7 +410,7 @@ class TestCompactCommandUI:
                 return_value="summary-panel",
             ),
         ):
-            _run(CompactCommand().execute(ctx, []))
+            await CompactCommand().execute(ctx, [])
 
         assert ui.started == 1
         assert ui.stopped == 1

@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from tests.conftest import run_async as _run
-
 
 def _ctx():
     from EvoScientist.commands.base import CommandContext
@@ -14,15 +12,15 @@ def _ctx():
 
 
 class TestInstallSkill:
-    def test_usage_message_when_no_args(self):
+    async def test_usage_message_when_no_args(self):
         from EvoScientist.commands.implementation.skills import InstallSkill
 
         ctx, ui = _ctx()
-        _run(InstallSkill().execute(ctx, []))
+        await InstallSkill().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Usage:" in m for m in msgs)
 
-    def test_happy_path(self):
+    async def test_happy_path(self):
         from EvoScientist.commands.implementation.skills import InstallSkill
 
         ctx, ui = _ctx()
@@ -35,21 +33,21 @@ class TestInstallSkill:
                 "path": "/tmp/demo",
             },
         ):
-            _run(InstallSkill().execute(ctx, ["./some-path"]))
+            await InstallSkill().execute(ctx, ["./some-path"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Installed: demo-skill" in m for m in msgs)
 
 
 class TestUninstallSkill:
-    def test_usage_message_when_no_args(self):
+    async def test_usage_message_when_no_args(self):
         from EvoScientist.commands.implementation.skills import UninstallSkill
 
         ctx, ui = _ctx()
-        _run(UninstallSkill().execute(ctx, []))
+        await UninstallSkill().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Usage:" in m for m in msgs)
 
-    def test_uninstall_success(self):
+    async def test_uninstall_success(self):
         from EvoScientist.commands.implementation.skills import UninstallSkill
 
         ctx, ui = _ctx()
@@ -57,11 +55,11 @@ class TestUninstallSkill:
             "EvoScientist.tools.skills_manager.uninstall_skill",
             return_value={"success": True},
         ):
-            _run(UninstallSkill().execute(ctx, ["demo-skill"]))
+            await UninstallSkill().execute(ctx, ["demo-skill"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Uninstalled: demo-skill" in m for m in msgs)
 
-    def test_uninstall_failure(self):
+    async def test_uninstall_failure(self):
         from EvoScientist.commands.implementation.skills import UninstallSkill
 
         ctx, ui = _ctx()
@@ -69,6 +67,6 @@ class TestUninstallSkill:
             "EvoScientist.tools.skills_manager.uninstall_skill",
             return_value={"success": False, "error": "not found"},
         ):
-            _run(UninstallSkill().execute(ctx, ["missing"]))
+            await UninstallSkill().execute(ctx, ["missing"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Failed: not found" in m for m in msgs)
