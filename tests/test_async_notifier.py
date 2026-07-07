@@ -154,9 +154,8 @@ async def test_spawn_watcher_replaces_existing_for_same_thread():
     # Cancelled watchers don't push notifications
     assert _drain_one_queue_helper(async_notifier._notification_queue) == []
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
-    if hasattr(async_notifier, "_notifications_by_thread"):
-        for q in async_notifier._notifications_by_thread.values():
-            assert _drain_one_queue_helper(q) == []
+    for q in async_notifier._notifications_by_thread.values():
+        assert _drain_one_queue_helper(q) == []
 
 
 # ============================================================================
@@ -567,33 +566,28 @@ async def test_notification_consuming_flag_prevents_reentry():
 
 def _drain_all(an_mod):
     """Drain every queue (per-thread + unrouted) so tests start clean."""
-    if hasattr(an_mod, "_notification_queue"):
+    while True:
+        try:
+            an_mod._notification_queue.get_nowait()
+        except queue.Empty:
+            break
+    for q in list(an_mod._notifications_by_thread.values()):
         while True:
             try:
-                an_mod._notification_queue.get_nowait()
+                q.get_nowait()
             except queue.Empty:
                 break
-    if hasattr(an_mod, "_notifications_by_thread"):
-        for q in list(an_mod._notifications_by_thread.values()):
-            while True:
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    break
-    if hasattr(an_mod, "_unrouted_queue"):
-        while True:
-            try:
-                an_mod._unrouted_queue.get_nowait()
-            except queue.Empty:
-                break
+    while True:
+        try:
+            an_mod._unrouted_queue.get_nowait()
+        except queue.Empty:
+            break
 
 
 def _reset_notifier_state(an_mod):
     _drain_all(an_mod)
-    if hasattr(an_mod, "_active_watchers"):
-        an_mod._active_watchers.clear()
-    if hasattr(an_mod, "_watcher_by_thread"):
-        an_mod._watcher_by_thread.clear()
+    an_mod._active_watchers.clear()
+    an_mod._watcher_by_thread.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -874,9 +868,8 @@ async def test_watcher_runs_get_persistent_failure_drops_notification(monkeypatc
     # test silently false-pass.
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
     assert _drain_one_queue_helper(async_notifier._notification_queue) == []
-    if hasattr(async_notifier, "_notifications_by_thread"):
-        for q in async_notifier._notifications_by_thread.values():
-            assert _drain_one_queue_helper(q) == []
+    for q in async_notifier._notifications_by_thread.values():
+        assert _drain_one_queue_helper(q) == []
     # 1 initial + _MAX_RECONNECT_ATTEMPTS retries = 11 calls total.
     assert client.runs.get.await_count == async_notifier._MAX_RECONNECT_ATTEMPTS + 1
 
@@ -979,9 +972,8 @@ async def test_watcher_skips_notification_on_stream_fail_with_nonterminal_status
     # No notification should have been enqueued in any queue.
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
     assert _drain_one_queue_helper(async_notifier._notification_queue) == []
-    if hasattr(async_notifier, "_notifications_by_thread"):
-        for q in async_notifier._notifications_by_thread.values():
-            assert _drain_one_queue_helper(q) == []
+    for q in async_notifier._notifications_by_thread.values():
+        assert _drain_one_queue_helper(q) == []
 
 
 def _drain_one_queue_helper(q):
