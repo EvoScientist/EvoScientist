@@ -16,12 +16,16 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ModelRequest,
     ModelResponse,
 )
+
+if TYPE_CHECKING:
+    from .events import MiddlewareEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +350,12 @@ class ModelFallbackMiddleware(AgentMiddleware):
     """
 
     name = "model_fallback"
+
+    def __init__(self, events: MiddlewareEventSink | None = None) -> None:
+        super().__init__()
+        from .events import NoOpSink
+
+        self._events = events or NoOpSink()
 
     def wrap_model_call(
         self,

@@ -29,6 +29,8 @@ from langchain.agents.middleware.types import (
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
+from .events import MiddlewareEventSink, NoOpSink
+
 logger = logging.getLogger(__name__)
 
 # Module-level storage for main-agent tool-selection UI state.
@@ -87,12 +89,14 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         *,
         always_include: frozenset[str] | None = None,
         track_stream_selection: bool = True,
+        events: MiddlewareEventSink | None = None,
     ):
         super().__init__()
         self._selector_factory = selector_factory
         self._threshold = threshold
         self._always_include = always_include or frozenset()
         self._track_stream_selection = track_stream_selection
+        self._events = events or NoOpSink()
         # Agent tools are fixed after graph construction, so the filtered
         # always-include set is stable for this middleware instance.
         self._selector: AgentMiddleware | None = None
@@ -193,6 +197,10 @@ class _ToolSelectionTrackerMiddleware(AgentMiddleware):
 
     name = "tool_selection_tracker"
 
+    def __init__(self, events: MiddlewareEventSink | None = None) -> None:
+        super().__init__()
+        self._events = events or NoOpSink()
+
     def wrap_model_call(
         self,
         request: ModelRequest,
@@ -223,6 +231,7 @@ def create_tool_selector_middleware(
     *,
     model: BaseChatModel | None = None,
     track_stream_selection: bool = True,
+    events: MiddlewareEventSink | None = None,
 ):
     """Build LLMToolSelectorMiddleware + tracker with EvoScientist defaults.
 
@@ -275,16 +284,18 @@ def create_tool_selector_middleware(
             always_include=always_include,
         )
 
+    sink = events or NoOpSink()
     middleware: list[AgentMiddleware] = [
         _ConditionalToolSelectorMiddleware(
             selector_factory=selector_factory,
             threshold=threshold,
             always_include=DEFAULT_ALWAYS_INCLUDE_TOOLS,
             track_stream_selection=track_stream_selection,
+            events=sink,
         ),
     ]
     if track_stream_selection:
-        middleware.append(_ToolSelectionTrackerMiddleware())
+        middleware.append(_ToolSelectionTrackerMiddleware(events=sink))
     return middleware
 
 

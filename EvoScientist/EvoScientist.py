@@ -41,6 +41,8 @@ logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from .middleware.events import MiddlewareEventSink
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -644,6 +646,7 @@ def _get_default_middleware(
     cfg=None,
     chat_model=None,
     memory_source_agent: str = "EvoScientist",
+    events: "MiddlewareEventSink | None" = None,
 ):
     """Build the default middleware list.
 
@@ -663,6 +666,10 @@ def _get_default_middleware(
             (avoids writing module globals on the pure path).
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
+        events: Frontend-supplied event sink. Middleware report structured
+            display events (tool selection, model fallback) to it. Defaults to
+            :class:`NoOpSink`; async sub-agent stacks are always forced to
+            ``NoOpSink`` (they must not drive the main-agent widgets).
     """
     from .middleware import (
         ConfigurableModelMiddleware,
@@ -679,6 +686,12 @@ def _get_default_middleware(
         default_memory_scheduler,
         load_fallback_chain,
     )
+    from .middleware.events import NoOpSink
+
+    # Subagent stacks never drive the main-agent frontend widgets; force the
+    # no-op sink there regardless of what the caller passed. Main/interactive
+    # stacks default to NoOpSink when no frontend sink is supplied.
+    events = NoOpSink() if (events is None or for_async_subagent) else events
 
     cfg = cfg if cfg is not None else _ensure_config()
     if cfg.model_fallbacks:
@@ -731,12 +744,13 @@ def _get_default_middleware(
     mw = [
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
-        ModelFallbackMiddleware(),
+        ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(
             model=tool_selector_model,
             track_stream_selection=not for_async_subagent,
+            events=events,
         ),
         # Interpreter prompt must land before runtime/memory context, so this
         # middleware sits ahead of runtime_context in the stack.
@@ -868,6 +882,7 @@ def create_cli_agent(
     chat_model=None,
     *,
     on_mcp_progress=None,
+    events: "MiddlewareEventSink | None" = None,
 ) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
@@ -969,7 +984,7 @@ def create_cli_agent(
     # CLI agent never drifts from the default chain. Anything CLI-specific
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
     mw: list[AgentMiddleware] = _get_default_middleware(
-        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model, events=events
     )
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
