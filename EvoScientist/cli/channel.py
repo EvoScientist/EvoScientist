@@ -24,22 +24,16 @@ from typing import TYPE_CHECKING, Any
 from rich.panel import Panel
 from rich.text import Text
 
+from ..channels.capabilities import ChannelCapabilities
 from ..channels.interaction import (
-    APPROVAL_TIMEOUT_FEEDBACK,
-    APPROVED_AUTO_FEEDBACK,
-    APPROVED_FEEDBACK,
     ASK_USER_TIMEOUT,
-    ASK_USER_TIMEOUT_FEEDBACK,
     HITL_APPROVAL_TIMEOUT,
-    OTHER_PROMPT,
-    approval_prompt_metadata,
-    decision_feedback,
-    format_approval_prompt,
-    format_question_prompt,
-    is_cancel_reply,
+    ApprovalPolicy,
+    InteractionIO,
+    PendingReplyRegistry,
     is_stop_command,
-    parse_approval_reply,
-    parse_choice_answer,
+    resolve_approval,
+    resolve_ask_user,
 )
 from ..commands.base import ChannelRuntime
 from ..stream.console import console
@@ -465,20 +459,83 @@ async def _dispatch_channel_slash_impl(
 
 
 # ---------------------------------------------------------------------------
-# HITL approval intercept: bus thread ⇄ main CLI thread
+# HITL / ask_user interaction bridge: bus loop ⇄ main CLI thread
 # ---------------------------------------------------------------------------
-# When the main thread needs HITL approval from a channel user, it registers
-# a pending HITL wait for (channel, chat_id).  The bus consumer checks this
-# BEFORE normal enqueue, so the next reply from that user is intercepted.
-
-_pending_hitl: dict[str, dict] = {}  # "channel:chat_id" -> {event, reply}
-_hitl_lock = threading.Lock()
-_hitl_auto_approve: set[str] = set()  # "channel:chat_id" keys with auto-approve
+# The interaction protocol itself (prompt formatting, reply grammar,
+# feedback, auto-approve policy) lives in ``channels.interaction``.  Here we
+# only bridge it: the whole engine coroutine runs on the bus loop via
+# ``run_coroutine_threadsafe`` while the calling (main / TUI) thread blocks
+# on the resulting future.  Replies are routed by a single asyncio-based
+# ``PendingReplyRegistry`` fed from the inbound interception point — the bus
+# consumer checks it BEFORE normal enqueue, so the next reply from that chat
+# is intercepted (R1).
 
 # Per-flow timeout defaults are shared with the consumer via
 # ``channels.interaction`` (single source of truth for the grammar).
 _HITL_APPROVAL_TIMEOUT = HITL_APPROVAL_TIMEOUT
 _ASK_USER_TIMEOUT = ASK_USER_TIMEOUT
+
+# Extra head-room on the outer ``.result()`` wait so the engine's own
+# per-flow timeout always fires first and returns a clean cancelled/None
+# instead of the bridge tearing the coroutine down mid-flight (R2).
+_ENGINE_RESULT_SLACK = 30.0
+# Send timeout inside the bridge IO adapter (kept per-flow-independent, as
+# the standalone consumer has no send timeout).
+_BRIDGE_SEND_TIMEOUT = 15.0
+
+# One reply registry + one approval policy for the whole bridge process,
+# both living on the bus loop (replacing the old ``_pending_hitl`` /
+# ``_hitl_lock`` / ``_hitl_auto_approve`` module globals).
+_reply_registry = PendingReplyRegistry()
+_approval_policy = ApprovalPolicy()
+
+
+class _BridgeIO(InteractionIO):
+    """:class:`InteractionIO` for the CLI bridge, running on the bus loop.
+
+    ``send`` publishes outbound (bounded by :data:`_BRIDGE_SEND_TIMEOUT`);
+    ``wait_reply`` blocks on the shared :data:`_reply_registry`.  Both run on
+    the bus loop because the engine coroutine is scheduled there via
+    ``run_coroutine_threadsafe`` — no per-message thread hop.
+    """
+
+    def __init__(
+        self,
+        bus: Any,
+        msg: ChannelMessage,
+        capabilities: ChannelCapabilities,
+        session_key: str,
+    ) -> None:
+        self._bus = bus
+        self._msg = msg
+        self.capabilities = capabilities
+        self.base_metadata = msg.metadata
+        self._session_key = session_key
+
+    async def send(self, content: str, *, metadata: dict | None = None) -> bool:
+        from ..channels.bus.events import OutboundMessage
+
+        try:
+            await asyncio.wait_for(
+                self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=self._msg.channel_type,
+                        chat_id=self._msg.chat_id,
+                        content=content,
+                        metadata=metadata
+                        if metadata is not None
+                        else self._msg.metadata or {},
+                    )
+                ),
+                timeout=_BRIDGE_SEND_TIMEOUT,
+            )
+            return True
+        except Exception as exc:
+            _channel_logger.debug("bridge send failed: %s", exc)
+            return False
+
+    async def wait_reply(self, *, timeout: float) -> str | None:
+        return await _reply_registry.wait(self._session_key, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -618,215 +675,99 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
 _is_stop_command = is_stop_command
 
 
-def _register_hitl_wait(channel_type: str, chat_id: str) -> threading.Event:
-    """Register a pending HITL wait.  Returns a threading.Event to block on."""
-    key = f"{channel_type}:{chat_id}"
-    event = threading.Event()
-    with _hitl_lock:
-        _pending_hitl[key] = {"event": event, "reply": None}
-    return event
+def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
+    """Run *coro* (an engine coroutine) on the bus loop and block for it.
 
-
-def _pop_hitl_reply(channel_type: str, chat_id: str) -> str | None:
-    """Pop and return the HITL reply (or None if not set)."""
-    key = f"{channel_type}:{chat_id}"
-    with _hitl_lock:
-        slot = _pending_hitl.pop(key, None)
-    return slot["reply"] if slot else None
-
-
-def _try_set_hitl_reply(channel_type: str, chat_id: str, content: str) -> bool:
-    """Try to intercept a message as a HITL reply.  Returns True if consumed."""
-    key = f"{channel_type}:{chat_id}"
-    with _hitl_lock:
-        slot = _pending_hitl.get(key)
-        if slot:
-            slot["reply"] = content
-            slot["event"].set()
-            return True
-    return False
+    Schedules the coroutine on ``_bus_loop`` via ``run_coroutine_threadsafe``
+    and waits up to *result_timeout* seconds for it (the outer bound is the
+    engine's own per-flow timeout plus slack, so the engine's timeout fires
+    first — R2).  Returns *on_error* (a zero-arg factory) on any failure.
+    """
+    bus_loop = _bus_loop
+    if bus_loop is None:
+        return on_error()
+    try:
+        return asyncio.run_coroutine_threadsafe(coro, bus_loop).result(
+            timeout=result_timeout
+        )
+    except Exception as exc:
+        _channel_logger.debug("interaction engine bridge failed: %s", exc)
+        return on_error()
 
 
 def channel_ask_user_prompt(
     ask_user_data: dict,
     msg: ChannelMessage | None = None,
 ) -> dict:
-    """Format ask_user questions and collect answers from a channel user.
+    """Collect answers to ask_user questions from a channel user.
 
-    If *msg* is provided, sends questions via the bus and waits for a reply.
-    Otherwise falls back to returning a cancelled result.
+    Thin bridge: runs :func:`channels.interaction.resolve_ask_user` on the
+    bus loop over a :class:`_BridgeIO` and blocks for the result.  Signature
+    and return shape are unchanged (callers in ``interactive.py`` /
+    ``commands.py`` / ``tui_interactive.py`` are untouched).
 
-    Returns:
-        ``{"answers": [...], "status": "answered"}`` or
-        ``{"status": "cancelled"}``.
+    Returns ``{"answers": [...], "status": "answered"}`` or
+    ``{"status": "cancelled"}``.
     """
-    from ..channels.bus.events import OutboundMessage
-
     questions = ask_user_data.get("questions", [])
     if not questions:
         return {"answers": [], "status": "answered"}
-
-    if msg is None or not msg.bus_ref:
+    if msg is None or not msg.bus_ref or _bus_loop is None:
         return {"status": "cancelled"}
 
-    bus_loop = _bus_loop
-    if not bus_loop:
-        return {"status": "cancelled"}
-
-    def _send(content: str) -> bool:
-        try:
-            asyncio.run_coroutine_threadsafe(
-                msg.bus_ref.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel_type,
-                        chat_id=msg.chat_id,
-                        content=content,
-                        metadata=msg.metadata or {},
-                    )
-                ),
-                bus_loop,
-            ).result(timeout=15)
-            return True
-        except Exception as exc:
-            _channel_logger.debug("ask_user send failed: %s", exc)
-            return False
-
-    # Ask one question at a time (consistent with Rich CLI / TUI)
-    total = len(questions)
-    answers: list[str] = []
-
-    for i, q in enumerate(questions):
-        q_type = q.get("type", "text")
-
-        if not _send(format_question_prompt(q, i, total)):
-            return {"status": "cancelled"}
-
-        # Wait for reply
-        hitl_event = _register_hitl_wait(msg.channel_type, msg.chat_id)
-        replied = hitl_event.wait(timeout=_ASK_USER_TIMEOUT)
-        reply_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
-
-        if not replied or not reply_text:
-            _send(ASK_USER_TIMEOUT_FEEDBACK)
-            return {"status": "cancelled"}
-
-        raw = reply_text.strip()
-        if is_stop_command(raw):
-            return {"status": "cancelled"}
-        if is_cancel_reply(raw):
-            return {"status": "cancelled"}
-
-        # Parse answer
-        if q_type == "multiple_choice":
-            choices = q.get("choices", [])
-            kind, value = parse_choice_answer(raw, choices)
-            if kind == "other":
-                # Other selected -- ask for free-form input
-                if not _send(OTHER_PROMPT):
-                    return {"status": "cancelled"}
-                hitl_event = _register_hitl_wait(msg.channel_type, msg.chat_id)
-                replied = hitl_event.wait(timeout=_ASK_USER_TIMEOUT)
-                other_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
-                if not replied or not other_text:
-                    _send(ASK_USER_TIMEOUT_FEEDBACK)
-                    return {"status": "cancelled"}
-                if is_stop_command(other_text):
-                    return {"status": "cancelled"}
-                if is_cancel_reply(other_text):
-                    return {"status": "cancelled"}
-                answers.append(other_text.strip())
-            else:
-                answers.append(value)
-        else:
-            answers.append(raw)
-
-    return {"answers": answers, "status": "answered"}
+    # ask_user never uses buttons; a plain capability set suffices.
+    io = _BridgeIO(
+        msg.bus_ref, msg, ChannelCapabilities(), _channel_message_session_key(msg)
+    )
+    # Each question may need up to two waits (question + "Other" free-form);
+    # bound the outer wait accordingly so it never fires before the engine's.
+    result_timeout = _ASK_USER_TIMEOUT * (2 * len(questions)) + _ENGINE_RESULT_SLACK
+    return _run_engine_on_bus(
+        resolve_ask_user(questions, io, timeout=_ASK_USER_TIMEOUT),
+        result_timeout=result_timeout,
+        on_error=lambda: {"status": "cancelled"},
+    )
 
 
 def channel_hitl_prompt(
     action_requests: list,
     msg: ChannelMessage,
 ) -> list[dict] | None:
-    """Send HITL approval prompt to channel user and wait for reply.
+    """Resolve a HITL approval prompt with a channel user.
 
-    Blocking function — uses threading.Event.wait().  Safe to call from a
-    background thread (CLI channel processing or asyncio.to_thread in TUI).
+    Thin bridge: runs :func:`channels.interaction.resolve_approval` on the
+    bus loop over a :class:`_BridgeIO` and blocks for the result.  Signature
+    and return shape are unchanged (callers are untouched).  Safe to call
+    from a background thread (CLI channel processing / TUI ``to_thread``).
 
-    Returns approval decisions list on approve/auto, or None on reject/timeout.
+    Returns the approval decisions list on approve/auto, or None on
+    reject / timeout / stop.
     """
-    from ..channels.bus.events import OutboundMessage
-
-    # Check session auto-approve (set by a previous "3" reply)
-    session_key = f"{msg.channel_type}:{msg.chat_id}"
-    if session_key in _hitl_auto_approve:
-        return [{"type": "approve"} for _ in action_requests]
-
-    bus_loop = _bus_loop
-    if not (bus_loop and msg.bus_ref):
+    if not (_bus_loop and msg.bus_ref):
         _channel_logger.debug("HITL: no bus_loop or bus_ref, rejecting")
         return None
 
-    # Look up the channel instance so we can attach buttons when the channel
-    # supports `inline_buttons` (Feishu cards, QQ keyboards, …).
+    session_key = _channel_message_session_key(msg)
+    # Look up the channel instance so the engine can attach buttons when the
+    # channel supports `inline_buttons` (Feishu cards, QQ keyboards, …).
     channel_obj = (
         _manager.get_channel(msg.channel_type) if _manager is not None else None
     )
-    has_buttons = channel_obj is not None and channel_obj.capabilities.inline_buttons
-    approval_metadata = approval_prompt_metadata(msg.metadata, with_buttons=has_buttons)
-
-    def _send(content: str, *, metadata: dict | None = None) -> bool:
-        """Send a message to the channel user.  Returns True on success."""
-        try:
-            asyncio.run_coroutine_threadsafe(
-                msg.bus_ref.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel_type,
-                        chat_id=msg.chat_id,
-                        content=content,
-                        metadata=metadata
-                        if metadata is not None
-                        else msg.metadata or {},
-                    )
-                ),
-                bus_loop,
-            ).result(timeout=15)
-            return True
-        except Exception as exc:
-            _channel_logger.debug("HITL send failed: %s", exc)
-            return False
-
-    # 1. Send approval prompt
-    prompt_text = format_approval_prompt(action_requests, with_buttons=has_buttons)
-    if not _send(prompt_text, metadata=approval_metadata):
-        return None
-
-    # 2. Wait for channel user's reply
-    hitl_event = _register_hitl_wait(msg.channel_type, msg.chat_id)
-    replied = hitl_event.wait(timeout=_HITL_APPROVAL_TIMEOUT)
-    reply_text = _pop_hitl_reply(msg.channel_type, msg.chat_id)
-
-    if not replied or not reply_text:
-        _send(APPROVAL_TIMEOUT_FEEDBACK)
-        return None
-
-    if is_stop_command(reply_text):
-        # `/stop` already got its own immediate ack from the bus fast-path.
-        # Treat it as a pure cancel signal here so we don't send a second,
-        # contradictory "Unrecognized reply" message.
-        return None
-
-    # 3. Parse decision
-    decision = parse_approval_reply(reply_text)
-    if decision == "auto":
-        _hitl_auto_approve.add(session_key)
-        _send(APPROVED_AUTO_FEEDBACK)
-        return [{"type": "approve"} for _ in action_requests]
-    if decision == "approve":
-        _send(APPROVED_FEEDBACK)
-        return [{"type": "approve"} for _ in action_requests]
-
-    _send(decision_feedback(decision))
-    return None
+    capabilities = (
+        channel_obj.capabilities if channel_obj is not None else ChannelCapabilities()
+    )
+    io = _BridgeIO(msg.bus_ref, msg, capabilities, session_key)
+    return _run_engine_on_bus(
+        resolve_approval(
+            action_requests,
+            io,
+            _approval_policy,
+            session_key,
+            timeout=_HITL_APPROVAL_TIMEOUT,
+        ),
+        result_timeout=_HITL_APPROVAL_TIMEOUT + _ENGINE_RESULT_SLACK,
+        on_error=lambda: None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1012,13 +953,16 @@ async def _bus_inbound_consumer(bus, manager) -> None:
             except asyncio.CancelledError:
                 break
 
-            # /stop should preempt HITL interception so cancel works while
-            # waiting for approvals/questions.  If a HITL wait is pending,
-            # still release it so the blocking prompt can unwind immediately.
+            session_key = _channel_session_key(msg.channel, msg.chat_id)
+
+            # /stop should preempt interaction interception so cancel works
+            # while waiting for approvals/questions.  If a prompt wait is
+            # pending, still deliver /stop into it so the blocking engine
+            # unwinds immediately (it treats /stop as a clean cancel).
             if _is_stop_command(msg.content):
-                if _try_set_hitl_reply(msg.channel, msg.chat_id, msg.content):
+                if _reply_registry.try_resolve(session_key, msg.content):
                     _channel_logger.info(
-                        f"[bus] stop request released HITL wait for "
+                        f"[bus] stop request released interaction wait for "
                         f"{msg.channel}:{msg.chat_id}"
                     )
                 _task = asyncio.create_task(_handle_bus_message(bus, manager, msg))
@@ -1026,10 +970,12 @@ async def _bus_inbound_consumer(bus, manager) -> None:
                 _task.add_done_callback(_tasks.discard)
                 continue
 
-            # Check if this message is a HITL approval reply
-            if _try_set_hitl_reply(msg.channel, msg.chat_id, msg.content):
+            # R1: reply interception sits ahead of normal enqueue — if a
+            # prompt is waiting on this chat, the next message is its reply
+            # and must NOT be enqueued as a fresh agent turn.
+            if _reply_registry.try_resolve(session_key, msg.content):
                 _channel_logger.info(
-                    f"[bus] HITL reply from {msg.channel}:{msg.sender_id}: "
+                    f"[bus] interaction reply from {msg.channel}:{msg.sender_id}: "
                     f"{msg.content[:60]}"
                 )
                 continue

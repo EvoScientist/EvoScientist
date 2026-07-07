@@ -1,5 +1,6 @@
 """Tests for HITL (Human-in-the-Loop) approval mechanism."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 from langgraph.types import Interrupt
@@ -557,53 +558,48 @@ class TestConsumerHitlHelpers:
 
 
 # =============================================================================
-# Channel HITL intercept mechanism (channel.py)
+# Channel reply-interception mechanism (channel.py PendingReplyRegistry)
 # =============================================================================
+# The CLI bridge routes prompt replies through the shared asyncio-based
+# ``PendingReplyRegistry`` on the bus loop (replacing the old threading.Event
+# ``_pending_hitl`` globals). ``_bus_inbound_consumer`` feeds it via
+# ``try_resolve`` ahead of normal enqueue (R1).
 
 
-class TestChannelHitlIntercept:
-    def test_register_and_set_hitl_reply(self):
-        from EvoScientist.cli.channel import (
-            _pop_hitl_reply,
-            _register_hitl_wait,
-            _try_set_hitl_reply,
+class TestChannelReplyRegistry:
+    async def test_register_and_resolve_reply(self):
+        from EvoScientist.cli import channel as channel_mod
+
+        reg = channel_mod._reply_registry
+        reg.clear()
+
+        async def _resolver():
+            await asyncio.sleep(0.01)  # let wait() register first
+            assert reg.try_resolve("telegram:chat123", "1") is True
+
+        got, _ = await asyncio.gather(
+            reg.wait("telegram:chat123", timeout=1.0), _resolver()
         )
+        assert got == "1"
+        assert "telegram:chat123" not in reg
 
-        event = _register_hitl_wait("telegram", "chat123")
-        assert not event.is_set()
+    def test_try_resolve_no_pending(self):
+        from EvoScientist.cli import channel as channel_mod
 
-        # Simulate reply arriving
-        intercepted = _try_set_hitl_reply("telegram", "chat123", "1")
-        assert intercepted is True
-        assert event.is_set()
+        channel_mod._reply_registry.clear()
+        # No pending wait — should not intercept.
+        resolved = channel_mod._reply_registry.try_resolve("discord:no_pending", "y")
+        assert resolved is False
 
-        reply = _pop_hitl_reply("telegram", "chat123")
-        assert reply == "1"
+    async def test_reply_timeout_returns_none(self):
+        from EvoScientist.cli import channel as channel_mod
 
-    def test_try_set_hitl_reply_no_pending(self):
-        from EvoScientist.cli.channel import _try_set_hitl_reply
-
-        # No pending HITL — should not intercept
-        assert _try_set_hitl_reply("discord", "no_pending", "y") is False
-
-    def test_pop_hitl_reply_no_pending(self):
-        from EvoScientist.cli.channel import _pop_hitl_reply
-
-        assert _pop_hitl_reply("discord", "no_pending") is None
-
-    def test_hitl_reply_timeout(self):
-        from EvoScientist.cli.channel import (
-            _pop_hitl_reply,
-            _register_hitl_wait,
-        )
-
-        event = _register_hitl_wait("telegram", "timeout_chat")
-        # Don't set reply — simulate timeout
-        replied = event.wait(timeout=0.01)
-        assert replied is False
-        # Pop should still return None (reply was never set)
-        reply = _pop_hitl_reply("telegram", "timeout_chat")
-        assert reply is None
+        reg = channel_mod._reply_registry
+        reg.clear()
+        # No reply delivered — wait should time out and clean up.
+        got = await reg.wait("telegram:timeout_chat", timeout=0.02)
+        assert got is None
+        assert "telegram:timeout_chat" not in reg
 
 
 # =============================================================================
