@@ -15,9 +15,18 @@ class ChannelCommand(Command):
 
     name = "/channel"
     description = "Configure messaging channels"
+    category = "Channels"
     subcommands: ClassVar[list[SubCommand]] = [
-        SubCommand("status", "Show running channel status"),
-        SubCommand("stop", "Stop a running channel"),
+        SubCommand("status", "Show channel status"),
+        SubCommand("stop", "Stop running channels"),
+        SubCommand("telegram", "Start Telegram channel"),
+        SubCommand("discord", "Start Discord channel"),
+        SubCommand("slack", "Start Slack channel"),
+        SubCommand("feishu", "Start Feishu channel"),
+        SubCommand("dingtalk", "Start DingTalk channel"),
+        SubCommand("wechat", "Start WeChat channel"),
+        SubCommand("email", "Start Email channel"),
+        SubCommand("imessage", "Start iMessage channel"),
     ]
 
     def needs_agent(self, args: list[str]) -> bool:

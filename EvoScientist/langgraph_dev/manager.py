@@ -194,7 +194,9 @@ def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
     try:
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"workspace": str(workspace_dir), "pid": pid}))
+        tmp.write_text(
+            json.dumps({"workspace": str(workspace_dir), "pid": pid}), encoding="utf-8"
+        )
         os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
         logger.warning(
@@ -218,7 +220,7 @@ def _read_workspace_sidecar() -> dict | None:
     if not RUNTIME.workspace_sidecar.exists():
         return None
     try:
-        data = json.loads(RUNTIME.workspace_sidecar.read_text())
+        data = json.loads(RUNTIME.workspace_sidecar.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -450,7 +452,7 @@ def _kill_owned_stale_process(port: int) -> bool:
     if not RUNTIME.pid_file.exists():
         return False
     try:
-        owned_pid = int(RUNTIME.pid_file.read_text().strip())
+        owned_pid = int(RUNTIME.pid_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return False
 
@@ -672,6 +674,8 @@ def start_langgraph_dev(
     # what the parent had inherited from its own environment.
     sub_env = os.environ.copy()
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
+    sub_env["PYTHONIOENCODING"] = "utf-8"
+    sub_env["PYTHONUTF8"] = "1"
 
     # By default, let langgraph dev write its full ``.langgraph_api/`` cache
     # so future use cases — cross-session async tasks, Store API persistence,
@@ -732,7 +736,7 @@ def start_langgraph_dev(
             log_handle.close()
         except Exception:
             pass
-    RUNTIME.pid_file.write_text(str(proc.pid))
+    RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
     _write_workspace_sidecar(workspace_dir=workspace_dir, pid=proc.pid)
     global _PROCESS_WORKSPACE
     _PROCESS = proc
@@ -746,7 +750,9 @@ def start_langgraph_dev(
         if proc.poll() is not None:
             tail = ""
             try:
-                tail = RUNTIME.log_file.read_text()[-2000:]
+                tail = RUNTIME.log_file.read_text(encoding="utf-8", errors="replace")[
+                    -2000:
+                ]
             except Exception:
                 pass
             # Subprocess died on its own — clear our module-level bookkeeping

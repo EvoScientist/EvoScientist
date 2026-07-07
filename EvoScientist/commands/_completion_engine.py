@@ -12,6 +12,9 @@ class CompletionKind(StrEnum):
     EMPTY = "empty"
 
 
+_CATEGORY_ORDER = ["Session", "Skills", "MCP", "Channels", "Model", "General"]
+
+
 @dataclass(frozen=True)
 class CompletionCandidate:
     """A single completion suggestion with its replacement range."""
@@ -20,6 +23,7 @@ class CompletionCandidate:
     description: str
     replace_start: int
     replace_end: int
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -55,27 +59,25 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     # --- Top-level command completion ---
     if len(parts) == 1:
         prefix = before.lower().rstrip()
-        commands = cmd_manager.list_commands()
-        matches = [(c, d) for c, d in commands if c.startswith(prefix)]
 
-        # Whether the typed prefix is itself a complete command name. Checked
-        # via membership rather than ``len(matches) == 1`` so a command whose
-        # name is a strict prefix of another (e.g. ``/model`` vs
-        # ``/model-fallback``) still counts as an exact match — otherwise the
-        # popup never hides on the shorter command and Enter completes instead
-        # of submitting it.
-        exact = any(c == prefix for c, _ in matches)
+        # Match commands by canonical name AND aliases
+        by_cat: dict[str, list[tuple[str, str]]] = {}
+        for cmd in cmd_manager.get_all_commands():
+            all_names = [cmd.name.lower()] + [
+                a.lower() if a.startswith("/") else f"/{a.lower()}" for a in cmd.alias
+            ]
+            if any(n.startswith(prefix) for n in all_names):
+                by_cat.setdefault(cmd.category, []).append((cmd.name, cmd.description))
 
-        # Exact match with no trailing space → hide
-        if exact and not has_trailing_space:
+        # Whether the typed prefix resolves to an exact command/alias
+        exact_cmd = cmd_manager.get_command(prefix)
+
+        if exact_cmd and not has_trailing_space:
             return CompletionResult(CompletionKind.EMPTY, [])
 
-        # Exact match + trailing space + has subcommands → show subcommands
-        if exact and has_trailing_space:
-            if not cmd_manager.get_subcommands(prefix):
-                return CompletionResult(CompletionKind.EMPTY, [])
-            sub_items = cmd_manager.list_subcommands(cmd_name)
-            if sub_items:
+        if exact_cmd and has_trailing_space:
+            completions = exact_cmd.get_completions([""])
+            if completions:
                 insert_pos = len(before)
                 return CompletionResult(
                     CompletionKind.SUBCOMMANDS,
@@ -86,59 +88,80 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
                             replace_start=insert_pos,
                             replace_end=insert_pos,
                         )
-                        for name, desc in sub_items
+                        for name, desc in completions
                     ],
                 )
+            return CompletionResult(CompletionKind.EMPTY, [])
 
-        if matches:
-            return CompletionResult(
-                CompletionKind.COMMANDS,
-                [
+        all_matches = [v for vs in by_cat.values() for v in vs]
+        if not all_matches:
+            return CompletionResult(CompletionKind.EMPTY, [])
+
+        # Build candidates ordered by category
+        candidates: list[CompletionCandidate] = []
+        for cat in _CATEGORY_ORDER:
+            for cmd_text, desc in by_cat.get(cat, []):
+                candidates.append(
                     CompletionCandidate(
-                        text=cmd,
+                        text=cmd_text,
                         description=desc,
                         replace_start=0,
                         replace_end=len(before),
+                        category=cat,
                     )
-                    for cmd, desc in matches
-                ],
-            )
+                )
+        for cat, items in by_cat.items():
+            if cat not in _CATEGORY_ORDER:
+                for cmd_text, desc in items:
+                    candidates.append(
+                        CompletionCandidate(
+                            text=cmd_text,
+                            description=desc,
+                            replace_start=0,
+                            replace_end=len(before),
+                            category=cat,
+                        )
+                    )
 
-        return CompletionResult(CompletionKind.EMPTY, [])
+        return CompletionResult(CompletionKind.COMMANDS, candidates)
 
-    # --- Subcommand completion (len(parts) >= 2) ---
-    if len(parts) >= 3:
-        return CompletionResult(CompletionKind.EMPTY, [])
-
+    # --- Subcommand / argument completion (len(parts) >= 2) ---
     cmd = cmd_manager.get_command(cmd_name)
-    if cmd is None or not cmd.subcommands:
+    if cmd is None:
         return CompletionResult(CompletionKind.EMPTY, [])
 
-    sub_prefix = parts[1].lower()
-    sub_matches = [
-        (name, desc)
-        for name, desc in cmd_manager.list_subcommands(cmd_name)
-        if name.startswith(sub_prefix)
-    ]
-
-    if not sub_matches:
+    # Delegate to Command.get_completions for all depths
+    tokens = parts[1:]
+    if has_trailing_space:
+        tokens.append("")
+    completions = cmd.get_completions(tokens)
+    if not completions:
         return CompletionResult(CompletionKind.EMPTY, [])
 
-    # Exact match (sub_prefix == name) → the subcommand is already
-    # complete.  Hide regardless of trailing space — the user is done
-    # with the subcommand and ready to type arguments.  Without this
-    # guard, Tab on ``/mcp list`` re-inserts ``list`` and ``/mcp list ``
-    # oscillates between adding and removing the trailing space.
-    if len(sub_matches) == 1 and sub_matches[0][0] == sub_prefix:
-        return CompletionResult(CompletionKind.EMPTY, [])
-
-    sub_start = before.rfind(sub_prefix) if sub_prefix else len(before)
-    if sub_start < 0:
-        sub_start = len(parts[0]) + 1
-    # When the user has typed a trailing space, exclude it from the
-    # replace range — the apply step preserves it via
-    # ``current[replace_end:]`` so we don't double up the space.
-    replace_end = len(before) - 1 if has_trailing_space else len(before)
+    # Compute replacement range.
+    if tokens[-1]:
+        # User is typing a partial — replace it
+        sub_start = before.rfind(tokens[-1])
+        if sub_start < 0:
+            sub_start = len(before)
+        replace_end = len(before)
+    elif len(tokens) >= 2 and tokens[-2]:
+        # Trailing space after a token. Check if the previous token is
+        # a known subcommand name — if so, the completion is for the
+        # NEXT argument (insert at cursor). If not, the completions
+        # refine the partial (replace it).
+        prev = tokens[-2]
+        is_known_sub = any(sc.name == prev for sc in cmd.subcommands)
+        if not is_known_sub:
+            sub_start = before.rfind(prev)
+            if sub_start < 0:
+                sub_start = len(before)
+        else:
+            sub_start = len(before)
+        replace_end = len(before)
+    else:
+        sub_start = len(before)
+        replace_end = len(before)
 
     return CompletionResult(
         CompletionKind.SUBCOMMANDS,
@@ -149,6 +172,6 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
                 replace_start=sub_start,
                 replace_end=replace_end,
             )
-            for name, desc in sub_matches
+            for name, desc in completions
         ],
     )

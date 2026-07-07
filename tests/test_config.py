@@ -254,6 +254,30 @@ class TestLoadSaveReset:
         assert loaded.anthropic_api_key == "test-key"
         assert loaded.provider == "openai"
 
+    def test_load_reads_manually_edited_utf8_config(self, temp_config_dir, clean_env):
+        """Config loading handles localized content from manually edited YAML."""
+        config_path = get_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "provider: openai\nmodel: gpt-4o\ndefault_workdir: /tmp/café\n",
+            encoding="utf-8",
+        )
+
+        loaded = load_config()
+
+        assert loaded.provider == "openai"
+        assert loaded.model == "gpt-4o"
+        assert loaded.default_workdir == "/tmp/café"
+
+    def test_save_writes_utf8_config(self, temp_config_dir, clean_env):
+        """Config saving writes localized content with UTF-8 encoding."""
+        save_config(EvoScientistConfig(default_workdir="/tmp/résumé"))
+
+        config_path = get_config_path()
+        raw = config_path.read_text(encoding="utf-8")
+        assert "default_workdir: /tmp/résumé" in raw
+        assert load_config().default_workdir == "/tmp/résumé"
+
     def test_reset_deletes_config_file(self, temp_config_dir, clean_env):
         """Test that reset deletes the config file."""
         config = EvoScientistConfig(provider="openai")

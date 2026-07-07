@@ -138,7 +138,7 @@ def _uv_tool_existing_requirements() -> dict[str, str]:
         except ModuleNotFoundError:
             return {}
     try:
-        data = tomllib.loads(receipt.read_text())
+        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
     except Exception:
         return {}
     tool_name = _uv_tool_name() or ""
@@ -410,7 +410,7 @@ def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
 
 def parse_marketplace_yaml(path: Path) -> MCPServerEntry:
     """Parse a single marketplace YAML file into an MCPServerEntry."""
-    data = yaml.safe_load(path.read_text()) or {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError(f"Expected a YAML mapping in {path}")
 

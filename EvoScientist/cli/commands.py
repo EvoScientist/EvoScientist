@@ -20,6 +20,7 @@ from ..commands.base import ChannelRuntime, Command, CommandContext
 from ..gateway import (
     GraphGateway,
     GraphTarget,
+    RunRequest,
     RuntimeGateways,
     create_runtime_gateways,
 )
@@ -2009,6 +2010,18 @@ def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> 
     return not prompt and not thread_id
 
 
+def _resolve_stream_json_auto_mode(auto_mode: bool | None, output_format: str) -> bool:
+    """Resolve the effective ``--auto-mode`` for a single-shot run.
+
+    stream-json is headless, so auto-mode defaults on there when the caller did
+    not pass the flag (``None``); an explicit ``--auto-mode`` / ``--no-auto-mode``
+    always wins, and non-stream-json runs keep the historical off-by-default.
+    """
+    if auto_mode is not None:
+        return auto_mode
+    return output_format == "stream-json"
+
+
 @app.callback(invoke_without_command=True)
 def _main_callback(
     ctx: typer.Context,
@@ -2055,10 +2068,11 @@ def _main_callback(
         "--auto-approve",
         help="Skip tool approval prompts for HITL actions",
     ),
-    auto_mode: bool = typer.Option(
-        False,
-        "--auto-mode",
-        help="Run unattended: skip ask_user and tool approval prompts",
+    auto_mode: bool | None = typer.Option(
+        None,
+        "--auto-mode/--no-auto-mode",
+        help="Run unattended: skip ask_user and tool approval prompts "
+        "(default: on when --output-format stream-json)",
     ),
     ask_user: bool = typer.Option(
         False,
@@ -2080,6 +2094,14 @@ def _main_callback(
         "--ui",
         help="UI backend: tui (default), cli, or webui.",
     ),
+    output_format: str | None = typer.Option(
+        None,
+        "--output-format",
+        help=(
+            "Output format for single-shot (-p) mode: 'text' (default) or "
+            "'stream-json' (line-delimited JSON events to stdout)."
+        ),
+    ),
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI"""
     # If a subcommand was invoked, don't run the default behavior
@@ -2088,6 +2110,37 @@ def _main_callback(
 
     # Load and apply configuration
     from ..config import apply_config_to_env, get_effective_config
+
+    # Resolve the output format first. In stream-json mode stdout must carry
+    # only JSONL, so establish the mode and redirect the console to stderr
+    # BEFORE anything below (ccproxy startup, validation) can print a
+    # human-readable line to stdout.
+    effective_output_format = (output_format or "text").lower()
+    if effective_output_format not in ("text", "stream-json"):
+        raise typer.BadParameter("--output-format must be 'text' or 'stream-json'")
+    if effective_output_format == "stream-json":
+        if not prompt:
+            raise typer.BadParameter(
+                "--output-format stream-json requires -p/--prompt (single-shot mode)"
+            )
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+
+    # stream-json is headless, so auto-mode defaults on (auto-handle approval and
+    # ask_user gates) unless the caller explicitly passed --no-auto-mode. Without
+    # it the run would stall at the first gate and end without doing the work;
+    # --no-auto-mode is the (experimental) opt-in to receiving interrupt/ask_user
+    # events and driving resume yourself.
+    effective_auto_mode = _resolve_stream_json_auto_mode(
+        auto_mode, effective_output_format
+    )
+    if effective_output_format == "stream-json" and auto_mode is False:
+        console.print(
+            "[yellow]--no-auto-mode with stream-json is experimental: an "
+            "interrupt/ask_user event ends the run early and is not yet "
+            "resumable.[/yellow]"
+        )
 
     # Build CLI overrides dict
     cli_overrides = {}
@@ -2101,12 +2154,18 @@ def _main_callback(
         cli_overrides["ui_backend"] = ui
     if auto_approve:
         cli_overrides["auto_approve"] = True
-    if auto_mode:
+    if effective_auto_mode:
         cli_overrides["auto_mode"] = True
         cli_overrides["auto_approve"] = True
         cli_overrides["enable_ask_user"] = False
-    elif ask_user:
-        cli_overrides["enable_ask_user"] = True
+    else:
+        # An explicit --no-auto-mode (auto_mode is False, not None) must win over
+        # a config file that enables auto-mode; without this the resolved-off
+        # value writes nothing and silently falls back to the config default.
+        if auto_mode is False:
+            cli_overrides["auto_mode"] = False
+        if ask_user:
+            cli_overrides["enable_ask_user"] = True
     if dangerous:
         cli_overrides["dangerous_mode"] = True
     if auth_mode:
@@ -2261,7 +2320,8 @@ def _main_callback(
         import asyncio
 
         from ..sessions import get_checkpointer
-        from .interactive import cmd_run
+        from ..stream.json_sink import stream_json
+        from .interactive import _wait_for_memory_workers_before_exit, cmd_run
         from .resume_hint import print_resume_hint
 
         runtime_gateways = create_runtime_gateways()
@@ -2296,16 +2356,42 @@ def _main_callback(
                     config=config,
                 )
                 try:
-                    cmd_run(
-                        agent,
-                        prompt,
-                        thread_id=tid,
-                        show_thinking=show_thinking,
-                        workspace_dir=workspace_dir,
-                        model=config.model,
-                        ui_backend=config.ui_backend,
-                        runtime_gateways=runtime_gateways,
-                    )
+                    if effective_output_format == "stream-json":
+                        # Headless JSONL path: drive the sink through the gateway
+                        # directly. We are already inside the async single-shot
+                        # loop, so this is a plain await — no nested-loop juggling,
+                        # and the gateway seam keeps it execution-backend agnostic.
+                        request = RunRequest(
+                            message=prompt,
+                            thread_id=tid,
+                            metadata=build_metadata(workspace_dir, config.model),
+                            target=GraphTarget(
+                                local_graph=agent, workspace_dir=workspace_dir
+                            ),
+                        )
+                        try:
+                            await stream_json(graph_gateway, request)
+                        except Exception as exc:
+                            # stream_events already emitted a terminal `error`
+                            # event onto the JSON stream before re-raising; exit
+                            # cleanly so the stream ends with that event instead
+                            # of a raw traceback.
+                            raise typer.Exit(1) from exc
+                        finally:
+                            # Let post-run memory workers persist before exit,
+                            # matching the text path (cmd_run does this itself).
+                            _wait_for_memory_workers_before_exit()
+                    else:
+                        cmd_run(
+                            agent,
+                            prompt,
+                            thread_id=tid,
+                            show_thinking=show_thinking,
+                            workspace_dir=workspace_dir,
+                            model=config.model,
+                            ui_backend=config.ui_backend,
+                            runtime_gateways=runtime_gateways,
+                        )
                 finally:
                     try:
                         print_resume_hint(tid, console=console)

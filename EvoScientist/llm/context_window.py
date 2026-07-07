@@ -29,6 +29,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Covers OpenRouter ``minimax/minimax-m3`` (via split('/')[-1]) and direct
     # ``MiniMax-M3`` (via lowercased exact match).
     "minimax-m3": 1_000_000,
+    # Zhipu GLM-5.2 — 1M context, an exception to the ``glm-5`` family (203K).
+    # Matches OpenRouter ``z-ai/glm-5.2`` via split('/')[-1].
+    "glm-5.2": 1_000_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.

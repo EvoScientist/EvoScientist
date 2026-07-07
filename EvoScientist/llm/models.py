@@ -85,6 +85,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Anthropic (current generation)
     ("claude-fable-5", "claude-fable-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
+    ("claude-sonnet-5", "claude-sonnet-5", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # OpenAI
@@ -122,6 +123,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # NVIDIA
     ("nemotron-super", "nvidia/nemotron-3-super-120b-a12b", "nvidia"),
     ("nemotron-nano", "nvidia/nemotron-3-nano-30b-a3b", "nvidia"),
+    ("glm-5.2", "z-ai/glm-5.2", "nvidia"),
     ("glm4.7", "z-ai/glm4.7", "nvidia"),
     ("deepseek-v3.2", "deepseek-ai/deepseek-v3.2", "nvidia"),
     ("deepseek-v3.1", "deepseek-ai/deepseek-v3.1-terminus", "nvidia"),
@@ -133,6 +135,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("step-3.5-flash", "stepfun-ai/step-3.5-flash", "nvidia"),
     # SiliconFlow
     ("minimax-m2.5", "Pro/MiniMaxAI/MiniMax-M2.5", "siliconflow"),
+    ("glm-5.2", "Pro/zai-org/GLM-5.2", "siliconflow"),
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
@@ -140,6 +143,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
     ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
+    ("claude-sonnet-5", "anthropic/claude-sonnet-5", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
     ("gpt-5.5-pro", "openai/gpt-5.5-pro", "openrouter"),
     ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
@@ -149,6 +153,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3.1-pro", "google/gemini-3.1-pro-preview", "openrouter"),
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
+    ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
     ("mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "openrouter"),
@@ -162,12 +167,14 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
+    ("glm-5.2", "glm-5.2", "zhipu-code"),
     ("glm-5.1", "glm-5.1", "zhipu-code"),
     ("glm-5", "glm-5", "zhipu-code"),
     ("glm-5-turbo", "glm-5-turbo", "zhipu-code"),
     ("glm-5v-turbo", "glm-5v-turbo", "zhipu-code"),
     ("glm-4.7", "glm-4.7", "zhipu-code"),
     # Zhipu (智谱 — general endpoint, default for simple lookups)
+    ("glm-5.2", "glm-5.2", "zhipu"),
     ("glm-5.1", "glm-5.1", "zhipu"),
     ("glm-5", "glm-5", "zhipu"),
     ("glm-5-turbo", "glm-5-turbo", "zhipu"),

@@ -527,7 +527,7 @@ def load_config() -> EvoScientistConfig:
         return EvoScientistConfig()
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
         # Filter to only valid fields
@@ -552,8 +552,14 @@ def save_config(config: EvoScientistConfig) -> None:
     data = _config_to_dict(config)
 
     # Save all fields including empty API keys (users can set them via env vars instead)
-    with open(config_path, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            data,
+            f,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
 
 
 def reset_config() -> None:

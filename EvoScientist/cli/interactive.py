@@ -234,39 +234,32 @@ class SlashCommandCompleter(Completer):
         text = document.text_before_cursor
         workspace_dir = self._workspace_getter()
 
-        # @file mention completion
+        # Slash command / subcommand completions take priority
+        if text.startswith("/"):
+            from ..commands._completion_engine import compute_completions
+
+            result = compute_completions(text, len(text))
+            if result.kind != "empty" and result.candidates:
+                for c in result.candidates:
+                    start_pos = c.replace_start - len(text)
+                    yield Completion(
+                        c.text,
+                        start_position=start_pos,
+                        display_meta=c.description,
+                    )
+            return
+
+        # @file mention completion (only for non-command input)
         if "@" in text:
             candidates = complete_file_mention(text, workspace_dir)
             if candidates:
-                # Replace from the last '@' token
                 import re as _re
 
-                m = _re.search(r"@[^\s]*$", text)
+                m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', text)
                 start = -len(m.group(0)) if m else 0
                 for path, type_hint in candidates:
                     yield Completion(path, start_position=start, display_meta=type_hint)
                 return
-
-        # Slash command completion
-        if not text.startswith("/"):
-            return
-
-        from ..commands._completion_engine import compute_completions
-
-        result = compute_completions(
-            document.text_before_cursor, len(document.text_before_cursor)
-        )
-        if result.kind == "empty" or not result.candidates:
-            return
-
-        # Sort alphabetically by completion text for stable, predictable
-        # ordering in the popup. The engine returns candidates in
-        # manager-registration order, which is not stable across changes.
-        for c in sorted(result.candidates, key=lambda c: c.text):
-            start_pos = c.replace_start - len(document.text_before_cursor)
-            yield Completion(
-                c.text, start_position=start_pos, display_meta=c.description
-            )
 
 
 async def _resolve_startup_session(

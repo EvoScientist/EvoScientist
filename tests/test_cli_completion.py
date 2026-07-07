@@ -66,11 +66,16 @@ class TestSlashCommandCompleter:
         completions = list(completer.get_completions(_doc("/mcp list"), None))
         assert completions == []
 
-    def test_results_sorted_alphabetically(self):
+    def test_results_match_engine_order(self):
+        """Completer preserves the category-based order from compute_completions."""
+        from EvoScientist.commands._completion_engine import compute_completions
+
         completer = SlashCommandCompleter()
         completions = list(completer.get_completions(_doc("/"), None))
-        texts = [c.text for c in completions]
-        assert texts == sorted(texts)
+        engine_result = compute_completions("/", 1)
+        assert [c.text for c in completions] == [
+            c.text for c in engine_result.candidates
+        ]
 
     def test_display_meta_is_description(self):
         completer = SlashCommandCompleter()
@@ -79,8 +84,13 @@ class TestSlashCommandCompleter:
             if c.text == "/help":
                 assert c.display_meta is not None
 
-    def test_subcommand_completions_sorted(self):
+    def test_subcommand_completions_match_engine_order(self):
+        """Subcommand completions preserve the order from compute_completions."""
+        from EvoScientist.commands._completion_engine import compute_completions
+
         completer = SlashCommandCompleter()
         completions = list(completer.get_completions(_doc("/mcp "), None))
-        texts = [c.text for c in completions]
-        assert texts == sorted(texts)
+        engine_result = compute_completions("/mcp ", 5)
+        assert [c.text for c in completions] == [
+            c.text for c in engine_result.candidates
+        ]

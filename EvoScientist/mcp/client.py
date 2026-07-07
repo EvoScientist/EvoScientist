@@ -190,7 +190,7 @@ def _load_user_config() -> dict[str, Any]:
     """Load the user-level MCP config, returning an empty dict if absent."""
     if USER_MCP_CONFIG.is_file():
         try:
-            data = yaml.safe_load(USER_MCP_CONFIG.read_text()) or {}
+            data = yaml.safe_load(USER_MCP_CONFIG.read_text(encoding="utf-8")) or {}
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
@@ -201,7 +201,8 @@ def _save_user_config(config: dict[str, Any]) -> None:
     """Write *config* to the user-level MCP config file."""
     USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     USER_MCP_CONFIG.write_text(
-        yaml.dump(config, default_flow_style=False, sort_keys=False)
+        yaml.dump(config, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
     )
 
 
@@ -584,7 +585,7 @@ def load_mcp_config() -> dict[str, Any]:
         return {}
 
     try:
-        data = yaml.safe_load(USER_MCP_CONFIG.read_text()) or {}
+        data = yaml.safe_load(USER_MCP_CONFIG.read_text(encoding="utf-8")) or {}
         if not isinstance(data, dict):
             return {}
     except Exception as exc:

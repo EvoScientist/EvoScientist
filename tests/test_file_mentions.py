@@ -346,11 +346,11 @@ class TestCompleteFileMention:
         assert any("results.json" in p for p in paths)
 
     def test_fuzzy_deep_file(self, tmp_path: Path) -> None:
-        """Files nested 2+ levels deep are discovered by fuzzy search."""
+        """Files nested 2+ levels deep are discovered via directory prefix."""
         nested = tmp_path / "src" / "models"
         nested.mkdir(parents=True)
         (nested / "base.py").write_text("")
-        result = complete_file_mention("@base", str(tmp_path))
+        result = complete_file_mention("@src/models/base", str(tmp_path))
         paths = [p for p, _ in result]
         assert any("base.py" in p for p in paths)
 
