@@ -371,14 +371,31 @@ def _step_minimax_region(config: EvoScientistConfig) -> str:
     return _MINIMAX_REGIONS[region]
 
 
-def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
-    """Step 2a: Select Anthropic authentication mode (API key vs OAuth).
+def _step_oauth_auth_mode(
+    config: EvoScientistConfig,
+    *,
+    provider_label: str,
+    ccproxy_provider: str,
+    config_attr: str,
+    prompt_login_label: str,
+    oauth_choice_label: str | None = None,
+    status_label: str | None = None,
+    question_label: str | None = None,
+) -> str:
+    """Select API-key vs ccproxy OAuth authentication for a provider.
 
     Args:
         config: Current configuration.
+        provider_label: Provider display name for direct API-key access.
+        ccproxy_provider: ccproxy auth provider name.
+        config_attr: Config attribute storing this provider's auth mode.
+        prompt_login_label: Label used in "Log in to ..." prompts.
+        oauth_choice_label: Optional display label for the OAuth choice.
+        status_label: Optional display label for status messages.
+        question_label: Optional prompt label override.
 
     Returns:
-        Selected auth mode: "api_key", "oauth", or "auto".
+        Selected auth mode: "api_key" or "oauth".
     """
     from ...ccproxy_manager import check_ccproxy_auth, is_ccproxy_available
 
@@ -386,10 +403,14 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
 
     from .prompter import BACK_SENTINEL, GoBack, install_navigation_keys
 
+    oauth_label = oauth_choice_label or f"{prompt_login_label} OAuth"
+    auth_status_label = status_label or oauth_label
+    auth_question_label = question_label or f"{provider_label} authentication mode"
+
     choices = [
-        Choice(title="API Key (direct Anthropic access)", value="api_key"),
+        Choice(title=f"API Key (direct {provider_label} access)", value="api_key"),
         Choice(
-            title="Claude Code OAuth (via ccproxy — no API key needed)"
+            title=f"{oauth_label} (via ccproxy — no API key needed)"
             + (
                 ""
                 if ccproxy_available
@@ -401,12 +422,12 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
         Choice(title="← Back (re-pick provider)", value=BACK_SENTINEL),
     ]
 
-    current = config.anthropic_auth_mode
+    current = getattr(config, config_attr)
     if current not in ("api_key", "oauth"):
         current = "api_key"
 
     question = questionary.select(
-        "Authentication mode  [Esc/← to go back]:",
+        f"{auth_question_label}  [Esc/← to go back]:",
         choices=choices,
         default=current,
         style=WIZARD_STYLE,
@@ -448,11 +469,9 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
     if auth_mode == "oauth":
         _prompt_ccproxy_port(config)
 
-    # If OAuth selected, check auth status and offer login
-    if auth_mode in ("oauth", "auto"):
-        authed, msg = check_ccproxy_auth()
+        authed, msg = check_ccproxy_auth(ccproxy_provider)
         if authed:
-            console.print(f"  [green]✓ OAuth: {msg}[/green]")
+            console.print(f"  [green]✓ {auth_status_label}: {msg}[/green]")
             relogin = questionary.confirm(
                 "Re-authenticate to refresh credentials?",
                 default=False,
@@ -462,11 +481,13 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
             if relogin is None:
                 raise KeyboardInterrupt()
             if relogin:
-                _run_ccproxy_login("claude_api", "OAuth")
+                _run_ccproxy_login(ccproxy_provider, auth_status_label)
         else:
-            console.print(f"  [yellow]OAuth not authenticated: {msg}[/yellow]")
+            console.print(
+                f"  [yellow]{auth_status_label} not authenticated: {msg}[/yellow]"
+            )
             login = questionary.confirm(
-                "Log in to Claude now?",
+                f"Log in to {prompt_login_label} now?",
                 default=True,
                 style=CONFIRM_STYLE,
                 qmark=QMARK,
@@ -474,9 +495,30 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
             if login is None:
                 raise KeyboardInterrupt()
             if login:
-                _run_ccproxy_login("claude_api", "OAuth")
+                _run_ccproxy_login(ccproxy_provider, auth_status_label)
 
     return auth_mode
+
+
+def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
+    """Step 2a: Select Anthropic authentication mode (API key vs OAuth).
+
+    Args:
+        config: Current configuration.
+
+    Returns:
+        Selected auth mode: "api_key" or "oauth".
+    """
+    return _step_oauth_auth_mode(
+        config,
+        provider_label="Anthropic",
+        ccproxy_provider="claude_api",
+        config_attr="anthropic_auth_mode",
+        prompt_login_label="Claude",
+        oauth_choice_label="Claude Code OAuth",
+        status_label="OAuth",
+        question_label="Authentication mode",
+    )
 
 
 def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
@@ -488,101 +530,16 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key" or "oauth".
     """
-    from ...ccproxy_manager import check_ccproxy_auth, is_ccproxy_available
-
-    ccproxy_available = is_ccproxy_available()
-
-    from .prompter import BACK_SENTINEL, GoBack, install_navigation_keys
-
-    choices = [
-        Choice(title="API Key (direct OpenAI access)", value="api_key"),
-        Choice(
-            title="Codex OAuth (via ccproxy — no API key needed)"
-            + (
-                ""
-                if ccproxy_available
-                else " [requires: pip install evoscientist[oauth]]"
-            ),
-            value="oauth",
-        ),
-        questionary.Separator(),
-        Choice(title="← Back (re-pick provider)", value=BACK_SENTINEL),
-    ]
-
-    current = config.openai_auth_mode
-    if current not in ("api_key", "oauth"):
-        current = "api_key"
-
-    question = questionary.select(
-        "OpenAI authentication mode  [Esc/← to go back]:",
-        choices=choices,
-        default=current,
-        style=WIZARD_STYLE,
-        qmark=QMARK,
-        use_indicator=True,
+    return _step_oauth_auth_mode(
+        config,
+        provider_label="OpenAI",
+        ccproxy_provider="codex",
+        config_attr="openai_auth_mode",
+        prompt_login_label="Codex",
+        oauth_choice_label="Codex OAuth",
+        status_label="Codex OAuth",
+        question_label="OpenAI authentication mode",
     )
-    install_navigation_keys(question, with_back=True)
-    auth_mode = question.ask()
-
-    if auth_mode is None:
-        raise KeyboardInterrupt()
-    if auth_mode == BACK_SENTINEL:
-        raise GoBack()
-
-    if auth_mode == "oauth" and not ccproxy_available:
-        console.print("  [yellow]✗ ccproxy not installed[/yellow]")
-        console.print()
-        install = questionary.confirm(
-            'Install ccproxy now? (pip install "evoscientist[oauth]")',
-            default=True,
-            style=WIZARD_STYLE,
-            qmark=f"  {QMARK}",
-        ).ask()
-        if install is None:
-            raise KeyboardInterrupt()
-        if install:
-            console.print()
-            if _install_ccproxy():
-                console.print("  [green]✓ ccproxy installed successfully.[/green]")
-            else:
-                console.print("  [yellow]Falling back to API key mode.[/yellow]")
-                return "api_key"
-        else:
-            console.print(
-                '  [dim]Skipped. Install manually: pip install "evoscientist[oauth]"[/dim]'
-            )
-            return "api_key"
-
-    # If OAuth selected, prompt for port and check auth status
-    if auth_mode == "oauth":
-        _prompt_ccproxy_port(config)
-        authed, msg = check_ccproxy_auth("codex")
-        if authed:
-            console.print(f"  [green]✓ Codex OAuth: {msg}[/green]")
-            relogin = questionary.confirm(
-                "Re-authenticate to refresh credentials?",
-                default=False,
-                style=CONFIRM_STYLE,
-                qmark=QMARK,
-            ).ask()
-            if relogin is None:
-                raise KeyboardInterrupt()
-            if relogin:
-                _run_ccproxy_login("codex", "Codex OAuth")
-        else:
-            console.print(f"  [yellow]Codex OAuth not authenticated: {msg}[/yellow]")
-            login = questionary.confirm(
-                "Log in to Codex now?",
-                default=True,
-                style=CONFIRM_STYLE,
-                qmark=QMARK,
-            ).ask()
-            if login is None:
-                raise KeyboardInterrupt()
-            if login:
-                _run_ccproxy_login("codex", "Codex OAuth")
-
-    return auth_mode
 
 
 def _step_provider_api_key(

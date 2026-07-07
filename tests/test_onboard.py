@@ -386,6 +386,109 @@ class TestStepProvider:
                 _step_provider(config)
 
 
+class TestStepOAuthAuthMode:
+    @pytest.mark.parametrize(
+        (
+            "step_name",
+            "config_attr",
+            "provider_label",
+            "oauth_choice_label",
+            "ccproxy_provider",
+            "status_label",
+            "question_label",
+            "login_prompt",
+        ),
+        [
+            (
+                "_step_anthropic_auth_mode",
+                "anthropic_auth_mode",
+                "Anthropic",
+                "Claude Code OAuth",
+                "claude_api",
+                "OAuth",
+                "Authentication mode",
+                "Log in to Claude now?",
+            ),
+            (
+                "_step_openai_auth_mode",
+                "openai_auth_mode",
+                "OpenAI",
+                "Codex OAuth",
+                "codex",
+                "Codex OAuth",
+                "OpenAI authentication mode",
+                "Log in to Codex now?",
+            ),
+        ],
+    )
+    def test_oauth_wrappers_use_provider_specific_ccproxy_flow(
+        self,
+        step_name,
+        config_attr,
+        provider_label,
+        oauth_choice_label,
+        ccproxy_provider,
+        status_label,
+        question_label,
+        login_prompt,
+    ):
+        """Anthropic/OpenAI wrappers share flow but keep provider-specific IDs."""
+        from EvoScientist.config.onboard import steps as onboard_steps
+
+        config = EvoScientistConfig(**{config_attr: "oauth"})
+        select_question = MagicMock()
+        select_question.ask.return_value = "oauth"
+        confirm_question = MagicMock()
+        confirm_question.ask.return_value = True
+
+        with (
+            patch(
+                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
+            ),
+            patch(
+                "EvoScientist.ccproxy_manager.check_ccproxy_auth",
+                return_value=(False, "not authenticated"),
+            ) as mock_check_auth,
+            patch(
+                "EvoScientist.config.onboard.prompter.install_navigation_keys"
+            ) as mock_nav,
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.select",
+                return_value=select_question,
+            ) as mock_select,
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.confirm",
+                return_value=confirm_question,
+            ) as mock_confirm,
+            patch(
+                "EvoScientist.config.onboard.steps._prompt_ccproxy_port"
+            ) as mock_port,
+            patch("EvoScientist.config.onboard.steps._run_ccproxy_login") as mock_login,
+        ):
+            result = getattr(onboard_steps, step_name)(config)
+
+        assert result == "oauth"
+        mock_nav.assert_called_once_with(select_question, with_back=True)
+        mock_port.assert_called_once_with(config)
+        mock_check_auth.assert_called_once_with(ccproxy_provider)
+        mock_login.assert_called_once_with(ccproxy_provider, status_label)
+
+        select_call = mock_select.call_args
+        assert select_call.args[0] == f"{question_label}  [Esc/← to go back]:"
+        assert select_call.kwargs["default"] == "oauth"
+        choice_titles = [
+            choice.title
+            for choice in select_call.kwargs["choices"]
+            if getattr(choice, "value", None) in {"api_key", "oauth"}
+        ]
+        assert choice_titles == [
+            f"API Key (direct {provider_label} access)",
+            f"{oauth_choice_label} (via ccproxy — no API key needed)",
+        ]
+        mock_confirm.assert_called_once()
+        assert mock_confirm.call_args.args[0] == login_prompt
+
+
 class TestStepModel:
     def test_returns_selected_model(self):
         """Test that _step_model returns selected model."""
