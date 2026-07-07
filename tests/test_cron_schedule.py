@@ -92,7 +92,7 @@ def test_scheduler_yaml_loads_as_async():
     subagents_dir = Path(EvoScientist.__file__).parent / "subagents"
     yaml_path = subagents_dir / "scheduler.yaml"
     assert yaml_path.exists(), f"Missing {yaml_path}"
-    data = yaml.safe_load(yaml_path.read_text())
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     assert "scheduler" in data, "Top-level key must be 'scheduler'"
     spec = data["scheduler"]
     assert spec.get("async") is True, "scheduler must have 'async: true'"
@@ -109,7 +109,9 @@ def test_langgraph_json_registers_scheduler():
     import EvoScientist
 
     root = Path(EvoScientist.__file__).parent
-    manifest = json.loads((root / "langgraph_dev" / "langgraph.json").read_text())
+    manifest = json.loads(
+        (root / "langgraph_dev" / "langgraph.json").read_text(encoding="utf-8")
+    )
     assert manifest["graphs"]["scheduler"] == (
         "EvoScientist.langgraph_dev.graphs:scheduler"
     )
@@ -126,11 +128,98 @@ def test_scheduler_graph_id_matches_registration():
     from EvoScientist.cron import schedule as crons
 
     root = Path(EvoScientist.__file__).parent
-    manifest = json.loads((root / "langgraph_dev" / "langgraph.json").read_text())
+    manifest = json.loads(
+        (root / "langgraph_dev" / "langgraph.json").read_text(encoding="utf-8")
+    )
     assert crons.SCHEDULER_GRAPH_ID in manifest["graphs"], (
         f"SCHEDULER_GRAPH_ID={crons.SCHEDULER_GRAPH_ID!r} not found in langgraph.json graphs"
     )
-    spec = yaml.safe_load((root / "subagents" / "scheduler.yaml").read_text())
+    spec = yaml.safe_load(
+        (root / "subagents" / "scheduler.yaml").read_text(encoding="utf-8")
+    )
     assert crons.SCHEDULER_GRAPH_ID in spec, (
         f"SCHEDULER_GRAPH_ID={crons.SCHEDULER_GRAPH_ID!r} is not the top-level key in scheduler.yaml"
     )
+
+
+def test_production_loaders_accept_utf8_content(tmp_path, monkeypatch):
+    """Production config readers must handle localized UTF-8 content."""
+    import os
+
+    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.mcp import client, registry
+
+    mcp_config = tmp_path / "mcp.yaml"
+    mcp_config.write_text(
+        """
+écho:
+  transport: stdio
+  command: python
+  args: ["-m", "démo"]
+  env:
+    MESSAGE: "bonjour café"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(client, "USER_MCP_CONFIG", mcp_config)
+    assert client._load_user_config()["écho"]["env"]["MESSAGE"] == "bonjour café"
+    assert client.load_mcp_config()["écho"]["args"] == ["-m", "démo"]
+
+    marketplace_yaml = tmp_path / "marketplace-écho.yaml"
+    marketplace_yaml.write_text(
+        """
+name: écho
+label: "Écho café"
+description: "localized marketplace entry"
+tags: "démo, marché"
+transport: stdio
+command: python
+args: ["-m", "écho"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    entry = registry.parse_marketplace_yaml(marketplace_yaml)
+    assert entry.name == "écho"
+    assert entry.tags == ["démo", "marché"]
+
+    venv = tmp_path / "uv" / "tools" / "evoscientist"
+    venv.mkdir(parents=True)
+    (venv / "uv-receipt.toml").write_text(
+        """
+[tool]
+requirements = [
+  { name = "evoscientist" },
+  { name = "mcp-écho", specifier = ">=1.0" },
+]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+    assert registry._uv_tool_existing_requirements()["mcp-écho"] == "mcp-écho>=1.0"
+
+    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
+    monkeypatch.setattr(manager, "RUNTIME", runtime)
+    workspace = tmp_path / "workspace-écho"
+    manager._write_workspace_sidecar(workspace, 12345)
+    assert manager._read_workspace_sidecar() == {
+        "workspace": str(workspace),
+        "pid": 12345,
+    }
+
+    runtime.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    class _NotLanggraphProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def cmdline(self):
+            return ["python", "localized-test"]
+
+        def kill(self):
+            raise AssertionError("non-langgraph pid must not be killed")
+
+    monkeypatch.setattr(manager, "_list_pids_on_port", lambda port: [os.getpid()])
+    monkeypatch.setattr(manager.psutil, "Process", _NotLanggraphProcess)
+    assert manager._kill_owned_stale_process(6174) is False
+    assert not runtime.pid_file.exists()
+    assert not runtime.workspace_sidecar.exists()

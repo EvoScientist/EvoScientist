@@ -449,6 +449,7 @@ def run_textual_interactive(
             ] = []  # queued messages to send after current turn
             self._comp_items: list = []
             self._comp_index: int = -1
+            self._comp_base: str = ""
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
             self._ask_user_future: asyncio.Future | None = None
@@ -652,6 +653,15 @@ def run_textual_interactive(
             for child in list(container.children):
                 if child is not welcome:
                     child.remove()
+            # Issue #301: unconditionally release the anchor and pin to the
+            # top after wiping. The children removed above are laid out
+            # asynchronously, so a ``max_scroll_y`` check at this moment is
+            # stale — relying on it (via ``_anchor_chat``) can re-engage the
+            # anchor and let Textual's compositor push ``scroll_y`` negative
+            # once the new (smaller) content lays out. Always reset.
+            self._release_anchor_and_pin_top(container)
+            self._chat_following = True
+            self._new_content_below = False
 
         def request_quit(self) -> None:
             self.action_request_quit()
@@ -681,6 +691,7 @@ def run_textual_interactive(
             self._background_tasks.add(refresh_task)
             refresh_task.add_done_callback(self._background_tasks.discard)
             self.append_system(f"New session: {self._conversation_tid}", style="green")
+            self._append_pending_skill_proposals_notice()
 
         async def handle_session_resume(
             self, thread_id: str, workspace_dir: str | None = None
@@ -701,10 +712,8 @@ def run_textual_interactive(
                 # WorkspaceMismatchError leaves the session pointing at the
                 # existing workspace. Other sync failures resume locally in
                 # the TUI while background workers may be unavailable.
-                from ..langgraph_dev.manager import (
-                    WorkspaceMismatchError,
-                    ensure_langgraph_dev,
-                )
+                from ..langgraph_dev.manager import WorkspaceMismatchError
+                from .commands import _sync_background_agent_server_workspace
                 from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
                 sync_widget = WorkspaceSyncWidget()
@@ -712,8 +721,7 @@ def run_textual_interactive(
                 await container.mount(sync_widget)
                 container.scroll_end(animate=False)
                 try:
-                    await asyncio.to_thread(
-                        ensure_langgraph_dev,
+                    await _sync_background_agent_server_workspace(
                         config,
                         workspace_dir=workspace_dir,
                     )
@@ -759,6 +767,7 @@ def run_textual_interactive(
             self._render_status()
             self.append_system(f"Resumed session: {thread_id}", style="green")
             await self._render_history(thread_id)
+            self._append_pending_skill_proposals_notice()
 
         async def flush(self) -> None:
             """No-op for TUI, messages are already delivered incrementally."""
@@ -807,6 +816,7 @@ def run_textual_interactive(
             # Show resume status
             if self._resume_warning:
                 self._append_system(self._resume_warning, style="yellow")
+                self._append_pending_skill_proposals_notice()
             elif self._resumed:
                 self._append_system(
                     f"Resumed session: {self._conversation_tid}",
@@ -814,9 +824,11 @@ def run_textual_interactive(
                 )
                 self.call_later(
                     lambda: asyncio.ensure_future(
-                        self._render_history(self._conversation_tid)
+                        self._render_history_then_pending_notice(self._conversation_tid)
                     )
                 )
+            else:
+                self._append_pending_skill_proposals_notice()
             # Startup notifications
             self.notify(
                 "EvoScientist is your research buddy.\n"
@@ -1036,10 +1048,34 @@ def run_textual_interactive(
         # ── Widget helpers ─────────────────────────────────────
 
         def _anchor_chat(self, container: VerticalScroll | None = None) -> None:
-            """Re-engage the scroll anchor so the viewport pins to the bottom."""
+            """Re-engage the scroll anchor so the viewport pins to the bottom.
+
+            Only engages the anchor when the chat content actually overflows
+            the viewport. Textual's compositor (see ``textual._compositor``)
+            recomputes ``scroll_y`` for anchored widgets via ``set_reactive``
+            — which bypasses the validator — so when anchored content is
+            shorter than the viewport, ``scroll_y`` goes negative and the
+            welcome banner drops below the visible region (issue #301).
+            When content fits, we instead release any prior anchor and pin
+            the viewport to the top.
+            """
             if container is None:
                 container = self.query_one("#chat", VerticalScroll)
-            container.anchor()
+            if container.max_scroll_y > 0:
+                container.anchor()
+            else:
+                self._release_anchor_and_pin_top(container)
+
+        def _release_anchor_and_pin_top(self, container: VerticalScroll) -> None:
+            """Release any active anchor and force the viewport to the top.
+
+            See ``_anchor_chat`` for why this is needed: Textual's compositor
+            bypasses ``validate_scroll_y`` for anchored widgets, so a leftover
+            anchor with content shorter than the viewport lets ``scroll_y``
+            go negative and pushes the welcome banner out of view (issue #301).
+            """
+            container.anchor(False)
+            container.scroll_home(animate=False, immediate=True)
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1537,6 +1573,12 @@ def run_textual_interactive(
                                 container.anchor()
                                 self._chat_following = True
                                 self._new_content_below = False
+                        elif container.is_anchored:
+                            # Content no longer overflows (e.g. loading widget
+                            # was just removed). Release the anchor so the
+                            # compositor doesn't pin scroll_y to a negative
+                            # value on the next layout pass (issue #301).
+                            self._release_anchor_and_pin_top(container)
                         event_type = state.handle_event(event)
 
                         new_phase = state.compute_phase()
@@ -2423,58 +2465,59 @@ def run_textual_interactive(
             self._history_suggester.append_entry(text)
             self._run_task = asyncio.ensure_future(self._run_turn(text))
 
+        def _build_file_candidates(self, text: str) -> list:
+            """Build CompletionCandidate list for @file mentions."""
+            import re as _re
+
+            from ..commands._completion_engine import CompletionCandidate
+
+            candidates = complete_file_mention(text, self._workspace_dir)
+            if not candidates:
+                return []
+            m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', text)
+            start = m.start() if m else len(text)
+            return [
+                CompletionCandidate(
+                    text=path if path.startswith("@") else f"@{path}",
+                    description=type_hint,
+                    replace_start=start,
+                    replace_end=len(text),
+                )
+                for path, type_hint in candidates
+            ]
+
         def on_text_area_changed(self, event: ChatTextArea.Changed) -> None:
+
             text = event.text_area.text
             comp_widget = self.query_one("#completions", Static)
 
-            # @file mention completion
+            # Slash-command completions take priority over @file
+            if text.startswith("/"):
+                from ..commands._completion_engine import compute_completions
+
+                result = compute_completions(text, len(text))
+                if result.kind == "empty" or not result.candidates:
+                    self._hide_completions()
+                    return
+
+                self._comp_items = result.candidates
+                self._comp_index = -1
+                c0 = result.candidates[0]
+                self._comp_base = text[: c0.replace_start]
+                self._render_completions()
+                comp_widget.display = True
+                return
+
+            # @file mention completion (only for non-command input)
             if "@" in text:
-                candidates = complete_file_mention(text, workspace_dir)
-                if candidates:
-                    import re as _re
-
-                    from ..commands._completion_engine import CompletionCandidate
-
-                    before = text[: len(event.text_area.text)]
-                    m = _re.search(r"@[^\s]*$", before)
-                    start = m.start() if m else len(event.text_area.text)
-                    end = len(event.text_area.text)
-                    self._comp_items = [
-                        CompletionCandidate(
-                            text=path if path.startswith("@") else f"@{path}",
-                            description=type_hint,
-                            replace_start=start,
-                            replace_end=end,
-                        )
-                        for path, type_hint in candidates
-                    ]
+                file_items = self._build_file_candidates(text)
+                if file_items:
+                    self._comp_items = file_items
                     self._comp_index = -1
                     self._render_completions()
                     comp_widget.display = True
                     return
 
-            if text.startswith("/"):
-                from ..commands._completion_engine import compute_completions
-
-                # ``ChatTextArea`` (Textual ``TextArea`` subclass) doesn't
-                # expose ``cursor_position`` directly; the public
-                # ``cursor_location`` is a (row, col) namedtuple. For
-                # completion we only need the prefix up to the cursor,
-                # and in practice the user is always typing at the end
-                # of the input — so ``len(text)`` is the correct offset
-                # without needing to walk the document line model.
-                result = compute_completions(
-                    event.text_area.text, len(event.text_area.text)
-                )
-                if result.kind == "empty" or not result.candidates:
-                    self._hide_completions()
-                    return
-
-                self._comp_items = sorted(result.candidates, key=lambda c: c.text)
-                self._comp_index = -1
-                self._render_completions()
-                comp_widget.display = True
-                return
             self._hide_completions()
 
         def _render_queue_indicator(self) -> None:
@@ -2497,6 +2540,10 @@ def run_textual_interactive(
 
         def action_cancel_queued(self) -> None:
             """Cancel the last queued message on Esc."""
+            comp_widget = self.query_one("#completions", Static)
+            if comp_widget.display:
+                self._hide_completions()
+                return
             # Cancel ask_user if active (widget handles Escape internally,
             # but this is a safety fallback)
             if self._ask_user_future and not self._ask_user_future.done():
@@ -2566,7 +2613,11 @@ def run_textual_interactive(
             # Handle completion list selection (up key)
             comp_widget = self.query_one("#completions", Static)
             if comp_widget.display and self._comp_items:
-                self._comp_index = (self._comp_index - 1) % len(self._comp_items)
+                n = len(self._comp_items)
+                if self._comp_index <= 0:
+                    self._comp_index = n - 1
+                else:
+                    self._comp_index -= 1
                 self._render_completions()
                 return
 
@@ -2703,19 +2754,43 @@ def run_textual_interactive(
             prompt.focus()
 
         def action_tab_complete(self) -> None:
-            """Handle TAB: cycle completions when visible, otherwise no-op.
-
-            Registered as a priority binding so it intercepts before Textual's
-            default focus-next behaviour, which would steal focus from the input
-            and lose the cursor.
-            """
+            """Handle TAB: apply highlighted completion, or trigger if not visible."""
             comp_widget = self.query_one("#completions", Static)
             if not (comp_widget.display and self._comp_items):
-                # No completions active — keep focus on the prompt.
-                self.query_one("#prompt", ChatTextArea).focus()
+                # Try to trigger completions from current input
+                prompt = self.query_one("#prompt", ChatTextArea)
+                prompt.focus()
+                text = prompt.value
+                if text.startswith("/"):
+                    from ..commands._completion_engine import compute_completions
+
+                    result = compute_completions(text, len(text))
+                    if result.kind != "empty" and result.candidates:
+                        self._comp_items = result.candidates
+                        self._comp_index = -1
+                        self._comp_base = text[: result.candidates[0].replace_start]
+                        self._render_completions()
+                        comp_widget.display = True
+                elif "@" in text:
+                    file_items = self._build_file_candidates(text)
+                    if file_items:
+                        self._comp_items = file_items
+                        self._comp_index = -1
+                        self._render_completions()
+                        comp_widget.display = True
                 return
-            self._comp_index = (self._comp_index + 1) % len(self._comp_items)
+            if self._comp_index < 0:
+                self._comp_index = 0
+            self._render_completions()
             self._apply_selected_completion()
+            selected = self._comp_items[self._comp_index]
+            is_file_dir = selected.text.startswith("@") and selected.text.rstrip(
+                '"'
+            ).endswith("/")
+            if is_file_dir:
+                return
+            if selected.text.startswith("@"):
+                self._hide_completions()
 
         def _handle_completion_enter(self) -> bool:
             """Called by ChatTextArea before submitting on Enter.
@@ -2732,16 +2807,26 @@ def run_textual_interactive(
             if not (comp_widget.display and self._comp_items):
                 return False
 
-            # If no item highlighted yet, select the first one
             if self._comp_index < 0:
                 self._comp_index = 0
 
-            self._apply_selected_completion()
-            self._hide_completions()
+            selected = self._comp_items[self._comp_index]
+            is_file_dir = selected.text.startswith("@") and selected.text.rstrip(
+                '"'
+            ).endswith("/")
+            with self.prevent(ChatTextArea.Changed):
+                self._apply_selected_completion()
+            if not is_file_dir:
+                self._hide_completions()
             return True
 
         def _apply_selected_completion(self) -> None:
-            """Apply the currently selected completion to the input field."""
+            """Apply the currently selected completion to the input field.
+
+            Callers are responsible for suppressing or allowing Changed
+            events (e.g. ``self.prevent(ChatTextArea.Changed)`` around
+            the call when the popup should stay hidden).
+            """
             if self._comp_index < 0 or self._comp_index >= len(self._comp_items):
                 return
             candidate = self._comp_items[self._comp_index]
@@ -2750,41 +2835,41 @@ def run_textual_interactive(
             if candidate.text.startswith("@"):
                 import re as _re
 
+                is_dir = candidate.text.rstrip('"').endswith("/")
+                suffix = "" if is_dir else " "
                 current = prompt.value
-                m = _re.search(r"@[^\s]*$", current)
+                m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', current)
                 if m:
-                    new_val = current[: m.start()] + candidate.text + " "
+                    new_val = current[: m.start()] + candidate.text + suffix
                 else:
-                    new_val = current + candidate.text + " "
+                    new_val = current + candidate.text + suffix
                 prompt.value = new_val
             else:
-                current = prompt.value
-                # If the suffix already starts with a space (e.g. user
-                # typed ``/mcp a `` and the engine excluded the trailing
-                # space from ``replace_end``), don't add another one.
-                suffix = current[candidate.replace_end :]
-                sep = "" if suffix.startswith(" ") else " "
-                prompt.value = (
-                    current[: candidate.replace_start] + candidate.text + sep + suffix
-                )
+                prompt.value = self._comp_base + candidate.text + " "
 
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
-            comp_widget = self.query_one("#completions", Static)
-            comp_widget.display = False
+            self.query_one("#completions", Static).display = False
 
         def _render_completions(self) -> None:
             comp_text = Text()
+            last_cat = ""
             for i, candidate in enumerate(self._comp_items):
                 cmd, desc = candidate.text, candidate.description
+                cat = getattr(candidate, "category", "")
+                if cat and cat != last_cat:
+                    if last_cat:
+                        comp_text.append("\n")
+                    comp_text.append(f" {cat}\n", style="bold #6b7280")
+                    last_cat = cat
                 if i == self._comp_index:
-                    comp_text.append("\u25b8 ", style="bold")
-                    comp_text.append(f"{cmd:<30}", style="bold")
+                    comp_text.append("  \u25b8 ", style="bold")
+                    comp_text.append(f"{cmd:<28}", style="bold")
                     comp_text.append(desc, style="bold")
                 else:
-                    comp_text.append("  ", style="#888888")
-                    comp_text.append(f"{cmd:<30}", style="#888888")
+                    comp_text.append("    ", style="#888888")
+                    comp_text.append(f"{cmd:<28}", style="#888888")
                     comp_text.append(desc, style="#888888")
                 if i < len(self._comp_items) - 1:
                     comp_text.append("\n")
@@ -3118,6 +3203,17 @@ def run_textual_interactive(
                     channels=channels_info,
                 )
             )
+
+        async def _render_history_then_pending_notice(self, thread_id: str) -> None:
+            await self._render_history(thread_id)
+            self._append_pending_skill_proposals_notice()
+
+        def _append_pending_skill_proposals_notice(self) -> None:
+            from .commands import _pending_skill_proposals_message
+
+            message = _pending_skill_proposals_message(self._workspace_dir)
+            if message:
+                self._append_system(message, style="yellow")
 
         def _render_status(self) -> None:
             status = self.query_one("#status", Static)

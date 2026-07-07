@@ -30,7 +30,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.llm.models import list_models_by_provider
+from EvoScientist.llm.models import list_model_picker_entries
 
 
 async def get_models(_request: Request) -> JSONResponse:
@@ -62,14 +62,11 @@ async def get_models(_request: Request) -> JSONResponse:
     cfg = await asyncio.to_thread(get_effective_config)
     entries = [
         {"name": name, "model_id": model_id, "provider": provider}
-        for name, model_id, provider in list_models_by_provider()
+        for name, model_id, provider in await list_model_picker_entries(
+            getattr(cfg, "ollama_base_url", None),
+            include_custom_ollama=False,
+        )
     ]
-    ollama_base_url = getattr(cfg, "ollama_base_url", None)
-    if ollama_base_url:
-        from EvoScientist.llm.ollama_discovery import discover_ollama_models
-
-        for name in await discover_ollama_models(ollama_base_url, timeout=1.5):
-            entries.append({"name": name, "model_id": name, "provider": "ollama"})
     return JSONResponse(
         {
             "entries": entries,

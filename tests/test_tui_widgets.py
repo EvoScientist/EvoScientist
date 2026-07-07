@@ -746,11 +746,11 @@ class TestCompletionLogic(unittest.TestCase):
                             )
                         )
                 self._comp_index: int = comp_index
+                self._comp_base: str = ""
                 self._fake_input = fake_input
                 self._fake_completions = fake_completions
 
             def query_one(self, selector, widget_type=None):
-                # Match by selector string; widget_type is ignored in stub
                 if "prompt" in selector:
                     return fake_input
                 if "completions" in selector:
@@ -764,59 +764,65 @@ class TestCompletionLogic(unittest.TestCase):
                 if not (comp_widget.display and self._comp_items):
                     self.query_one("#prompt").focus()
                     return
-                self._comp_index = (self._comp_index + 1) % len(self._comp_items)
+                if self._comp_index < 0:
+                    self._comp_index = 0
+                self._render_completions()
                 self._apply_selected_completion()
+                selected = self._comp_items[self._comp_index]
+                is_file_dir = selected.text.startswith("@") and selected.text.rstrip(
+                    '"'
+                ).endswith("/")
+                if is_file_dir:
+                    return
+                if selected.text.startswith("@"):
+                    self._hide_completions()
 
             def _apply_selected_completion(self):
                 candidate = self._comp_items[self._comp_index]
                 prompt = self.query_one("#prompt")
                 if candidate.text.startswith("@"):
-                    prompt.value = candidate.text + " "
+                    is_dir = candidate.text.rstrip('"').endswith("/")
+                    suffix = "" if is_dir else " "
+                    prompt.value = candidate.text + suffix
                 else:
-                    current = prompt.value
-                    suffix = current[candidate.replace_end :]
-                    sep = "" if suffix.startswith(" ") else " "
-                    prompt.value = (
-                        current[: candidate.replace_start]
-                        + candidate.text
-                        + sep
-                        + suffix
-                    )
+                    prompt.value = self._comp_base + candidate.text + " "
                 prompt.cursor_position = len(prompt.value)
                 self._render_completions()
 
             def _hide_completions(self):
                 self._comp_items = []
                 self._comp_index = -1
-                comp_widget = self.query_one("#completions")
-                comp_widget.display = False
+                self.query_one("#completions").display = False
 
             def _render_completions(self):
                 comp_widget = self.query_one("#completions")
                 comp_text = Text()
                 for i, candidate in enumerate(self._comp_items):
                     cmd, desc = candidate.text, candidate.description
+                    cat = getattr(candidate, "category", "")
+                    if cat and (
+                        i == 0
+                        or getattr(self._comp_items[i - 1], "category", "") != cat
+                    ):
+                        if i > 0:
+                            comp_text.append("\n")
+                        comp_text.append(f" {cat}\n", style="bold #6b7280")
                     if i == self._comp_index:
-                        comp_text.append("\u25b8 ", style="bold")
-                        comp_text.append(f"{cmd:<22}", style="bold")
+                        comp_text.append("  \u25b8 ", style="bold")
+                        comp_text.append(f"{cmd:<28}", style="bold")
                         comp_text.append(desc, style="bold")
                     else:
-                        comp_text.append("  ", style="#888888")
-                        comp_text.append(f"{cmd:<22}", style="#888888")
+                        comp_text.append("    ", style="#888888")
+                        comp_text.append(f"{cmd:<28}", style="#888888")
                         comp_text.append(desc, style="#888888")
                     if i < len(self._comp_items) - 1:
                         comp_text.append("\n")
                 comp_widget.update(comp_text)
 
             def on_key(self, key: str):
-                """Simplified version matching the real on_key logic.
-
-                Up/down are handled by priority bindings, not on_key.
-                Only enter needs on_key handling.
-                """
                 comp_widget = self.query_one("#completions")
                 if not (comp_widget.display and self._comp_items):
-                    return False  # did nothing
+                    return False
                 if key == "enter" and self._comp_index >= 0:
                     self._hide_completions()
                     return True
@@ -845,15 +851,15 @@ class TestCompletionLogic(unittest.TestCase):
         assert app._comp_index == 0
         assert app._fake_input.value == "/resume "
 
-    def test_tab_complete_wraps_around(self):
-        """TAB past the last item should wrap back to index 0."""
+    def test_tab_applies_current_highlight(self):
+        """TAB on an already-highlighted item should apply it, not advance."""
         items = [("/resume", "d1"), ("/run", "d2")]
-        app = self._make_app(comp_items=items, comp_index=1)  # last item
+        app = self._make_app(comp_items=items, comp_index=1)  # second item
         app._fake_completions.display = True
 
         app.action_tab_complete()
-        assert app._comp_index == 0
-        assert app._fake_input.value == "/resume "
+        assert app._comp_index == 1
+        assert app._fake_input.value == "/run "
 
     def test_tab_complete_updates_cursor_position(self):
         """TAB should position the cursor at the end of the completed text."""
@@ -1024,32 +1030,23 @@ class TestCompletionLogic(unittest.TestCase):
         result = compute_completions(text, len(text))  # cursor at end
         assert result.candidates
         for c in result.candidates:
-            # ``a`` is at position 5; trailing space at position 6.
-            # ``replace_start=5`` (start of the partial prefix),
-            # ``replace_end=6`` (right after the prefix, before the
-            # trailing space — so the trailing space is preserved in
-            # the suffix during apply).
+            # ``replace_start`` must point to the start of the partial
+            # ``a`` (position 5) so that ``_comp_base`` = ``/mcp ``.
             assert c.replace_start == 5
-            assert c.replace_end == 6
 
     def test_engine_subcommand_trailing_space_apply_does_not_double_space(self):
         """Applying the completion for ``/mcp a `` + accept 'add' must
-        not produce ``/mcp add  `` (double space). The engine's
-        replace range excludes the trailing space; the apply step
-        must skip the separator when the suffix already starts with one.
+        not produce ``/mcp add  `` (double space). The TUI uses
+        ``_comp_base + candidate.text + " "`` which avoids double spaces.
         """
         from EvoScientist.commands._completion_engine import compute_completions
 
         text = "/mcp a "
         result = compute_completions(text, len(text))
         c = result.candidates[0]
-        current = text
-        # Apply logic that mirrors the TUI ``_apply_selected_completion``.
-        suffix = current[c.replace_end :]
-        sep = "" if suffix.startswith(" ") else " "
-        new_value = current[: c.replace_start] + c.text + sep + suffix
-        # Expected: ``/mcp add `` — the ``a`` is replaced with ``add``,
-        # the trailing space is preserved via the suffix. No double space.
+        # TUI apply logic: base (text[:replace_start]) + candidate + " "
+        comp_base = text[: c.replace_start]
+        new_value = comp_base + c.text + " "
         assert new_value == f"/mcp {c.text} "
 
     def test_engine_trailing_space_replace_range(self):

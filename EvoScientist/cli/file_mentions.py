@@ -462,7 +462,7 @@ def complete_file_mention(
                 rel = entry.relative_to(base)
                 suffix = "/" if entry.is_dir() else ""
                 candidates_raw.append(rel.as_posix() + suffix)
-        except OSError:
+        except (OSError, ValueError):
             return []
         return [
             (_format_mention(r), "dir" if r.endswith("/") else _type_hint(r))
@@ -481,17 +481,17 @@ def complete_file_mention(
     except OSError:
         pass
 
-    combined = all_files + dir_candidates
-
-    # Determine query: if partial has a slash, search within that subtree
     if "/" in partial:
-        # Filter candidates to those starting with the directory prefix
+        # Search within the subtree for the given directory prefix
+        combined = all_files + dir_candidates
         dir_prefix = partial.rsplit("/", 1)[0] + "/"
         file_query = partial.rsplit("/", 1)[1]
         subtree = [c for c in combined if c.startswith(dir_prefix)]
         results = _fuzzy_search(file_query, subtree)
     else:
-        results = _fuzzy_search(partial, combined)
+        # Depth 1 only: top-level files and directories
+        top_files = [f for f in all_files if "/" not in f]
+        results = _fuzzy_search(partial, top_files + dir_candidates)
 
     if quoted:
         # User opened a quoted mention — close it for them.

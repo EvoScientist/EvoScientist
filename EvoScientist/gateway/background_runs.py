@@ -23,6 +23,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
+from ..langgraph_dev.sdk import (
+    configured_langgraph_dev_url,
+    langgraph_dev_headers,
+)
+
 if TYPE_CHECKING:
     from langgraph_sdk.schema import Config, Input, Run, Thread
 
@@ -33,7 +38,6 @@ DEFAULT_BACKGROUND_RUN_TERMINAL_STATUSES = frozenset(
 )
 DEFAULT_BACKGROUND_RUN_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_BACKGROUND_RUN_MAX_POLL_FAILURES = 3
-DEFAULT_BACKGROUND_RUN_HEADERS = {"x-auth-scheme": "langsmith"}
 
 _background_run_watcher_tasks: set[asyncio.Task[None]] = set()
 
@@ -163,15 +167,11 @@ class BackgroundRunWatcherConfig:
 
 def default_background_run_url() -> str:
     """Return the configured local ``langgraph dev`` URL."""
-    from ..EvoScientist import _ensure_config
-
-    cfg = _ensure_config()
-    port = int(getattr(cfg, "langgraph_dev_port", 6174))
-    return f"http://localhost:{port}"
+    return configured_langgraph_dev_url()
 
 
 def _headers(headers: Mapping[str, str] | None) -> dict[str, str]:
-    return dict(DEFAULT_BACKGROUND_RUN_HEADERS if headers is None else headers)
+    return langgraph_dev_headers(headers)
 
 
 def _create_thread(

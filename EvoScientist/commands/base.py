@@ -104,6 +104,7 @@ class Command(ABC):
     alias: ClassVar[list[str]] = []
     description: str
     arguments: ClassVar[list[Argument]] = []
+    category: ClassVar[str] = "General"
     subcommands: ClassVar[list[SubCommand]] = []
     # When False, callers may dispatch this command without waiting for
     # the background agent load to finish — important so recovery
@@ -119,6 +120,37 @@ class Command(ABC):
         ``/channel start`` vs ``/channel status``).
         """
         return self.requires_agent
+
+    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+        """Return completions for args typed after the command name.
+
+        Default walks :attr:`subcommands` for the first positional token
+        only.  Override for deeper levels (e.g. server names, thread IDs).
+        """
+        if not self.subcommands:
+            return []
+        if len(tokens) <= 1:
+            prefix = tokens[0].lower() if tokens else ""
+            matches = [
+                (sc.name, sc.description)
+                for sc in self.subcommands
+                if sc.name.startswith(prefix)
+            ]
+            # Exact match — subcommand already complete, hide popup
+            if len(matches) == 1 and matches[0][0] == prefix:
+                return []
+            return matches
+        # partial + trailing space: /mcp a  → still show "add"
+        if len(tokens) == 2 and tokens[1] == "":
+            prefix = tokens[0].lower()
+            if any(sc.name == prefix for sc in self.subcommands):
+                return []
+            return [
+                (sc.name, sc.description)
+                for sc in self.subcommands
+                if sc.name.startswith(prefix)
+            ]
+        return []
 
     @abstractmethod
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:

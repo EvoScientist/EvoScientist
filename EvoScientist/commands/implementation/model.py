@@ -47,6 +47,7 @@ class ModelCommand(Command):
 
     name = "/model"
     description = "Switch model (--save to persist)"
+    category = "Model"
     # ``--save`` is parsed manually in ``execute`` via ``"--save" in args``;
     # ``type=bool`` below is declarative metadata, not enforced by the manager.
     arguments: ClassVar[list[Argument]] = [
@@ -66,7 +67,7 @@ class ModelCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...EvoScientist import _ensure_config
-        from ...llm.models import list_models_by_provider
+        from ...llm.models import list_model_picker_entries
 
         cfg = _ensure_config()
         current_model = cfg.model
@@ -97,22 +98,10 @@ class ModelCommand(Command):
             )
             return
 
-        entries = list_models_by_provider()
-
-        # Ollama models are locally-installed — probe the daemon for the list
-        # the user has actually pulled. Gated on ollama_base_url being set
-        # (issue non-goal forbids implicit localhost detection).
-        ollama_base_url = getattr(cfg, "ollama_base_url", None)
-        if ollama_base_url:
-            from ...llm.ollama_discovery import discover_ollama_models
-
-            detected = await discover_ollama_models(ollama_base_url, timeout=1.5)
-            for detected_name in detected:
-                entries.append((detected_name, detected_name, "ollama"))
-            # Always append the sentinel so users can type a name even when
-            # the daemon is down or no models have been pulled yet. The widget
-            # swaps the sentinel name for the typed value before posting Picked.
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+        entries = await list_model_picker_entries(
+            getattr(cfg, "ollama_base_url", None),
+            include_custom_ollama=True,
+        )
 
         result = await ctx.ui.wait_for_model_pick(
             entries,
