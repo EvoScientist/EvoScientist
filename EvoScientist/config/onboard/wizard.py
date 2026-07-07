@@ -197,7 +197,6 @@ def _configure_provider_auth_mode(
     provider: str,
     *,
     strict: bool,
-    reset_stale_oauth_modes: bool,
 ) -> None:
     """Configure Anthropic/OpenAI auth mode for the selected provider."""
     if provider == "anthropic":
@@ -210,8 +209,22 @@ def _configure_provider_auth_mode(
             config.openai_auth_mode = "api_key"
         else:
             config.openai_auth_mode = _step_openai_auth_mode(config)
-    elif reset_stale_oauth_modes:
+
+
+def _active_llm_providers(config: EvoScientistConfig) -> set[str]:
+    """Return providers currently selected by the main and auxiliary models."""
+    providers = {config.provider}
+    if config.auxiliary_provider:
+        providers.add(config.auxiliary_provider)
+    return providers
+
+
+def _reconcile_oauth_modes(config: EvoScientistConfig) -> None:
+    """Clear OAuth flags for providers no selected model uses."""
+    active_providers = _active_llm_providers(config)
+    if "anthropic" not in active_providers:
         config.anthropic_auth_mode = "api_key"
+    if "openai" not in active_providers:
         config.openai_auth_mode = "api_key"
 
 
@@ -308,7 +321,6 @@ def _configure_provider_connection(
     skip_validation: bool,
     preset_api_key: str | None = None,
     require_api_key=None,
-    reset_stale_oauth_modes: bool,
 ) -> list[str]:
     """Configure provider base URL/region, auth mode, and API key."""
     ollama_detected_models = _configure_provider_base_url(
@@ -320,7 +332,6 @@ def _configure_provider_connection(
         config,
         provider,
         strict=strict,
-        reset_stale_oauth_modes=reset_stale_oauth_modes,
     )
     _configure_provider_api_key(
         config,
@@ -679,7 +690,6 @@ def run_onboard(
                             require_api_key=lambda provider=provider: _require(
                                 "api_key", f"{provider} API key"
                             ),
-                            reset_stale_oauth_modes=True,
                         )
                     except GoBack:
                         # User picked "← Back" — restore config to its state at the
@@ -702,6 +712,7 @@ def run_onboard(
                         continue
                     break  # Provider setup succeeded — exit sub-loop
 
+                _reconcile_oauth_modes(config)
                 _autosave(config)
             else:
                 # Provider section skipped — keep prior provider value to drive
@@ -763,7 +774,6 @@ def run_onboard(
                                         aux_provider,
                                         strict=False,
                                         skip_validation=skip_validation,
-                                        reset_stale_oauth_modes=False,
                                     )
                                 )
                             except GoBack:
@@ -791,6 +801,7 @@ def run_onboard(
                     # Skip: single driver — clear any prior auxiliary config.
                     config.auxiliary_provider = ""
                     config.auxiliary_model = ""
+                _reconcile_oauth_modes(config)
                 _autosave(config)
 
             if "tavily" in sections_to_run:

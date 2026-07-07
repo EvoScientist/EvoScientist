@@ -184,6 +184,38 @@ class TestSharedConstantsAlignment:
                 )
 
 
+class TestOAuthModeReconcile:
+    def test_reconcile_preserves_auxiliary_openai_oauth(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            auxiliary_provider="openai",
+            auxiliary_model="gpt-5.5",
+            openai_auth_mode="oauth",
+            anthropic_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.openai_auth_mode == "oauth"
+        assert config.anthropic_auth_mode == "api_key"
+
+    def test_reconcile_preserves_auxiliary_provider_without_model(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            auxiliary_provider="openai",
+            auxiliary_model="",
+            openai_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.openai_auth_mode == "oauth"
+
+
 # =============================================================================
 # Test render_progress
 # =============================================================================
@@ -1529,6 +1561,48 @@ class TestRunOnboard:
         assert final_config.openai_api_key == ""
         mock_q.password.assert_not_called()
         mock_auth.assert_called_once_with("codex")
+
+    def test_auxiliary_reconfigure_clears_unused_openai_oauth(self):
+        """Switching co-pilot away from OpenAI clears stale OpenAI OAuth mode."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                anthropic_auth_mode="oauth",
+                auxiliary_provider="openai",
+                auxiliary_model="gpt-5.5",
+                openai_auth_mode="oauth",
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "minimax",  # Auxiliary provider no longer uses OpenAI
+                "global",  # MiniMax region
+                "minimax-m2",  # Auxiliary model
+            ]
+            mock_q.password.return_value.ask.side_effect = [
+                "sk-minimax",  # MiniMax API key
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "minimax"
+        assert final_config.openai_auth_mode == "api_key"
+        assert final_config.anthropic_auth_mode == "oauth"
 
     def test_auxiliary_custom_provider_collects_base_url(self):
         """Regression for the custom-provider fix: a custom auxiliary provider
