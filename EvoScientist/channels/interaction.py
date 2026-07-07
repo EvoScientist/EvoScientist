@@ -23,6 +23,7 @@ rather than growing a third driver copy.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -455,6 +456,25 @@ async def resolve_ask_user(
     return {"answers": answers, "status": "answered"}
 
 
+@dataclass
+class ApprovalOutcome:
+    """Result of :func:`resolve_approval`.
+
+    ``decisions`` is the approve-all payload on approve/auto, or ``None``
+    when the action was declined (reject / timeout / stop / unrecognized).
+
+    ``unrecognized_reply`` carries the raw reply text when parsing failed.
+    The engine centralizes *parsing* but does not decide the transport
+    policy for unparseable text — the drivers do: the consumer rejects the
+    pending action and refeeds the text as a new agent turn (a channel user
+    who ignores the prompt and types a fresh instruction must not lose it);
+    the CLI bridge sends :data:`UNRECOGNIZED_FEEDBACK` and declines.
+    """
+
+    decisions: list[dict] | None = None
+    unrecognized_reply: str | None = None
+
+
 async def resolve_approval(
     action_requests: list,
     io: InteractionIO,
@@ -462,44 +482,47 @@ async def resolve_approval(
     session_key: str,
     *,
     timeout: float = HITL_APPROVAL_TIMEOUT,
-) -> list[dict] | None:
-    """Drive a HITL approval interrupt to a decisions payload.
+) -> ApprovalOutcome:
+    """Drive a HITL approval interrupt to an :class:`ApprovalOutcome`.
 
     Auto-resolves via *policy* (session grant or config rule) without
     prompting.  Otherwise sends the approval prompt (with capability-driven
     buttons), waits for a reply, and parses it.  ``/stop`` cancels silently
-    (it already got its own ack from the transport's stop fast-path).
-
-    Returns an approve-all ``decisions`` list on approve/auto, or ``None``
-    on reject / unrecognized / timeout / stop.
+    (it already got its own ack from the transport's stop fast-path).  An
+    unrecognized reply declines *without feedback* and hands the raw text
+    back to the driver via ``unrecognized_reply`` (see
+    :class:`ApprovalOutcome` for the per-driver policy).
     """
     auto = policy.auto_decision(session_key, action_requests)
     if auto is not None:
-        return auto
+        return ApprovalOutcome(decisions=auto)
 
     has_buttons = bool(io.capabilities.inline_buttons)
     prompt = format_approval_prompt(action_requests, with_buttons=has_buttons)
     metadata = approval_prompt_metadata(io.base_metadata, with_buttons=has_buttons)
     if not await io.send(prompt, metadata=metadata):
-        return None
+        return ApprovalOutcome()
 
     reply = await io.wait_reply(timeout=timeout)
     if not reply:
         await io.send(APPROVAL_TIMEOUT_FEEDBACK)
-        return None
+        return ApprovalOutcome()
 
     if is_stop_command(reply):
-        return None
+        return ApprovalOutcome()
 
     decision = parse_approval_reply(reply)
     if decision == "auto":
         policy.grant_session(session_key)
         await io.send(APPROVED_AUTO_FEEDBACK)
-        return approve_decisions(action_requests)
+        return ApprovalOutcome(decisions=approve_decisions(action_requests))
     if decision == "approve":
         await io.send(APPROVED_FEEDBACK)
-        return approve_decisions(action_requests)
+        return ApprovalOutcome(decisions=approve_decisions(action_requests))
+    if decision == "reject":
+        await io.send(REJECTED_FEEDBACK)
+        return ApprovalOutcome()
 
-    # reject or unrecognized — send the matching feedback, then decline.
-    await io.send(decision_feedback(decision))
-    return None
+    # Unrecognized — decline and report the raw text; the driver chooses
+    # the feedback / refeed policy.
+    return ApprovalOutcome(unrecognized_reply=reply)

@@ -208,6 +208,52 @@ class TestHitlPromptBridge:
             )
         assert result is None
 
+    def test_unrecognized_reply_declines_without_refeed(self, monkeypatch):
+        """CLI-bridge policy: unparseable reply → explicit notice, NO refeed.
+
+        Matches the pre-engine cli/channel.py path byte-for-byte: the reply
+        is consumed by the interception registry (never enqueued as a new
+        turn) and the user gets "Unrecognized reply. Action rejected.".
+        Only the serve-mode consumer refeeds — see
+        TestConsumerUnrecognizedRefeed in tests/test_interaction_engine.py.
+        """
+        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        with _BusLoopThread() as loop:
+            monkeypatch.setattr(channel_mod, "_bus_loop", loop)
+            monkeypatch.setattr(channel_mod, "_manager", None)
+            bus = MessageBus()
+            msg = ChannelMessage(
+                msg_id="m1",
+                content="",
+                sender="u1",
+                channel_type="fake",
+                chat_id="chat1",
+                bus_ref=bus,
+                metadata={},
+            )
+            _feed_reply_when_ready(loop, "fake:chat1", "do something else instead")
+            result = channel_mod.channel_hitl_prompt(
+                [{"name": "execute", "args": {"command": "ls"}}], msg
+            )
+            assert result is None
+
+            # Outbound: prompt, then the exact old unrecognized notice.
+            async def _drain():
+                out = []
+                while True:
+                    try:
+                        m = await asyncio.wait_for(bus.consume_outbound(), timeout=0.2)
+                    except TimeoutError:
+                        return out
+                    out.append(m.content)
+
+            contents = asyncio.run_coroutine_threadsafe(_drain(), loop).result(
+                timeout=5
+            )
+        assert contents[-1] == "Unrecognized reply. Action rejected."
+        # No refeed: nothing was enqueued for the main thread.
+        assert channel_mod._message_queue.empty()
+
     def test_approve_all_grants_channel_session(self, monkeypatch):
         monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
         with _BusLoopThread() as loop:

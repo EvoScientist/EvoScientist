@@ -13,7 +13,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
@@ -24,6 +24,7 @@ from .capabilities import ChannelCapabilities
 from .interaction import (
     ASK_USER_TIMEOUT,
     HITL_APPROVAL_TIMEOUT,
+    REJECTED_FEEDBACK,
     ApprovalPolicy,
     InteractionIO,
     PendingReplyRegistry,
@@ -385,7 +386,20 @@ class InboundConsumer:
             return
 
         async with self._chat_locks[session_key]:
-            await self._stream_with_hitl(msg, channel, thread_id, session_key)
+            refeed = await self._stream_with_hitl(msg, channel, thread_id, session_key)
+
+        # An unrecognized reply to a pending approval rejected the action
+        # and now becomes a NEW agent turn (pre-engine serve semantics).
+        # The lock was released above, so the previous turn has fully
+        # unwound before the refeed turn acquires it — same ordering as the
+        # old fall-through routing.  Loops in case the refeed turn hits
+        # another approval that is again answered with unparseable text.
+        while refeed is not None:
+            refeed_msg = replace(msg, content=refeed, message_id="", media=[])
+            async with self._chat_locks[session_key]:
+                refeed = await self._stream_with_hitl(
+                    refeed_msg, channel, thread_id, session_key
+                )
 
     async def _stream_with_hitl(
         self,
@@ -393,8 +407,13 @@ class InboundConsumer:
         channel: Channel | None,
         thread_id: str,
         session_key: str,
-    ) -> None:
-        """Stream agent events with HITL interrupt handling."""
+    ) -> str | None:
+        """Stream agent events with HITL interrupt handling.
+
+        Returns ``None`` normally.  When a pending approval is answered
+        with unrecognized text, returns that raw text so the caller can
+        refeed it as a new agent turn after this one unwinds.
+        """
         from langgraph.types import Command
 
         stream_input: GraphRunInput = msg.content
@@ -538,17 +557,28 @@ class InboundConsumer:
                 # reply wait, parsing (incl. /stop), and feedback strings.
                 action_reqs = interrupt_data.get("action_requests", [])
                 io = _ConsumerIO(self, msg, session_key)
-                decisions = await resolve_approval(
+                outcome = await resolve_approval(
                     action_reqs,
                     io,
                     self._approval_policy,
                     session_key,
                     timeout=_HITL_APPROVAL_TIMEOUT,
                 )
-                if decisions is None:
-                    return  # reject / timeout / stop — end the turn
+                if outcome.unrecognized_reply is not None:
+                    # Serve-mode policy (matches the pre-engine routing): an
+                    # unrecognized reply REJECTS the pending action, confirms
+                    # with the reject feedback, and is then processed as a
+                    # NEW agent turn — a user who ignores the prompt and
+                    # types a fresh instruction must not lose it.  The
+                    # refeed is returned to ``_handle_message``, which
+                    # starts the new turn only after this one has fully
+                    # unwound (same chat-lock ordering as before).
+                    await io.send(REJECTED_FEEDBACK)
+                    return outcome.unrecognized_reply
+                if outcome.decisions is None:
+                    return None  # reject / timeout / stop — end the turn
 
-                stream_input = Command(resume={"decisions": decisions})
+                stream_input = Command(resume={"decisions": outcome.decisions})
                 # continue to next HITL round
 
         except TimeoutError:

@@ -174,21 +174,21 @@ class TestResolveApproval:
         p.grant_session("tg:c1")
         io = FakeIO()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
-        assert result == [{"type": "approve"}]
+        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert io.sent == []  # no prompt, silent
 
     async def test_config_auto_approve_short_circuits(self, monkeypatch):
         monkeypatch.setattr(I, "config_auto_approve", lambda reqs: True)
         io = FakeIO()
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == [{"type": "approve"}]
+        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert io.sent == []
 
     async def test_approve(self, monkeypatch):
         monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
         io = FakeIO(["1"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == [{"type": "approve"}]
+        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert io.contents[0].startswith("⚠️ Approval Required")
         assert io.contents[-1] == I.APPROVED_FEEDBACK
 
@@ -196,7 +196,7 @@ class TestResolveApproval:
         monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
         io = FakeIO(["2"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result is None
+        assert result == I.ApprovalOutcome()
         assert io.contents[-1] == I.REJECTED_FEEDBACK
 
     async def test_approve_all_grants_session(self, monkeypatch):
@@ -204,7 +204,7 @@ class TestResolveApproval:
         io = FakeIO(["3"])
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
-        assert result == [{"type": "approve"}]
+        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert io.contents[-1] == I.APPROVED_AUTO_FEEDBACK
         assert p.is_session_granted("tg:c1")  # future prompts auto-approve
 
@@ -216,27 +216,33 @@ class TestResolveApproval:
         ]
         io = FakeIO(["1"])
         result = await I.resolve_approval(reqs, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == [{"type": "approve"}, {"type": "approve"}]
+        assert result.decisions == [{"type": "approve"}, {"type": "approve"}]
 
-    async def test_unrecognized_reply(self, monkeypatch):
+    async def test_unrecognized_reply_reported_not_judged(self, monkeypatch):
+        # The engine declines but hands the raw text back — the *driver*
+        # decides the feedback / refeed policy (consumer refeeds as a new
+        # turn; CLI bridge sends the unrecognized notice).
         monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
         io = FakeIO(["huh?"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result is None
-        assert io.contents[-1] == I.UNRECOGNIZED_FEEDBACK
+        assert result.decisions is None
+        assert result.unrecognized_reply == "huh?"
+        # No feedback sent by the engine itself on the unrecognized path.
+        assert I.UNRECOGNIZED_FEEDBACK not in io.contents
+        assert I.REJECTED_FEEDBACK not in io.contents
 
     async def test_timeout(self, monkeypatch):
         monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
         io = FakeIO([])  # times out
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result is None
+        assert result == I.ApprovalOutcome()
         assert io.contents[-1] == I.APPROVAL_TIMEOUT_FEEDBACK
 
     async def test_stop_command_silent_cancel(self, monkeypatch):
         monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
         io = FakeIO(["/stop"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result is None
+        assert result == I.ApprovalOutcome()
         # /stop already got its own ack; no reject/unrecognized feedback here.
         assert I.REJECTED_FEEDBACK not in io.contents
         assert I.UNRECOGNIZED_FEEDBACK not in io.contents
@@ -246,7 +252,7 @@ class TestResolveApproval:
         io = FakeIO(["1"])
         io.send_ok = False
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result is None
+        assert result == I.ApprovalOutcome()
 
     # ── R3: button-capability formatting + payload normalization ──
 
@@ -279,7 +285,7 @@ class TestResolveApproval:
         io = FakeIO(["3"], capabilities=QQ_CAPS)
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
-        assert result == [{"type": "approve"}]
+        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert p.is_session_granted("tg:c1")
 
 
@@ -331,3 +337,104 @@ class TestPendingReplyRegistry:
         reg.clear()
         got = await fut
         assert got is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Consumer driver: unrecognized-reply refeed (serve-mode policy)
+# ═══════════════════════════════════════════════════════════════════════
+# Pre-engine semantics that must survive the extraction: an unrecognized
+# reply while a HITL approval is pending REJECTS the pending action, sends
+# the "❌ 已拒绝" feedback, and the user's text is then processed as a NEW
+# agent turn — a user who ignores the prompt and types a fresh instruction
+# must not lose it.  (The CLI bridge deliberately does NOT refeed; see
+# tests/test_cli_channel_bridge.py.)
+
+
+class TestConsumerUnrecognizedRefeed:
+    async def test_unrecognized_reply_rejects_and_refeeds(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from EvoScientist.channels.bus.events import (
+            InboundMessage as BusInbound,
+        )
+        from EvoScientist.channels.bus.message_bus import MessageBus
+        from EvoScientist.channels.channel_manager import ChannelManager
+        from EvoScientist.channels.consumer import InboundConsumer
+        from tests.fakes import FakeGraphGateway, StubChannel
+
+        # Force the manual-prompt path (no config auto-approve).
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        mgr.register(StubChannel())
+
+        stream_calls = 0
+
+        async def _fake_stream(request):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                # First turn hits a HITL interrupt.
+                yield {
+                    "type": "interrupt",
+                    "interrupt_id": "main",
+                    "action_requests": [
+                        {"name": "execute", "args": {"command": "rm -rf /x"}}
+                    ],
+                    "review_configs": [],
+                }
+                return
+            # The refeed turn: echo what we were given.
+            yield {"type": "text", "content": f"handled: {request.message}"}
+            yield {"type": "done", "content": f"handled: {request.message}"}
+
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        consumer = InboundConsumer(
+            bus=bus,
+            manager=mgr,
+            agent=MagicMock(),
+            thread_id="",
+            graph_gateway=gateway,
+            max_concurrent=2,
+            max_pending=10,
+            inference_timeout=5.0,
+            drain_timeout=1.0,
+        )
+
+        task = asyncio.create_task(consumer.run())
+        try:
+            await bus.publish_inbound(
+                BusInbound(
+                    channel="stub", sender_id="u1", chat_id="c1", content="do the thing"
+                )
+            )
+
+            # 1. Approval prompt goes out.
+            prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+            assert prompt.content.startswith("⚠️ Approval Required")
+
+            # 2. User ignores the prompt and types a fresh instruction.
+            await bus.publish_inbound(
+                BusInbound(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="actually, summarize the report",
+                )
+            )
+
+            # 3. Pending action is rejected with the old serve feedback...
+            feedback = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+            assert feedback.content == "❌ 已拒绝"
+
+            # 4. ...and the text is processed as a NEW agent turn.
+            response = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
+            assert response.content == "handled: actually, summarize the report"
+
+            # The refeed reached the stream path as its own request.
+            assert stream_calls == 2
+            assert gateway.requests[-1].message == "actually, summarize the report"
+        finally:
+            await consumer.stop()
+            await task

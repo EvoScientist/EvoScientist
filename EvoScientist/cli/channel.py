@@ -28,6 +28,7 @@ from ..channels.capabilities import ChannelCapabilities
 from ..channels.interaction import (
     ASK_USER_TIMEOUT,
     HITL_APPROVAL_TIMEOUT,
+    UNRECOGNIZED_FEEDBACK,
     ApprovalPolicy,
     InteractionIO,
     PendingReplyRegistry,
@@ -741,7 +742,7 @@ def channel_hitl_prompt(
     from a background thread (CLI channel processing / TUI ``to_thread``).
 
     Returns the approval decisions list on approve/auto, or None on
-    reject / timeout / stop.
+    reject / unrecognized / timeout / stop.
     """
     if not (_bus_loop and msg.bus_ref):
         _channel_logger.debug("HITL: no bus_loop or bus_ref, rejecting")
@@ -757,14 +758,26 @@ def channel_hitl_prompt(
         channel_obj.capabilities if channel_obj is not None else ChannelCapabilities()
     )
     io = _BridgeIO(msg.bus_ref, msg, capabilities, session_key)
-    return _run_engine_on_bus(
-        resolve_approval(
+
+    async def _hitl_flow() -> list[dict] | None:
+        outcome = await resolve_approval(
             action_requests,
             io,
             _approval_policy,
             session_key,
             timeout=_HITL_APPROVAL_TIMEOUT,
-        ),
+        )
+        if outcome.unrecognized_reply is not None:
+            # CLI-bridge policy (matches the pre-engine cli/channel.py
+            # path): an unparseable reply declines with the explicit
+            # notice and is NOT refed as a new turn — only the serve-mode
+            # consumer refeeds.
+            await io.send(UNRECOGNIZED_FEEDBACK)
+            return None
+        return outcome.decisions
+
+    return _run_engine_on_bus(
+        _hitl_flow(),
         result_timeout=_HITL_APPROVAL_TIMEOUT + _ENGINE_RESULT_SLACK,
         on_error=lambda: None,
     )
