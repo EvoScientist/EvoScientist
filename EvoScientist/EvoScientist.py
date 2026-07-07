@@ -461,9 +461,12 @@ def _maybe_swap_async_subagents(
             out.append(s)
 
     if agent_specs and middleware is not None:
+        from .cli import async_notifier
         from .middleware.async_watcher import AsyncWatcherMiddleware
 
-        middleware.append(AsyncWatcherMiddleware(agent_specs))
+        # Composition root wires the concrete notifier port into the middleware;
+        # the middleware itself never imports the CLI layer.
+        middleware.append(AsyncWatcherMiddleware(agent_specs, notifier=async_notifier))
 
     # Forward the CLI's live (model, provider) into deepagents'
     # start/update_async_task tool calls so the deployed graph can
@@ -785,9 +788,15 @@ def _get_default_middleware(
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
     # must not spawn local OS processes.
     if not for_async_subagent:
+        from .cli import async_notifier
         from .middleware.background import BackgroundExecutionMiddleware
 
-        mw.append(BackgroundExecutionMiddleware())
+        # Inject the notifier port + the assembly-time dangerous-mode policy
+        # (agents rebuild on config change, so the captured flag never staler
+        # than the agent it lives on).
+        mw.append(
+            BackgroundExecutionMiddleware(async_notifier, dangerous=cfg.dangerous_mode)
+        )
 
     return mw
 

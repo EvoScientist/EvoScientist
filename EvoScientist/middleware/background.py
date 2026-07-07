@@ -11,7 +11,7 @@ sub-agents are *tasks*, future cron is *schedules*).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import ToolRuntime
@@ -19,6 +19,9 @@ from langchain_core.tools import tool
 
 from .. import background, paths
 from ..backends import prepare_sandbox_command
+
+if TYPE_CHECKING:
+    from .notifier import NotifierPort
 
 
 def _origin_thread_id(runtime: ToolRuntime | None) -> str | None:
@@ -29,11 +32,15 @@ def _origin_thread_id(runtime: ToolRuntime | None) -> str | None:
         return None
 
 
-def _notify_done(proc: background.BgProcess, origin_thread_id: str | None) -> None:
-    """Watcher ``on_exit`` hook: enqueue a completion notification (reuses async_notifier).
+def _notify_done(
+    proc: background.BgProcess,
+    origin_thread_id: str | None,
+    notifier: NotifierPort,
+) -> None:
+    """Watcher ``on_exit`` hook: enqueue a completion notification via the port.
 
-    Skipped for user-stopped processes (the user already knows). The notifier is imported
-    lazily to keep this module free of a load-time dependency on the CLI layer.
+    Skipped for user-stopped processes (the user already knows). The notifier
+    port owns the notification type, so this module never imports the CLI layer.
     """
     if proc.stopped:
         return
@@ -44,69 +51,69 @@ def _notify_done(proc: background.BgProcess, origin_thread_id: str | None) -> No
         status = "interrupted"  # terminated by a signal
     else:
         status = "error"
-    from ..cli import async_notifier
-
-    async_notifier._enqueue(
-        async_notifier.AsyncTaskNotification(
-            task_id=proc.process_id,
-            agent_name=proc.name,
-            status=status,
-            received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            prompt=proc.command,
-            kind="bg-process",
-            origin_cli_thread_id=origin_thread_id,
-        )
+    notifier.enqueue_bg_process_notification(
+        task_id=proc.process_id,
+        agent_name=proc.name,
+        status=status,
+        prompt=proc.command,
+        origin_cli_thread_id=origin_thread_id,
     )
 
 
-@tool(parse_docstring=True)
-def run_in_background(
-    command: str, name: str | None = None, runtime: ToolRuntime = None
-) -> str:
-    """Launch a long-running shell command in the background and return immediately.
+def _make_run_in_background(notifier: NotifierPort, dangerous: bool):
+    """Build the ``run_in_background`` tool bound to an injected notifier + policy.
 
-    Use for unbounded or very long tasks (model training, large downloads, servers)
-    that should not block the conversation. Output streams to a log file; poll it with
-    check_process and stop it with stop_process. For a bounded command that just needs
-    more time, prefer execute(..., timeout=N) instead of backgrounding.
-
-    Args:
-        command: The shell command to run in the background.
-        name: Optional short label to recognize the process later.
+    ``dangerous`` is captured from ``cfg.dangerous_mode`` at assembly (the agent
+    is rebuilt when config changes, so the captured value never goes stale), and
+    the notifier is the injected port used for the completion notification.
     """
-    cwd = str(paths.resolve_virtual_path("/"))
-    # Honor dangerous mode so background commands match `execute`'s policy
-    # (real-filesystem access, no virtual-path rewriting). Read the env flag that
-    # apply_config_to_env round-trips at startup (and the subprocess inherits) —
-    # cheaper than reloading the full config from disk on every launch, and uses
-    # the same truthy parsing as every other bool env flag.
-    from ..llm.models import _env_flag_enabled
 
-    dangerous = _env_flag_enabled("EVOSCIENTIST_DANGEROUS_MODE")
-    # Same path-rewriting + validation as execute (shared helper) so virtual paths
-    # resolve to the workspace and the command can't bypass the sandbox checks.
-    command, error = prepare_sandbox_command(
-        command, cwd, virtual_mode=not dangerous, dangerous=dangerous
-    )
-    if error:
-        return error
-    tid = _origin_thread_id(runtime)
-    process_id = background.launch(
-        command, cwd, name, origin_thread_id=tid, on_exit=lambda p: _notify_done(p, tid)
-    )
-    label = f" (name={name!r})" if name else ""
-    # In dangerous mode `/` is the real root, so advertise the real log path;
-    # in virtual mode `/.bg_processes/...` correctly maps to the workspace.
-    log_path = (
-        f"{cwd}/.bg_processes/{process_id}.log"
-        if dangerous
-        else f"/.bg_processes/{process_id}.log"
-    )
-    return (
-        f"Started background process {process_id}{label}. "
-        f"Output -> {log_path}. "
-        f"Poll with check_process('{process_id}'), stop with stop_process('{process_id}')."
-    )
+    @tool(parse_docstring=True)
+    def run_in_background(
+        command: str, name: str | None = None, runtime: ToolRuntime = None
+    ) -> str:
+        """Launch a long-running shell command in the background and return immediately.
+
+        Use for unbounded or very long tasks (model training, large downloads, servers)
+        that should not block the conversation. Output streams to a log file; poll it with
+        check_process and stop it with stop_process. For a bounded command that just needs
+        more time, prefer execute(..., timeout=N) instead of backgrounding.
+
+        Args:
+            command: The shell command to run in the background.
+            name: Optional short label to recognize the process later.
+        """
+        cwd = str(paths.resolve_virtual_path("/"))
+        # Same path-rewriting + validation as execute (shared helper) so virtual paths
+        # resolve to the workspace and the command can't bypass the sandbox checks.
+        command, error = prepare_sandbox_command(
+            command, cwd, virtual_mode=not dangerous, dangerous=dangerous
+        )
+        if error:
+            return error
+        tid = _origin_thread_id(runtime)
+        process_id = background.launch(
+            command,
+            cwd,
+            name,
+            origin_thread_id=tid,
+            on_exit=lambda p: _notify_done(p, tid, notifier),
+        )
+        label = f" (name={name!r})" if name else ""
+        # In dangerous mode `/` is the real root, so advertise the real log path;
+        # in virtual mode `/.bg_processes/...` correctly maps to the workspace.
+        log_path = (
+            f"{cwd}/.bg_processes/{process_id}.log"
+            if dangerous
+            else f"/.bg_processes/{process_id}.log"
+        )
+        return (
+            f"Started background process {process_id}{label}. "
+            f"Output -> {log_path}. "
+            f"Poll with check_process('{process_id}'), stop with stop_process('{process_id}')."
+        )
+
+    return run_in_background
 
 
 @tool(parse_docstring=True)
@@ -146,6 +153,11 @@ class BackgroundExecutionMiddleware(AgentMiddleware):
     Attached to the main agent only (async sub-agents must not spawn local processes).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, notifier: NotifierPort, *, dangerous: bool = False) -> None:
         super().__init__()
-        self.tools = [run_in_background, check_process, stop_process, list_processes]
+        self.tools = [
+            _make_run_in_background(notifier, dangerous),
+            check_process,
+            stop_process,
+            list_processes,
+        ]

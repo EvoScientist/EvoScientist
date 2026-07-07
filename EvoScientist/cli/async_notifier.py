@@ -117,6 +117,71 @@ def _enqueue(notification: AsyncTaskNotification) -> None:
     q.put(notification)
 
 
+def enqueue_task_notification(notification: AsyncTaskNotification) -> None:
+    """Public :class:`~EvoScientist.middleware.notifier.NotifierPort` entry point.
+
+    Route a completed-task notification onto the consumer queue. Thin wrapper
+    over :func:`_enqueue` so middleware can enqueue without reaching into the
+    module's private symbols.
+    """
+    _enqueue(notification)
+
+
+def enqueue_bg_process_notification(
+    *,
+    task_id: str,
+    agent_name: str,
+    status: str,
+    prompt: str = "",
+    origin_cli_thread_id: str | None = None,
+) -> None:
+    """Build and enqueue a background-process completion notification.
+
+    :class:`~EvoScientist.middleware.notifier.NotifierPort` entry point used by
+    the background middleware so it never constructs the CLI-owned
+    :class:`AsyncTaskNotification` itself — the ``kind="bg-process"`` tag and the
+    UTC ``received_at`` timestamp are filled in here.
+    """
+    _enqueue(
+        AsyncTaskNotification(
+            task_id=task_id,
+            agent_name=agent_name,
+            status=status,
+            received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            prompt=prompt,
+            kind="bg-process",
+            origin_cli_thread_id=origin_cli_thread_id,
+        )
+    )
+
+
+def pre_cancel_watcher(task_id: str) -> None:
+    """Cancel a stale watcher for ``task_id`` before a new run replaces it.
+
+    ``update_async_task`` starts a new run on the same ``thread_id`` with
+    ``multitask_strategy="interrupt"``, which closes the old run's stream
+    cleanly. Without pre-cancellation the old watcher would observe that clean
+    exit and enqueue a stale "success" notification before the new spawn can
+    replace it. Cancellation propagates ``CancelledError`` (a ``BaseException``)
+    which the watcher's ``except Exception:`` does not catch, so ``_enqueue``
+    never runs for the cancelled watcher.
+
+    No-op when there is no live watcher; swallows any error (a failed
+    pre-cancel only risks one stale notification, never a crashed tool call).
+    """
+    try:
+        old = _watcher_by_thread.get(task_id)
+        if old is not None and not old.done():
+            old.cancel()
+    except Exception:
+        logger.warning(
+            "Pre-cancel of stale watcher for task %s failed; a stale success "
+            "notification may be enqueued",
+            task_id,
+            exc_info=True,
+        )
+
+
 def has_pending_notifications(current_thread_id: str | None = None) -> bool:
     """Cheap predicate for poller idle paths — true iff there's anything to consume.
 
