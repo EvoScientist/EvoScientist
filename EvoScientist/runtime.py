@@ -1,4 +1,4 @@
-"""Process-wide owned async runtime for EvoScientist (audit finding #8).
+"""Process-wide owned async runtime for EvoScientist.
 
 A single persistent event loop, owned by a dedicated daemon thread
 (``evosci-runtime``), is the one place agent coroutines run in *every* mode.
@@ -7,12 +7,8 @@ reach the loop through exactly three primitives — :meth:`AgentRuntime.submit`,
 :meth:`AgentRuntime.run_sync`, :meth:`AgentRuntime.spawn` — plus the single-turn
 :meth:`AgentRuntime.turn` gate. Everything else is ``await``.
 
-This module owns the sole ``new_event_loop()`` call in the codebase and the
-Windows Proactor policy application (see :mod:`EvoScientist._winloop` and issue
-#283). No other module should create loops, call ``asyncio.run``, or apply
-``nest_asyncio``; the ``tests/test_no_adhoc_event_loops.py`` guard enforces this.
-
-See ``design-async-runtime.md`` §3 for the full rationale.
+This module owns the runtime loop creation path and the Windows Proactor policy
+application (see :mod:`EvoScientist._winloop` and issue #283).
 """
 
 from __future__ import annotations
@@ -33,11 +29,10 @@ logger = logging.getLogger(__name__)
 class TurnInProgressError(RuntimeError):
     """Raised by :meth:`AgentRuntime.turn` when a foreground turn is active.
 
-    "At most one foreground turn per process" is an explicit invariant of the
-    runtime (see ``design-async-runtime.md`` §2 non-goals and R4). Raising —
-    rather than queueing — is deliberate: every frontend owns a queue with its
-    own deferral policy, and an accidental second concurrent turn fails loudly
-    instead of racing on process-global agent/middleware state.
+    "At most one foreground turn per process" is an explicit runtime invariant.
+    Raising rather than queueing is deliberate: every frontend owns a queue with
+    its own deferral policy, and an accidental second concurrent turn fails
+    loudly instead of racing on process-global agent/middleware state.
     """
 
 
