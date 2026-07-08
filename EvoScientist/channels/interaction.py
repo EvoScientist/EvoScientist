@@ -130,6 +130,18 @@ def approval_prompt_metadata(base_metadata: dict | None, *, with_buttons: bool) 
 # ── ask_user question formatting & answer grammar ──────────────────────
 
 
+def _choice_value(choice: object, fallback: str = "") -> str:
+    """Normalize one ask_user choice to its display/answer string.
+
+    Choices arrive from model-produced tool args; the schema says dicts with
+    a ``value`` key, but nothing enforces that at runtime, so plain strings
+    (or anything else) must not crash the prompt.
+    """
+    if isinstance(choice, dict):
+        return str(choice.get("value", fallback or choice))
+    return str(choice)
+
+
 def format_question_prompt(question: dict, index: int, total: int) -> str:
     """Format one ask_user *question* as a channel message.
 
@@ -151,7 +163,7 @@ def format_question_prompt(question: dict, index: int, total: int) -> str:
     if q_type == "multiple_choice":
         choices = question.get("choices", [])
         for j, choice in enumerate(choices):
-            label = choice.get("value", str(choice))
+            label = _choice_value(choice)
             letter = chr(ord("A") + j)
             lines.append(f"   {letter}. {label}")
         other_letter = chr(ord("A") + len(choices))
@@ -164,7 +176,7 @@ def format_question_prompt(question: dict, index: int, total: int) -> str:
     return "\n".join(lines)
 
 
-def parse_choice_answer(raw: str, choices: list[dict]) -> tuple[str, str | None]:
+def parse_choice_answer(raw: str, choices: list) -> tuple[str, str | None]:
     """Classify a multiple-choice reply.
 
     Returns ``(kind, value)``:
@@ -180,7 +192,7 @@ def parse_choice_answer(raw: str, choices: list[dict]) -> tuple[str, str | None]
     if len(raw) == 1 and raw.upper().isalpha():
         idx = ord(raw.upper()) - ord("A")
         if 0 <= idx < len(choices):
-            return ("answer", choices[idx].get("value", raw))
+            return ("answer", _choice_value(choices[idx], raw))
         return ("answer", raw)
     return ("answer", raw)
 
@@ -504,7 +516,7 @@ async def resolve_approval(
         return ApprovalOutcome()
 
     reply = await io.wait_reply(timeout=timeout)
-    if not reply:
+    if reply is None:
         await io.send(APPROVAL_TIMEOUT_FEEDBACK)
         return ApprovalOutcome()
 

@@ -371,8 +371,6 @@ class InboundConsumer:
             except Exception:
                 pass
 
-        channel = self._get_channel(msg.channel)
-        thread_id = await self._get_thread_id(msg.sender_id)
         session_key = msg.session_key  # "channel:chat_id"
 
         # Lazily create per-chat lock; evict stale locks when too many
@@ -390,6 +388,11 @@ class InboundConsumer:
         # text plus the original inbound context — one path for both flows.
         if self._reply_registry.try_resolve(session_key, msg.content, context=msg):
             return
+
+        # Resolved only for real agent turns — a consumed prompt reply must
+        # not create a graph thread or touch the sender-session LRU.
+        channel = self._get_channel(msg.channel)
+        thread_id = await self._get_thread_id(msg.sender_id)
 
         async with self._chat_locks[session_key]:
             refeed = await self._stream_with_hitl(msg, channel, thread_id, session_key)

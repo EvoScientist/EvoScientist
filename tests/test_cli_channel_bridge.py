@@ -24,15 +24,24 @@ from EvoScientist.cli.channel import ChannelMessage
 from tests.fakes import QueueFakeChannel
 
 
-@pytest.fixture(autouse=True)
-def _clean_bridge_state():
+def _reset_channel_state():
     channel_mod._reply_registry.clear()
     channel_mod._approval_policy.clear_sessions()
     while not channel_mod._message_queue.empty():
         channel_mod._message_queue.get_nowait()
+    with channel_mod._response_lock:
+        channel_mod._pending_responses.clear()
+    with channel_mod._channel_request_lock:
+        channel_mod._channel_requests.clear()
+        channel_mod._session_requests.clear()
+        channel_mod._cancelled_channel_messages.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clean_bridge_state():
+    _reset_channel_state()
     yield
-    channel_mod._reply_registry.clear()
-    channel_mod._approval_policy.clear_sessions()
+    _reset_channel_state()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -389,3 +398,29 @@ class TestAskUserPromptBridge:
                 {"questions": [{"question": "Which dataset?", "type": "text"}]}, msg
             )
         assert result == {"answers": ["CIFAR-10"], "status": "answered"}
+
+
+class TestBridgeClosesUnscheduledCoroutine:
+    def test_no_bus_loop_closes_coro(self, monkeypatch):
+        """The bridge must close an engine coroutine it never scheduled —
+        otherwise GC emits a "was never awaited" RuntimeWarning. (cr_frame
+        is not a reliable observable for close() on unstarted coroutines.)"""
+        import gc
+        import warnings
+
+        monkeypatch.setattr(channel_mod, "_bus_loop", None)
+
+        async def _engine():
+            return "never"
+
+        coro = _engine()
+        result = channel_mod._run_engine_on_bus(
+            coro, result_timeout=1.0, on_error=lambda: "fallback"
+        )
+        assert result == "fallback"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            del coro
+            gc.collect()
+        assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]

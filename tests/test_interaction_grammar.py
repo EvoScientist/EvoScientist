@@ -305,3 +305,37 @@ class TestQuestionPromptFormat:
         assert "A. CIFAR-10" in got
         assert "B. ImageNet" in got
         assert "C. Other" in got
+
+
+class TestChoiceNormalization:
+    """Choices arrive from model tool args — plain strings must not crash."""
+
+    def test_prompt_renders_plain_string_choices(self):
+        got = I.format_question_prompt(
+            {
+                "question": "Pick one",
+                "type": "multiple_choice",
+                "choices": ["CIFAR-10", "ImageNet"],
+            },
+            0,
+            1,
+        )
+        assert "A. CIFAR-10" in got
+        assert "B. ImageNet" in got
+        assert "C. Other" in got
+
+    def test_parse_returns_plain_string_choice(self):
+        kind, value = I.parse_choice_answer("b", ["CIFAR-10", "ImageNet"])
+        assert (kind, value) == ("answer", "ImageNet")
+
+    def test_mixed_dict_and_string_choices(self):
+        choices = [{"value": "CIFAR-10"}, "ImageNet"]
+        got = I.format_question_prompt(
+            {"question": "Pick", "type": "multiple_choice", "choices": choices},
+            0,
+            1,
+        )
+        assert "A. CIFAR-10" in got
+        assert "B. ImageNet" in got
+        kind, value = I.parse_choice_answer("a", choices)
+        assert (kind, value) == ("answer", "CIFAR-10")

@@ -503,3 +503,61 @@ class TestConsumerUnrecognizedRefeed:
         finally:
             await consumer.stop()
             await task
+
+
+class TestApprovalEmptyReply:
+    async def test_empty_reply_is_unrecognized_not_timeout(self, monkeypatch):
+        """A media-only/empty reply must reach the refeed path, not timeout."""
+        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        io = FakeIO(replies=[""])
+        policy = I.ApprovalPolicy()
+        outcome = await I.resolve_approval(
+            [{"name": "execute", "args": {"command": "ls"}}],
+            io,
+            policy,
+            "stub:c1",
+            timeout=1.0,
+        )
+        assert outcome.decisions is None
+        assert outcome.unrecognized_reply == ""
+        sent = [content for content, _ in io.sent]
+        assert I.APPROVAL_TIMEOUT_FEEDBACK not in sent
+
+
+class TestReplyInterceptionSkipsThreadCreation:
+    async def test_consumed_reply_creates_no_thread(self):
+        """A registry-consumed reply must not create a graph thread or touch
+        the sender-session LRU."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from EvoScientist.channels.bus.events import InboundMessage as BusInbound
+        from EvoScientist.channels.consumer import InboundConsumer
+
+        gateway = MagicMock()
+        gateway.create_thread = AsyncMock(return_value="t-should-not-exist")
+        consumer = InboundConsumer(
+            bus=MagicMock(),
+            manager=MagicMock(),
+            agent=MagicMock(),
+            thread_id="",
+            graph_gateway=gateway,
+            max_concurrent=1,
+            max_pending=5,
+            inference_timeout=1.0,
+            drain_timeout=0.5,
+        )
+        msg = BusInbound(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="1",
+            message_id="m1",
+        )
+        fut = consumer._reply_registry.register(msg.session_key)
+
+        await consumer._handle_message(msg)
+
+        assert fut.done()
+        assert fut.result().content == "1"
+        gateway.create_thread.assert_not_awaited()
+        assert consumer._sessions == {}

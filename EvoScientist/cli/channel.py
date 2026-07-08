@@ -697,10 +697,12 @@ def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
     """
     bus_loop = _bus_loop
     if bus_loop is None:
+        coro.close()
         return on_error()
     try:
         fut = asyncio.run_coroutine_threadsafe(coro, bus_loop)
     except Exception as exc:
+        coro.close()
         _channel_logger.debug("interaction engine bridge failed: %s", exc)
         return on_error()
 
