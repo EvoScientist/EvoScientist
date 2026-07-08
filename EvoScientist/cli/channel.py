@@ -12,6 +12,7 @@ for the main thread to set a response via ``_set_channel_response()``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import queue
 import threading
@@ -476,9 +477,13 @@ async def _dispatch_channel_slash_impl(
 # per-flow timeout always fires first and returns a clean cancelled/None
 # instead of the bridge tearing the coroutine down mid-flight.
 _ENGINE_RESULT_SLACK = 30.0
+_ENGINE_CANCEL_SETTLE_TIMEOUT = 1.0
 # Send timeout inside the bridge IO adapter (kept per-flow-independent, as
 # the standalone consumer has no send timeout).
 _BRIDGE_SEND_TIMEOUT = 15.0
+_ASK_USER_WAITS_PER_QUESTION = 2
+_ASK_USER_SENDS_PER_QUESTION = 3
+_HITL_SENDS_PER_APPROVAL = 2
 
 # One reply registry + one approval policy for the whole bridge process,
 # both living on the bus loop (replacing the old ``_pending_hitl`` /
@@ -533,6 +538,22 @@ class _BridgeIO(InteractionIO):
 
     async def wait_reply(self, *, timeout: float) -> str | None:
         return await _reply_registry.wait(self._session_key, timeout)
+
+
+def _ask_user_result_timeout(question_count: int) -> float:
+    per_question = (
+        ASK_USER_TIMEOUT * _ASK_USER_WAITS_PER_QUESTION
+        + _BRIDGE_SEND_TIMEOUT * _ASK_USER_SENDS_PER_QUESTION
+    )
+    return per_question * question_count + _ENGINE_RESULT_SLACK
+
+
+def _hitl_result_timeout() -> float:
+    return (
+        HITL_APPROVAL_TIMEOUT
+        + _BRIDGE_SEND_TIMEOUT * _HITL_SENDS_PER_APPROVAL
+        + _ENGINE_RESULT_SLACK
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -684,9 +705,28 @@ def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
     if bus_loop is None:
         return on_error()
     try:
-        return asyncio.run_coroutine_threadsafe(coro, bus_loop).result(
-            timeout=result_timeout
-        )
+        fut = asyncio.run_coroutine_threadsafe(coro, bus_loop)
+    except Exception as exc:
+        _channel_logger.debug("interaction engine bridge failed: %s", exc)
+        return on_error()
+
+    try:
+        return fut.result(timeout=result_timeout)
+    except concurrent.futures.TimeoutError as exc:
+        fut.cancel()
+        try:
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), bus_loop).result(
+                timeout=_ENGINE_CANCEL_SETTLE_TIMEOUT
+            )
+        except concurrent.futures.TimeoutError:
+            _channel_logger.debug("interaction engine cancellation did not settle")
+        except Exception as settle_exc:
+            _channel_logger.debug(
+                "interaction engine failed while settling cancellation: %s",
+                settle_exc,
+            )
+        _channel_logger.debug("interaction engine bridge timed out: %s", exc)
+        return on_error()
     except Exception as exc:
         _channel_logger.debug("interaction engine bridge failed: %s", exc)
         return on_error()
@@ -716,12 +756,9 @@ def channel_ask_user_prompt(
     io = _BridgeIO(
         msg.bus_ref, msg, ChannelCapabilities(), _channel_message_session_key(msg)
     )
-    # Each question may need up to two waits (question + "Other" free-form);
-    # bound the outer wait accordingly so it never fires before the engine's.
-    result_timeout = ASK_USER_TIMEOUT * (2 * len(questions)) + _ENGINE_RESULT_SLACK
     return _run_engine_on_bus(
         resolve_ask_user(questions, io, timeout=ASK_USER_TIMEOUT),
-        result_timeout=result_timeout,
+        result_timeout=_ask_user_result_timeout(len(questions)),
         on_error=lambda: {"status": "cancelled"},
     )
 
@@ -778,7 +815,7 @@ def channel_hitl_prompt(
 
     return _run_engine_on_bus(
         _hitl_flow(),
-        result_timeout=HITL_APPROVAL_TIMEOUT + _ENGINE_RESULT_SLACK,
+        result_timeout=_hitl_result_timeout(),
         on_error=lambda: None,
     )
 

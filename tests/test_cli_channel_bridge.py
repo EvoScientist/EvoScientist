@@ -118,6 +118,65 @@ class TestReplyInterceptionOrdering:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Bridge timeout budgeting and cancellation
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestBridgeTimeouts:
+    def test_ask_user_outer_timeout_includes_waits_and_sends(self):
+        question_count = 2
+        per_question_worst_case = (
+            channel_mod.ASK_USER_TIMEOUT * channel_mod._ASK_USER_WAITS_PER_QUESTION
+            + channel_mod._BRIDGE_SEND_TIMEOUT
+            * channel_mod._ASK_USER_SENDS_PER_QUESTION
+        )
+
+        assert channel_mod._ask_user_result_timeout(question_count) == (
+            per_question_worst_case * question_count + channel_mod._ENGINE_RESULT_SLACK
+        )
+
+    def test_hitl_outer_timeout_exceeds_engine_worst_case(self):
+        engine_worst_case = (
+            channel_mod.HITL_APPROVAL_TIMEOUT
+            + channel_mod._BRIDGE_SEND_TIMEOUT * channel_mod._HITL_SENDS_PER_APPROVAL
+        )
+
+        assert channel_mod._hitl_result_timeout() == (
+            engine_worst_case + channel_mod._ENGINE_RESULT_SLACK
+        )
+        assert channel_mod._hitl_result_timeout() > engine_worst_case
+
+    def test_outer_timeout_cancels_engine_and_releases_reply_slot(self, monkeypatch):
+        session_key = "fake:timeout"
+        registered = threading.Event()
+        cancelled = threading.Event()
+
+        async def _wait_forever():
+            channel_mod._reply_registry.register(session_key)
+            registered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            finally:
+                channel_mod._reply_registry.discard(session_key)
+
+        with _BusLoopThread() as loop:
+            monkeypatch.setattr(channel_mod, "_bus_loop", loop)
+            result = channel_mod._run_engine_on_bus(
+                _wait_forever(),
+                result_timeout=0.2,
+                on_error=lambda: "cancelled",
+            )
+
+        assert result == "cancelled"
+        assert registered.wait(timeout=1.0)
+        assert cancelled.wait(timeout=1.0)
+        assert channel_mod._reply_registry.try_resolve(session_key, "late") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Bridge round-trip: channel_hitl_prompt over a real bus loop
 # ═══════════════════════════════════════════════════════════════════════
 
