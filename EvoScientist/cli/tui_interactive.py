@@ -805,11 +805,11 @@ def run_textual_interactive(
         def on_mount(self) -> None:
             # Bind the session sink's fallback-notice display so model-fallback
             # messages appear as SystemMessage widgets in the chat container.
-            sink = self._runtime_gateways.graph_gateway.events
-            if sink is not None and hasattr(sink, "set_fallback_display"):
-                sink.set_fallback_display(
-                    lambda text, style: self._append_system(text, style)
-                )
+            # ``event_sink`` is the concrete FrontendEventSink created by the
+            # enclosing factory — the same instance the gateway carries.
+            event_sink.set_fallback_display(
+                lambda text, style: self._append_system(text, style)
+            )
 
             self._render_welcome()
             self._render_status()
@@ -2981,9 +2981,7 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
-            sink = self._runtime_gateways.graph_gateway.events
-            if sink is not None and hasattr(sink, "set_fallback_display"):
-                sink.set_fallback_display(None)
+            event_sink.set_fallback_display(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None
