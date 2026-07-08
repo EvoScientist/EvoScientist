@@ -154,6 +154,7 @@ def _feed_reply_when_ready(loop, session_key, reply, *, tries=200):
 
 class TestHitlPromptBridge:
     def test_no_bus_loop_rejects(self, monkeypatch):
+        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
         monkeypatch.setattr(channel_mod, "_bus_loop", None)
         msg = ChannelMessage(
             msg_id="m1",
@@ -164,6 +165,24 @@ class TestHitlPromptBridge:
             bus_ref=object(),
         )
         assert channel_mod.channel_hitl_prompt([{"name": "execute"}], msg) is None
+
+    def test_session_grant_approves_when_bus_loop_down(self, monkeypatch):
+        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(channel_mod, "_bus_loop", None)
+        msg = ChannelMessage(
+            msg_id="m1",
+            content="",
+            sender="u1",
+            channel_type="fake",
+            chat_id="chat1",
+            bus_ref=object(),
+        )
+
+        channel_mod._approval_policy.grant_session("fake:chat1")
+
+        assert channel_mod.channel_hitl_prompt([{"name": "execute"}], msg) == [
+            {"type": "approve"}
+        ]
 
     def test_approve_round_trip(self, monkeypatch):
         # Force the manual-prompt path (no config auto-approve).

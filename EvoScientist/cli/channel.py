@@ -740,11 +740,15 @@ def channel_hitl_prompt(
     Returns the approval decisions list on approve/auto, or None on
     reject / unrecognized / timeout / stop.
     """
+    session_key = _channel_message_session_key(msg)
+    decisions = _approval_policy.auto_decision(session_key, action_requests)
+    if decisions is not None:
+        return decisions
+
     if not (_bus_loop and msg.bus_ref):
         _channel_logger.debug("HITL: no bus_loop or bus_ref, rejecting")
         return None
 
-    session_key = _channel_message_session_key(msg)
     # Look up the channel instance so the engine can attach buttons when the
     # channel supports `inline_buttons` (Feishu cards, QQ keyboards, …).
     channel_obj = (
