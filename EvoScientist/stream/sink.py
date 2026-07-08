@@ -19,6 +19,8 @@ import logging
 import threading
 from collections.abc import Callable
 
+from .console import console
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,7 +30,8 @@ class SessionEventSink:
     Args:
         fallback_display: Optional ``(text, style)`` callback the frontend
             supplies to render a model-fallback notice (Rich: ``console.print``;
-            TUI: append a system message). ``None`` drops fallback notices.
+            TUI: append a system message). ``None`` renders to the shared
+            Rich console.
     """
 
     def __init__(
@@ -57,11 +60,13 @@ class SessionEventSink:
         with self._lock:
             fallback_display = self._fallback_display
         if fallback_display is None:
+            console.print(text, style=style)
             return
         try:
             fallback_display(text, style)
         except Exception:
             logger.warning("Fallback display callback failed", exc_info=True)
+            console.print(text, style=style)
 
     # --- MiddlewareEventSink write side (any thread) ---------------------
     def on_tool_selection_started(self, total_tools: int) -> None:

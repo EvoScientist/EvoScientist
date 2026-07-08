@@ -324,6 +324,27 @@ class TestUiEmit:
         assert any("Falling back to fb (prov)" in t for t in texts)
         assert any("succeeded" in t for t in texts)
 
+    async def test_default_sink_prints_to_console(self):
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        invoke = AsyncMock(return_value=AI_RESPONSE)
+        sink = SessionEventSink()
+
+        with (
+            patch("EvoScientist.llm.models.get_chat_model") as mock_gcm,
+            patch("EvoScientist.stream.sink.console.print") as mock_print,
+        ):
+            mock_gcm.return_value = MagicMock()
+            await _try_fallbacks(req, invoke, Exception("503 down"), sink)
+
+        texts = [call.args[0] for call in mock_print.call_args_list]
+        assert any("Primary model failed" in t for t in texts)
+        assert any("Falling back to fb (prov)" in t for t in texts)
+        assert any("succeeded" in t for t in texts)
+        assert all(
+            call.kwargs == {"style": "yellow"} for call in mock_print.call_args_list[:2]
+        )
+
     async def test_display_failure_does_not_abort_fallback(self, caplog):
         add_fallback("fb", "prov")
         req = _fake_request()
@@ -332,13 +353,29 @@ class TestUiEmit:
             fallback_display=MagicMock(side_effect=RuntimeError("ui unavailable"))
         )
 
-        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+        with (
+            patch("EvoScientist.llm.models.get_chat_model") as mock_gcm,
+            patch("EvoScientist.stream.sink.console.print") as mock_print,
+        ):
             mock_gcm.return_value = MagicMock()
             result = await _try_fallbacks(req, invoke, Exception("503 down"), sink)
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
         assert "Fallback display callback failed" in caplog.text
+        texts = [call.args[0] for call in mock_print.call_args_list]
+        assert any("Primary model failed" in t for t in texts)
+        assert any("Falling back to fb (prov)" in t for t in texts)
+        assert any("succeeded" in t for t in texts)
+
+    def test_noopsink_keeps_fallback_notices_silent(self):
+        sink = NoOpSink()
+
+        with patch("EvoScientist.stream.sink.console.print") as mock_print:
+            sink.emit_fallback_notice("hidden")
+            sink.on_model_fallback("a", "b", "c")
+
+        mock_print.assert_not_called()
 
     async def test_emit_shows_non_fallbackable_rejection(self):
         add_fallback("fb", "prov")
