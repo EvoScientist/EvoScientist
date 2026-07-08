@@ -200,7 +200,7 @@ class _V3EventProcessor:
         process_value_messages: bool = False,
         events: "ToolSelectionView | None" = None,
     ) -> None:
-        from ..middleware.events import NoOpSink
+        from ..middleware.events import NO_OP_SINK
 
         self.emitter = emitter
         self.subagents = subagents
@@ -216,7 +216,7 @@ class _V3EventProcessor:
         ] = {}
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
-        self._selector = _ToolSelectionSuppressor(emitter, events or NoOpSink())
+        self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
 
     @staticmethod
     def _tool_scope(

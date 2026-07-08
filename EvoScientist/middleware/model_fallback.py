@@ -323,9 +323,9 @@ class ModelFallbackMiddleware(AgentMiddleware):
 
     def __init__(self, events: MiddlewareEventSink | None = None) -> None:
         super().__init__()
-        from .events import NoOpSink
+        from .events import NO_OP_SINK
 
-        self._events = events or NoOpSink()
+        self._events = events or NO_OP_SINK
 
     def wrap_model_call(
         self,

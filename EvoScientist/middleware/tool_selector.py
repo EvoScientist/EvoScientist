@@ -31,7 +31,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from .events import MiddlewareEventSink, NoOpSink
+from .events import NO_OP_SINK, MiddlewareEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         self._selector_factory = selector_factory
         self._threshold = threshold
         self._always_include = always_include or frozenset()
-        self._events = events or NoOpSink()
+        self._events = events or NO_OP_SINK
         # Agent tools are fixed after graph construction, so the filtered
         # always-include set is stable for this middleware instance.
         self._selector: AgentMiddleware | None = None
@@ -107,12 +107,6 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
     @staticmethod
     def _selected_names(request: ModelRequest) -> list[str]:
         return [name for tool in request.tools if (name := _tool_name(tool))]
-
-    def _report_selection(self, request: ModelRequest) -> None:
-        """Report the surviving tools once the selector filtered the request."""
-        selected = self._selected_names(request)
-        if selected:
-            logger.debug("Selected tools: %s", selected)
 
     def wrap_model_call(
         self,
@@ -140,8 +134,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             nonlocal _handler_called
             _handler_called = True
             # ``req.tools`` is the selector-filtered set here.
-            self._events.on_tool_selection(self._selected_names(req), total)
-            self._report_selection(req)
+            selected = self._selected_names(req)
+            self._events.on_tool_selection(selected, total)
+            if selected:
+                logger.debug("Selected tools: %s", selected)
             _end_selection()
             return handler(req)
 
@@ -182,8 +178,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         async def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
             _handler_called = True
-            self._events.on_tool_selection(self._selected_names(req), total)
-            self._report_selection(req)
+            selected = self._selected_names(req)
+            self._events.on_tool_selection(selected, total)
+            if selected:
+                logger.debug("Selected tools: %s", selected)
             _end_selection()
             return await handler(req)
 

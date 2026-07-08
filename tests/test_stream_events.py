@@ -493,6 +493,95 @@ class TestV3ProtocolStreaming:
             for e in events
         )
 
+    @pytest.mark.filterwarnings(
+        "ignore:The v3 streaming protocol on Pregel is experimental"
+    )
+    async def test_sync_middleware_event_reaches_bound_stream_sink_via_executor(self):
+        """LangChain executor context carries the active stream binding."""
+        from langchain.agents.middleware.types import AgentMiddleware
+        from langchain_core.runnables.config import run_in_executor
+
+        from EvoScientist.middleware.events import RunScopedEventSink
+        from EvoScientist.stream.sink import SessionEventSink
+
+        class SyncSelectionProbeMiddleware(AgentMiddleware):
+            name = "sync_selection_probe"
+
+            def __init__(self):
+                super().__init__()
+                self.called = False
+                self.events = RunScopedEventSink()
+
+            def wrap_model_call(self, request, handler):
+                self.called = True
+                self.events.on_tool_selection_started(2)
+                self.events.on_tool_selection(["probe_tool"], 2)
+                try:
+                    return handler(request)
+                finally:
+                    self.events.on_tool_selection_ended()
+
+        middleware = SyncSelectionProbeMiddleware()
+        sink = SessionEventSink()
+        inner_agent = create_deep_agent(
+            model=_ToolCallingFakeModel(responses=[AIMessage(content="inner answer")]),
+            tools=[],
+            system_prompt="Answer directly.",
+            middleware=[middleware],
+        )
+
+        class ExecutorBackedAgent:
+            async def aget_state(self, _config):
+                return SimpleNamespace(values={})
+
+            def astream_events(self, astream_input, config, **_kwargs):
+                return ExecutorBackedRun(astream_input, config)
+
+        class ExecutorBackedRun:
+            def __init__(self, astream_input, config):
+                self._astream_input = astream_input
+                self._config = config
+                self.subagents = async_iter([])
+
+            def __aiter__(self):
+                return self._iter_events()
+
+            async def _iter_events(self):
+                await run_in_executor(
+                    None,
+                    lambda: inner_agent.invoke(
+                        self._astream_input,
+                        config=self._config,
+                    ),
+                )
+                yield protocol_event(
+                    "messages", (AIMessage(content="final answer"), {})
+                )
+
+            async def abort(self):
+                pass
+
+        agent = ExecutorBackedAgent()
+
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent,
+                "answer",
+                "live-deepagents-sync-contextvar",
+                events=sink,
+            )
+        ]
+
+        assert middleware.called is True
+        assert any(
+            event.get("type") == "done" and event.get("content") == "final answer"
+            for event in events
+        )
+        assert sink.tool_selection_active is False
+        assert sink.tool_selection_pending() is True
+        assert sink.consume_tool_selection() == (True, ["probe_tool"])
+
     async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
         from EvoScientist.stream.sink import SessionEventSink

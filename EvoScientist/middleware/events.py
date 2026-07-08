@@ -31,8 +31,7 @@ A sink implementation therefore MUST be:
 
 A sink that blocks stalls the model call that emitted the event — the emitting
 worker thread is held until the sink returns. Nothing in the framework isolates
-a slow sink from the run; see ``tests/test_middleware_event_sink.py`` for the
-contract test that pins this.
+a slow sink from the run.
 """
 
 from __future__ import annotations
@@ -139,6 +138,9 @@ class NoOpSink:
         return (False, None)
 
 
+NO_OP_SINK = NoOpSink()
+
+
 _current_run_event_sink: ContextVar[MiddlewareEventSink | None] = ContextVar(
     "evoscientist_current_run_event_sink", default=None
 )
@@ -168,7 +170,7 @@ class RunScopedEventSink:
     __slots__ = ()
 
     def _sink(self) -> MiddlewareEventSink:
-        return _current_run_event_sink.get() or NoOpSink()
+        return _current_run_event_sink.get() or NO_OP_SINK
 
     def on_tool_selection_started(self, total_tools: int) -> None:
         self._sink().on_tool_selection_started(total_tools)

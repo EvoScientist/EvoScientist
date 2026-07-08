@@ -690,13 +690,13 @@ def _get_default_middleware(
         default_memory_scheduler,
         load_fallback_chain,
     )
-    from .middleware.events import NoOpSink, RunScopedEventSink
+    from .middleware.events import NO_OP_SINK, RunScopedEventSink
 
     # Subagent stacks never drive the main-agent frontend widgets; force the
     # no-op sink there regardless of what the caller passed. Main stacks built
     # without an explicit frontend/session sink report into the active stream
     # run's sink, preserving selector suppression for headless local runs.
-    events = NoOpSink() if for_async_subagent else (events or RunScopedEventSink())
+    events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
     if cfg.model_fallbacks:
