@@ -381,9 +381,14 @@ class PendingReplyRegistry:
         """
         fut = self.register(session_key)
         try:
-            return await asyncio.wait_for(fut, timeout)
-        except (TimeoutError, asyncio.CancelledError):
-            return None
+            done, _pending = await asyncio.wait({fut}, timeout=timeout)
+            if not done:
+                fut.cancel()
+                return None
+            try:
+                return fut.result()
+            except asyncio.CancelledError:
+                return None
         finally:
             # Identity-safe: only drop *our* slot, never a newer waiter that
             # re-registered on the same chat while we were unwinding.

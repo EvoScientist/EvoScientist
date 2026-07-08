@@ -10,6 +10,8 @@ approve-all, and capability-driven button formatting.
 
 import asyncio
 
+import pytest
+
 from EvoScientist.channels import interaction as I
 from EvoScientist.channels.capabilities import ChannelCapabilities
 
@@ -337,6 +339,15 @@ class TestPendingReplyRegistry:
         reg.clear()
         got = await fut
         assert got is None
+
+    async def test_task_cancellation_propagates(self):
+        reg = I.PendingReplyRegistry()
+        task = asyncio.create_task(reg.wait("s1", timeout=1.0))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert "s1" not in reg
 
 
 # ═══════════════════════════════════════════════════════════════════════
