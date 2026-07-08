@@ -8,6 +8,7 @@ to be available.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,77 @@ def reset_module_state():
     manager._PROCESS_WORKSPACE = None
     manager._ASYNC_SUBAGENTS_AVAILABLE = False
     manager._LOG_OFFSET_AT_START = 0
+
+
+# =============================================================================
+# langgraph CLI resolution
+# =============================================================================
+
+
+class TestLanggraphCliResolution:
+    def _make_executable(self, path):
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    def test_prefers_current_python_environment_over_path(self, tmp_path, monkeypatch):
+        local_bin = tmp_path / "local" / "bin"
+        local_bin.mkdir(parents=True)
+        local_langgraph = local_bin / "langgraph"
+        self._make_executable(local_langgraph)
+
+        path_bin = tmp_path / "path" / "bin"
+        path_bin.mkdir(parents=True)
+        path_langgraph = path_bin / "langgraph"
+        self._make_executable(path_langgraph)
+
+        monkeypatch.setattr(sys, "executable", str(local_bin / "python"))
+        monkeypatch.setattr(
+            manager.shutil,
+            "which",
+            lambda command: str(path_langgraph) if command == "langgraph" else None,
+        )
+
+        assert manager._langgraph_exe() == str(local_langgraph)
+
+    def test_falls_back_to_path_when_environment_binary_missing(
+        self, tmp_path, monkeypatch
+    ):
+        path_bin = tmp_path / "path" / "bin"
+        path_bin.mkdir(parents=True)
+        path_langgraph = path_bin / "langgraph"
+        self._make_executable(path_langgraph)
+
+        monkeypatch.setattr(
+            sys, "executable", str(tmp_path / "local" / "bin" / "python")
+        )
+        monkeypatch.setattr(
+            manager.shutil,
+            "which",
+            lambda command: str(path_langgraph) if command == "langgraph" else None,
+        )
+
+        assert manager._langgraph_exe() == str(path_langgraph)
+
+    def test_checks_windows_suffix_next_to_current_python(self, tmp_path, monkeypatch):
+        scripts_dir = tmp_path / "Scripts"
+        scripts_dir.mkdir()
+        local_langgraph = scripts_dir / "langgraph.exe"
+        self._make_executable(local_langgraph)
+
+        path_bin = tmp_path / "path" / "bin"
+        path_bin.mkdir(parents=True)
+        path_langgraph = path_bin / "langgraph.exe"
+        self._make_executable(path_langgraph)
+
+        monkeypatch.setattr(sys, "executable", str(scripts_dir / "python.exe"))
+        monkeypatch.setattr(manager.os, "name", "nt", raising=False)
+        monkeypatch.setattr(
+            manager.shutil,
+            "which",
+            lambda command: str(path_langgraph) if command == "langgraph" else None,
+        )
+
+        assert manager._langgraph_exe() == str(local_langgraph)
 
 
 # =============================================================================
