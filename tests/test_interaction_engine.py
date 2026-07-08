@@ -115,6 +115,28 @@ class TestResolveAskUser:
         assert "(optional)" in io.contents[0]
         assert "Leave empty to skip." in io.contents[0]
 
+    async def test_optional_empty_reply_skips_and_continues(self):
+        io = FakeIO(["", "next"])
+        result = await I.resolve_ask_user(
+            [
+                {"question": "Notes?", "type": "text", "required": False},
+                {"question": "Next?", "type": "text"},
+            ],
+            io,
+        )
+        assert result == {"answers": ["", "next"], "status": "answered"}
+        assert io.contents[1].startswith("❓ Question 2/2")
+        assert I.ASK_USER_TIMEOUT_FEEDBACK not in io.contents
+
+    async def test_required_empty_reply_cancels_without_timeout_notice(self):
+        io = FakeIO([""])
+        result = await I.resolve_ask_user(
+            [{"question": "Required?", "type": "text"}],
+            io,
+        )
+        assert result == {"status": "cancelled"}
+        assert I.ASK_USER_TIMEOUT_FEEDBACK not in io.contents
+
     async def test_timeout_first_question(self):
         io = FakeIO([])  # no replies -> timeout
         result = await I.resolve_ask_user([{"question": "Q?", "type": "text"}], io)

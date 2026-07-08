@@ -455,11 +455,18 @@ async def resolve_ask_user(
             return {"status": "cancelled"}
 
         reply = await io.wait_reply(timeout=timeout)
-        if not reply:
+        if reply is None:
             await io.send(ASK_USER_TIMEOUT_FEEDBACK)
             return {"status": "cancelled"}
 
         raw = reply.strip()
+        required = q.get("required", True) is not False
+        if raw == "":
+            if required:
+                return {"status": "cancelled"}
+            answers.append("")
+            continue
+
         if is_stop_command(raw) or is_cancel_reply(raw):
             return {"status": "cancelled"}
 
@@ -470,12 +477,18 @@ async def resolve_ask_user(
                 if not await io.send(OTHER_PROMPT):
                     return {"status": "cancelled"}
                 other = await io.wait_reply(timeout=timeout)
-                if not other:
+                if other is None:
                     await io.send(ASK_USER_TIMEOUT_FEEDBACK)
                     return {"status": "cancelled"}
-                if is_stop_command(other) or is_cancel_reply(other):
+                other_raw = other.strip()
+                if other_raw == "":
+                    if required:
+                        return {"status": "cancelled"}
+                    answers.append("")
+                    continue
+                if is_stop_command(other_raw) or is_cancel_reply(other_raw):
                     return {"status": "cancelled"}
-                answers.append(other.strip())
+                answers.append(other_raw)
             else:
                 answers.append(value)
         else:
