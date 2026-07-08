@@ -282,6 +282,16 @@ class EvoScientistConfig:
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
     openrouter_anthropic_prompt_cache: bool = True
+    # OpenRouter app attribution (issue #339). Sent only for the openrouter
+    # provider; identifies EvoScientist in OpenRouter's app rankings/analytics.
+    # Override (e.g. a private fork) via the fields below or their env vars.
+    openrouter_http_referer: str = "https://github.com/EvoScientist/EvoScientist"
+    openrouter_app_title: str = "EvoScientist"
+    # Comma-separated; split into a list before being passed to
+    # langchain-openrouter (its app_categories kwarg expects list[str]).
+    openrouter_app_categories: str = (
+        "writing-assistant,personal-agent,creative-writing,cli-agent,programming-app"
+    )
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -753,6 +763,9 @@ _ENV_MAPPINGS = {
     "openrouter_anthropic_prompt_cache": (
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ),
+    "openrouter_http_referer": "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+    "openrouter_app_title": "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+    "openrouter_app_categories": "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
     "dangerous_mode": "EVOSCIENTIST_DANGEROUS_MODE",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
@@ -884,6 +897,22 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
+    if config.openrouter_http_referer and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_HTTP_REFERER"] = (
+            config.openrouter_http_referer
+        )
+    if config.openrouter_app_title and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_TITLE"] = config.openrouter_app_title
+    if config.openrouter_app_categories and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"] = (
+            config.openrouter_app_categories
+        )
     if not config.openrouter_anthropic_prompt_cache and not os.environ.get(
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):

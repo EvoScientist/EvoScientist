@@ -68,6 +68,17 @@ _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 
+# OpenRouter app-attribution defaults (issue #339). Duplicated as the
+# EvoScientistConfig field defaults in config/settings.py — keep in sync
+# (mirrors the reasoning_effort "high" default living in both places).
+# langchain-openrouter maps app_url → HTTP-Referer, app_title → X-Title,
+# app_categories → X-OpenRouter-Categories.
+_OPENROUTER_DEFAULT_HTTP_REFERER = "https://github.com/EvoScientist/EvoScientist"
+_OPENROUTER_DEFAULT_APP_TITLE = "EvoScientist"
+_OPENROUTER_DEFAULT_APP_CATEGORIES = (
+    "writing-assistant,personal-agent,creative-writing,cli-agent,programming-app"
+)
+
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
@@ -490,6 +501,35 @@ def get_chat_model(
         # so enabling `summary` is safe. See langchain-ai/langchain#37777.
         effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or "high"
         kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
+        # App attribution (issue #339): identify EvoScientist to OpenRouter so
+        # usage is credited to the project (app rankings, model app tabs,
+        # analytics) rather than langchain-openrouter's LangChain-branded
+        # defaults. setdefault so an explicit caller kwarg wins; values are
+        # configurable via EVOSCIENTIST_OPENROUTER_* env (fed from the config
+        # file by apply_config_to_env). Applied only here, so no other provider
+        # ever receives these kwargs.
+        kwargs.setdefault(
+            "app_url",
+            os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "").strip()
+            or _OPENROUTER_DEFAULT_HTTP_REFERER,
+        )
+        kwargs.setdefault(
+            "app_title",
+            os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE", "").strip()
+            or _OPENROUTER_DEFAULT_APP_TITLE,
+        )
+        # app_categories must be a list[str] (langchain-openrouter joins it into
+        # the X-OpenRouter-Categories header); split the comma-separated config
+        # value and drop blanks so a stray comma/space can't emit an empty one.
+        _app_categories_raw = (
+            os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "").strip()
+            or _OPENROUTER_DEFAULT_APP_CATEGORIES
+        )
+        _app_categories = [
+            c.strip() for c in _app_categories_raw.split(",") if c.strip()
+        ]
+        if _app_categories:
+            kwargs.setdefault("app_categories", _app_categories)
         _patch_openrouter_strip_responses_reasoning()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url

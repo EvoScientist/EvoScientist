@@ -77,6 +77,9 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -104,6 +107,9 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -131,6 +137,13 @@ class TestEvoScientistConfig:
         assert config.log_level == "warning"
         assert config.reasoning_effort == "high"
         assert config.openrouter_anthropic_prompt_cache is True
+        assert config.openrouter_http_referer == (
+            "https://github.com/EvoScientist/EvoScientist"
+        )
+        assert config.openrouter_app_title == "EvoScientist"
+        assert config.openrouter_app_categories == (
+            "writing-assistant,personal-agent,creative-writing,cli-agent,programming-app"
+        )
         assert config.memory_profile_enabled is True
         assert config.memory_observations_enabled is True
         assert config.memory_observation_writer == MemoryObservationWriter.ALL
@@ -655,6 +668,22 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.openrouter_anthropic_prompt_cache is False
 
+    def test_env_openrouter_app_attribution_override(
+        self, temp_config_dir, monkeypatch
+    ):
+        """OpenRouter app-attribution env vars should override file config."""
+        save_config(EvoScientistConfig())
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://acme.test")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "cli-agent,programming-app"
+        )
+
+        config = get_effective_config()
+        assert config.openrouter_http_referer == "https://acme.test"
+        assert config.openrouter_app_title == "Acme"
+        assert config.openrouter_app_categories == "cli-agent,programming-app"
+
     def test_set_openrouter_anthropic_prompt_cache(self, temp_config_dir, clean_env):
         """Test OpenRouter Anthropic prompt cache can be set through config."""
         save_config(EvoScientistConfig())
@@ -714,6 +743,60 @@ class TestApplyConfigToEnv:
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") == (
             "false"
         )
+
+    def test_openrouter_app_attribution_applied_to_env(self, clean_env, monkeypatch):
+        """Config app-attribution values are exported to env for models.py."""
+        for env in (
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+            "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        config = EvoScientistConfig(
+            openrouter_http_referer="https://acme.test",
+            openrouter_app_title="Acme",
+            openrouter_app_categories="cli-agent,programming-app",
+        )
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER") == (
+            "https://acme.test"
+        )
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") == "Acme"
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES") == (
+            "cli-agent,programming-app"
+        )
+
+    def test_openrouter_app_attribution_env_not_overwritten(
+        self, clean_env, monkeypatch
+    ):
+        """apply_config_to_env must not clobber an already-set attribution env var."""
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "existing-title")
+        config = EvoScientistConfig(openrouter_app_title="config-title")
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") == "existing-title"
+
+    def test_openrouter_app_attribution_empty_config_not_applied(
+        self, clean_env, monkeypatch
+    ):
+        """Empty-string attribution config must not create env vars."""
+        for env in (
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+            "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        config = EvoScientistConfig(
+            openrouter_http_referer="",
+            openrouter_app_title="",
+            openrouter_app_categories="",
+        )
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER") is None
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") is None
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES") is None
 
     def test_dangerous_mode_round_trips_to_env(self, clean_env, monkeypatch):
         """dangerous_mode set via CLI override must survive a fresh re-read.

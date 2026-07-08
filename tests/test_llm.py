@@ -439,6 +439,191 @@ class TestThirdPartyRouting:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
 
+    # --- OpenRouter app attribution (issue #339) ---
+
+    _APP_ATTR_ENV = (
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+    )
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_defaults(self, mock_init, monkeypatch):
+        """OpenRouter init should carry EvoScientist's default app attribution."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        # Isolate from any leaked env overrides so we assert the built-in defaults.
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
+        assert call_kwargs["app_title"] == "EvoScientist"
+        # Must be a list[str] (not the comma string) — langchain-openrouter joins it.
+        assert call_kwargs["app_categories"] == [
+            "writing-assistant",
+            "personal-agent",
+            "creative-writing",
+            "cli-agent",
+            "programming-app",
+        ]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_from_env(self, mock_init, monkeypatch):
+        """Env vars should override the default app attribution values."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://acme.test")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        # Include a space to prove each category is stripped.
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "cli-agent, programming-app"
+        )
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://acme.test"
+        assert call_kwargs["app_title"] == "Acme"
+        assert call_kwargs["app_categories"] == ["cli-agent", "programming-app"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_user_override_not_clobbered(
+        self, mock_init, monkeypatch
+    ):
+        """Caller-supplied attribution kwargs must beat both env and defaults."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        # Env is also set, to prove an explicit kwarg outranks the env override
+        # (not just the built-in default).
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://env.example"
+        )
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "EnvTitle")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "env-cat")
+
+        get_chat_model(
+            "x-ai/grok-4.3",
+            provider="openrouter",
+            app_url="https://mine.example",
+            app_title="MyApp",
+            app_categories=["only-this"],
+        )
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://mine.example"
+        assert call_kwargs["app_title"] == "MyApp"
+        # An explicit list is preserved verbatim, not re-split.
+        assert call_kwargs["app_categories"] == ["only-this"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_non_openrouter_providers_get_no_app_attribution(
+        self, mock_init, monkeypatch
+    ):
+        """Only the openrouter provider should receive app-attribution kwargs."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-real")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+        for model, provider in (
+            ("claude-sonnet-4-6", "anthropic"),
+            ("llama3.1:8b", "ollama"),
+        ):
+            get_chat_model(model, provider=provider)
+            call_kwargs = mock_init.call_args[1]
+            assert "app_url" not in call_kwargs
+            assert "app_title" not in call_kwargs
+            assert "app_categories" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_coexists_with_reasoning_and_cache(
+        self, mock_init, monkeypatch
+    ):
+        """Attribution must not disturb reasoning or Anthropic prompt caching."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+        monkeypatch.delenv(
+            "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", raising=False
+        )
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+
+        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        # Existing behavior intact.
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+        # Attribution added alongside.
+        assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
+        assert call_kwargs["app_title"] == "EvoScientist"
+        assert call_kwargs["app_categories"][0] == "writing-assistant"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_categories_env_strips_blank_items(
+        self, mock_init, monkeypatch
+    ):
+        """A messy comma value (stray commas / spaces) yields a clean list."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "a,, b , ,c")
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        assert mock_init.call_args[1]["app_categories"] == ["a", "b", "c"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_categories_all_separators_omit_kwarg(
+        self, mock_init, monkeypatch
+    ):
+        """A categories value with no real items omits the kwarg entirely."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", " , , ")
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        # No app_categories kwarg at all — not an empty list (which the library
+        # would reject / send as an empty header).
+        assert "app_categories" not in mock_init.call_args[1]
+
+    def test_openrouter_app_attribution_lands_on_real_model(self, monkeypatch):
+        """Build a REAL ChatOpenRouter (no mock) and assert the attribution
+        values land on the instance rather than being silently dumped into
+        model_kwargs.
+
+        The mocked tests above assert on the kwargs handed to init_chat_model,
+        so they cannot catch a param-name typo or a langchain-openrouter version
+        that accepts these only as passthrough model params (which the library
+        does with a warning, not an error). This test is the guard for both.
+        """
+        from langchain_openrouter import ChatOpenRouter
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+
+        model = get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        assert isinstance(model, ChatOpenRouter)
+        assert model.app_url == "https://github.com/EvoScientist/EvoScientist"
+        assert model.app_title == "EvoScientist"
+        assert model.app_categories == [
+            "writing-assistant",
+            "personal-agent",
+            "creative-writing",
+            "cli-agent",
+            "programming-app",
+        ]
+        # Not silently swallowed into model_kwargs (the passthrough failure mode).
+        model_kwargs = model.model_kwargs or {}
+        assert "app_url" not in model_kwargs
+        assert "app_title" not in model_kwargs
+        assert "app_categories" not in model_kwargs
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_anthropic_prompt_cache_enabled_by_default(
         self, mock_init, monkeypatch
