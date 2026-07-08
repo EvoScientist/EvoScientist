@@ -19,7 +19,7 @@ from .types import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
-    from ..middleware.events import ToolSelectionView
+    from ..middleware.events import SessionEvents
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +72,7 @@ class LocalGraphGateway:
     """
 
     thread_store: ThreadStore = field(default_factory=LocalThreadStore)
-    events: ToolSelectionView | None = None
+    events: SessionEvents | None = None
 
     async def create_thread(
         self,

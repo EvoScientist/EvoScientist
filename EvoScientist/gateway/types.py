@@ -11,7 +11,7 @@ from langgraph.types import Command
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
-    from ..middleware.events import ToolSelectionView
+    from ..middleware.events import SessionEvents
 
 GraphEvent: TypeAlias = dict[str, Any]
 GraphRunInput: TypeAlias = str | Command
@@ -96,7 +96,7 @@ class ThreadStore(Protocol):
 class GraphGateway(Protocol):
     """One authority for graph runs and thread lifecycle operations."""
 
-    events: ToolSelectionView | None
+    events: SessionEvents | None
 
     async def create_thread(
         self,

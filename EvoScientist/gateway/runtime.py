@@ -15,7 +15,7 @@ from .server import (
 from .types import GraphGateway, ThreadStore
 
 if TYPE_CHECKING:
-    from ..middleware.events import ToolSelectionView
+    from ..middleware.events import SessionEvents
 
 RuntimeGatewayBackend = Literal["local", "langgraph_server"]
 
@@ -35,7 +35,7 @@ def create_runtime_gateways(
     graph_id: str = DEFAULT_GRAPH_ID,
     headers: dict[str, str] | None = None,
     langgraph_client: LangGraphClient | None = None,
-    events: ToolSelectionView | None = None,
+    events: SessionEvents | None = None,
 ) -> RuntimeGateways:
     """Create gateway handles for CLI/TUI/serve execution.
 

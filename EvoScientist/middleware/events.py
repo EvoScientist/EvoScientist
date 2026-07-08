@@ -103,6 +103,10 @@ class ToolSelectionView(Protocol):
         ...
 
 
+class SessionEvents(MiddlewareEventSink, ToolSelectionView, Protocol):
+    """Gateway-carried session sink for both middleware writes and stream reads."""
+
+
 class NoOpSink:
     """Default sink: drops every event and never renders a selection.
 
