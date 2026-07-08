@@ -20,7 +20,7 @@ from EvoScientist.middleware.model_fallback import (
     add_fallback,
     clear_fallbacks,
 )
-from EvoScientist.stream.sink import FrontendEventSink
+from EvoScientist.stream.sink import SessionEventSink
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -296,7 +296,7 @@ class TestGuardAndFallback:
 class TestUiEmit:
     """Verify that fallback narration reaches the injected frontend sink.
 
-    The ``FrontendEventSink`` formats the structured ``on_model_fallback``
+    The ``SessionEventSink`` formats the structured ``on_model_fallback``
     transition and passes ``emit_fallback_notice`` framing lines through the
     same ``fallback_display`` callback the frontend supplies, so capturing that
     callback exercises the exact user-facing text.
@@ -304,7 +304,7 @@ class TestUiEmit:
 
     def _capturing_sink(self):
         messages: list[tuple[str, str]] = []
-        sink = FrontendEventSink(
+        sink = SessionEventSink(
             fallback_display=lambda text, style: messages.append((text, style))
         )
         return sink, messages
@@ -323,6 +323,22 @@ class TestUiEmit:
         assert any("Primary model failed" in t for t in texts)
         assert any("Falling back to fb (prov)" in t for t in texts)
         assert any("succeeded" in t for t in texts)
+
+    async def test_display_failure_does_not_abort_fallback(self, caplog):
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        invoke = AsyncMock(return_value=AI_RESPONSE)
+        sink = SessionEventSink(
+            fallback_display=MagicMock(side_effect=RuntimeError("ui unavailable"))
+        )
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            result = await _try_fallbacks(req, invoke, Exception("503 down"), sink)
+
+        assert result is AI_RESPONSE
+        invoke.assert_awaited_once()
+        assert "Fallback display callback failed" in caplog.text
 
     async def test_emit_shows_non_fallbackable_rejection(self):
         add_fallback("fb", "prov")

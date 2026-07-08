@@ -1,12 +1,12 @@
-"""Frontend-owned event sink.
+"""Session-owned event sink.
 
-A single sink instance, created and owned by an interactive frontend (Rich CLI
-or TUI), that both **records** tool-selection state for the stream suppressor
-and **renders** model-fallback notices. It is injected into the agent's
+A single sink instance, created and owned by a frontend or local stream run,
+that both **records** tool-selection state for the stream suppressor and
+optionally **renders** model-fallback notices. It is injected into the agent's
 middleware (write side) and read by ``stream/tool_selection.py`` (read side).
 
 The tool-selection state machine — active / total / pending / last-emitted with
-consume-once + dedup semantics — lives here, in the frontend, replacing the
+consume-once + dedup semantics — lives here, in the session sink, replacing the
 process-global module variables that used to live in ``middleware/tool_selector``.
 The state is guarded by a lock because middleware hooks fire on worker threads
 while the stream suppressor reads on the runtime thread (see the threading
@@ -15,12 +15,15 @@ contract in :mod:`EvoScientist.middleware.events`).
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 
+logger = logging.getLogger(__name__)
 
-class FrontendEventSink:
-    """Tool-selection state holder + model-fallback renderer for a frontend.
+
+class SessionEventSink:
+    """Tool-selection state holder + model-fallback renderer for a session.
 
     Args:
         fallback_display: Optional ``(text, style)`` callback the frontend
@@ -47,7 +50,18 @@ class FrontendEventSink:
         binds its ``_append_system`` on mount, clears it on exit) use this
         instead of the constructor argument.
         """
-        self._fallback_display = fallback_display
+        with self._lock:
+            self._fallback_display = fallback_display
+
+    def _display_fallback(self, text: str, style: str) -> None:
+        with self._lock:
+            fallback_display = self._fallback_display
+        if fallback_display is None:
+            return
+        try:
+            fallback_display(text, style)
+        except Exception:
+            logger.warning("Fallback display callback failed", exc_info=True)
 
     # --- MiddlewareEventSink write side (any thread) ---------------------
     def on_tool_selection_started(self, total_tools: int) -> None:
@@ -68,9 +82,7 @@ class FrontendEventSink:
         # Formatting lives in the frontend: reproduce the transition line the
         # fallback middleware used to emit itself. ``to_model`` already carries
         # the provider suffix and ``reason`` the exception text.
-        if self._fallback_display is None:
-            return
-        self._fallback_display(
+        self._display_fallback(
             f"  -> Falling back to {to_model} due to: {reason}", "yellow"
         )
 
@@ -83,9 +95,7 @@ class FrontendEventSink:
         where they land. This preserves the exact user-facing narration while
         the structured :meth:`on_model_fallback` covers the transition itself.
         """
-        if self._fallback_display is None:
-            return
-        self._fallback_display(text, style)
+        self._display_fallback(text, style)
 
     # --- ToolSelectionView read side (runtime thread) -------------------
     @property

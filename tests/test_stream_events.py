@@ -410,9 +410,9 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selector_reasoning_delta_is_suppressed(self):
         """Selector reasoning must not appear as main-agent thinking."""
-        from EvoScientist.stream.sink import FrontendEventSink
+        from EvoScientist.stream.sink import SessionEventSink
 
-        sink = FrontendEventSink()
+        sink = SessionEventSink()
         sink.on_tool_selection_started(30)  # selector call in flight
         agent = FakeV3Agent(
             [
@@ -441,9 +441,9 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
-        from EvoScientist.stream.sink import FrontendEventSink
+        from EvoScientist.stream.sink import SessionEventSink
 
-        sink = FrontendEventSink()
+        sink = SessionEventSink()
         sink.on_tool_selection_started(30)
         message = AIMessage(
             additional_kwargs={"reasoning_content": "selector whole thought"},
@@ -773,11 +773,11 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selection_flushes_before_tool_only_step(self):
         """Selector UI event is emitted even when selection is followed only by a tool."""
-        from EvoScientist.stream.sink import FrontendEventSink
+        from EvoScientist.stream.sink import SessionEventSink
 
         # The frontend sink holds a pending selection (1 of 3 tools) — the
         # suppressor must surface it before the tool-only step.
-        sink = FrontendEventSink()
+        sink = SessionEventSink()
         sink.on_tool_selection(["read_file"], 3)
         output = ToolMessage(
             content="File content",

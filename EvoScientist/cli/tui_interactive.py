@@ -299,9 +299,9 @@ def run_textual_interactive(
     # (read side). The fallback-notice display is bound to the App's
     # _append_system once the App exists (on_mount); tool-selection needs no
     # display hook (its widget is mounted from the stream event).
-    from ..stream.sink import FrontendEventSink
+    from ..stream.sink import SessionEventSink
 
-    event_sink = FrontendEventSink()
+    event_sink = SessionEventSink()
     runtime_gateways = create_runtime_gateways(events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
 
@@ -805,7 +805,7 @@ def run_textual_interactive(
         def on_mount(self) -> None:
             # Bind the session sink's fallback-notice display so model-fallback
             # messages appear as SystemMessage widgets in the chat container.
-            # ``event_sink`` is the concrete FrontendEventSink created by the
+            # ``event_sink`` is the concrete SessionEventSink created by the
             # enclosing factory — the same instance the gateway carries.
             event_sink.set_fallback_display(
                 lambda text, style: self._append_system(text, style)

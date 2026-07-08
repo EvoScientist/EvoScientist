@@ -12,7 +12,7 @@ from EvoScientist.middleware.tool_selector import (
     create_tool_selector_middleware,
 )
 from EvoScientist.stream.emitter import StreamEventEmitter
-from EvoScientist.stream.sink import FrontendEventSink
+from EvoScientist.stream.sink import SessionEventSink
 from EvoScientist.stream.tool_selection import _ToolSelectionSuppressor
 
 
@@ -377,7 +377,7 @@ def test_render_sequences_table():
         ("new selection renders", ["execute", "think_tool"], 5, True),
         ("kept-all selection does not render", ["a", "b", "c"], 3, False),
     ]
-    sink = FrontendEventSink()
+    sink = SessionEventSink()
     suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
 
     for label, selected, total, expect_render in cases:
@@ -392,7 +392,7 @@ def test_render_sequences_table():
 
 def test_consume_is_once_only():
     """A pending selection renders once; a second flush yields nothing."""
-    sink = FrontendEventSink()
+    sink = SessionEventSink()
     suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
 
     first = _drive_selection(sink, suppressor, ["read_file"], 3)

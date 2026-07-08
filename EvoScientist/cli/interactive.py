@@ -452,9 +452,9 @@ def cmd_interactive(
     # middleware (write side) and the local gateway's streaming path (read side)
     # so both share one owner. It survives agent rebuilds (/model, /new, MCP
     # reload) because the session, not the agent, holds it.
-    from ..stream.sink import FrontendEventSink
+    from ..stream.sink import SessionEventSink
 
-    event_sink = FrontendEventSink(
+    event_sink = SessionEventSink(
         fallback_display=lambda text, style: console.print(text, style=style)
     )
 
