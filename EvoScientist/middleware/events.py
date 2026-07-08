@@ -70,6 +70,7 @@ class MiddlewareEventSink(Protocol):
         ...
 
 
+@runtime_checkable
 class ToolSelectionView(Protocol):
     """Read side of the tool-selection state the stream suppressor consumes.
 
@@ -103,6 +104,7 @@ class ToolSelectionView(Protocol):
         ...
 
 
+@runtime_checkable
 class SessionEvents(MiddlewareEventSink, ToolSelectionView, Protocol):
     """Gateway-carried session sink for both middleware writes and stream reads."""
 
