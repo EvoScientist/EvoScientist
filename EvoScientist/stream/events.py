@@ -825,6 +825,11 @@ async def stream_agent_events(
                      subagent_start, subagent_tool_call, subagent_tool_result, subagent_end,
                      done, error
     """
+    if events is None:
+        from .sink import SessionEventSink
+
+        events = SessionEventSink()
+
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     if metadata:
         config["metadata"] = metadata
@@ -844,8 +849,18 @@ async def stream_agent_events(
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
     _run_raised: bool = False
+    event_sink_token = None
     try:
         from langgraph.stream.transformers import UpdatesTransformer
+
+        from ..middleware.events import (
+            MiddlewareEventSink,
+            bind_run_event_sink,
+            reset_run_event_sink,
+        )
+
+        if isinstance(events, MiddlewareEventSink):
+            event_sink_token = bind_run_event_sink(events)
 
         try:
             stream_result = agent.astream_events(
@@ -972,6 +987,8 @@ async def stream_agent_events(
                 task.cancel()
         if producers:
             await asyncio.gather(*producers, return_exceptions=True)
+        if event_sink_token is not None:
+            reset_run_event_sink(event_sink_token)
         # When the run ended with an exception the LangGraph checkpoint may be
         # left interrupted (``next`` non-empty). Clear it — unless it's a real
         # human-in-the-loop pause — so the next user message starts a fresh turn

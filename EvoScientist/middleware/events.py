@@ -36,6 +36,7 @@ contract test that pins this.
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from typing import Protocol, runtime_checkable
 
 
@@ -43,9 +44,10 @@ from typing import Protocol, runtime_checkable
 class MiddlewareEventSink(Protocol):
     """Structured display events emitted by middleware hooks.
 
-    Implementations are supplied by frontends and injected at the agent
-    composition root (see ``EvoScientist.EvoScientist``). The default for
-    headless, gateway, and subagent stacks is :class:`NoOpSink`.
+    Implementations are supplied by frontends/sessions and injected at the
+    agent composition root (see ``EvoScientist.EvoScientist``). Main agents
+    built without an explicit sink use :class:`RunScopedEventSink`; subagent
+    stacks use :class:`NoOpSink`.
 
     All methods must honour the module-level threading/blocking contract:
     callable from any thread, thread-safe, and non-blocking.
@@ -150,3 +152,50 @@ class NoOpSink:
 
     def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
         return (False, None)
+
+
+_current_run_event_sink: ContextVar[MiddlewareEventSink | None] = ContextVar(
+    "evoscientist_current_run_event_sink", default=None
+)
+
+
+def bind_run_event_sink(
+    events: MiddlewareEventSink,
+) -> Token[MiddlewareEventSink | None]:
+    """Bind middleware events to the sink for the current streamed run."""
+    return _current_run_event_sink.set(events)
+
+
+def reset_run_event_sink(token: Token[MiddlewareEventSink | None]) -> None:
+    """Restore the previous run-scoped event sink binding."""
+    _current_run_event_sink.reset(token)
+
+
+class RunScopedEventSink:
+    """Proxy sink for default main agents.
+
+    A main agent can be constructed before the frontend or local gateway exists.
+    This proxy lets that agent report middleware events to whichever sink the
+    active ``stream_agent_events`` call bound for the current run. If the agent
+    is invoked outside that streaming path, events are dropped.
+    """
+
+    __slots__ = ()
+
+    def _sink(self) -> MiddlewareEventSink:
+        return _current_run_event_sink.get() or NoOpSink()
+
+    def on_tool_selection_started(self, total_tools: int) -> None:
+        self._sink().on_tool_selection_started(total_tools)
+
+    def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
+        self._sink().on_tool_selection(selected, total_tools)
+
+    def on_tool_selection_ended(self) -> None:
+        self._sink().on_tool_selection_ended()
+
+    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
+        self._sink().on_model_fallback(from_model, to_model, reason)
+
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        self._sink().emit_fallback_notice(text, style)

@@ -65,10 +65,10 @@ class LocalThreadStore:
 class LocalGraphGateway:
     """Gateway backed by the current in-process graph and session helpers.
 
-    ``events`` is the frontend event sink for this runtime — the same instance
-    injected into the agent's middleware. The streaming path reads it so the
-    tool-selection suppressor and the middleware share one owner. ``None`` (the
-    default, and every headless / server runtime) means no selection widget.
+    ``events`` is the frontend/session event sink for this runtime — normally
+    the same instance injected into the agent's middleware. If it is ``None``,
+    ``stream_agent_events`` creates a per-run session sink and binds it for
+    default main-agent middleware via ``RunScopedEventSink``.
     """
 
     thread_store: ThreadStore = field(default_factory=LocalThreadStore)

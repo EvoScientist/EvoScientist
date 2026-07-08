@@ -1,6 +1,7 @@
 """Tests for EvoScientist/stream/events.py helpers."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from deepagents import create_deep_agent
@@ -26,6 +27,7 @@ from tests.stream_v3_fakes import (
     FakeV3Agent,
     HangingV3Agent,
     SubscriptionSensitiveV3Agent,
+    async_iter,
     collect_events,
     message_delta,
     message_finish,
@@ -436,6 +438,58 @@ class TestV3ProtocolStreaming:
 
         assert not any(
             e.get("type") == "thinking" and e.get("content") == "selector-only thought"
+            for e in events
+        )
+
+    async def test_default_run_scoped_sink_suppresses_selector_reasoning(self):
+        """Default main-agent middleware reports into the current stream sink."""
+        from EvoScientist.middleware.events import RunScopedEventSink
+
+        middleware_events = RunScopedEventSink()
+
+        class Run:
+            def __init__(self):
+                self.subagents = async_iter([])
+                self.aborted = False
+
+            def __aiter__(self):
+                return self._iter_events()
+
+            async def _iter_events(self):
+                middleware_events.on_tool_selection_started(30)
+                try:
+                    yield protocol_event(
+                        "messages",
+                        (
+                            {
+                                "event": "content-block-delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "reasoning-delta",
+                                    "reasoning": "default selector thought",
+                                },
+                            },
+                            {},
+                        ),
+                    )
+                finally:
+                    middleware_events.on_tool_selection_ended()
+
+            async def abort(self):
+                self.aborted = True
+
+        class Agent:
+            async def aget_state(self, _config):
+                return SimpleNamespace(values={})
+
+            def astream_events(self, *_args, **_kwargs):
+                return Run()
+
+        events = await collect_events(Agent())
+
+        assert not any(
+            e.get("type") == "thinking"
+            and e.get("content") == "default selector thought"
             for e in events
         )
 

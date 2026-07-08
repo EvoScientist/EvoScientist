@@ -669,10 +669,11 @@ def _get_default_middleware(
             (avoids writing module globals on the pure path).
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
-        events: Frontend-supplied event sink. Middleware report structured
-            display events (tool selection, model fallback) to it. Defaults to
-            :class:`NoOpSink`; async sub-agent stacks are always forced to
-            ``NoOpSink`` (they must not drive the main-agent widgets).
+        events: Frontend/session-supplied event sink. Middleware report
+            structured display events (tool selection, model fallback) to it.
+            Defaults to the current stream run's sink for main agents; async
+            sub-agent stacks are always forced to ``NoOpSink`` (they must not
+            drive the main-agent widgets).
     """
     from .middleware import (
         ConfigurableModelMiddleware,
@@ -689,12 +690,13 @@ def _get_default_middleware(
         default_memory_scheduler,
         load_fallback_chain,
     )
-    from .middleware.events import NoOpSink
+    from .middleware.events import NoOpSink, RunScopedEventSink
 
     # Subagent stacks never drive the main-agent frontend widgets; force the
-    # no-op sink there regardless of what the caller passed. Main/interactive
-    # stacks default to NoOpSink when no frontend sink is supplied.
-    events = NoOpSink() if (events is None or for_async_subagent) else events
+    # no-op sink there regardless of what the caller passed. Main stacks built
+    # without an explicit frontend/session sink report into the active stream
+    # run's sink, preserving selector suppression for headless local runs.
+    events = NoOpSink() if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
     if cfg.model_fallbacks:
