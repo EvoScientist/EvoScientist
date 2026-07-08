@@ -394,12 +394,11 @@ class InboundConsumer:
         async with self._chat_locks[session_key]:
             refeed = await self._stream_with_hitl(msg, channel, thread_id, session_key)
 
-        # An unrecognized reply to a pending approval rejected the action
-        # and now becomes a NEW agent turn (pre-engine serve semantics).
-        # The lock was released above, so the previous turn has fully
-        # unwound before the refeed turn acquires it — same ordering as the
-        # old fall-through routing.  Loops in case the refeed turn hits
-        # another approval that is again answered with unparseable text.
+        # An unrecognized reply to a pending approval rejects the action and
+        # then becomes a new agent turn. The lock was released above, so the
+        # previous turn has fully unwound before the refeed turn acquires it.
+        # Loops in case the refeed turn hits another approval that is again
+        # answered with unparseable text.
         while refeed is not None:
             channel = self._get_channel(refeed.channel)
             thread_id = await self._get_thread_id(refeed.sender_id)
@@ -577,14 +576,11 @@ class InboundConsumer:
                     timeout=HITL_APPROVAL_TIMEOUT,
                 )
                 if outcome.unrecognized_reply is not None:
-                    # Serve-mode policy (matches the pre-engine routing): an
-                    # unrecognized reply REJECTS the pending action, confirms
-                    # with the reject feedback, and is then processed as a
-                    # NEW agent turn — a user who ignores the prompt and
-                    # types a fresh instruction must not lose it.  The
-                    # refeed is returned to ``_handle_message``, which
-                    # starts the new turn only after this one has fully
-                    # unwound (same chat-lock ordering as before).
+                    # Serve-mode policy: an unrecognized reply rejects the
+                    # pending action, confirms with reject feedback, and is
+                    # then processed as a new agent turn. The refeed is
+                    # returned to ``_handle_message`` so chat-lock ordering
+                    # stays serialized.
                     await io.send(REJECTED_FEEDBACK)
                     # In this flow, the final wait_reply call is exactly the
                     # unrecognized approval reply. ask_user does not read this.

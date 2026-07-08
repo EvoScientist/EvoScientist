@@ -1,23 +1,10 @@
-"""Transport-agnostic HITL / ask_user interaction engine.
+"""Transport-agnostic HITL and ask_user interaction engine.
 
-This module is the single home for the channel-side interaction protocol
-shared by the two drivers that talk to a human over a chat channel:
-
-* :mod:`EvoScientist.channels.consumer` — serve / standalone mode
-  (natively async, runs on the consumer event loop).
-* :mod:`EvoScientist.cli.channel` — CLI / TUI mode (a synchronous bridge
-  that drives the engine on the bus loop).
-
-Historically each driver carried its own copy of prompt formatting, the
-reply grammar (choice letters, the "Other" free-form sub-flow,
-approve/reject/approve-all, stop commands), the auto-approve policy and
-the bilingual feedback strings — ~250 lines that had to be hand-synced
-and had already drifted (``/stop`` handling existed only on the CLI
-side).  Everything pure lives here now; both drivers point at it.
-
-Sizing rule: this module is sized for the two current interaction flows
-(approval + ask_user). New interrupt types should *extend the engine here*
-rather than growing a third driver copy.
+The module defines the channel-side protocol shared by serve mode and the
+CLI/TUI bridge: prompt formatting, reply grammar, stop handling, approval
+policy, pending-reply routing, and the async engine coroutines for approval
+and ask_user flows. Drivers provide transport-specific IO through
+:class:`InteractionIO`.
 """
 
 from __future__ import annotations
@@ -50,27 +37,6 @@ UNRECOGNIZED_FEEDBACK = "Unrecognized reply. Action rejected."
 APPROVAL_TIMEOUT_FEEDBACK = "⏰ Approval timed out. Action rejected."
 ASK_USER_TIMEOUT_FEEDBACK = "⏰ Response timed out."
 OTHER_PROMPT = "Please type your answer:"
-
-# Feedback keyed by parsed approval decision.  ``None`` means "send
-# nothing" (timeout / stop are silent — a late reply must not claim the
-# user approved when they walked away, and /stop already got its own ack).
-_DECISION_FEEDBACK: dict[str, str] = {
-    "approve": APPROVED_FEEDBACK,
-    "auto": APPROVED_AUTO_FEEDBACK,
-    "reject": REJECTED_FEEDBACK,
-}
-
-
-def decision_feedback(decision: str | None) -> str:
-    """Feedback string for a parsed approval *decision*.
-
-    ``approve``/``auto``/``reject`` map to their bilingual strings; an
-    unrecognized reply (``None``) maps to the English reject notice.
-    """
-    if decision is None:
-        return UNRECOGNIZED_FEEDBACK
-    return _DECISION_FEEDBACK.get(decision, UNRECOGNIZED_FEEDBACK)
-
 
 # ── stop / cancel helpers ──────────────────────────────────────────────
 
@@ -261,21 +227,14 @@ def config_auto_approve(action_requests: list[dict]) -> bool:
 
 
 class ApprovalPolicy:
-    """Auto-approve policy: config rules + a session auto-approve registry.
+    """Auto-approve policy backed by config rules and session grants.
 
-    One instance is owned per process (the consumer holds one on its loop;
-    the CLI bridge holds one on the bus loop). Cross-process sharing is a
-    non-goal — unifying the *implementation* removes the manual-sync
-    burden without merging the two processes' registries.
+    One instance is owned per process. The consumer keeps one on its event
+    loop; the CLI bridge keeps one on the bus loop.
     """
 
     def __init__(self) -> None:
         self._granted_sessions: set[str] = set()
-
-    @staticmethod
-    def session_key(channel: str, chat_id: str) -> str:
-        """Derive the ``"channel:chat_id"`` session key."""
-        return f"{channel}:{chat_id}"
 
     def is_session_granted(self, session_key: str) -> bool:
         """Whether the user previously chose "Approve all" for this session."""

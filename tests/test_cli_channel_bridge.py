@@ -289,10 +289,9 @@ class TestHitlPromptBridge:
     def test_unrecognized_reply_declines_without_refeed(self, monkeypatch):
         """CLI-bridge policy: unparseable reply → explicit notice, NO refeed.
 
-        Matches the pre-engine cli/channel.py path byte-for-byte: the reply
-        is consumed by the interception registry (never enqueued as a new
-        turn) and the user gets the unrecognized-reply notice.
-        Only the serve-mode consumer refeeds — see
+        The reply is consumed by the interception registry, never enqueued
+        as a new turn, and the user gets the unrecognized-reply notice. Only
+        the serve-mode consumer refeeds; see
         TestConsumerUnrecognizedRefeed in tests/test_interaction_engine.py.
         """
         monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)

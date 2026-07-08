@@ -687,12 +687,6 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
     return True
 
 
-# Stop-command detection now lives in ``channels.interaction`` (shared with
-# the consumer). Kept as a module alias so the bus fast-path call sites read
-# naturally and stay import-stable.
-_is_stop_command = is_stop_command
-
-
 def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
     """Run *coro* (an engine coroutine) on the bus loop and block for it.
 
@@ -805,10 +799,9 @@ def channel_hitl_prompt(
             timeout=HITL_APPROVAL_TIMEOUT,
         )
         if outcome.unrecognized_reply is not None:
-            # CLI-bridge policy (matches the pre-engine cli/channel.py
-            # path): an unparseable reply declines with the explicit
-            # notice and is NOT refed as a new turn — only the serve-mode
-            # consumer refeeds.
+            # CLI-bridge policy: an unparseable reply declines with the
+            # explicit notice. Only the serve-mode consumer refeeds the
+            # text as a new turn.
             await io.send(UNRECOGNIZED_FEEDBACK)
             return None
         return outcome.decisions
@@ -1009,7 +1002,7 @@ async def _bus_inbound_consumer(bus, manager) -> None:
             # while waiting for approvals/questions.  If a prompt wait is
             # pending, still deliver /stop into it so the blocking engine
             # unwinds immediately (it treats /stop as a clean cancel).
-            if _is_stop_command(msg.content):
+            if is_stop_command(msg.content):
                 if _reply_registry.try_resolve(session_key, msg.content):
                     _channel_logger.info(
                         f"[bus] stop request released interaction wait for "
@@ -1053,7 +1046,7 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     # Fast-path: /stop intercept. Handle on the bus task itself so we
     # don't deadlock behind the main-thread stream we're trying to
     # interrupt. No typing indicator, no queue entry.
-    if _is_stop_command(msg.content):
+    if is_stop_command(msg.content):
         cancelled_count, active_count = _cancel_channel_session(
             msg.channel, msg.chat_id
         )

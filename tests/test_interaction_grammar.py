@@ -98,20 +98,6 @@ class TestParseApprovalReply:
         assert I.approve_decisions([]) == [{"type": "approve"}]
 
 
-class TestDecisionFeedback:
-    @pytest.mark.parametrize(
-        ("decision", "expected"),
-        [
-            ("approve", I.APPROVED_FEEDBACK),
-            ("auto", I.APPROVED_AUTO_FEEDBACK),
-            ("reject", I.REJECTED_FEEDBACK),
-            (None, I.UNRECOGNIZED_FEEDBACK),
-        ],
-    )
-    def test_feedback(self, decision, expected):
-        assert I.decision_feedback(decision) == expected
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # ask_user choice grammar (letters + "Other")
 # ═══════════════════════════════════════════════════════════════════════
@@ -149,9 +135,6 @@ class TestParseChoiceAnswer:
 
 
 class TestApprovalPolicy:
-    def test_session_key(self):
-        assert I.ApprovalPolicy.session_key("telegram", "c1") == "telegram:c1"
-
     def test_grant_and_is_granted(self):
         p = I.ApprovalPolicy()
         assert p.is_session_granted("tg:c1") is False
@@ -239,11 +222,8 @@ class TestConfigAutoApprove:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Prompt-format goldens — byte-for-byte vs the pre-extraction drivers.
+# Prompt-format checks.
 # ═══════════════════════════════════════════════════════════════════════
-#
-# The literals below are exactly what ``consumer.py`` / ``cli/channel.py``
-# emitted before extraction (whitespace, emoji, and phrasing preserved).
 
 
 class TestApprovalPromptFormat:

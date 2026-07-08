@@ -462,7 +462,7 @@ class TestConsumerHitlHelpers:
         assert parse_approval_reply("") is None
         assert parse_approval_reply("maybe") is None
 
-    def testformat_approval_prompt(self):
+    def test_format_approval_prompt(self):
         from EvoScientist.channels.interaction import format_approval_prompt
 
         prompt = format_approval_prompt(
