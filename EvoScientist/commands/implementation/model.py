@@ -154,7 +154,7 @@ class ModelCommand(Command):
         # Re-thread the session's frontend event sink so the rebuilt agent's
         # middleware keeps driving the tool-selection widget / fallback notices
         # after a /model switch (the sink lives on the gateway, not the agent).
-        events = getattr(ctx.graph_gateway, "events", None)
+        events = ctx.graph_gateway.events
 
         try:
             new_chat_model = _build_chat_model(temp_cfg)

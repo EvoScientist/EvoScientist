@@ -524,7 +524,7 @@ def run_textual_interactive(
             self._agent_loader.start(
                 workspace_dir=workspace,
                 checkpointer=self._checkpointer,
-                events=getattr(self._runtime_gateways.graph_gateway, "events", None),
+                events=self._runtime_gateways.graph_gateway.events,
             )
 
         def _mount_mcp_loader_widget(self) -> None:
@@ -805,7 +805,7 @@ def run_textual_interactive(
         def on_mount(self) -> None:
             # Bind the session sink's fallback-notice display so model-fallback
             # messages appear as SystemMessage widgets in the chat container.
-            sink = getattr(self._runtime_gateways.graph_gateway, "events", None)
+            sink = self._runtime_gateways.graph_gateway.events
             if sink is not None and hasattr(sink, "set_fallback_display"):
                 sink.set_fallback_display(
                     lambda text, style: self._append_system(text, style)
@@ -2981,7 +2981,7 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
-            sink = getattr(self._runtime_gateways.graph_gateway, "events", None)
+            sink = self._runtime_gateways.graph_gateway.events
             if sink is not None and hasattr(sink, "set_fallback_display"):
                 sink.set_fallback_display(None)
             if self._channel_timer is not None:
