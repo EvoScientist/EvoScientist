@@ -368,7 +368,7 @@ class TestBusInboundConsumer:
 
         The bus consumer delivers ``/stop`` into the reply registry (so the
         blocking engine unwinds) AND acks with "Stopped." — the registry
-        interception sits ahead of normal enqueue (R1), so the message never
+        interception sits ahead of normal enqueue, so the message never
         becomes a fresh agent turn.
         """
         from EvoScientist.cli import channel as channel_mod

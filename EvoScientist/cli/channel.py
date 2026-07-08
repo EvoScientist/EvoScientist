@@ -469,16 +469,12 @@ async def _dispatch_channel_slash_impl(
 # on the resulting future.  Replies are routed by a single asyncio-based
 # ``PendingReplyRegistry`` fed from the inbound interception point — the bus
 # consumer checks it BEFORE normal enqueue, so the next reply from that chat
-# is intercepted (R1).
+# is intercepted.
 
-# Per-flow timeout defaults are shared with the consumer via
-# ``channels.interaction`` (single source of truth for the grammar).
-_HITL_APPROVAL_TIMEOUT = HITL_APPROVAL_TIMEOUT
-_ASK_USER_TIMEOUT = ASK_USER_TIMEOUT
 
 # Extra head-room on the outer ``.result()`` wait so the engine's own
 # per-flow timeout always fires first and returns a clean cancelled/None
-# instead of the bridge tearing the coroutine down mid-flight (R2).
+# instead of the bridge tearing the coroutine down mid-flight.
 _ENGINE_RESULT_SLACK = 30.0
 # Send timeout inside the bridge IO adapter (kept per-flow-independent, as
 # the standalone consumer has no send timeout).
@@ -682,7 +678,7 @@ def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
     Schedules the coroutine on ``_bus_loop`` via ``run_coroutine_threadsafe``
     and waits up to *result_timeout* seconds for it (the outer bound is the
     engine's own per-flow timeout plus slack, so the engine's timeout fires
-    first — R2).  Returns *on_error* (a zero-arg factory) on any failure.
+    first). Returns *on_error* (a zero-arg factory) on any failure.
     """
     bus_loop = _bus_loop
     if bus_loop is None:
@@ -722,9 +718,9 @@ def channel_ask_user_prompt(
     )
     # Each question may need up to two waits (question + "Other" free-form);
     # bound the outer wait accordingly so it never fires before the engine's.
-    result_timeout = _ASK_USER_TIMEOUT * (2 * len(questions)) + _ENGINE_RESULT_SLACK
+    result_timeout = ASK_USER_TIMEOUT * (2 * len(questions)) + _ENGINE_RESULT_SLACK
     return _run_engine_on_bus(
-        resolve_ask_user(questions, io, timeout=_ASK_USER_TIMEOUT),
+        resolve_ask_user(questions, io, timeout=ASK_USER_TIMEOUT),
         result_timeout=result_timeout,
         on_error=lambda: {"status": "cancelled"},
     )
@@ -765,7 +761,7 @@ def channel_hitl_prompt(
             io,
             _approval_policy,
             session_key,
-            timeout=_HITL_APPROVAL_TIMEOUT,
+            timeout=HITL_APPROVAL_TIMEOUT,
         )
         if outcome.unrecognized_reply is not None:
             # CLI-bridge policy (matches the pre-engine cli/channel.py
@@ -778,7 +774,7 @@ def channel_hitl_prompt(
 
     return _run_engine_on_bus(
         _hitl_flow(),
-        result_timeout=_HITL_APPROVAL_TIMEOUT + _ENGINE_RESULT_SLACK,
+        result_timeout=HITL_APPROVAL_TIMEOUT + _ENGINE_RESULT_SLACK,
         on_error=lambda: None,
     )
 
@@ -983,9 +979,9 @@ async def _bus_inbound_consumer(bus, manager) -> None:
                 _task.add_done_callback(_tasks.discard)
                 continue
 
-            # R1: reply interception sits ahead of normal enqueue — if a
-            # prompt is waiting on this chat, the next message is its reply
-            # and must NOT be enqueued as a fresh agent turn.
+            # Reply interception sits ahead of normal enqueue — if a prompt
+            # is waiting on this chat, the next message is its reply and
+            # must NOT be enqueued as a fresh agent turn.
             if _reply_registry.try_resolve(session_key, msg.content):
                 _channel_logger.info(
                     f"[bus] interaction reply from {msg.channel}:{msg.sender_id}: "

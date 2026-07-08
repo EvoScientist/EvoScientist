@@ -32,12 +32,6 @@ from .interaction import (
     resolve_ask_user,
 )
 
-# Backwards-compatible re-exports for existing test imports; the canonical
-# implementations live in ``channels.interaction``.
-from .interaction import config_auto_approve as _should_auto_approve  # noqa: F401
-from .interaction import format_approval_prompt as _format_approval_prompt  # noqa: F401
-from .interaction import parse_approval_reply as _parse_approval_reply  # noqa: F401
-
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -45,10 +39,6 @@ T = TypeVar("T")
 _MAX_CHAT_LOCKS = 10_000
 _MAX_SESSIONS = 10_000
 _MAX_HITL_ROUNDS = 50
-# Per-flow timeout defaults now live in ``channels.interaction`` (single
-# source shared with the CLI bridge); aliased here for local readability.
-_HITL_APPROVAL_TIMEOUT = HITL_APPROVAL_TIMEOUT
-_ASK_USER_TIMEOUT = ASK_USER_TIMEOUT
 
 
 @dataclass
@@ -562,7 +552,7 @@ class InboundConsumer:
                     io,
                     self._approval_policy,
                     session_key,
-                    timeout=_HITL_APPROVAL_TIMEOUT,
+                    timeout=HITL_APPROVAL_TIMEOUT,
                 )
                 if outcome.unrecognized_reply is not None:
                     # Serve-mode policy (matches the pre-engine routing): an
@@ -660,7 +650,7 @@ class InboundConsumer:
         """
         questions = event_data.get("questions", [])
         io = _ConsumerIO(self, msg, session_key)
-        return await resolve_ask_user(questions, io, timeout=_ASK_USER_TIMEOUT)
+        return await resolve_ask_user(questions, io, timeout=ASK_USER_TIMEOUT)
 
     # ── internal ──
 

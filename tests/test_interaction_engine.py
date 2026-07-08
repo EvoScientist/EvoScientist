@@ -1,11 +1,11 @@
-"""Stage 2 tests for the interaction engine coroutines + reply registry.
+"""Tests for the interaction engine coroutines + reply registry.
 
 The engine (:func:`resolve_ask_user`, :func:`resolve_approval`) is pure
 async with an injected :class:`InteractionIO`, so it is exercised here with
 a scripted ``FakeIO``: assert the prompts it emits and feed it the replies
 a user would send.  Covers the whole grammar — single/multi question,
 optional, choice letters, "Other", timeout, ``/stop``, approve / reject /
-approve-all, and capability-driven button formatting (R3).
+approve-all, and capability-driven button formatting.
 """
 
 import asyncio
@@ -344,10 +344,10 @@ class TestPendingReplyRegistry:
 # ═══════════════════════════════════════════════════════════════════════
 # Pre-engine semantics that must survive the extraction: an unrecognized
 # reply while a HITL approval is pending REJECTS the pending action, sends
-# the "❌ 已拒绝" feedback, and the user's text is then processed as a NEW
+# the rejection feedback, and the user's text is then processed as a NEW
 # agent turn — a user who ignores the prompt and types a fresh instruction
-# must not lose it.  (The CLI bridge deliberately does NOT refeed; see
-# tests/test_cli_channel_bridge.py.)
+# must not lose it. (The CLI bridge deliberately does NOT refeed; see
+# tests/test_cli_channel_bridge.py)
 
 
 class TestConsumerUnrecognizedRefeed:
@@ -426,7 +426,7 @@ class TestConsumerUnrecognizedRefeed:
 
             # 3. Pending action is rejected with the old serve feedback...
             feedback = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
-            assert feedback.content == "❌ 已拒绝"
+            assert feedback.content == I.REJECTED_FEEDBACK
 
             # 4. ...and the text is processed as a NEW agent turn.
             response = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)

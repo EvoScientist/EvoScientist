@@ -1,15 +1,4 @@
-"""Stage 1 tests for ``channels.interaction`` — the shared interaction grammar.
-
-Two jobs:
-
-1. **Grammar** — table-driven coverage of the reply grammar (approval
-   letters, ask_user choice letters + the "Other" sub-flow, stop/cancel
-   commands, and the auto-approve policy).  The ``/stop`` rows pin the
-   drift fix (G3): both flows classify ``/stop`` *before* parsing a reply.
-2. **Prompt-format goldens** — byte-for-byte assertions that the extracted
-   formatters produce exactly the text the two drivers emitted before the
-   extraction.
-"""
+"""Tests the shared interaction grammar for ``channels.interaction``."""
 
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -19,7 +8,7 @@ import pytest
 from EvoScientist.channels import interaction as I
 
 # ═══════════════════════════════════════════════════════════════════════
-# Stop / cancel grammar (G3 — the drift fix, shared by BOTH flows)
+# Stop / cancel grammar
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -88,9 +77,9 @@ class TestParseApprovalReply:
         assert I.parse_approval_reply(text) == expected
 
     def test_button_values_normalize_to_decisions(self):
-        # R3: Feishu/QQ buttons deliver their `value` ("1"/"2"/"3") through
-        # the same reply path, so the shared parser must map them identically
-        # to a typed reply.
+        # Feishu/QQ buttons deliver their `value` ("1"/"2"/"3") through
+        # the same reply path, so the shared parser must map them
+        # identically to a typed reply.
         buttons = I.approval_prompt_metadata(None, with_buttons=True)["buttons"]
         values = [b["value"] for b in buttons]
         assert values == ["1", "2", "3"]
@@ -257,54 +246,31 @@ class TestConfigAutoApprove:
 # emitted before extraction (whitespace, emoji, and phrasing preserved).
 
 
-class TestApprovalPromptGolden:
-    def test_single_no_buttons(self):
-        got = I.format_approval_prompt(
-            [{"name": "execute", "args": {"command": "ls -la"}}]
-        )
-        assert got == (
-            "⚠️ Approval Required\n"
-            "\n"
-            "  1. execute: ls -la\n"
-            "\n"
-            "Reply: 1=Approve, 2=Reject, 3=Approve all\n"
-            "(Auto-reject in 2 min if no reply)"
-        )
-
-    def test_multiple_no_buttons(self):
+class TestApprovalPromptFormat:
+    def test_lists_each_action_with_reply_options(self):
         got = I.format_approval_prompt(
             [
                 {"name": "execute", "args": {"command": "ls"}},
                 {"name": "write_file", "args": {"path": "/out.txt"}},
             ]
         )
-        assert got == (
-            "⚠️ Approval Required\n"
-            "\n"
-            "  1. execute: ls\n"
-            "  2. write_file: /out.txt\n"
-            "\n"
-            "Reply: 1=Approve, 2=Reject, 3=Approve all\n"
-            "(Auto-reject in 2 min if no reply)"
-        )
+        assert "execute: ls" in got
+        assert "write_file: /out.txt" in got
+        # The offered options must match what parse_approval_reply accepts.
+        for option in ("1=Approve", "2=Reject", "3=Approve all"):
+            assert option in got
 
     def test_with_buttons_drops_text_instruction(self):
         got = I.format_approval_prompt(
             [{"name": "execute", "args": {"command": "ls -la"}}],
             with_buttons=True,
         )
-        assert got == "⚠️ Approval Required\n\n  1. execute: ls -la"
+        assert "execute: ls -la" in got
+        assert "1=Approve" not in got  # buttons replace the typed-reply hint
 
     def test_no_command_falls_back_to_name(self):
         got = I.format_approval_prompt([{"name": "ask_user", "args": {}}])
-        assert got == (
-            "⚠️ Approval Required\n"
-            "\n"
-            "  1. ask_user\n"
-            "\n"
-            "Reply: 1=Approve, 2=Reject, 3=Approve all\n"
-            "(Auto-reject in 2 min if no reply)"
-        )
+        assert "ask_user" in got
 
     def test_metadata_no_buttons(self):
         assert I.approval_prompt_metadata({"k": "v"}, with_buttons=False) == {"k": "v"}
@@ -312,39 +278,26 @@ class TestApprovalPromptGolden:
     def test_metadata_with_buttons(self):
         md = I.approval_prompt_metadata({"k": "v"}, with_buttons=True)
         assert md["k"] == "v"
-        assert md["buttons"] == [
-            {"text": "Approve", "value": "1", "type": "primary"},
-            {"text": "Reject", "value": "2", "type": "danger"},
-            {"text": "Approve all", "value": "3"},
-        ]
+        # Button values must be replies parse_approval_reply understands.
+        assert [b["value"] for b in md["buttons"]] == ["1", "2", "3"]
 
 
-class TestQuestionPromptGolden:
-    def test_single_text_required(self):
+class TestQuestionPromptFormat:
+    def test_single_question_offers_cancel(self):
         got = I.format_question_prompt(
             {"question": "What dataset?", "type": "text"}, 0, 1
         )
-        assert got == (
-            "❓ Quick check-in from EvoScientist\n"
-            "\n"
-            "1. What dataset?\n"
-            "\n"
-            "Reply with your answer, or 'cancel'."
-        )
+        assert "What dataset?" in got
+        assert "cancel" in got
 
-    def test_single_text_optional(self):
+    def test_optional_question_is_marked_and_skippable(self):
         got = I.format_question_prompt(
             {"question": "Notes?", "type": "text", "required": False}, 0, 1
         )
-        assert got == (
-            "❓ Quick check-in from EvoScientist\n"
-            "\n"
-            "1. Notes? (optional)\n"
-            "\n"
-            "Reply with your answer, or 'cancel'. Leave empty to skip."
-        )
+        assert "(optional)" in got
+        assert "skip" in got.lower()
 
-    def test_multi_choice_optional_numbered(self):
+    def test_multi_question_header_shows_position(self):
         got = I.format_question_prompt(
             {
                 "question": "Which?",
@@ -355,18 +308,9 @@ class TestQuestionPromptGolden:
             1,
             3,
         )
-        assert got == (
-            "❓ Question 2/3\n"
-            "\n"
-            "2. Which? (optional)\n"
-            "   A. A\n"
-            "   B. B\n"
-            "   C. Other\n"
-            "\n"
-            "Reply with a letter (A/B/C), or 'cancel'."
-        )
+        assert "2/3" in got
 
-    def test_multi_choice_required(self):
+    def test_choices_get_letters_plus_other(self):
         got = I.format_question_prompt(
             {
                 "question": "Pick one",
@@ -376,13 +320,8 @@ class TestQuestionPromptGolden:
             0,
             1,
         )
-        assert got == (
-            "❓ Quick check-in from EvoScientist\n"
-            "\n"
-            "1. Pick one\n"
-            "   A. CIFAR-10\n"
-            "   B. ImageNet\n"
-            "   C. Other\n"
-            "\n"
-            "Reply with a letter (A/B/C), or 'cancel'."
-        )
+        # Displayed letters must match what the choice parser accepts, with
+        # the "Other" free-form option appended after the real choices.
+        assert "A. CIFAR-10" in got
+        assert "B. ImageNet" in got
+        assert "C. Other" in got

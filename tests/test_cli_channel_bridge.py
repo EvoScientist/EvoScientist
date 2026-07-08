@@ -1,9 +1,9 @@
-"""Stage 3 tests for the CLI channel bridge.
+"""Tests for the CLI channel bridge.
 
 The bridge runs the shared interaction engine on the bus loop via
-``run_coroutine_threadsafe`` while the calling thread blocks.  Covered here:
+``run_coroutine_threadsafe`` while the calling thread blocks. Covered here:
 
-* **R1 ordering** — the reply-interception point sits *ahead* of normal
+* **Ordering** — the reply-interception point sits *ahead* of normal
   enqueue, so a reply to a pending prompt is delivered into the engine's
   wait and never becomes a fresh agent turn.
 * **Bridge round-trip** — ``channel_hitl_prompt`` drives ``resolve_approval``
@@ -36,7 +36,7 @@ def _clean_bridge_state():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# R1: reply interception sits ahead of normal enqueue
+# Reply interception sits ahead of normal enqueue
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -213,7 +213,7 @@ class TestHitlPromptBridge:
 
         Matches the pre-engine cli/channel.py path byte-for-byte: the reply
         is consumed by the interception registry (never enqueued as a new
-        turn) and the user gets "Unrecognized reply. Action rejected.".
+        turn) and the user gets the unrecognized-reply notice.
         Only the serve-mode consumer refeeds — see
         TestConsumerUnrecognizedRefeed in tests/test_interaction_engine.py.
         """
@@ -250,7 +250,7 @@ class TestHitlPromptBridge:
             contents = asyncio.run_coroutine_threadsafe(_drain(), loop).result(
                 timeout=5
             )
-        assert contents[-1] == "Unrecognized reply. Action rejected."
+        assert contents[-1] == interaction_mod.UNRECOGNIZED_FEEDBACK
         # No refeed: nothing was enqueued for the main thread.
         assert channel_mod._message_queue.empty()
 

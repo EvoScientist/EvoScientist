@@ -35,17 +35,17 @@ if TYPE_CHECKING:
 HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for a HITL approval reply
 ASK_USER_TIMEOUT = 300.0  # seconds to wait for an ask_user reply
 
-# ── stop-command grammar (G3) ──────────────────────────────────────────
+# ── stop-command grammar ──────────────────────────────────────────
 # Checked before reply parsing in *both* flows so a `/stop` mid-prompt
 # always cancels instead of being captured as a literal answer.
 _STOP_COMMANDS = frozenset(("/stop", "/cancel"))
 
-# ── bilingual feedback strings ─────────────────────────────────────────
+# ── feedback strings ─────────────────────────────────────────
 # Visible confirmations so a click/reply registers on channels without a
 # message-recall API (e.g. QQ C2C).
-APPROVED_FEEDBACK = "✅ 已批准"
-APPROVED_AUTO_FEEDBACK = "✅ 已批准（后续自动通过）"
-REJECTED_FEEDBACK = "❌ 已拒绝"
+APPROVED_FEEDBACK = "✅ Approved"
+APPROVED_AUTO_FEEDBACK = "✅ Approved (auto-approving future actions)"
+REJECTED_FEEDBACK = "❌ Rejected"
 UNRECOGNIZED_FEEDBACK = "Unrecognized reply. Action rejected."
 APPROVAL_TIMEOUT_FEEDBACK = "⏰ Approval timed out. Action rejected."
 ASK_USER_TIMEOUT_FEEDBACK = "⏰ Response timed out."
