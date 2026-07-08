@@ -128,6 +128,13 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         # Track whether handler was called — if so, any exception is from
         # the downstream model, not the selector, and must propagate.
         _handler_called = False
+        _selection_open = True
+
+        def _end_selection() -> None:
+            nonlocal _selection_open
+            if _selection_open:
+                self._events.on_tool_selection_ended()
+                _selection_open = False
 
         def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
@@ -135,7 +142,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             # ``req.tools`` is the selector-filtered set here.
             self._events.on_tool_selection(self._selected_names(req), total)
             self._report_selection(req)
-            self._events.on_tool_selection_ended()
+            _end_selection()
             return handler(req)
 
         try:
@@ -147,9 +154,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
                 raise  # Error from downstream model — don't retry
             # Selector itself failed (e.g., structured output not supported).
             logger.debug("Tool selector failed, using all tools", exc_info=True)
+            _end_selection()
             return handler(request)
         finally:
-            self._events.on_tool_selection_ended()
+            _end_selection()
 
     async def awrap_model_call(
         self,
@@ -163,13 +171,20 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         self._events.on_tool_selection_started(total)
 
         _handler_called = False
+        _selection_open = True
+
+        def _end_selection() -> None:
+            nonlocal _selection_open
+            if _selection_open:
+                self._events.on_tool_selection_ended()
+                _selection_open = False
 
         async def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
             _handler_called = True
             self._events.on_tool_selection(self._selected_names(req), total)
             self._report_selection(req)
-            self._events.on_tool_selection_ended()
+            _end_selection()
             return await handler(req)
 
         try:
@@ -180,9 +195,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             if _handler_called:
                 raise
             logger.debug("Tool selector failed, using all tools", exc_info=True)
+            _end_selection()
             return await handler(request)
         finally:
-            self._events.on_tool_selection_ended()
+            _end_selection()
 
 
 def create_tool_selector_middleware(

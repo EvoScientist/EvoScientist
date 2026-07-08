@@ -3,6 +3,7 @@
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.tools import BaseTool, StructuredTool
 
@@ -20,18 +21,28 @@ class _RecordingSink:
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.active = False
 
     def on_tool_selection_started(self, total_tools: int) -> None:
+        self.active = True
         self.calls.append(("started", total_tools))
 
     def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
         self.calls.append(("selection", list(selected), total_tools))
 
     def on_tool_selection_ended(self) -> None:
+        self.active = False
         self.calls.append(("ended",))
 
     def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
         pass
+
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        pass
+
+    @property
+    def tool_selection_active(self) -> bool:
+        return self.active
 
 
 def _tool(name: str) -> BaseTool:
@@ -183,9 +194,11 @@ def test_selection_lifecycle_reported_to_sink():
     request = _request([_tool(f"t{i}") for i in range(10)])
     cond.wrap_model_call(request, MagicMock())
 
-    assert sink.calls[0] == ("started", 10)
-    assert ("selection", ["read_file", "think_tool"], 10) in sink.calls
-    assert sink.calls[-1] == ("ended",)
+    assert sink.calls == [
+        ("started", 10),
+        ("selection", ["read_file", "think_tool"], 10),
+        ("ended",),
+    ]
 
 
 def test_selector_failure_reports_ended_without_selection():
@@ -208,6 +221,59 @@ def test_selector_failure_reports_ended_without_selection():
     assert ("started", 10) in sink.calls
     assert not any(c[0] == "selection" for c in sink.calls)
     assert sink.calls[-1] == ("ended",)
+
+
+def test_selector_failure_ends_before_sync_fallback_handler():
+    """All-tools fallback must not run while selector suppression is active."""
+    mock_selector = MagicMock()
+    mock_selector.wrap_model_call.side_effect = RuntimeError("no structured output")
+    sink = _RecordingSink()
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=MagicMock(return_value=mock_selector),
+        threshold=5,
+        events=sink,
+    )
+
+    request = _request([_tool(f"t{i}") for i in range(10)])
+
+    def handler(req):
+        sink.calls.append(("handler", sink.tool_selection_active))
+        return MagicMock()
+
+    cond.wrap_model_call(request, handler)
+
+    assert sink.calls == [
+        ("started", 10),
+        ("ended",),
+        ("handler", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_selector_failure_ends_before_async_fallback_handler():
+    """Async all-tools fallback must see selection already closed."""
+    mock_selector = MagicMock()
+    mock_selector.awrap_model_call.side_effect = RuntimeError("no structured output")
+    sink = _RecordingSink()
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=MagicMock(return_value=mock_selector),
+        threshold=5,
+        events=sink,
+    )
+
+    request = _request([_tool(f"t{i}") for i in range(10)])
+
+    async def handler(req):
+        sink.calls.append(("handler", sink.tool_selection_active))
+        return MagicMock()
+
+    await cond.awrap_model_call(request, handler)
+
+    assert sink.calls == [
+        ("started", 10),
+        ("ended",),
+        ("handler", False),
+    ]
 
 
 def test_selector_always_includes_available_memory_tools():
