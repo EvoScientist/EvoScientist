@@ -670,7 +670,7 @@ def _get_default_middleware(
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
         events: Frontend/session-supplied event sink. Middleware report
-            structured display events (tool selection, model fallback) to it.
+            tool-selection events and model-fallback notices to it.
             Defaults to the current stream run's sink for main agents; async
             sub-agent stacks are always forced to ``NoOpSink`` (they must not
             drive the main-agent widgets).

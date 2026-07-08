@@ -3,9 +3,8 @@
 Uses LangChain's AgentMiddleware to intercept model calls.  When the primary
 model raises an exception, the middleware walks the configured fallback chain,
 trying each alternative model in order.  Every fallback attempt and its
-outcome is reported to the injected event sink (the fallback transition via the
-structured ``on_model_fallback``; the surrounding narration via
-``emit_fallback_notice``), and the frontend sink renders it.
+outcome is reported to the injected event sink as fallback narration, and the
+frontend sink renders it.
 
 Errors that indicate a client-side bug (malformed request / HTTP 400) or a
 context-length breach are not eligible for fallback and are re-raised
@@ -216,9 +215,7 @@ async def _try_fallbacks(
         request: The original model request.
         invoke: Async callable that invokes the handler on a request.
         primary_exc: The exception raised by the primary model.
-        events: Injected event sink. The fallback *transition* is reported via
-            the structured ``on_model_fallback``; the surrounding narration
-            (header / outcome / exhaustion) via ``emit_fallback_notice``.
+        events: Injected event sink for fallback narration.
 
     Returns:
         The ``ModelResponse`` from the first successful fallback.
@@ -237,14 +234,11 @@ async def _try_fallbacks(
     )
 
     last_exc = primary_exc
-    from_label = "primary model"
     for model_name, provider in get_fallback_chain():
-        # Structured transition: the frontend formats the "  -> Falling back to
-        # {to} due to: {reason}" line (to carries the provider, reason the exc).
-        events.on_model_fallback(
-            from_label,
-            f"{model_name} ({provider})",
+        events.emit_fallback_notice(
+            f"  -> Falling back to {model_name} ({provider}) due to: "
             f"{type(last_exc).__name__}: {last_exc}",
+            "yellow",
         )
         try:
             fallback_model = get_chat_model(model=model_name, provider=provider)
@@ -266,7 +260,6 @@ async def _try_fallbacks(
                 )
                 raise
             last_exc = fb_exc
-            from_label = f"{model_name} ({provider})"
             events.emit_fallback_notice(
                 f"  x {model_name} also failed: {type(fb_exc).__name__}: {fb_exc}",
                 "red",

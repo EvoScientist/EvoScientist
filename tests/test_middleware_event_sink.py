@@ -43,9 +43,6 @@ class _SlowSink:
     def on_tool_selection_ended(self) -> None:
         self._record("ended")
 
-    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
-        self._record("fallback")
-
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         self._record("notice")
 
@@ -57,7 +54,7 @@ def test_noopsink_satisfies_protocol():
     assert sink.on_tool_selection_started(10) is None
     assert sink.on_tool_selection(["a", "b"], 10) is None
     assert sink.on_tool_selection_ended() is None
-    assert sink.on_model_fallback("gpt-x", "gpt-y", "503 down") is None
+    assert sink.emit_fallback_notice("fallback notice") is None
 
 
 def test_slow_sink_satisfies_protocol():
@@ -95,12 +92,12 @@ def test_blocking_sink_stalls_the_emitting_thread():
     sink = _SlowSink(delay)
 
     start = time.perf_counter()
-    sink.on_model_fallback("primary", "fallback", "503 down")
+    sink.emit_fallback_notice("fallback notice")
     elapsed = time.perf_counter() - start
 
     # The caller was blocked for at least the sink's delay.
     assert elapsed >= delay
-    assert [name for name, _ in sink.calls] == ["fallback"]
+    assert [name for name, _ in sink.calls] == ["notice"]
 
 
 def test_noopsink_never_blocks():
@@ -108,7 +105,7 @@ def test_noopsink_never_blocks():
     start = time.perf_counter()
     for _ in range(10_000):
         sink.on_tool_selection_started(50)
-        sink.on_model_fallback("a", "b", "c")
+        sink.emit_fallback_notice("fallback notice")
     elapsed = time.perf_counter() - start
     # 20k no-op calls are effectively free.
     assert elapsed < 0.5

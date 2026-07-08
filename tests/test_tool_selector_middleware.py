@@ -34,9 +34,6 @@ class _RecordingSink:
         self.active = False
         self.calls.append(("ended",))
 
-    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
-        pass
-
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         pass
 

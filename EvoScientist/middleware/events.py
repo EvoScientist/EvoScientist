@@ -2,20 +2,21 @@
 
 This module lives deliberately inside ``middleware/`` so the dependency
 direction is always **frontends → middleware**, never the reverse. Middleware
-reports structured facts about what happened during a model call; a frontend
-supplies a sink implementation that owns its own display state and renders (or
-ignores) those facts.
+reports facts about what happened during a model call; a frontend supplies a
+sink implementation that owns its own display state and renders (or ignores)
+those facts.
 
 Two families of events are evidenced today and modelled here:
 
 * **Tool selection** — the adaptive ``LLMToolSelectorMiddleware`` wrapper
   reports when a selection LLM call starts, which tools survived filtering,
   and when it ends.
-* **Model fallback** — the fallback middleware reports each transition from a
-  failing model to the next candidate in the chain.
+* **Model fallback** — the fallback middleware reports lifecycle narration for
+  failed primary calls and fallback attempts.
 
-Events are **structured, not pre-formatted**. Formatting (Rich styles, TUI
-widgets, etc.) belongs in the sink implementation, where the frontend owns it.
+Tool-selection events are structured. Fallback notices are pre-formatted
+narration plus a style, because the middleware owns the wording and the sink
+only decides where to display it.
 
 Threading / blocking contract
 -----------------------------
@@ -65,21 +66,8 @@ class MiddlewareEventSink(Protocol):
         """The tool-selection LLM call has finished (or failed)."""
         ...
 
-    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
-        """A model call fell back from ``from_model`` to ``to_model``."""
-        ...
-
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
-        """Render a pre-formatted fallback lifecycle line.
-
-        Transitional shim: the structured
-        :meth:`on_model_fallback` covers the fallback *transition*, but the
-        non-transition narration the fallback middleware still emits — the
-        primary-failure header, per-attempt outcome, chain exhaustion, and the
-        non-fallbackable rejection — arrives here as pre-formatted ``(text,
-        style)`` so the exact user-facing narration is preserved while
-        formatting migrates to the frontend.
-        """
+        """Render a pre-formatted fallback lifecycle line."""
         ...
 
 
@@ -136,9 +124,6 @@ class NoOpSink:
     def on_tool_selection_ended(self) -> None:
         pass
 
-    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
-        pass
-
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         pass
 
@@ -193,9 +178,6 @@ class RunScopedEventSink:
 
     def on_tool_selection_ended(self) -> None:
         self._sink().on_tool_selection_ended()
-
-    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
-        self._sink().on_model_fallback(from_model, to_model, reason)
 
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         self._sink().emit_fallback_notice(text, style)

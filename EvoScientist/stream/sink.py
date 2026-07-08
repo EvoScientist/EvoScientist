@@ -83,23 +83,8 @@ class SessionEventSink:
         with self._lock:
             self._active = False
 
-    def on_model_fallback(self, from_model: str, to_model: str, reason: str) -> None:
-        # Formatting lives in the frontend: reproduce the transition line the
-        # fallback middleware used to emit itself. ``to_model`` already carries
-        # the provider suffix and ``reason`` the exception text.
-        self._display_fallback(
-            f"  -> Falling back to {to_model} due to: {reason}", "yellow"
-        )
-
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
-        """Render a fallback lifecycle line (header / outcome) verbatim.
-
-        The fallback middleware still narrates the non-transition lines
-        (primary-model failure, per-attempt outcome, exhaustion,
-        non-fallbackable rejection) as pre-formatted text; the frontend owns
-        where they land. This preserves the exact user-facing narration while
-        the structured :meth:`on_model_fallback` covers the transition itself.
-        """
+        """Render a fallback lifecycle line verbatim."""
         self._display_fallback(text, style)
 
     # --- ToolSelectionView read side (runtime thread) -------------------

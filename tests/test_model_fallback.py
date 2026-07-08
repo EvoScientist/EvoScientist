@@ -296,9 +296,8 @@ class TestGuardAndFallback:
 class TestUiEmit:
     """Verify that fallback narration reaches the injected frontend sink.
 
-    The ``SessionEventSink`` formats the structured ``on_model_fallback``
-    transition and passes ``emit_fallback_notice`` framing lines through the
-    same ``fallback_display`` callback the frontend supplies, so capturing that
+    The fallback middleware sends its narration lines through the same
+    ``fallback_display`` callback the frontend supplies, so capturing that
     callback exercises the exact user-facing text.
     """
 
@@ -373,7 +372,6 @@ class TestUiEmit:
 
         with patch("EvoScientist.stream.sink.console.print") as mock_print:
             sink.emit_fallback_notice("hidden")
-            sink.on_model_fallback("a", "b", "c")
 
         mock_print.assert_not_called()
 
