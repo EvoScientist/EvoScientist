@@ -309,6 +309,20 @@ class TestPendingReplyRegistry:
         assert got == "hello"
         assert "s1" not in reg  # cleaned up after wait
 
+    async def test_wait_event_returns_reply_context(self):
+        reg = I.PendingReplyRegistry()
+        context = object()
+
+        async def _resolver():
+            await asyncio.sleep(0.01)
+            assert reg.try_resolve("s1", "hello", context=context) is True
+
+        got, _ = await asyncio.gather(reg.wait_event("s1", timeout=1.0), _resolver())
+        assert got is not None
+        assert got.content == "hello"
+        assert got.context is context
+        assert "s1" not in reg
+
     async def test_wait_timeout_returns_none(self):
         reg = I.PendingReplyRegistry()
         got = await reg.wait("s1", timeout=0.02)
@@ -400,7 +414,10 @@ class TestConsumerUnrecognizedRefeed:
             yield {"type": "text", "content": f"handled: {request.message}"}
             yield {"type": "done", "content": f"handled: {request.message}"}
 
-        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway = FakeGraphGateway(
+            stream=_fake_stream,
+            generated_thread_ids=["thread-original", "thread-reply"],
+        )
         consumer = InboundConsumer(
             bus=bus,
             manager=mgr,
@@ -417,35 +434,50 @@ class TestConsumerUnrecognizedRefeed:
         try:
             await bus.publish_inbound(
                 BusInbound(
-                    channel="stub", sender_id="u1", chat_id="c1", content="do the thing"
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="do the thing",
+                    message_id="msg-original",
+                    metadata={"origin": "original"},
                 )
             )
 
             # 1. Approval prompt goes out.
             prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
             assert prompt.content.startswith("⚠️ Approval Required")
+            assert prompt.metadata == {"origin": "original"}
 
             # 2. User ignores the prompt and types a fresh instruction.
             await bus.publish_inbound(
                 BusInbound(
                     channel="stub",
-                    sender_id="u1",
+                    sender_id="u2",
                     chat_id="c1",
                     content="actually, summarize the report",
+                    message_id="msg-reply",
+                    media=["file-report.pdf"],
+                    metadata={"origin": "reply"},
                 )
             )
 
             # 3. Pending action is rejected with the old serve feedback...
             feedback = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
             assert feedback.content == I.REJECTED_FEEDBACK
+            assert feedback.metadata == {"origin": "original"}
 
             # 4. ...and the text is processed as a NEW agent turn.
             response = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
             assert response.content == "handled: actually, summarize the report"
+            assert response.reply_to == "msg-reply"
+            assert response.metadata == {"origin": "reply"}
 
             # The refeed reached the stream path as its own request.
             assert stream_calls == 2
+            assert gateway.requests[0].thread_id == "thread-original"
             assert gateway.requests[-1].message == "actually, summarize the report"
+            assert gateway.requests[-1].thread_id == "thread-reply"
+            assert gateway.requests[-1].media == ["file-report.pdf"]
         finally:
             await consumer.stop()
             await task

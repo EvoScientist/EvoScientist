@@ -13,7 +13,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
@@ -130,6 +130,7 @@ class _ConsumerIO(InteractionIO):
         self._consumer = consumer
         self._msg = msg
         self._session_key = session_key
+        self._last_reply_message: InboundMessage | None = None
         channel = consumer._get_channel(msg.channel)
         self.capabilities = (
             channel.capabilities if channel is not None else ChannelCapabilities()
@@ -148,7 +149,22 @@ class _ConsumerIO(InteractionIO):
         return True
 
     async def wait_reply(self, *, timeout: float) -> str | None:
-        return await self._consumer._reply_registry.wait(self._session_key, timeout)
+        reply = await self._consumer._reply_registry.wait_event(
+            self._session_key, timeout
+        )
+        if reply is None:
+            self._last_reply_message = None
+            return None
+        self._last_reply_message = (
+            reply.context if isinstance(reply.context, InboundMessage) else None
+        )
+        return reply.content
+
+    def take_reply_context(self) -> InboundMessage | None:
+        """Consume the last inbound reply context captured by ``wait_reply``."""
+        msg = self._last_reply_message
+        self._last_reply_message = None
+        return msg
 
 
 class InboundConsumer:
@@ -371,8 +387,8 @@ class InboundConsumer:
         # approval) is waiting on this chat, hand it this message instead
         # of starting a fresh agent turn.  The engine parses it (stop /
         # cancel / choice / approval grammar), so the registry only routes
-        # raw text — one path for both flows.
-        if self._reply_registry.try_resolve(session_key, msg.content):
+        # text plus the original inbound context — one path for both flows.
+        if self._reply_registry.try_resolve(session_key, msg.content, context=msg):
             return
 
         async with self._chat_locks[session_key]:
@@ -385,10 +401,16 @@ class InboundConsumer:
         # old fall-through routing.  Loops in case the refeed turn hits
         # another approval that is again answered with unparseable text.
         while refeed is not None:
-            refeed_msg = replace(msg, content=refeed, message_id="", media=[])
+            channel = self._get_channel(refeed.channel)
+            thread_id = await self._get_thread_id(refeed.sender_id)
+            session_key = refeed.session_key
+            if session_key not in self._chat_locks:
+                self._chat_locks[session_key] = asyncio.Lock()
+                if len(self._chat_locks) > _MAX_CHAT_LOCKS:
+                    self._evict_chat_locks()
             async with self._chat_locks[session_key]:
                 refeed = await self._stream_with_hitl(
-                    refeed_msg, channel, thread_id, session_key
+                    refeed, channel, thread_id, session_key
                 )
 
     async def _stream_with_hitl(
@@ -397,12 +419,12 @@ class InboundConsumer:
         channel: Channel | None,
         thread_id: str,
         session_key: str,
-    ) -> str | None:
+    ) -> InboundMessage | None:
         """Stream agent events with HITL interrupt handling.
 
         Returns ``None`` normally.  When a pending approval is answered
-        with unrecognized text, returns that raw text so the caller can
-        refeed it as a new agent turn after this one unwinds.
+        with unrecognized text, returns the intercepted inbound reply so the
+        caller can refeed it as a new agent turn after this one unwinds.
         """
         from langgraph.types import Command
 
@@ -564,7 +586,15 @@ class InboundConsumer:
                     # starts the new turn only after this one has fully
                     # unwound (same chat-lock ordering as before).
                     await io.send(REJECTED_FEEDBACK)
-                    return outcome.unrecognized_reply
+                    # In this flow, the final wait_reply call is exactly the
+                    # unrecognized approval reply. ask_user does not read this.
+                    refeed_msg = io.take_reply_context()
+                    if refeed_msg is None:
+                        logger.warning(
+                            "Unrecognized approval reply had no inbound context; "
+                            "dropping refeed"
+                        )
+                    return refeed_msg
                 if outcome.decisions is None:
                     return None  # reject / timeout / stop — end the turn
 

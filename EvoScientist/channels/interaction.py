@@ -335,6 +335,14 @@ class InteractionIO(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class PendingReply:
+    """A pending prompt reply plus optional transport-specific context."""
+
+    content: str
+    context: object | None = None
+
+
 class PendingReplyRegistry:
     """Route "the next message from this chat" into a waiting coroutine.
 
@@ -348,9 +356,9 @@ class PendingReplyRegistry:
     """
 
     def __init__(self) -> None:
-        self._pending: dict[str, asyncio.Future[str]] = {}
+        self._pending: dict[str, asyncio.Future[PendingReply]] = {}
 
-    def register(self, session_key: str) -> asyncio.Future[str]:
+    def register(self, session_key: str) -> asyncio.Future[PendingReply]:
         """Create and store a future awaiting the next reply for *session_key*."""
         loop = asyncio.get_running_loop()
         # A stale waiter for the same chat should never linger; cancel it
@@ -358,15 +366,21 @@ class PendingReplyRegistry:
         stale = self._pending.get(session_key)
         if stale is not None and not stale.done():
             stale.cancel()
-        fut: asyncio.Future[str] = loop.create_future()
+        fut: asyncio.Future[PendingReply] = loop.create_future()
         self._pending[session_key] = fut
         return fut
 
-    def try_resolve(self, session_key: str, content: str) -> bool:
+    def try_resolve(
+        self,
+        session_key: str,
+        content: str,
+        *,
+        context: object | None = None,
+    ) -> bool:
         """Deliver *content* to a pending waiter.  Returns True if consumed."""
         fut = self._pending.get(session_key)
         if fut is not None and not fut.done():
-            fut.set_result(content)
+            fut.set_result(PendingReply(content=content, context=context))
             return True
         return False
 
@@ -378,6 +392,15 @@ class PendingReplyRegistry:
         """Register, await a reply for *timeout* seconds, then clean up.
 
         Returns the reply text, or ``None`` on timeout / cancellation.
+        """
+        reply = await self.wait_event(session_key, timeout)
+        return reply.content if reply is not None else None
+
+    async def wait_event(self, session_key: str, timeout: float) -> PendingReply | None:
+        """Register, await a reply event, then clean up.
+
+        Returns the full reply envelope, or ``None`` on timeout / registry
+        cancellation. Cancellation of the task awaiting this method propagates.
         """
         fut = self.register(session_key)
         try:
