@@ -57,6 +57,7 @@ class TestModelsRegistry:
             "nvidia",
             "siliconflow",
             "openrouter",
+            "requesty",
             "zhipu",
             "zhipu-code",
             "volcengine",
@@ -396,6 +397,19 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "sf-key-123"
         # SiliconFlow should disable thinking
         assert call_kwargs["extra_body"]["enable_thinking"] is False
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_requesty_routes_through_openai(self, mock_init, monkeypatch):
+        """Requesty provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("REQUESTY_API_KEY", "rq-key-123")
+
+        get_chat_model("openai/gpt-4o-mini", provider="requesty")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://router.requesty.ai/v1"
+        assert call_kwargs["api_key"] == "rq-key-123"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_uses_native_provider(self, mock_init, monkeypatch):

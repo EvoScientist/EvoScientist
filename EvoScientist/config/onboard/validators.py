@@ -321,6 +321,39 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_requesty_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Requesty API key via the authenticated /v1/models endpoint.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import httpx
+
+        resp = httpx.get(
+            "https://router.requesty.ai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, "Valid"
+        # Only 401/403 mean the key is actually rejected. 429 (rate-limit)
+        # and 5xx (router incident) leave the key validity unknown — surface
+        # the real status so the user doesn't go re-roll a good key during
+        # an outage.
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
 def validate_deepseek_key(api_key: str) -> tuple[bool, str]:
     """Validate a DeepSeek API key by making a test request.
 

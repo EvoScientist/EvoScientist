@@ -2,9 +2,10 @@
 
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, MiniMax
-(Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, ZhipuAI, Volcengine,
-DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible
-endpoints) and convenient short names for common models.
+(Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty, ZhipuAI,
+Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and custom
+OpenAI/Anthropic-compatible endpoints) and convenient short names for common
+models.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ _DASHSCOPE_CODE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
+_REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -48,6 +50,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
     "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
+    "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -166,6 +169,13 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
+    # Requesty (aggregator — OpenAI-compatible router, provider/model IDs)
+    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4-6", "requesty"),
+    ("claude-opus-4.8", "anthropic/claude-opus-4-8", "requesty"),
+    ("gpt-4o-mini", "openai/gpt-4o-mini", "requesty"),
+    ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
+    ("grok-4.3", "xai/grok-4.3", "requesty"),
+    ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
     ("glm-5.2", "glm-5.2", "zhipu-code"),
     ("glm-5.1", "glm-5.1", "zhipu-code"),
