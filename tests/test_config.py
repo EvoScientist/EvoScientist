@@ -141,9 +141,7 @@ class TestEvoScientistConfig:
             "https://github.com/EvoScientist/EvoScientist"
         )
         assert config.openrouter_app_title == "EvoScientist"
-        assert config.openrouter_app_categories == (
-            "writing-assistant,personal-agent,creative-writing,cli-agent,programming-app"
-        )
+        assert config.openrouter_app_categories == "creative-writing,personal-agent"
         assert config.memory_profile_enabled is True
         assert config.memory_observations_enabled is True
         assert config.memory_observation_writer == MemoryObservationWriter.ALL

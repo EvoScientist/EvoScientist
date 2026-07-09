@@ -462,13 +462,7 @@ class TestThirdPartyRouting:
         assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
         assert call_kwargs["app_title"] == "EvoScientist"
         # Must be a list[str] (not the comma string) — langchain-openrouter joins it.
-        assert call_kwargs["app_categories"] == [
-            "writing-assistant",
-            "personal-agent",
-            "creative-writing",
-            "cli-agent",
-            "programming-app",
-        ]
+        assert call_kwargs["app_categories"] == ["creative-writing", "personal-agent"]
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_app_attribution_from_env(self, mock_init, monkeypatch):
@@ -560,7 +554,7 @@ class TestThirdPartyRouting:
         # Attribution added alongside.
         assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
         assert call_kwargs["app_title"] == "EvoScientist"
-        assert call_kwargs["app_categories"][0] == "writing-assistant"
+        assert call_kwargs["app_categories"] == ["creative-writing", "personal-agent"]
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_app_categories_env_strips_blank_items(
@@ -569,11 +563,32 @@ class TestThirdPartyRouting:
         """A messy comma value (stray commas / spaces) yields a clean list."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "a,, b , ,c")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "a,,  b  ")
 
         get_chat_model("x-ai/grok-4.3", provider="openrouter")
 
-        assert mock_init.call_args[1]["app_categories"] == ["a", "b", "c"]
+        assert mock_init.call_args[1]["app_categories"] == ["a", "b"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_categories_capped_to_per_request_limit(
+        self, mock_init, monkeypatch
+    ):
+        """Over-configuring categories caps to the first N and warns the user."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+            "cli-agent,programming-app,personal-agent,writing-assistant",
+        )
+
+        with pytest.warns(UserWarning, match="at most 2 app categories"):
+            get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        # OpenRouter honors at most 2 per request, so only the first 2 are sent.
+        assert mock_init.call_args[1]["app_categories"] == [
+            "cli-agent",
+            "programming-app",
+        ]
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_app_categories_all_separators_omit_kwarg(
@@ -611,13 +626,7 @@ class TestThirdPartyRouting:
         assert isinstance(model, ChatOpenRouter)
         assert model.app_url == "https://github.com/EvoScientist/EvoScientist"
         assert model.app_title == "EvoScientist"
-        assert model.app_categories == [
-            "writing-assistant",
-            "personal-agent",
-            "creative-writing",
-            "cli-agent",
-            "programming-app",
-        ]
+        assert model.app_categories == ["creative-writing", "personal-agent"]
         # Not silently swallowed into model_kwargs (the passthrough failure mode).
         model_kwargs = model.model_kwargs or {}
         assert "app_url" not in model_kwargs

@@ -15,6 +15,11 @@ from typing import Any
 
 from langchain.chat_models import init_chat_model
 
+from ..config.settings import (
+    OPENROUTER_DEFAULT_APP_CATEGORIES,
+    OPENROUTER_DEFAULT_APP_TITLE,
+    OPENROUTER_DEFAULT_HTTP_REFERER,
+)
 from .context_window import apply_known_context_window
 from .patches import (
     _is_ccproxy_codex,
@@ -68,16 +73,13 @@ _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 
-# OpenRouter app-attribution defaults (issue #339). Duplicated as the
-# EvoScientistConfig field defaults in config/settings.py — keep in sync
-# (mirrors the reasoning_effort "high" default living in both places).
-# langchain-openrouter maps app_url → HTTP-Referer, app_title → X-Title,
-# app_categories → X-OpenRouter-Categories.
-_OPENROUTER_DEFAULT_HTTP_REFERER = "https://github.com/EvoScientist/EvoScientist"
-_OPENROUTER_DEFAULT_APP_TITLE = "EvoScientist"
-_OPENROUTER_DEFAULT_APP_CATEGORIES = (
-    "writing-assistant,personal-agent,creative-writing,cli-agent,programming-app"
-)
+# OpenRouter app attribution (issue #339). Default values are the single source
+# of truth in config/settings.py (imported above); langchain-openrouter maps
+# app_url → HTTP-Referer, app_title → X-Title, app_categories →
+# X-OpenRouter-Categories. OpenRouter honors at most this many categories per
+# request (server-side limit) and silently ignores the rest, so the sent list is
+# capped to this many below. https://openrouter.ai/docs/app-attribution
+_OPENROUTER_MAX_CATEGORIES_PER_REQUEST = 2
 
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
@@ -511,23 +513,40 @@ def get_chat_model(
         kwargs.setdefault(
             "app_url",
             os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "").strip()
-            or _OPENROUTER_DEFAULT_HTTP_REFERER,
+            or OPENROUTER_DEFAULT_HTTP_REFERER,
         )
         kwargs.setdefault(
             "app_title",
             os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE", "").strip()
-            or _OPENROUTER_DEFAULT_APP_TITLE,
+            or OPENROUTER_DEFAULT_APP_TITLE,
         )
         # app_categories must be a list[str] (langchain-openrouter joins it into
         # the X-OpenRouter-Categories header); split the comma-separated config
         # value and drop blanks so a stray comma/space can't emit an empty one.
         _app_categories_raw = (
             os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "").strip()
-            or _OPENROUTER_DEFAULT_APP_CATEGORIES
+            or OPENROUTER_DEFAULT_APP_CATEGORIES
         )
         _app_categories = [
             c.strip() for c in _app_categories_raw.split(",") if c.strip()
         ]
+        # Cap to the per-request limit and warn, so a misconfigured extra is
+        # dropped predictably here (and surfaced to the user) rather than being
+        # silently truncated server-side.
+        _limit = _OPENROUTER_MAX_CATEGORIES_PER_REQUEST
+        if len(_app_categories) > _limit:
+            warnings.warn(
+                f"OpenRouter accepts at most {_limit} app categories per "
+                f"request, so only the first {_limit} are sent: "
+                f"{_app_categories[:_limit]}. Ignoring the rest: "
+                f"{_app_categories[_limit:]}. Set "
+                f"EVOSCIENTIST_OPENROUTER_APP_CATEGORIES (or the "
+                f"openrouter_app_categories config) to at most {_limit} "
+                f"categories to silence this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
+            _app_categories = _app_categories[:_limit]
         if _app_categories:
             kwargs.setdefault("app_categories", _app_categories)
         _patch_openrouter_strip_responses_reasoning()

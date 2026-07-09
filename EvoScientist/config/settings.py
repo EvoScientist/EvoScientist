@@ -123,6 +123,16 @@ def get_config_path() -> Path:
 # Configuration dataclass
 # =============================================================================
 
+# OpenRouter app-attribution defaults (issue #339). Single source of truth: the
+# EvoScientistConfig fields below default to these, and llm/models.py imports
+# them for its env-fallback, so the values never drift across the two layers.
+OPENROUTER_DEFAULT_HTTP_REFERER = "https://github.com/EvoScientist/EvoScientist"
+OPENROUTER_DEFAULT_APP_TITLE = "EvoScientist"
+# OpenRouter honors only the first 2 categories per request (server-side limit)
+# and silently ignores the rest, so keep the two most relevant ones. Chosen per
+# maintainer review — creative-writing is a less competitive marketplace group.
+OPENROUTER_DEFAULT_APP_CATEGORIES = "creative-writing,personal-agent"
+
 
 @dataclass
 class EvoScientistConfig:
@@ -284,14 +294,13 @@ class EvoScientistConfig:
     openrouter_anthropic_prompt_cache: bool = True
     # OpenRouter app attribution (issue #339). Sent only for the openrouter
     # provider; identifies EvoScientist in OpenRouter's app rankings/analytics.
-    # Override (e.g. a private fork) via the fields below or their env vars.
-    openrouter_http_referer: str = "https://github.com/EvoScientist/EvoScientist"
-    openrouter_app_title: str = "EvoScientist"
+    # Override (e.g. a private fork) via these fields or their env vars.
+    # Defaults live in the module constants above (also imported by llm/models.py).
+    openrouter_http_referer: str = OPENROUTER_DEFAULT_HTTP_REFERER
+    openrouter_app_title: str = OPENROUTER_DEFAULT_APP_TITLE
     # Comma-separated; split into a list before being passed to
     # langchain-openrouter (its app_categories kwarg expects list[str]).
-    openrouter_app_categories: str = (
-        "writing-assistant,personal-agent,creative-writing,cli-agent,programming-app"
-    )
+    openrouter_app_categories: str = OPENROUTER_DEFAULT_APP_CATEGORIES
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
