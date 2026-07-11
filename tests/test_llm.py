@@ -972,7 +972,6 @@ class TestPatchOpenAICompatContent:
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == "hello"
 
-    @pytest.mark.anyio
     async def test_agenerate_flattened(self):
         from langchain_core.messages import HumanMessage
 
@@ -1003,7 +1002,6 @@ class TestPatchOpenAICompatContent:
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == "hello"
 
-    @pytest.mark.anyio
     async def test_astream_flattened(self):
         from langchain_core.messages import HumanMessage
 
@@ -1044,7 +1042,6 @@ class TestPatchOpenAICompatContent:
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
 
-    @pytest.mark.anyio
     async def test_agenerate_preserves_media(self):
         from langchain_core.messages import HumanMessage
 
@@ -1077,7 +1074,6 @@ class TestPatchOpenAICompatContent:
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
 
-    @pytest.mark.anyio
     async def test_astream_preserves_media(self):
         from langchain_core.messages import HumanMessage
 
@@ -1550,7 +1546,6 @@ class TestNoVisionFallback:
         assert out == ["x", "y"]
         assert len(calls) == 2
 
-    @pytest.mark.anyio
     async def test_astream_falls_back(self):
         from unittest.mock import MagicMock
 

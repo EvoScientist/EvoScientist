@@ -10,14 +10,16 @@ import importlib
 import unittest
 from unittest.mock import AsyncMock
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Textual might not be installed — skip entire module if missing
 # ---------------------------------------------------------------------------
 _has_textual = importlib.util.find_spec("textual") is not None
 
 
-@unittest.skipUnless(_has_textual, "textual not installed")
-class TestLoadingWidget(unittest.TestCase):
+@pytest.mark.skipif(not _has_textual, reason="textual not installed")
+class TestLoadingWidget:
     """LoadingWidget construction and attributes."""
 
     def test_construction(self):
@@ -43,7 +45,7 @@ class TestLoadingWidget(unittest.TestCase):
         assert w._frame == 1
         assert w._elapsed == 0.1
 
-    def test_cleanup_stops_timer_and_removes(self):
+    async def test_cleanup_stops_timer_and_removes(self):
         from EvoScientist.cli.widgets.loading_widget import LoadingWidget
 
         class _Timer:
@@ -58,9 +60,7 @@ class TestLoadingWidget(unittest.TestCase):
         w._timer_handle = timer
         w.remove = AsyncMock()
 
-        from tests.conftest import run_async
-
-        run_async(w.cleanup())
+        await w.cleanup()
 
         assert timer.stopped is True
         assert w._timer_handle is None

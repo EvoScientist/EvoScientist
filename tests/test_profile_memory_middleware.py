@@ -344,9 +344,7 @@ def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(
     )
 
 
-def test_profile_memory_async_path_bootstraps_and_injects(
-    tmp_path, monkeypatch, run_async
-):
+async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -356,7 +354,7 @@ def test_profile_memory_async_path_bootstraps_and_injects(
         return request
 
     middleware = memory_module.create_memory_middleware(str(memories))
-    run_async(middleware.awrap_model_call(_request(), _handler))
+    await middleware.awrap_model_call(_request(), _handler)
 
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
@@ -399,8 +397,8 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     assert soul_path.read_bytes() == original_bytes
 
 
-def test_profile_memory_async_path_inlines_content_under_blockbuster(
-    tmp_path, monkeypatch, run_async
+async def test_profile_memory_async_path_inlines_content_under_blockbuster(
+    tmp_path, monkeypatch
 ):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
@@ -425,17 +423,13 @@ def test_profile_memory_async_path_inlines_content_under_blockbuster(
 
     monkeypatch.setattr(middleware, "_read_profile_memory", tracked_read_profile_memory)
 
-    async def run():
-        event_loop_thread = threading.get_ident()
-        blocker = BlockBuster(scanned_modules=memory_module)
-        blocker.activate()
-        try:
-            modified = await middleware.amodify_request(_request())
-        finally:
-            blocker.deactivate()
-        return event_loop_thread, modified
-
-    event_loop_thread, modified = run_async(run())
+    event_loop_thread = threading.get_ident()
+    blocker = BlockBuster(scanned_modules=memory_module)
+    blocker.activate()
+    try:
+        modified = await middleware.amodify_request(_request())
+    finally:
+        blocker.deactivate()
 
     assert call_threads
     assert all(thread_id != event_loop_thread for thread_id in call_threads)
@@ -534,8 +528,8 @@ def test_profile_memory_uses_explicit_workspace_for_project_profile(
     ).exists()
 
 
-def test_profile_memory_resolves_project_id_once_per_middleware(
-    tmp_path, monkeypatch, run_async
+async def test_profile_memory_resolves_project_id_once_per_middleware(
+    tmp_path, monkeypatch
 ):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
@@ -552,7 +546,7 @@ def test_profile_memory_resolves_project_id_once_per_middleware(
         str(memories), workspace_dir=str(workspace), max_inline_profile_chars=10
     )
     middleware.modify_request(_request())
-    run_async(middleware.amodify_request(_request()))
+    await middleware.amodify_request(_request())
 
     assert calls == [workspace]
     assert middleware.project_id == "P-cached-project"

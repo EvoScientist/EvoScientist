@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from EvoScientist.llm import patches as patches_mod
-from tests.conftest import run_async as _run
 
 # =============================================================================
 # Helpers
@@ -152,7 +151,7 @@ class TestStartAsyncTaskInjection:
             "configurable": {"model": "gpt-5", "model_provider": "openai"}
         }
 
-    def test_async_start_injects_config(self, restore_model_passthrough_patch):
+    async def test_async_start_injects_config(self, restore_model_passthrough_patch):
         try:
             from deepagents.middleware import async_subagents as ds_mod
         except ImportError:
@@ -176,12 +175,10 @@ class TestStartAsyncTaskInjection:
             "EvoScientist.EvoScientist._ensure_config",
             return_value=_stub_cfg(model="claude-haiku-4-5", provider="anthropic"),
         ):
-            _run(
-                tool.coroutine(
-                    description="hi",
-                    subagent_type="writing-agent",
-                    runtime=_runtime_stub(),
-                )
+            await tool.coroutine(
+                description="hi",
+                subagent_type="writing-agent",
+                runtime=_runtime_stub(),
             )
 
         runs_async.create.assert_awaited_once()
@@ -267,7 +264,7 @@ class TestUpdateAsyncTaskInjection:
             "last_updated_at": "2026-05-07T00:00:00Z",
         }
 
-    def test_async_update_injects_config(self, restore_model_passthrough_patch):
+    async def test_async_update_injects_config(self, restore_model_passthrough_patch):
         """The async coroutine path must inject config too."""
         try:
             from deepagents.middleware import async_subagents as ds_mod
@@ -296,12 +293,10 @@ class TestUpdateAsyncTaskInjection:
             "EvoScientist.EvoScientist._ensure_config",
             return_value=_stub_cfg(model="gpt-5", provider="openai"),
         ):
-            _run(
-                tool.coroutine(
-                    task_id="thread-001",
-                    message="follow up async",
-                    runtime=runtime,
-                )
+            await tool.coroutine(
+                task_id="thread-001",
+                message="follow up async",
+                runtime=runtime,
             )
 
         runs_async.create.assert_awaited_once()

@@ -20,7 +20,6 @@ from EvoScientist.channels.wechat.crypto import (
     _pkcs7_unpad,
     parse_xml,
 )
-from tests.conftest import run_async as _run
 
 # ── Config tests ──────────────────────────────────────────────────
 
@@ -83,36 +82,36 @@ class TestWeChatChannelInit:
         channel = WeChatChannel(config, backend="wechatmp")
         assert channel._backend == "wechatmp"
 
-    def test_start_raises_without_corp_id(self):
+    async def test_start_raises_without_corp_id(self):
         config = WeComConfig(corp_id="", agent_id="1", secret="s")
         channel = WeChatChannel(config, backend="wecom")
         with pytest.raises(ChannelError, match="corp_id"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_without_secret(self):
+    async def test_start_raises_without_secret(self):
         config = WeComConfig(corp_id="corp", agent_id="1", secret="")
         channel = WeChatChannel(config, backend="wecom")
         with pytest.raises(ChannelError, match="secret"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_without_agent_id(self):
+    async def test_start_raises_without_agent_id(self):
         config = WeComConfig(corp_id="corp", agent_id="", secret="s")
         channel = WeChatChannel(config, backend="wecom")
         with pytest.raises(ChannelError, match="agent_id"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_mp_without_app_id(self):
+    async def test_start_raises_mp_without_app_id(self):
         config = WeChatMPConfig(app_id="", app_secret="s")
         channel = WeChatChannel(config, backend="wechatmp")
         with pytest.raises(ChannelError, match="app_id"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_stop_when_not_running(self):
+    async def test_stop_when_not_running(self):
         config = WeComConfig(corp_id="c", agent_id="1", secret="s")
         channel = WeChatChannel(config, backend="wecom")
-        _run(channel.stop())  # Should not raise
+        await channel.stop()  # Should not raise
 
-    def test_send_returns_false_without_client(self):
+    async def test_send_returns_false_without_client(self):
         from EvoScientist.channels.base import OutboundMessage
 
         config = WeComConfig(corp_id="c", agent_id="1", secret="s")
@@ -123,7 +122,7 @@ class TestWeChatChannelInit:
             content="hello",
             metadata={"chat_id": "user1"},
         )
-        result = _run(channel.send(msg))
+        result = await channel.send(msg)
         assert result is False
 
 
@@ -324,144 +323,123 @@ class TestMessageProcessing:
         )
         return WeChatChannel(config, backend="wecom")
 
-    def test_text_message_queued(self):
+    async def test_text_message_queued(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "text",
-                    "Content": "Hello!",
-                    "FromUserName": "user1",
-                    "ToUserName": "bot",
-                    "MsgId": "100",
-                    "CreateTime": str(int(time.time())),
-                }
-            )
-            # Check message was enqueued
-            assert not channel._queue.empty()
-            msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
-            assert msg.content == "Hello!"
-            assert msg.sender_id == "user1"
-            assert msg.channel == "wechat"
+        await channel._process_message(
+            {
+                "MsgType": "text",
+                "Content": "Hello!",
+                "FromUserName": "user1",
+                "ToUserName": "bot",
+                "MsgId": "100",
+                "CreateTime": str(int(time.time())),
+            }
+        )
+        # Check message was enqueued
+        assert not channel._queue.empty()
+        msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
+        assert msg.content == "Hello!"
+        assert msg.sender_id == "user1"
+        assert msg.channel == "wechat"
 
-        _run(_test())
-
-    def test_location_message(self):
+    async def test_location_message(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "location",
-                    "Location_X": "39.9",
-                    "Location_Y": "116.4",
-                    "Label": "Beijing",
-                    "FromUserName": "user1",
-                    "ToUserName": "bot",
-                    "MsgId": "101",
-                    "CreateTime": str(int(time.time())),
-                }
-            )
-            msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
-            assert "Beijing" in msg.content
-            assert "39.9" in msg.content
+        await channel._process_message(
+            {
+                "MsgType": "location",
+                "Location_X": "39.9",
+                "Location_Y": "116.4",
+                "Label": "Beijing",
+                "FromUserName": "user1",
+                "ToUserName": "bot",
+                "MsgId": "101",
+                "CreateTime": str(int(time.time())),
+            }
+        )
+        msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
+        assert "Beijing" in msg.content
+        assert "39.9" in msg.content
 
-        _run(_test())
-
-    def test_voice_recognition(self):
+    async def test_voice_recognition(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "voice",
-                    "Recognition": "你好世界",
-                    "FromUserName": "user1",
-                    "ToUserName": "bot",
-                    "MsgId": "102",
-                    "CreateTime": str(int(time.time())),
-                }
-            )
-            msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
-            assert "你好世界" in msg.content
+        await channel._process_message(
+            {
+                "MsgType": "voice",
+                "Recognition": "你好世界",
+                "FromUserName": "user1",
+                "ToUserName": "bot",
+                "MsgId": "102",
+                "CreateTime": str(int(time.time())),
+            }
+        )
+        msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
+        assert "你好世界" in msg.content
 
-        _run(_test())
-
-    def test_link_message(self):
+    async def test_link_message(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "link",
-                    "Title": "Test Link",
-                    "Description": "A description",
-                    "Url": "https://example.com",
-                    "FromUserName": "user1",
-                    "ToUserName": "bot",
-                    "MsgId": "103",
-                    "CreateTime": str(int(time.time())),
-                }
-            )
-            msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
-            assert "Test Link" in msg.content
-            assert "https://example.com" in msg.content
+        await channel._process_message(
+            {
+                "MsgType": "link",
+                "Title": "Test Link",
+                "Description": "A description",
+                "Url": "https://example.com",
+                "FromUserName": "user1",
+                "ToUserName": "bot",
+                "MsgId": "103",
+                "CreateTime": str(int(time.time())),
+            }
+        )
+        msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
+        assert "Test Link" in msg.content
+        assert "https://example.com" in msg.content
 
-        _run(_test())
-
-    def test_subscribe_event(self):
+    async def test_subscribe_event(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "event",
-                    "Event": "subscribe",
-                    "FromUserName": "user1",
-                    "ToUserName": "bot",
-                    "MsgId": "",
-                    "CreateTime": str(int(time.time())),
-                }
-            )
-            msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
-            assert "关注" in msg.content
+        await channel._process_message(
+            {
+                "MsgType": "event",
+                "Event": "subscribe",
+                "FromUserName": "user1",
+                "ToUserName": "bot",
+                "MsgId": "",
+                "CreateTime": str(int(time.time())),
+            }
+        )
+        msg = await asyncio.wait_for(channel._queue.get(), timeout=1.0)
+        assert "关注" in msg.content
 
-        _run(_test())
-
-    def test_unsubscribe_ignored(self):
+    async def test_unsubscribe_ignored(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "event",
-                    "Event": "unsubscribe",
-                    "FromUserName": "user1",
-                    "ToUserName": "bot",
-                    "MsgId": "",
-                    "CreateTime": str(int(time.time())),
-                }
-            )
-            assert channel._queue.empty()
+        await channel._process_message(
+            {
+                "MsgType": "event",
+                "Event": "unsubscribe",
+                "FromUserName": "user1",
+                "ToUserName": "bot",
+                "MsgId": "",
+                "CreateTime": str(int(time.time())),
+            }
+        )
+        assert channel._queue.empty()
 
-        _run(_test())
-
-    def test_empty_message_ignored(self):
+    async def test_empty_message_ignored(self):
         channel = self._make_channel()
 
-        async def _test():
-            await channel._process_message(
-                {
-                    "MsgType": "text",
-                    "Content": "",
-                    "FromUserName": "",
-                    "ToUserName": "bot",
-                }
-            )
-            assert channel._queue.empty()
-
-        _run(_test())
+        await channel._process_message(
+            {
+                "MsgType": "text",
+                "Content": "",
+                "FromUserName": "",
+                "ToUserName": "bot",
+            }
+        )
+        assert channel._queue.empty()
 
 
 # ── Registration test ─────────────────────────────────────────────

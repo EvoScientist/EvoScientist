@@ -1399,9 +1399,7 @@ class TestLoadToolsProgressCallback:
 
         monkeypatch.setattr(lc_client, "MultiServerMCPClient", _FakeClient)
 
-    def test_success_emits_start_then_success_with_tool_count(self, monkeypatch):
-        import asyncio
-
+    async def test_success_emits_start_then_success_with_tool_count(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
         events: list[tuple[str, str, str]] = []
@@ -1415,16 +1413,14 @@ class TestLoadToolsProgressCallback:
         def record(event, name, detail):
             events.append((event, name, detail))
 
-        asyncio.run(_load_tools(config, on_progress=record))
+        await _load_tools(config, on_progress=record)
 
         assert events == [
             ("start", "srv", ""),
             ("success", "srv", "3"),
         ]
 
-    def test_failure_emits_start_then_error_with_detail(self, monkeypatch):
-        import asyncio
-
+    async def test_failure_emits_start_then_error_with_detail(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
         events: list[tuple[str, str, str]] = []
@@ -1435,16 +1431,14 @@ class TestLoadToolsProgressCallback:
         def record(event, name, detail):
             events.append((event, name, detail))
 
-        asyncio.run(_load_tools(config, on_progress=record))
+        await _load_tools(config, on_progress=record)
 
         assert events == [
             ("start", "srv", ""),
             ("error", "srv", "boom"),
         ]
 
-    def test_mixed_fleet_reports_each_server_independently(self, monkeypatch):
-        import asyncio
-
+    async def test_mixed_fleet_reports_each_server_independently(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
         events: list[tuple[str, str, str]] = []
@@ -1464,7 +1458,7 @@ class TestLoadToolsProgressCallback:
         def record(event, name, detail):
             events.append((event, name, detail))
 
-        asyncio.run(_load_tools(config, on_progress=record))
+        await _load_tools(config, on_progress=record)
 
         by_server = {}
         for ev, name, detail in events:
@@ -1472,9 +1466,7 @@ class TestLoadToolsProgressCallback:
         assert by_server["ok_srv"] == [("start", ""), ("success", "1")]
         assert by_server["bad_srv"] == [("start", ""), ("error", "refused")]
 
-    def test_callback_errors_do_not_break_the_load(self, monkeypatch):
-        import asyncio
-
+    async def test_callback_errors_do_not_break_the_load(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
         self._patch_client(monkeypatch, {"srv": ["tool1"]})
@@ -1484,10 +1476,10 @@ class TestLoadToolsProgressCallback:
         def bad_callback(event, name, detail):
             raise RuntimeError("callback bug")
 
-        result = asyncio.run(_load_tools(config, on_progress=bad_callback))
+        result = await _load_tools(config, on_progress=bad_callback)
         assert result == {"srv": ["tool1"]}
 
-    def test_semaphore_caps_concurrent_connections(self, monkeypatch):
+    async def test_semaphore_caps_concurrent_connections(self, monkeypatch):
         """Many configured servers must not all spawn at once."""
         import asyncio
 
@@ -1516,7 +1508,7 @@ class TestLoadToolsProgressCallback:
         config = {
             f"srv{i}": {"transport": "stdio", "command": "demo"} for i in range(10)
         }
-        asyncio.run(mcp_client._load_tools(config))
+        await mcp_client._load_tools(config)
 
         assert inflight["peak"] <= 3
         assert inflight["peak"] > 1  # sanity: we *are* parallelizing

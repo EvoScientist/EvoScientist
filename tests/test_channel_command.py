@@ -3,8 +3,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from tests.conftest import run_async as _run
-
 
 def _ctx():
     from EvoScientist.commands.base import ChannelRuntime, CommandContext
@@ -55,7 +53,7 @@ class TestNeedsAgent:
 class TestStartPath:
     """Start flow must propagate agent/thread_id globals."""
 
-    def test_start_binds_channel_runtime(self):
+    async def test_start_binds_channel_runtime(self):
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
         ctx, _ui = _ctx()
@@ -77,11 +75,11 @@ class TestStartPath:
                 return_value=config,
             ),
         ):
-            _run(ChannelCommand().execute(ctx, ["telegram"]))
+            await ChannelCommand().execute(ctx, ["telegram"])
         assert ctx.channel_runtime.agent is ctx.agent
         assert ctx.channel_runtime.thread_id == "tid-42"
 
-    def test_start_propagates_send_thinking(self):
+    async def test_start_propagates_send_thinking(self):
         """send_thinking flag must reach _start_channels_bus_mode."""
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
@@ -111,14 +109,14 @@ class TestStartPath:
                 return_value=config,
             ),
         ):
-            _run(ChannelCommand().execute(ctx, ["telegram"]))
+            await ChannelCommand().execute(ctx, ["telegram"])
         assert captured["agent"] is ctx.agent
         assert captured["thread_id"] == "tid-42"
         assert captured["send_thinking"] is False
 
 
 class TestAddToRunningPath:
-    def test_add_to_running_binds_channel_runtime(self):
+    async def test_add_to_running_binds_channel_runtime(self):
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
         ctx, _ui = _ctx()
@@ -140,11 +138,11 @@ class TestAddToRunningPath:
                 return_value=config,
             ),
         ):
-            _run(ChannelCommand().execute(ctx, ["discord"]))
+            await ChannelCommand().execute(ctx, ["discord"])
         assert ctx.channel_runtime.agent is ctx.agent
         assert ctx.channel_runtime.thread_id == "tid-42"
 
-    def test_add_to_running_propagates_send_thinking(self):
+    async def test_add_to_running_propagates_send_thinking(self):
         """Adding to a running bus must honor config.channel_send_thinking."""
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
@@ -173,13 +171,13 @@ class TestAddToRunningPath:
                 return_value=config,
             ),
         ):
-            _run(ChannelCommand().execute(ctx, ["discord"]))
+            await ChannelCommand().execute(ctx, ["discord"])
         assert captured["channel_type"] == "discord"
         assert captured["send_thinking"] is True
 
 
 class TestStatusPath:
-    def test_status_without_running_channels(self):
+    async def test_status_without_running_channels(self):
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
         ctx, ui = _ctx()
@@ -198,6 +196,6 @@ class TestStatusPath:
                 return_value=config,
             ),
         ):
-            _run(ChannelCommand().execute(ctx, ["status"]))
+            await ChannelCommand().execute(ctx, ["status"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("No messaging channels" in m for m in msgs)

@@ -29,7 +29,6 @@ from EvoScientist.sessions import (
     resolve_thread_id_prefix,
     thread_exists,
 )
-from tests.conftest import run_async as _run
 
 
 def _mock_path(db_path: str):
@@ -120,7 +119,7 @@ class TestFormatRelativeTime(unittest.TestCase):
         assert "month" in result
 
 
-class TestThreadFunctions(unittest.TestCase):
+class TestThreadFunctions(unittest.IsolatedAsyncioTestCase):
     """Tests using a real temporary SQLite database."""
 
     @classmethod
@@ -194,7 +193,10 @@ class TestThreadFunctions(unittest.TestCase):
                 )
                 await conn.commit()
 
-        _run(_setup())
+        # setUpClass is a sync classmethod with no running loop, and
+        # IsolatedAsyncioTestCase offers no async class-level hook —
+        # asyncio.run() is the standard one-shot runner here.
+        asyncio.run(_setup())
 
         # Patch get_db_path to point to our temp DB
         cls._patcher = patch(
@@ -219,76 +221,76 @@ class TestThreadFunctions(unittest.TestCase):
         except OSError:
             pass
 
-    def test_list_threads(self):
-        threads = _run(list_threads(limit=10))
+    async def test_list_threads(self):
+        threads = await list_threads(limit=10)
         # Should only contain EvoScientist threads
         assert len(threads) == 3
         # Most recent first
         assert threads[0]["thread_id"] == "def00001"
 
-    def test_list_threads_with_message_count(self):
-        threads = _run(list_threads(limit=10, include_message_count=True))
+    async def test_list_threads_with_message_count(self):
+        threads = await list_threads(limit=10, include_message_count=True)
         assert "message_count" in threads[0]
 
-    def test_thread_exists_true(self):
-        assert _run(thread_exists("abc12345"))
+    async def test_thread_exists_true(self):
+        assert await thread_exists("abc12345")
 
-    def test_thread_exists_false(self):
-        assert not _run(thread_exists("nonexist"))
+    async def test_thread_exists_false(self):
+        assert not await thread_exists("nonexist")
 
-    def test_find_similar(self):
-        similar = _run(find_similar_threads("abc1"))
+    async def test_find_similar(self):
+        similar = await find_similar_threads("abc1")
         assert len(similar) == 2
         assert "abc12345" in similar
         assert "abc12399" in similar
 
-    def test_find_similar_no_match(self):
-        similar = _run(find_similar_threads("xyz"))
+    async def test_find_similar_no_match(self):
+        similar = await find_similar_threads("xyz")
         assert len(similar) == 0
 
-    def test_resolve_prefix_exact_match(self):
-        resolved, matches = _run(resolve_thread_id_prefix("abc12345"))
+    async def test_resolve_prefix_exact_match(self):
+        resolved, matches = await resolve_thread_id_prefix("abc12345")
         assert resolved == "abc12345"
         assert matches == []
 
-    def test_resolve_prefix_unique_prefix(self):
-        resolved, matches = _run(resolve_thread_id_prefix("def00"))
+    async def test_resolve_prefix_unique_prefix(self):
+        resolved, matches = await resolve_thread_id_prefix("def00")
         assert resolved == "def00001"
         assert matches == []
 
-    def test_resolve_prefix_ambiguous(self):
-        resolved, matches = _run(resolve_thread_id_prefix("abc1"))
+    async def test_resolve_prefix_ambiguous(self):
+        resolved, matches = await resolve_thread_id_prefix("abc1")
         assert resolved is None
         assert set(matches) == {"abc12345", "abc12399"}
 
-    def test_resolve_prefix_not_found(self):
-        resolved, matches = _run(resolve_thread_id_prefix("zzz"))
+    async def test_resolve_prefix_not_found(self):
+        resolved, matches = await resolve_thread_id_prefix("zzz")
         assert resolved is None
         assert matches == []
 
-    def test_find_similar_escapes_sql_wildcards(self):
+    async def test_find_similar_escapes_sql_wildcards(self):
         # '%' / '_' must be treated as literal characters, not SQL LIKE
         # wildcards, so a prefix that doesn't occur verbatim returns nothing
         # (prior buggy behavior: '%' matched every thread).
-        assert _run(find_similar_threads("%")) == []
-        assert _run(find_similar_threads("_")) == []
+        assert await find_similar_threads("%") == []
+        assert await find_similar_threads("_") == []
 
-    def test_get_most_recent(self):
-        recent = _run(get_most_recent())
+    async def test_get_most_recent(self):
+        recent = await get_most_recent()
         assert recent is not None
         assert recent == "def00001"
 
-    def test_get_thread_metadata(self):
-        meta = _run(get_thread_metadata("abc12345"))
+    async def test_get_thread_metadata(self):
+        meta = await get_thread_metadata("abc12345")
         assert meta is not None
         assert meta["workspace_dir"] == "/tmp/ws_abc12345"
         assert meta["model"] == "claude-sonnet-4-6"
 
-    def test_get_thread_metadata_missing(self):
-        meta = _run(get_thread_metadata("nonexist"))
+    async def test_get_thread_metadata_missing(self):
+        meta = await get_thread_metadata("nonexist")
         assert meta is None
 
-    def test_delete_thread(self):
+    async def test_delete_thread(self):
         # Insert a thread to delete
         async def _insert():
             import aiosqlite
@@ -306,16 +308,16 @@ class TestThreadFunctions(unittest.TestCase):
                 )
                 await conn.commit()
 
-        _run(_insert())
+        await _insert()
 
-        assert _run(thread_exists("todelete"))
-        assert _run(delete_thread("todelete"))
-        assert not _run(thread_exists("todelete"))
+        assert await thread_exists("todelete")
+        assert await delete_thread("todelete")
+        assert not await thread_exists("todelete")
 
-    def test_delete_nonexistent(self):
-        assert not _run(delete_thread("nope1234"))
+    async def test_delete_nonexistent(self):
+        assert not await delete_thread("nope1234")
 
-    def test_get_thread_messages_applies_summarization_event(self):
+    async def test_get_thread_messages_applies_summarization_event(self):
         async def _insert():
             import aiosqlite
 
@@ -369,18 +371,18 @@ class TestThreadFunctions(unittest.TestCase):
                 )
                 await conn.commit()
 
-        _run(_insert())
+        await _insert()
         try:
-            messages = _run(get_thread_messages("sum12345"))
+            messages = await get_thread_messages("sum12345")
             assert len(messages) == 2
             assert isinstance(messages[0], AIMessage)
             assert messages[0].content == "summary"
             assert isinstance(messages[1], HumanMessage)
             assert messages[1].content == "third"
         finally:
-            _run(_cleanup())
+            await _cleanup()
 
-    def test_get_thread_messages_reconstructs_multi_delta_chain(self):
+    async def test_get_thread_messages_reconstructs_multi_delta_chain(self):
         """3-checkpoint chain with ``_DeltaSnapshot`` seed + pending writes.
 
         Exercises the upstream ``aget_delta_channel_history`` walk: the
@@ -477,19 +479,19 @@ class TestThreadFunctions(unittest.TestCase):
                 "shortcut."
             )
 
-        _run(_insert())
+        await _insert()
         try:
-            _run(_assert_walk_branch_active())
-            messages = _run(get_thread_messages("chain12345"))
+            await _assert_walk_branch_active()
+            messages = await get_thread_messages("chain12345")
             assert [m.content for m in messages] == ["m1", "m2", "m3", "m4"]
             assert isinstance(messages[0], HumanMessage)
             assert isinstance(messages[1], AIMessage)
             assert isinstance(messages[2], HumanMessage)
             assert isinstance(messages[3], AIMessage)
         finally:
-            _run(_cleanup())
+            await _cleanup()
 
-    def test_get_thread_messages_handles_overwrite_bare_message(self):
+    async def test_get_thread_messages_handles_overwrite_bare_message(self):
         """``Overwrite(value=<bare BaseMessage>)`` wraps to a single-element list.
 
         The ``Overwrite`` reset branch in ``_load_checkpoint_messages``
@@ -543,9 +545,9 @@ class TestThreadFunctions(unittest.TestCase):
                 )
                 await conn.commit()
 
-        _run(_insert())
+        await _insert()
         try:
-            messages = _run(get_thread_messages("ow_bare01"))
+            messages = await get_thread_messages("ow_bare01")
             # Overwrite replaced the seed completely; bare message wrapped
             # in a 1-element list.
             assert len(messages) == 1
@@ -553,9 +555,9 @@ class TestThreadFunctions(unittest.TestCase):
             assert messages[0].content == "replaced"
             assert messages[0].id == "repl"
         finally:
-            _run(_cleanup())
+            await _cleanup()
 
-    def test_get_thread_messages_ignores_colliding_other_agent(self):
+    async def test_get_thread_messages_ignores_colliding_other_agent(self):
         """Multi-agent DB with thread_id collision: must surface only ours.
 
         Without the agent_name filter on the head-checkpoint lookup,
@@ -617,35 +619,35 @@ class TestThreadFunctions(unittest.TestCase):
                 )
                 await conn.commit()
 
-        _run(_insert())
+        await _insert()
         try:
-            messages = _run(get_thread_messages("collide01"))
+            messages = await get_thread_messages("collide01")
             assert [m.content for m in messages] == ["ours_1", "ours_2"]
             # Defense-in-depth: explicitly forbid leakage of the other
             # agent's content.
             for msg in messages:
                 assert not msg.content.startswith("theirs_")
         finally:
-            _run(_cleanup())
+            await _cleanup()
 
     # -- Agent isolation: OtherAgent data should never be visible --
 
-    def test_thread_exists_ignores_other_agent(self):
-        assert not _run(thread_exists("zzz99999"))
+    async def test_thread_exists_ignores_other_agent(self):
+        assert not await thread_exists("zzz99999")
 
-    def test_find_similar_ignores_other_agent(self):
-        similar = _run(find_similar_threads("zzz"))
+    async def test_find_similar_ignores_other_agent(self):
+        similar = await find_similar_threads("zzz")
         assert len(similar) == 0
 
-    def test_get_metadata_ignores_other_agent(self):
-        meta = _run(get_thread_metadata("zzz99999"))
+    async def test_get_metadata_ignores_other_agent(self):
+        meta = await get_thread_metadata("zzz99999")
         assert meta is None
 
-    def test_delete_ignores_other_agent(self):
+    async def test_delete_ignores_other_agent(self):
         # Should not delete OtherAgent's data
-        assert not _run(delete_thread("zzz99999"))
+        assert not await delete_thread("zzz99999")
 
-    def test_delete_thread_preserves_other_agent_writes(self):
+    async def test_delete_thread_preserves_other_agent_writes(self):
         """Deleting a shared thread_id must only remove writes linked to
         EvoScientist checkpoints, leaving OtherAgent's writes intact."""
 
@@ -690,10 +692,10 @@ class TestThreadFunctions(unittest.TestCase):
                 )
                 await conn.commit()
 
-        _run(_insert())
+        await _insert()
 
         # Delete — should only affect EvoScientist's data
-        _run(delete_thread(shared_tid))
+        await delete_thread(shared_tid)
 
         # Verify OtherAgent's writes survive
         async def _check():
@@ -707,12 +709,12 @@ class TestThreadFunctions(unittest.TestCase):
                     rows = await cur.fetchall()
                 return [r[0] for r in rows]
 
-        remaining = _run(_check())
+        remaining = await _check()
         assert "cp_other_shared" in remaining
         assert "cp_evo_shared" not in remaining
 
 
-class TestPruningCheckpointer(unittest.TestCase):
+class TestPruningCheckpointer(unittest.IsolatedAsyncioTestCase):
     """Integration tests for ``PruningCheckpointer`` against a real
     ``AsyncSqliteSaver`` backed by a temp SQLite file.
     """
@@ -731,14 +733,14 @@ class TestPruningCheckpointer(unittest.TestCase):
         except OSError:
             pass
 
-    def _run_with_wrapper(self, keep: int, body):
+    async def _run_with_wrapper(self, keep: int, body):
         """Open ``PruningCheckpointer`` against the temp DB on a single
         loop, invoke ``body(saver)`` (an async callable), then close
         cleanly.
 
         Required because ``aiosqlite.Connection`` is bound to the event
-        loop it was opened on; reusing it across separate ``run_async``
-        calls raises ``ValueError("no active connection")``.
+        loop it was opened on; reusing it across separate event loops
+        raises ``ValueError("no active connection")``.
         """
         from EvoScientist.sessions import PruningCheckpointer
 
@@ -749,7 +751,7 @@ class TestPruningCheckpointer(unittest.TestCase):
                 await saver.setup()
                 return await body(saver)
 
-        return _run(_go())
+        return await _go()
 
     @staticmethod
     def _config(thread_id: str, ns: str = "") -> dict:
@@ -778,7 +780,7 @@ class TestPruningCheckpointer(unittest.TestCase):
     def _metadata() -> dict:
         return {"agent_name": AGENT_NAME, "step": 0, "writes": {}, "parents": {}}
 
-    def _row_count(self, thread_id: str, ns: str = "") -> int:
+    async def _row_count(self, thread_id: str, ns: str = "") -> int:
         async def _count():
             import aiosqlite
 
@@ -790,9 +792,9 @@ class TestPruningCheckpointer(unittest.TestCase):
                     row = await cur.fetchone()
                     return int(row[0]) if row else 0
 
-        return _run(_count())
+        return await _count()
 
-    def test_aput_prunes_after_insert(self):
+    async def test_aput_prunes_after_insert(self):
         tid = "tprune01"
 
         async def _body(wrapper):
@@ -804,10 +806,10 @@ class TestPruningCheckpointer(unittest.TestCase):
                     {},
                 )
 
-        self._run_with_wrapper(keep=3, body=_body)
-        assert self._row_count(tid) == 3
+        await self._run_with_wrapper(keep=3, body=_body)
+        assert await self._row_count(tid) == 3
 
-    def test_aput_keeps_latest_for_resume(self):
+    async def test_aput_keeps_latest_for_resume(self):
         """After pruning, ``aget_tuple`` must return the just-written checkpoint."""
         tid = "tresume1"
 
@@ -825,12 +827,12 @@ class TestPruningCheckpointer(unittest.TestCase):
             )
             return last_cfg, tuple_
 
-        last_cfg, tuple_ = self._run_with_wrapper(keep=2, body=_body)
+        last_cfg, tuple_ = await self._run_with_wrapper(keep=2, body=_body)
         assert last_cfg["configurable"]["checkpoint_id"] == "cpr_0004"
         assert tuple_ is not None
         assert tuple_.checkpoint["id"] == "cpr_0004"
 
-    def test_aput_writes_against_kept_checkpoint(self):
+    async def test_aput_writes_against_kept_checkpoint(self):
         """HITL safety: ``aput_writes`` after prune still attaches successfully."""
         tid = "twrites1"
 
@@ -848,7 +850,7 @@ class TestPruningCheckpointer(unittest.TestCase):
             await wrapper.aput_writes(last, [("__interrupt__", "v")], "task1")
             return last
 
-        last_cfg = self._run_with_wrapper(keep=2, body=_body)
+        last_cfg = await self._run_with_wrapper(keep=2, body=_body)
 
         async def _check():
             import aiosqlite
@@ -861,9 +863,9 @@ class TestPruningCheckpointer(unittest.TestCase):
                     row = await cur.fetchone()
                     return int(row[0]) if row else 0
 
-        assert _run(_check()) == 1
+        assert await _check() == 1
 
-    def test_aput_partitions_by_ns(self):
+    async def test_aput_partitions_by_ns(self):
         """Two checkpoint namespaces are pruned independently."""
         tid = "tns01"
 
@@ -882,11 +884,11 @@ class TestPruningCheckpointer(unittest.TestCase):
                     {},
                 )
 
-        self._run_with_wrapper(keep=2, body=_body)
-        assert self._row_count(tid, ns="") == 2
-        assert self._row_count(tid, ns="sub:1") == 2
+        await self._run_with_wrapper(keep=2, body=_body)
+        assert await self._row_count(tid, ns="") == 2
+        assert await self._row_count(tid, ns="sub:1") == 2
 
-    def test_inherits_base_checkpoint_saver(self):
+    async def test_inherits_base_checkpoint_saver(self):
         """LangGraph's ``compile()`` requires ``isinstance(saver, BaseCheckpointSaver)``.
 
         Inheriting from ``AsyncSqliteSaver`` (which inherits from
@@ -908,9 +910,9 @@ class TestPruningCheckpointer(unittest.TestCase):
             assert callable(saver.aget_tuple)
             assert callable(saver.aput_writes)
 
-        self._run_with_wrapper(keep=2, body=_body)
+        await self._run_with_wrapper(keep=2, body=_body)
 
-    def test_prune_failure_does_not_break_aput(self):
+    async def test_prune_failure_does_not_break_aput(self):
         """If pruning raises, ``aput`` still returns successfully."""
         tid = "tfail01"
 
@@ -926,10 +928,10 @@ class TestPruningCheckpointer(unittest.TestCase):
                 {},
             )
 
-        result = self._run_with_wrapper(keep=2, body=_body)
+        result = await self._run_with_wrapper(keep=2, body=_body)
         assert result["configurable"]["checkpoint_id"] == "cpf_0001"
 
-    def test_prune_keep_zero_disables(self):
+    async def test_prune_keep_zero_disables(self):
         """``keep_per_ns=0`` is a no-op — all rows survive."""
         tid = "tzero01"
 
@@ -942,10 +944,10 @@ class TestPruningCheckpointer(unittest.TestCase):
                     {},
                 )
 
-        self._run_with_wrapper(keep=0, body=_body)
-        assert self._row_count(tid) == 4
+        await self._run_with_wrapper(keep=0, body=_body)
+        assert await self._row_count(tid) == 4
 
-    def test_prune_preserves_other_agent(self):
+    async def test_prune_preserves_other_agent(self):
         """A row with a different ``agent_name`` is never deleted."""
         tid = "tother1"
 
@@ -969,10 +971,10 @@ class TestPruningCheckpointer(unittest.TestCase):
                     {},
                 )
 
-        self._run_with_wrapper(keep=2, body=_body)
+        await self._run_with_wrapper(keep=2, body=_body)
 
         # OtherAgent's row + 2 EvoScientist rows = 3 total
-        assert self._row_count(tid) == 3
+        assert await self._row_count(tid) == 3
 
         async def _check_other():
             import aiosqlite
@@ -984,9 +986,9 @@ class TestPruningCheckpointer(unittest.TestCase):
                 ) as cur:
                     return (await cur.fetchone()) is not None
 
-        assert _run(_check_other())
+        assert await _check_other()
 
-    def test_keep_one_boundary(self):
+    async def test_keep_one_boundary(self):
         """``keep_per_ns=1`` keeps only the latest row, deletes the rest."""
         tid = "tk1_001"
 
@@ -999,8 +1001,8 @@ class TestPruningCheckpointer(unittest.TestCase):
                     {},
                 )
 
-        self._run_with_wrapper(keep=1, body=_body)
-        assert self._row_count(tid) == 1
+        await self._run_with_wrapper(keep=1, body=_body)
+        assert await self._row_count(tid) == 1
 
         async def _which():
             import aiosqlite
@@ -1014,9 +1016,9 @@ class TestPruningCheckpointer(unittest.TestCase):
                     return row[0] if row else None
 
         # The newest write (highest checkpoint_id) is the one kept.
-        assert _run(_which()) == "k1_0001"
+        assert await _which() == "k1_0001"
 
-    def test_concurrent_same_thread_aput_invariant(self):
+    async def test_concurrent_same_thread_aput_invariant(self):
         """Concurrent ``aput()`` calls cannot squeeze either caller's
         just-written row out of the top-N retention window.
 
@@ -1055,11 +1057,11 @@ class TestPruningCheckpointer(unittest.TestCase):
             results = await asyncio.gather(t1, t2)
             return results
 
-        results = self._run_with_wrapper(keep=1, body=_body)
+        results = await self._run_with_wrapper(keep=1, body=_body)
         # Whichever caller landed last is the one survivor; importantly,
         # the row count is exactly 1 (no torn state where both rows
         # disappeared or both survived).
-        assert self._row_count(tid) == 1
+        assert await self._row_count(tid) == 1
 
         async def _winner():
             import aiosqlite
@@ -1072,7 +1074,7 @@ class TestPruningCheckpointer(unittest.TestCase):
                     row = await cur.fetchone()
                     return row[0] if row else None
 
-        survivor = _run(_winner())
+        survivor = await _winner()
         # The survivor must be one of the two we wrote, not some torn ID.
         assert survivor in {"cc_a", "cc_b"}
         # And both aput results must report a valid checkpoint_id (neither
@@ -1080,7 +1082,7 @@ class TestPruningCheckpointer(unittest.TestCase):
         for r in results:
             assert r["configurable"]["checkpoint_id"] in {"cc_a", "cc_b"}
 
-    def test_uuid_ordering_keeps_latest(self):
+    async def test_uuid_ordering_keeps_latest(self):
         """Uses langgraph's actual UUIDv6-shaped checkpoint IDs to confirm
         ``ORDER BY checkpoint_id DESC`` keeps the chronologically latest.
 
@@ -1114,8 +1116,8 @@ class TestPruningCheckpointer(unittest.TestCase):
                 await saver.aput(self._config(tid), cp, self._metadata(), {})
             return ids
 
-        ids = self._run_with_wrapper(keep=2, body=_body)
-        assert self._row_count(tid) == 2
+        ids = await self._run_with_wrapper(keep=2, body=_body)
+        assert await self._row_count(tid) == 2
 
         async def _check():
             import aiosqlite
@@ -1127,13 +1129,13 @@ class TestPruningCheckpointer(unittest.TestCase):
                 ) as cur:
                     return [r[0] for r in await cur.fetchall()]
 
-        survivors = _run(_check())
+        survivors = await _check()
         # The two latest UUIDv6 ids — by chronological generation —
         # must be the survivors. Lexicographic DESC ordering must match.
         assert survivors == [ids[4], ids[3]]
 
 
-class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
+class TestPruningCheckpointerDeltaChannel(unittest.IsolatedAsyncioTestCase):
     """Tests for DeltaChannel-aware pruning.
 
     The naive ``keep_latest`` pruner can sever the ``_DeltaSnapshot``
@@ -1192,7 +1194,7 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
         ) as cur:
             return [r[0] for r in await cur.fetchall()]
 
-    def test_preserves_snapshot_ancestor(self):
+    async def test_preserves_snapshot_ancestor(self):
         """Snapshot lives outside the anchor window → walk reaches and stops."""
         from langgraph.checkpoint.serde.types import _DeltaSnapshot
 
@@ -1221,10 +1223,10 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
                 await conn.commit()
                 return await self._surviving_ids(conn, tid)
 
-        survivors = _run(_go())
+        survivors = await _go()
         assert survivors == [f"cp_{i:03d}" for i in range(3, 11)]
 
-    def test_preserves_full_chain_when_no_snapshot(self):
+    async def test_preserves_full_chain_when_no_snapshot(self):
         """No snapshot anywhere → walk reaches root, preserves everything."""
         from EvoScientist.sessions import PruningCheckpointer
 
@@ -1248,10 +1250,10 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
                 await conn.commit()
                 return await self._surviving_ids(conn, tid)
 
-        survivors = _run(_go())
+        survivors = await _go()
         assert survivors == [f"cp_{i:03d}" for i in range(1, 11)]
 
-    def test_plain_list_seed_also_terminates_walk(self):
+    async def test_plain_list_seed_also_terminates_walk(self):
         """Pre-DeltaChannel format (plain list in channel_values) also counts as seed."""
         from EvoScientist.sessions import PruningCheckpointer
 
@@ -1279,10 +1281,10 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
                 await conn.commit()
                 return await self._surviving_ids(conn, tid)
 
-        survivors = _run(_go())
+        survivors = await _go()
         assert survivors == ["cp_002", "cp_003", "cp_004", "cp_005", "cp_006"]
 
-    def test_chain_break_stops_walk_cleanly(self):
+    async def test_chain_break_stops_walk_cleanly(self):
         """Missing ancestor row breaks the chain; walk stops without raising."""
         from EvoScientist.sessions import PruningCheckpointer
 
@@ -1316,13 +1318,13 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
                 await conn.commit()
                 return await self._surviving_ids(conn, tid)
 
-        survivors = _run(_go())
+        survivors = await _go()
         # anchors = cp_004, cp_005. Walk visits cp_003 (preserved),
         # then cp_002 → None → break. cp_001 pruned. cp_002 already
         # absent. Survivors: cp_003, cp_004, cp_005.
         assert survivors == ["cp_003", "cp_004", "cp_005"]
 
-    def test_deserialization_failure_safe_side_over_preserves(self):
+    async def test_deserialization_failure_safe_side_over_preserves(self):
         """Corrupt blob mid-walk: pruner preserves what it visited so far."""
         from EvoScientist.sessions import PruningCheckpointer
 
@@ -1357,13 +1359,13 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
                 await conn.commit()
                 return await self._surviving_ids(conn, tid)
 
-        survivors = _run(_go())
+        survivors = await _go()
         # anchors = cp_004, cp_005. Walk visits cp_003 (added to
         # extra_preserve before deserialize fails). cp_001, cp_002
         # pruned. Survivors: cp_003, cp_004, cp_005.
         assert survivors == ["cp_003", "cp_004", "cp_005"]
 
-    def test_anchor_count_below_keep_is_noop(self):
+    async def test_anchor_count_below_keep_is_noop(self):
         """When checkpoint count < keep_per_ns, prune returns early without DELETE."""
         from EvoScientist.sessions import PruningCheckpointer
 
@@ -1387,11 +1389,11 @@ class TestPruningCheckpointerDeltaChannel(unittest.TestCase):
                 await conn.commit()
                 return await self._surviving_ids(conn, tid)
 
-        survivors = _run(_go())
+        survivors = await _go()
         assert survivors == ["cp_001", "cp_002", "cp_003"]
 
 
-class TestMigrationSweep(unittest.TestCase):
+class TestMigrationSweep(unittest.IsolatedAsyncioTestCase):
     """Tests for the legacy-bloat migration sweep."""
 
     def setUp(self):
@@ -1426,7 +1428,7 @@ class TestMigrationSweep(unittest.TestCase):
         except OSError:
             pass
 
-    def _seed(self, threads_x_ns_x_count: list[tuple[str, str, int]]):
+    async def _seed(self, threads_x_ns_x_count: list[tuple[str, str, int]]):
         async def _go():
             import aiosqlite
 
@@ -1470,9 +1472,9 @@ class TestMigrationSweep(unittest.TestCase):
                         )
                 await conn.commit()
 
-        _run(_go())
+        await _go()
 
-    def _user_version(self) -> int:
+    async def _user_version(self) -> int:
         async def _go():
             import aiosqlite
 
@@ -1481,9 +1483,9 @@ class TestMigrationSweep(unittest.TestCase):
                     row = await cur.fetchone()
                     return int(row[0]) if row else 0
 
-        return _run(_go())
+        return await _go()
 
-    def _row_count(self, thread_id: str, ns: str) -> int:
+    async def _row_count(self, thread_id: str, ns: str) -> int:
         async def _go():
             import aiosqlite
 
@@ -1495,12 +1497,12 @@ class TestMigrationSweep(unittest.TestCase):
                     row = await cur.fetchone()
                     return int(row[0]) if row else 0
 
-        return _run(_go())
+        return await _go()
 
-    def test_sweep_partitions_threads_and_ns(self):
+    async def test_sweep_partitions_threads_and_ns(self):
         from EvoScientist.sessions import _run_migration_sweep
 
-        self._seed(
+        await self._seed(
             [
                 ("t1", "", 8),
                 ("t1", "sub:1", 6),
@@ -1508,29 +1510,29 @@ class TestMigrationSweep(unittest.TestCase):
             ]
         )
 
-        pairs = _run(_run_migration_sweep(keep=3))
+        pairs = await _run_migration_sweep(keep=3)
         assert pairs == 3
 
-        assert self._row_count("t1", "") == 3
-        assert self._row_count("t1", "sub:1") == 3
-        assert self._row_count("t2", "") == 3
+        assert await self._row_count("t1", "") == 3
+        assert await self._row_count("t1", "sub:1") == 3
+        assert await self._row_count("t2", "") == 3
 
-    def test_sweep_sets_user_version(self):
+    async def test_sweep_sets_user_version(self):
         from EvoScientist.sessions import _MIGRATION_VERSION, _run_migration_sweep
 
-        self._seed([("ta", "", 5)])
-        assert self._user_version() == 0
-        _run(_run_migration_sweep(keep=2))
-        assert self._user_version() == _MIGRATION_VERSION
+        await self._seed([("ta", "", 5)])
+        assert await self._user_version() == 0
+        await _run_migration_sweep(keep=2)
+        assert await self._user_version() == _MIGRATION_VERSION
 
-    def test_sweep_skipped_when_marker_set(self):
+    async def test_sweep_skipped_when_marker_set(self):
         from EvoScientist.sessions import (
             _MIGRATION_VERSION,
             _run_migration_sweep,
             _set_user_version,
         )
 
-        self._seed([("tb", "", 5)])
+        await self._seed([("tb", "", 5)])
 
         async def _bump():
             import aiosqlite
@@ -1538,39 +1540,39 @@ class TestMigrationSweep(unittest.TestCase):
             async with aiosqlite.connect(self._db_path) as conn:
                 await _set_user_version(conn, _MIGRATION_VERSION)
 
-        _run(_bump())
+        await _bump()
         # Already at marker → sweep is a no-op even though many rows exist.
-        pairs = _run(_run_migration_sweep(keep=2))
+        pairs = await _run_migration_sweep(keep=2)
         assert pairs == 0
-        assert self._row_count("tb", "") == 5
+        assert await self._row_count("tb", "") == 5
 
-    def test_needs_migration_below_threshold(self):
+    async def test_needs_migration_below_threshold(self):
         from EvoScientist.sessions import _needs_migration
 
         # Empty DB (file doesn't exist yet) → False
-        assert not _run(_needs_migration())
+        assert not await _needs_migration()
         # Tiny DB → False
-        self._seed([("tc", "", 1)])
-        assert not _run(_needs_migration())
+        await self._seed([("tc", "", 1)])
+        assert not await _needs_migration()
 
-    def test_needs_migration_above_threshold(self):
+    async def test_needs_migration_above_threshold(self):
         """Use monkeypatch on the threshold constant so tests stay fast."""
         from EvoScientist import sessions as sessions_module
 
-        self._seed([("td", "", 3)])
+        await self._seed([("td", "", 3)])
         with patch.object(sessions_module, "_MIGRATION_THRESHOLD_BYTES", 1):
             # Tiny DB exceeds the 1-byte threshold → marker check kicks in.
-            assert _run(sessions_module._needs_migration())
+            assert await sessions_module._needs_migration()
 
-    def test_keep_zero_short_circuits_sweep(self):
+    async def test_keep_zero_short_circuits_sweep(self):
         from EvoScientist.sessions import _run_migration_sweep
 
-        self._seed([("te", "", 4)])
-        pairs = _run(_run_migration_sweep(keep=0))
+        await self._seed([("te", "", 4)])
+        pairs = await _run_migration_sweep(keep=0)
         assert pairs == 0
-        assert self._row_count("te", "") == 4
+        assert await self._row_count("te", "") == 4
 
-    def test_sweep_handles_missing_writes_table(self):
+    async def test_sweep_handles_missing_writes_table(self):
         """Legacy DB with only ``checkpoints`` (no ``writes``) must still prune.
 
         Regression test: the sweep used to unconditionally
@@ -1580,7 +1582,7 @@ class TestMigrationSweep(unittest.TestCase):
         from EvoScientist.sessions import _run_migration_sweep
 
         # Seed creates both tables; drop ``writes`` to simulate legacy.
-        self._seed([("tw", "", 5)])
+        await self._seed([("tw", "", 5)])
 
         async def _drop_writes():
             import aiosqlite
@@ -1589,13 +1591,13 @@ class TestMigrationSweep(unittest.TestCase):
                 await conn.execute("DROP TABLE writes")
                 await conn.commit()
 
-        _run(_drop_writes())
+        await _drop_writes()
 
-        pairs = _run(_run_migration_sweep(keep=2))
+        pairs = await _run_migration_sweep(keep=2)
         assert pairs == 1
-        assert self._row_count("tw", "") == 2
+        assert await self._row_count("tw", "") == 2
 
-    def test_get_checkpointer_blocks_on_sweep_then_idempotent(self):
+    async def test_get_checkpointer_blocks_on_sweep_then_idempotent(self):
         """End-to-end: ``get_checkpointer()`` must run the sweep BEFORE
         yielding the saver so a concurrent ``aput()`` can't race the
         DELETEs. After the first call sets ``user_version=1``, subsequent
@@ -1607,7 +1609,7 @@ class TestMigrationSweep(unittest.TestCase):
             get_checkpointer,
         )
 
-        self._seed([("ge", "", 6)])
+        await self._seed([("ge", "", 6)])
 
         # Force the sweep to be needed regardless of file size.
         with patch.object(sessions_module, "_MIGRATION_THRESHOLD_BYTES", 1):
@@ -1618,8 +1620,8 @@ class TestMigrationSweep(unittest.TestCase):
                 async with get_checkpointer() as saver:
                     return saver is not None
 
-            assert _run(_first())
-            assert self._user_version() == _MIGRATION_VERSION
+            assert await _first()
+            assert await self._user_version() == _MIGRATION_VERSION
 
             # Second entry: sweep must be skipped — patch _run_migration_sweep
             # to raise so any accidental re-invocation fails the test loudly.
@@ -1634,9 +1636,9 @@ class TestMigrationSweep(unittest.TestCase):
                     async with get_checkpointer() as saver:
                         return saver is not None
 
-                assert _run(_second())
+                assert await _second()
 
-    def test_sweep_preserves_snapshot_ancestor(self):
+    async def test_sweep_preserves_snapshot_ancestor(self):
         """Migration sweep must apply the same DeltaChannel walk as steady-state.
 
         Without this, legacy users upgrading to PR #231 would hit a
@@ -1713,8 +1715,8 @@ class TestMigrationSweep(unittest.TestCase):
                     )
                 await conn.commit()
 
-        _run(_seed())
-        pairs = _run(_run_migration_sweep(keep=5))
+        await _seed()
+        pairs = await _run_migration_sweep(keep=5)
         assert pairs == 1
 
         async def _survivors():
@@ -1728,7 +1730,7 @@ class TestMigrationSweep(unittest.TestCase):
                 ) as cur:
                     return [r[0] for r in await cur.fetchall()]
 
-        survivors = _run(_survivors())
+        survivors = await _survivors()
         # cp_001, cp_002 pruned. cp_003 (snapshot) + walk-through (cp_004,
         # cp_005) + anchors (cp_006..cp_010) survive.
         assert survivors == [f"cp_{i:03d}" for i in range(3, 11)]
@@ -1738,7 +1740,7 @@ class TestMigrationSweep(unittest.TestCase):
         assert "cp_002" not in survivors
 
 
-class TestDbStats(unittest.TestCase):
+class TestDbStats(unittest.IsolatedAsyncioTestCase):
     """Tests for the read-only ``db_stats`` diagnostic helper."""
 
     def setUp(self):
@@ -1761,7 +1763,7 @@ class TestDbStats(unittest.TestCase):
         except OSError:
             pass
 
-    def _seed(self):
+    async def _seed(self):
         async def _go():
             import aiosqlite
 
@@ -1835,9 +1837,9 @@ class TestDbStats(unittest.TestCase):
                     )
                 await conn.commit()
 
-        _run(_go())
+        await _go()
 
-    def test_stats_returns_evo_only_counts(self):
+    async def test_stats_returns_evo_only_counts(self):
         """All counts (incl. ``write_count``) must scope to EvoScientist rows.
 
         Regression for the previous bare ``COUNT(*) FROM writes`` which
@@ -1847,31 +1849,31 @@ class TestDbStats(unittest.TestCase):
         """
         from EvoScientist.sessions import db_stats
 
-        self._seed()
-        stats = _run(db_stats())
+        await self._seed()
+        stats = await db_stats()
         assert stats["thread_count"] == 2
         assert stats["checkpoint_count"] == 8  # OtherAgent's 1 row excluded
         assert stats["write_count"] == 4  # 2 OtherAgent writes excluded
         assert stats["size_bytes"] > 0
         assert stats["db_path"].endswith("stats.db")
 
-    def test_stats_top_threads_ordered_desc(self):
+    async def test_stats_top_threads_ordered_desc(self):
         from EvoScientist.sessions import db_stats
 
-        self._seed()
-        stats = _run(db_stats(top_n=5))
+        await self._seed()
+        stats = await db_stats(top_n=5)
         ids = [row["thread_id"] for row in stats["top_threads"]]
         counts = [row["count"] for row in stats["top_threads"]]
         # Sorted desc by count: evo01 (5) before evo02 (3); OtherAgent excluded
         assert ids == ["evo01", "evo02"]
         assert counts == [5, 3]
 
-    def test_stats_missing_db(self):
+    async def test_stats_missing_db(self):
         """No DB on disk → returns zeroed stats, never raises."""
         from EvoScientist.sessions import db_stats
 
         # Don't seed — file doesn't exist.
-        stats = _run(db_stats())
+        stats = await db_stats()
         assert stats["thread_count"] == 0
         assert stats["checkpoint_count"] == 0
         assert stats["write_count"] == 0
@@ -2002,11 +2004,11 @@ class TestReduceMessagesDeltaUpstreamParity:
         assert _signature(out) == [("HumanMessage", "d1", "x")]
 
 
-class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
+class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
     """Tests for ``create_checkpointer_for_langgraph_api`` — the WebUI/deploy
     SQLite checkpointer factory that replaces the default ``InMemorySaver``."""
 
-    def test_yields_pruning_checkpointer(self):
+    async def test_yields_pruning_checkpointer(self):
         """Factory yields a ``PruningCheckpointer`` instance."""
         from EvoScientist.sessions import (
             PruningCheckpointer,
@@ -2024,9 +2026,9 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
                     async with create_checkpointer_for_langgraph_api() as cp:
                         assert isinstance(cp, PruningCheckpointer)
 
-                _run(_run_inner())
+                await _run_inner()
 
-    def test_checkpointer_is_set_up(self):
+    async def test_checkpointer_is_set_up(self):
         """Factory calls ``setup()`` so tables exist before yielding."""
         import aiosqlite
 
@@ -2050,9 +2052,9 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
                                 "checkpoints table must exist after setup()"
                             )
 
-                _run(_run_inner())
+                await _run_inner()
 
-    def test_checkpointer_persists_across_contexts(self):
+    async def test_checkpointer_persists_across_contexts(self):
         """Data written in one context manager is readable in a new one.
 
         This is the core regression test: verifies that session data
@@ -2117,7 +2119,7 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
                         )
                         assert result.config["configurable"]["thread_id"] == thread_id
 
-        _run(_run_inner())
+        await _run_inner()
 
     def test_capability_surface_matches_langgraph_api_probe(self):
         """Document the REAL capability surface langgraph-api will detect.
@@ -2149,7 +2151,7 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
                 "docstring in create_checkpointer_for_langgraph_api"
             )
 
-    def test_aput_stamps_workspace_metadata_for_graph_rows(self):
+    async def test_aput_stamps_workspace_metadata_for_graph_rows(self):
         """Graph rows get workspace metadata; only main rows get agent_name."""
         import json
 
@@ -2229,10 +2231,10 @@ class TestCreateCheckpointerForLanggraphApi(unittest.TestCase):
                     return_value="/tmp/test-workspace",
                 ),
             ):
-                _run(_run_inner(db))
+                await _run_inner(db)
 
 
-class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
+class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
     """Tests for ``_restore_webui_threads_to_global_store``.
 
     Verifies that UUID-format threads written to SQLite by ``langgraph dev``
@@ -2288,7 +2290,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
 
         return patch("EvoScientist.sessions._api_workspace_dir", return_value=self._WS)
 
-    def test_restores_uuid_threads_into_global_store(self):
+    async def test_restores_uuid_threads_into_global_store(self):
         """UUID-format thread IDs from SQLite are injected into GlobalStore."""
         import sys
         from unittest.mock import MagicMock, patch
@@ -2323,7 +2325,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 ),
                 self._patch_workspace(),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         # Only the UUID thread should have been added; the short-hex CLI thread
         # should not appear because it doesn't match the UUID LIKE pattern.
@@ -2359,7 +2361,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         )
         assert isinstance(added[0]["updated_at"], _dt)
 
-    def test_fixes_existing_string_thread_ids_in_place(self):
+    async def test_fixes_existing_string_thread_ids_in_place(self):
         """Threads already in GlobalStore with string thread_id get fixed in-place.
 
         When .pckl loads successfully, threads are already in the store but
@@ -2401,7 +2403,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 ),
                 self._patch_workspace(),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         # No duplicate: still exactly one entry.
         assert len(mock_store["threads"]) == 1, (
@@ -2420,7 +2422,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert t["metadata"].get("workspace_dir") == self._WS
         assert t["metadata"].get("model") == "test-model"
 
-    def test_restore_includes_current_workspace_graph_threads_only(self):
+    async def test_restore_includes_current_workspace_graph_threads_only(self):
         """Restore includes current-workspace graph threads only.
 
         Threads from other workspaces and pre-stamping rows without
@@ -2468,7 +2470,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 ),
                 self._patch_workspace(),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         added = mock_store["threads"]
         restored = {entry["thread_id"]: entry for entry in added}
@@ -2490,7 +2492,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
             self._WS
         )
 
-    def test_purge_removes_only_evomemory_rows(self):
+    async def test_purge_removes_only_evomemory_rows(self):
         """Startup purge drops evomemory-* residue, leaves everything else."""
         import sqlite3
         from unittest.mock import patch
@@ -2513,9 +2515,9 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 "EvoScientist.sessions.get_db_path",
                 return_value=_mock_path(db),
             ):
-                _run(_purge_internal_worker_threads())
+                await _purge_internal_worker_threads()
                 # Idempotent: second run is a no-op, not an error.
-                _run(_purge_internal_worker_threads())
+                await _purge_internal_worker_threads()
 
             con = sqlite3.connect(db)
             remaining = {
@@ -2525,7 +2527,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
 
         assert remaining == {keep_main, keep_cli, keep_subagent}
 
-    def test_cli_session_filters_exclude_non_main_graph_rows(self):
+    async def test_cli_session_filters_exclude_non_main_graph_rows(self):
         from unittest.mock import patch
 
         from EvoScientist.sessions import (
@@ -2547,14 +2549,14 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 "EvoScientist.sessions.get_db_path",
                 return_value=_mock_path(db),
             ):
-                assert [row["thread_id"] for row in _run(list_threads())] == [
+                assert [row["thread_id"] for row in await list_threads()] == [
                     main_thread
                 ]
-                assert _run(thread_exists(main_thread))
-                assert not _run(thread_exists(worker_thread))
-                assert _run(resolve_thread_id_prefix(worker_thread[:8])) == (None, [])
+                assert await thread_exists(main_thread)
+                assert not await thread_exists(worker_thread)
+                assert await resolve_thread_id_prefix(worker_thread[:8]) == (None, [])
 
-    def test_restores_cli_rows_and_excludes_worker_residue(self):
+    async def test_restores_cli_rows_and_excludes_worker_residue(self):
         """CLI rows (agent_name, no graph_id) are restored with graph_id
         backfilled; crashed-worker residue (agent_name AND graph_id=
         evomemory-*) stays excluded — graph_id wins over agent_name."""
@@ -2597,7 +2599,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 ),
                 self._patch_workspace(),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         added = mock_store["threads"]
         assert len(added) == 1
@@ -2607,7 +2609,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["metadata"].get("workspace_dir") == self._WS
         assert added[0]["metadata"].get("model") == "test-model"
 
-    def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
+    async def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
         """Interop thread (CLI rows + WebUI rows under one UUID): bare
         columns under GROUP BY let SQLite pick an arbitrary row's NULL —
         all metadata fields must be MAX-aggregated (Codex F2)."""
@@ -2649,7 +2651,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 ),
                 self._patch_workspace(),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         added = mock_store["threads"]
         assert len(added) == 1, f"expected 1 thread, got {added}"
@@ -2659,7 +2661,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         assert added[0]["metadata"].get("workspace_dir") == self._WS
         assert added[0]["metadata"].get("model") == "test-model"
 
-    def test_restored_stub_gets_title_from_first_human_message(self):
+    async def test_restored_stub_gets_title_from_first_human_message(self):
         """Stubs carry metadata.title derived from the thread's first human
         message, so the WebUI sidebar doesn't show "Untitled Thread"."""
         import sys
@@ -2719,13 +2721,13 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                     return_value=self._WS,
                 ),
             ):
-                _run(_write_then_restore())
+                await _write_then_restore()
 
         added = mock_store["threads"]
         assert len(added) == 1, f"expected 1 restored thread, got {added}"
         assert added[0]["metadata"].get("title") == "hello title test"
 
-    def test_removes_preloaded_uuid_entries_outside_restore_scope(self):
+    async def test_removes_preloaded_uuid_entries_outside_restore_scope(self):
         """Stale and out-of-scope .pckl UUID entries are dropped.
 
         Stale UUID entries point at deleted/lost state and render as empty
@@ -2773,7 +2775,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                 ),
                 self._patch_workspace(),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         ids = [t["thread_id"] for t in mock_store["threads"]]
         assert _uuid_mod.UUID(ghost) not in ids, f"ghost must be removed, got {ids}"
@@ -2784,7 +2786,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
         # In-scope thread restored as usual.
         assert _uuid_mod.UUID(in_scope) in ids
 
-    def test_no_op_when_langgraph_runtime_inmem_absent(self):
+    async def test_no_op_when_langgraph_runtime_inmem_absent(self):
         """ImportError for langgraph_runtime_inmem is silently swallowed."""
         import sys
         from unittest.mock import patch
@@ -2793,9 +2795,9 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
 
         with patch.dict(sys.modules, {"langgraph_runtime_inmem.database": None}):
             # Must not raise.
-            _run(_restore_webui_threads_to_global_store())
+            await _restore_webui_threads_to_global_store()
 
-    def test_no_op_when_db_has_no_checkpoints_table(self):
+    async def test_no_op_when_db_has_no_checkpoints_table(self):
         """Missing checkpoints table is handled gracefully."""
         import sys
         from unittest.mock import MagicMock, patch
@@ -2825,12 +2827,12 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                     sys.modules, {"langgraph_runtime_inmem.database": fake_module}
                 ),
             ):
-                _run(_restore_webui_threads_to_global_store())
+                await _restore_webui_threads_to_global_store()
 
         # threads list untouched.
         assert mock_store["threads"] == []
 
-    def test_create_checkpointer_calls_restore(self):
+    async def test_create_checkpointer_calls_restore(self):
         """create_checkpointer_for_langgraph_api calls _restore_webui_threads_to_global_store."""
         from unittest.mock import patch
 
@@ -2858,7 +2860,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.TestCase):
                     async with create_checkpointer_for_langgraph_api():
                         pass
 
-                _run(_run_inner())
+                await _run_inner()
 
         assert restore_called, "_restore_webui_threads_to_global_store must be called"
 

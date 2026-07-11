@@ -7,7 +7,6 @@ deepagents internals. It hooks into ``awrap_tool_call`` and only fires on
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -105,7 +104,7 @@ def _make_middleware():
     return mw, fake_client
 
 
-def test_middleware_spawns_watcher_on_start_async_task():
+async def test_middleware_spawns_watcher_on_start_async_task():
     """A successful start_async_task tool call must spawn one watcher per task."""
     from langgraph.types import Command
 
@@ -142,7 +141,7 @@ def test_middleware_spawns_watcher_on_start_async_task():
         )
 
     with patch.object(async_notifier, "spawn_watcher", side_effect=fake_spawn):
-        result = asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        result = await mw.awrap_tool_call(request, fake_handler)
 
     assert isinstance(result, Command)
     assert spawn_calls == [
@@ -150,7 +149,7 @@ def test_middleware_spawns_watcher_on_start_async_task():
     ]
 
 
-def test_middleware_spawns_watcher_on_update_async_task():
+async def test_middleware_spawns_watcher_on_update_async_task():
     """A successful update_async_task call must also spawn a (replacement) watcher."""
     from langgraph.types import Command
 
@@ -183,7 +182,7 @@ def test_middleware_spawns_watcher_on_update_async_task():
         )
 
     with patch.object(async_notifier, "spawn_watcher", side_effect=fake_spawn):
-        asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        await mw.awrap_tool_call(request, fake_handler)
 
     assert len(spawn_calls) == 1
     args, kwargs = spawn_calls[0]
@@ -195,7 +194,7 @@ def test_middleware_spawns_watcher_on_update_async_task():
     assert kwargs["origin_cli_thread_id"] == "cli-thread-A"
 
 
-def test_middleware_pre_cancels_old_watcher_on_update():
+async def test_middleware_pre_cancels_old_watcher_on_update():
     """update_async_task must cancel the existing watcher BEFORE invoking the handler.
 
     Otherwise the new run interrupts the old run's stream, which closes
@@ -221,14 +220,14 @@ def test_middleware_pre_cancels_old_watcher_on_update():
 
     try:
         with patch.object(async_notifier, "spawn_watcher"):
-            asyncio.run(mw.awrap_tool_call(request, fake_handler))
+            await mw.awrap_tool_call(request, fake_handler)
     finally:
         async_notifier._watcher_by_thread.pop("task-1", None)
 
     assert cancel_observed_before_handler["value"] is True
 
 
-def test_middleware_passes_through_unrelated_tools():
+async def test_middleware_passes_through_unrelated_tools():
     """A non-launch tool call must not spawn any watcher and must return result unchanged."""
     mw, _ = _make_middleware()
 
@@ -240,13 +239,13 @@ def test_middleware_passes_through_unrelated_tools():
     request = _build_request("ls", {"path": "/"}, thread_id="t")
 
     with patch.object(async_notifier, "spawn_watcher") as mock_spawn:
-        result = asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        result = await mw.awrap_tool_call(request, fake_handler)
 
     assert result is sentinel
     assert mock_spawn.call_count == 0
 
 
-def test_middleware_handles_non_command_results_gracefully():
+async def test_middleware_handles_non_command_results_gracefully():
     """If the launch tool returns a string (validation error), no watcher is spawned."""
     mw, _ = _make_middleware()
 
@@ -260,13 +259,13 @@ def test_middleware_handles_non_command_results_gracefully():
     )
 
     with patch.object(async_notifier, "spawn_watcher") as mock_spawn:
-        result = asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        result = await mw.awrap_tool_call(request, fake_handler)
 
     assert result == "Unknown async subagent type `bogus`"
     assert mock_spawn.call_count == 0
 
 
-def test_middleware_origin_thread_id_is_none_when_runtime_config_missing():
+async def test_middleware_origin_thread_id_is_none_when_runtime_config_missing():
     """When runtime.config is empty, origin_cli_thread_id must be None (not crash)."""
     from langgraph.types import Command
 
@@ -299,12 +298,12 @@ def test_middleware_origin_thread_id_is_none_when_runtime_config_missing():
         )
 
     with patch.object(async_notifier, "spawn_watcher", side_effect=fake_spawn):
-        asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        await mw.awrap_tool_call(request, fake_handler)
 
     assert captured.get("origin_cli_thread_id") is None
 
 
-def test_middleware_swallows_spawn_exceptions():
+async def test_middleware_swallows_spawn_exceptions():
     """spawn_watcher errors must not propagate up — middleware logs and continues."""
     from langgraph.types import Command
 
@@ -336,7 +335,7 @@ def test_middleware_swallows_spawn_exceptions():
 
     with patch.object(async_notifier, "spawn_watcher", side_effect=boom):
         # Should not raise.
-        result = asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        result = await mw.awrap_tool_call(request, fake_handler)
 
     assert isinstance(result, Command)
 
@@ -356,7 +355,9 @@ def test_middleware_swallows_spawn_exceptions():
         ),
     ],
 )
-def test_middleware_picks_correct_prompt_field_per_tool(tool_name, args, prompt_field):
+async def test_middleware_picks_correct_prompt_field_per_tool(
+    tool_name, args, prompt_field
+):
     """start_async_task uses 'description'; update_async_task uses 'message'."""
     from langgraph.types import Command
 
@@ -385,12 +386,12 @@ def test_middleware_picks_correct_prompt_field_per_tool(tool_name, args, prompt_
     request = _build_request(tool_name, args, thread_id="t")
 
     with patch.object(async_notifier, "spawn_watcher", side_effect=fake_spawn):
-        asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        await mw.awrap_tool_call(request, fake_handler)
 
     assert captured_prompt["value"] == prompt_field
 
 
-def test_middleware_prompt_field_is_tool_name_gated_not_fallback_chained():
+async def test_middleware_prompt_field_is_tool_name_gated_not_fallback_chained():
     """update_async_task with extra `description` arg must still use `message`.
 
     Guards against the previous `args.get('description') or args.get('message')`
@@ -432,12 +433,12 @@ def test_middleware_prompt_field_is_tool_name_gated_not_fallback_chained():
     )
 
     with patch.object(async_notifier, "spawn_watcher", side_effect=fake_spawn):
-        asyncio.run(mw.awrap_tool_call(request, fake_handler))
+        await mw.awrap_tool_call(request, fake_handler)
 
     assert captured_prompt["value"] == "use this"
 
 
-def test_middleware_pre_cancel_swallows_unexpected_errors():
+async def test_middleware_pre_cancel_swallows_unexpected_errors():
     """A faulty old-watcher handle must not block the handler from running."""
     from langgraph.types import Command
 
@@ -460,7 +461,7 @@ def test_middleware_pre_cancel_swallows_unexpected_errors():
     try:
         with patch.object(async_notifier, "spawn_watcher"):
             # Should not raise.
-            asyncio.run(mw.awrap_tool_call(request, fake_handler))
+            await mw.awrap_tool_call(request, fake_handler)
     finally:
         async_notifier._watcher_by_thread.pop("t1", None)
 

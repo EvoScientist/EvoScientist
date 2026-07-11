@@ -20,7 +20,6 @@ from EvoScientist.stream.tool_results import (
     _extract_command_tool_content,
     _extract_tool_content,
 )
-from tests.conftest import run_async
 from tests.stream_v3_fakes import (
     ErroringV3Agent,
     FakeSubagent,
@@ -144,10 +143,10 @@ class TestExtractToolContent:
 class TestV3ProtocolStreaming:
     """Test stream_agent_events against v3 protocol events."""
 
-    def test_message_delta_emits_text(self):
+    async def test_message_delta_emits_text(self):
         """v3 content-block text deltas are processed."""
         agent = FakeV3Agent([message_delta("hello world")])
-        events = collect_events(agent)
+        events = await collect_events(agent)
         text_events = [e for e in events if e.get("type") == "text"]
         assert len(text_events) == 1
         assert text_events[0]["content"] == "hello world"
@@ -156,7 +155,7 @@ class TestV3ProtocolStreaming:
         assert "stream_mode" not in kwargs
         assert "subgraphs" not in kwargs
 
-    def test_streamed_non_selector_json_is_replayed(self):
+    async def test_streamed_non_selector_json_is_replayed(self):
         """Normal JSON answers are not swallowed by selector JSON buffering."""
         agent = FakeV3Agent(
             [
@@ -165,13 +164,13 @@ class TestV3ProtocolStreaming:
                 message_delta(": 1}"),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         text_events = [e for e in events if e.get("type") == "text"]
         assert "".join(e["content"] for e in text_events) == '{"answer": 1}'
         assert events[-1]["type"] == "done"
         assert events[-1]["response"] == '{"answer": 1}'
 
-    def test_incomplete_non_selector_json_flushes_on_message_finish(self):
+    async def test_incomplete_non_selector_json_flushes_on_message_finish(self):
         """Buffered non-selector text is not lost if the message ends mid-object."""
         agent = FakeV3Agent(
             [
@@ -180,40 +179,42 @@ class TestV3ProtocolStreaming:
                 message_finish(),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         text_events = [e for e in events if e.get("type") == "text"]
         assert "".join(e["content"] for e in text_events) == '{"answer":'
         assert events[-1]["response"] == '{"answer":'
 
-    def test_json_answer_with_tools_key_is_replayed_without_selector_context(self):
+    async def test_json_answer_with_tools_key_is_replayed_without_selector_context(
+        self,
+    ):
         """Normal answers may legitimately contain a top-level tools key."""
         agent = FakeV3Agent(
             [
                 message_delta('{"tools":["hammer"],"answer":"use safely"}'),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         text_events = [e for e in events if e.get("type") == "text"]
         assert len(text_events) == 1
         assert text_events[0]["content"] == '{"tools":["hammer"],"answer":"use safely"}'
         assert events[-1]["response"] == '{"tools":["hammer"],"answer":"use safely"}'
 
-    def test_text_delta_strips_legacy_thinking_tags(self):
+    async def test_text_delta_strips_legacy_thinking_tags(self):
         """Legacy <thinking> tags are still removed on the v3 text path."""
         agent = FakeV3Agent(
             [message_delta("<thinking>some reasoning</thinking>The answer is 42.")]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         text_events = [e for e in events if e.get("type") == "text"]
         assert len(text_events) == 1
         assert text_events[0]["content"] == "The answer is 42."
 
-    def test_text_delta_with_only_legacy_thinking_tags_is_skipped(self):
+    async def test_text_delta_with_only_legacy_thinking_tags_is_skipped(self):
         agent = FakeV3Agent([message_delta("<thinking>just reasoning</thinking>")])
-        events = collect_events(agent)
+        events = await collect_events(agent)
         assert [e for e in events if e.get("type") == "text"] == []
 
-    def test_updates_event_without_summary_is_skipped(self):
+    async def test_updates_event_without_summary_is_skipped(self):
         """Non-summary updates are skipped without error."""
         agent = FakeV3Agent(
             [
@@ -221,12 +222,14 @@ class TestV3ProtocolStreaming:
                 message_delta("should appear"),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         text_events = [e for e in events if e.get("type") == "text"]
         assert len(text_events) == 1
         assert text_events[0]["content"] == "should appear"
 
-    def test_user_message_clears_completed_memory_activity_counts(self, monkeypatch):
+    async def test_user_message_clears_completed_memory_activity_counts(
+        self, monkeypatch
+    ):
         calls = []
         monkeypatch.setattr(
             "EvoScientist.stream.events.clear_completed_memory_activity_counts",
@@ -234,11 +237,13 @@ class TestV3ProtocolStreaming:
         )
         agent = FakeV3Agent([])
 
-        collect_events(agent, message="new user turn")
+        await collect_events(agent, message="new user turn")
 
         assert calls == [True]
 
-    def test_command_message_clears_completed_memory_activity_counts(self, monkeypatch):
+    async def test_command_message_clears_completed_memory_activity_counts(
+        self, monkeypatch
+    ):
         calls = []
         monkeypatch.setattr(
             "EvoScientist.stream.events.clear_completed_memory_activity_counts",
@@ -247,12 +252,12 @@ class TestV3ProtocolStreaming:
         agent = FakeV3Agent([])
         resume_command = Command(resume={"decisions": [{"type": "approve"}]})
 
-        collect_events(agent, message=resume_command)
+        await collect_events(agent, message=resume_command)
 
         assert calls == [True]
         assert agent.astream_events.call_args.args[0] is resume_command
 
-    def test_summarization_filtered(self):
+    async def test_summarization_filtered(self):
         """v3 messages with lc_source=summarization emit summarization events."""
         agent = FakeV3Agent(
             [
@@ -260,7 +265,7 @@ class TestV3ProtocolStreaming:
                 message_delta("real content"),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
         ]
@@ -272,7 +277,7 @@ class TestV3ProtocolStreaming:
         assert len(text_events) == 1
         assert text_events[0]["content"] == "real content"
 
-    def test_updates_mode_summarization_event_emitted(self):
+    async def test_updates_mode_summarization_event_emitted(self):
         """_summarization_event updates should emit a summarization event."""
         summary_message = HumanMessage(
             content="Here is a summary of the conversation to date:\n\nKey facts",
@@ -294,7 +299,7 @@ class TestV3ProtocolStreaming:
                 message_delta("real content"),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
         ]
@@ -303,7 +308,7 @@ class TestV3ProtocolStreaming:
         assert len(summary_events) == 1
         assert summary_events[0]["content"] == "Key facts"
 
-    def test_updates_mode_does_not_duplicate_streamed_summarization(self):
+    async def test_updates_mode_does_not_duplicate_streamed_summarization(self):
         """If streamed summarization already emitted, updates fallback should not duplicate it."""
         summary_message = HumanMessage(
             content="Here is a summary of the conversation to date:\n\nKey facts"
@@ -324,7 +329,7 @@ class TestV3ProtocolStreaming:
                 message_delta("real content"),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
         ]
@@ -333,7 +338,7 @@ class TestV3ProtocolStreaming:
         assert len(summary_events) == 1
         assert summary_events[0]["content"] == "synthetic summary"
 
-    def test_updates_mode_does_not_reemit_existing_summarization_event(self):
+    async def test_updates_mode_does_not_reemit_existing_summarization_event(self):
         """Persisted _summarization_event from a prior turn should not be replayed."""
         summary_message = HumanMessage(
             content="Here is a summary of the conversation to date:\n\nKey facts",
@@ -352,7 +357,7 @@ class TestV3ProtocolStreaming:
             ],
             state_values=summary_event,
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
         ]
@@ -360,7 +365,7 @@ class TestV3ProtocolStreaming:
         summary_events = [e for e in events if e.get("type") == "summarization"]
         assert summary_events == []
 
-    def test_direct_stream_loads_existing_summarization_event_when_omitted(self):
+    async def test_direct_stream_loads_existing_summarization_event_when_omitted(self):
         """Public stream_agent_events() suppresses persisted summary replays."""
         summary_message = HumanMessage(
             content="Here is a summary of the conversation to date:\n\nKey facts",
@@ -380,13 +385,9 @@ class TestV3ProtocolStreaming:
             state_values=summary_event,
         )
 
-        async def _collect():
-            events = []
-            async for event in stream_agent_events(agent, "hi", "t1"):
-                events.append(event)
-            return events
-
-        events = run_async(_collect())
+        events = []
+        async for event in stream_agent_events(agent, "hi", "t1"):
+            events.append(event)
 
         summary_start_events = [
             e for e in events if e.get("type") == "summarization_start"
@@ -395,19 +396,19 @@ class TestV3ProtocolStreaming:
         summary_events = [e for e in events if e.get("type") == "summarization"]
         assert summary_events == []
 
-    def test_whole_message_reasoning_is_not_duplicated(self):
+    async def test_whole_message_reasoning_is_not_duplicated(self):
         """Providers can expose the same reasoning in kwargs and content blocks."""
         message = AIMessage(
             additional_kwargs={"reasoning_content": "Think once."},
             content=[{"type": "reasoning", "reasoning": "Think once."}],
         )
         agent = FakeV3Agent([protocol_event("messages", (message, {}))])
-        events = collect_events(agent)
+        events = await collect_events(agent)
         thinking_events = [e for e in events if e.get("type") == "thinking"]
         assert len(thinking_events) == 1
         assert thinking_events[0]["content"] == "Think once."
 
-    def test_tool_selector_reasoning_delta_is_suppressed(self):
+    async def test_tool_selector_reasoning_delta_is_suppressed(self):
         """Selector reasoning must not appear as main-agent thinking."""
         import EvoScientist.middleware.tool_selector as selector_mod
 
@@ -432,7 +433,7 @@ class TestV3ProtocolStreaming:
                     )
                 ]
             )
-            events = collect_events(agent)
+            events = await collect_events(agent)
         finally:
             selector_mod._selector_active = original_active
 
@@ -441,7 +442,7 @@ class TestV3ProtocolStreaming:
             for e in events
         )
 
-    def test_tool_selector_whole_message_reasoning_is_suppressed(self):
+    async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
         import EvoScientist.middleware.tool_selector as selector_mod
 
@@ -453,7 +454,7 @@ class TestV3ProtocolStreaming:
                 content="",
             )
             agent = FakeV3Agent([protocol_event("messages", (message, {}))])
-            events = collect_events(agent)
+            events = await collect_events(agent)
         finally:
             selector_mod._selector_active = original_active
 
@@ -462,7 +463,7 @@ class TestV3ProtocolStreaming:
             for e in events
         )
 
-    def test_tool_events_emit_call_and_result(self):
+    async def test_tool_events_emit_call_and_result(self):
         """v3 tool projection events become UI tool call/result events."""
         output = ToolMessage(
             name="read_file",
@@ -475,7 +476,7 @@ class TestV3ProtocolStreaming:
                 tool_finished(output),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         tool_call = next(e for e in events if e.get("type") == "tool_call")
         tool_result = next(e for e in events if e.get("type") == "tool_result")
         assert tool_call["name"] == "read_file"
@@ -489,7 +490,7 @@ class TestV3ProtocolStreaming:
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )
-    def test_live_deepagents_v3_tool_result_preserves_tool_call_id(self):
+    async def test_live_deepagents_v3_tool_result_preserves_tool_call_id(self):
         """DeepAgents v3 emits tool_call_id on started and finished tool events."""
 
         @tool
@@ -518,17 +519,14 @@ class TestV3ProtocolStreaming:
             system_prompt="Use tools when requested.",
         )
 
-        async def _collect_events():
-            return [
-                event
-                async for event in stream_agent_events(
-                    agent,
-                    "run probe",
-                    "live-deepagents-tool-id",
-                )
-            ]
-
-        events = run_async(_collect_events())
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent,
+                "run probe",
+                "live-deepagents-tool-id",
+            )
+        ]
 
         tool_call = next(e for e in events if e.get("type") == "tool_call")
         tool_result = next(e for e in events if e.get("type") == "tool_result")
@@ -551,7 +549,7 @@ class TestV3ProtocolStreaming:
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )
-    def test_live_deepagents_v3_hitl_emits_tool_call_and_single_interrupt(self):
+    async def test_live_deepagents_v3_hitl_emits_tool_call_and_single_interrupt(self):
         """Live HITL streams the model tool call once before one interrupt."""
 
         @tool
@@ -581,17 +579,14 @@ class TestV3ProtocolStreaming:
             checkpointer=InMemorySaver(),
         )
 
-        async def _collect_events():
-            return [
-                event
-                async for event in stream_agent_events(
-                    agent,
-                    "run echo",
-                    "live-deepagents-hitl",
-                )
-            ]
-
-        events = run_async(_collect_events())
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent,
+                "run echo",
+                "live-deepagents-hitl",
+            )
+        ]
 
         tool_calls = [e for e in events if e.get("type") == "tool_call"]
         interrupts = [e for e in events if e.get("type") == "interrupt"]
@@ -611,7 +606,7 @@ class TestV3ProtocolStreaming:
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )
-    def test_live_deepagents_v3_ask_user_suppresses_interrupt_tool_result(self):
+    async def test_live_deepagents_v3_ask_user_suppresses_interrupt_tool_result(self):
         """ask_user pause markers are not displayed as failed tool results."""
 
         model = _ToolCallingFakeModel(
@@ -654,15 +649,15 @@ class TestV3ProtocolStreaming:
                 )
             ]
 
-        first_events = run_async(_collect("ask"))
+        first_events = await _collect("ask")
         first_types = [event.get("type") for event in first_events]
         assert first_types == ["tool_call", "ask_user", "done"]
         ask_event = next(e for e in first_events if e.get("type") == "ask_user")
         assert ask_event["tool_call_id"] == "call_ask_1"
         assert ask_event["questions"] == [{"question": "What dataset?", "type": "text"}]
 
-        resumed_events = run_async(
-            _collect(Command(resume={"answers": ["CIFAR-10"], "status": "answered"}))
+        resumed_events = await _collect(
+            Command(resume={"answers": ["CIFAR-10"], "status": "answered"})
         )
         tool_result = next(e for e in resumed_events if e.get("type") == "tool_result")
         assert tool_result == {
@@ -678,7 +673,9 @@ class TestV3ProtocolStreaming:
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )
-    def test_live_deepagents_v3_task_result_uses_subagent_tool_message_content(self):
+    async def test_live_deepagents_v3_task_result_uses_subagent_tool_message_content(
+        self,
+    ):
         """Live task results should display the subagent ToolMessage content."""
 
         root_model = _ToolCallingFakeModel(
@@ -717,17 +714,14 @@ class TestV3ProtocolStreaming:
             ],
         )
 
-        async def _collect_events():
-            return [
-                event
-                async for event in stream_agent_events(
-                    agent,
-                    "delegate",
-                    "live-deepagents-subagent",
-                )
-            ]
-
-        events = run_async(_collect_events())
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent,
+                "delegate",
+                "live-deepagents-subagent",
+            )
+        ]
 
         subagent_start = next(e for e in events if e.get("type") == "subagent_start")
         subagent_end = next(e for e in events if e.get("type") == "subagent_end")
@@ -745,7 +739,7 @@ class TestV3ProtocolStreaming:
         assert task_result["content"] == "subagent final"
         assert "Command(" not in task_result["content"]
 
-    def test_message_tool_call_block_emits_pre_execution_tool_call(self):
+    async def test_message_tool_call_block_emits_pre_execution_tool_call(self):
         """Model-declared tool calls remain visible before execution starts."""
         agent = FakeV3Agent(
             [
@@ -776,14 +770,14 @@ class TestV3ProtocolStreaming:
                 ),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         event_types = [e["type"] for e in events]
         assert event_types.index("tool_call") < event_types.index("interrupt")
         tool_call = next(e for e in events if e.get("type") == "tool_call")
         assert tool_call["id"] == "tc-msg"
         assert tool_call["args"] == {"command": "ls"}
 
-    def test_tool_selection_flushes_before_tool_only_step(self):
+    async def test_tool_selection_flushes_before_tool_only_step(self):
         """Selector UI event is emitted even when selection is followed only by a tool."""
         import EvoScientist.middleware.tool_selector as selector_mod
 
@@ -806,7 +800,7 @@ class TestV3ProtocolStreaming:
                     tool_finished(output),
                 ]
             )
-            events = collect_events(agent)
+            events = await collect_events(agent)
         finally:
             selector_mod._current_selected_tools = original_selected
             selector_mod._total_tools_count = original_total
@@ -817,7 +811,7 @@ class TestV3ProtocolStreaming:
         selection = next(e for e in events if e.get("type") == "tool_selection")
         assert selection["tools"] == ["read_file"]
 
-    def test_subagent_projection_routes_namespaced_events(self):
+    async def test_subagent_projection_routes_namespaced_events(self):
         """DeepAgents subagent projection supplies identity for namespaced events."""
         namespace = ("task", "abc")
         output = ToolMessage(
@@ -838,7 +832,7 @@ class TestV3ProtocolStreaming:
             ],
             subagents=[FakeSubagent(namespace, "research-agent")],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         assert any(e.get("type") == "subagent_start" for e in events)
         assert any(e.get("type") == "subagent_end" for e in events)
 
@@ -865,7 +859,7 @@ class TestV3ProtocolStreaming:
         )
         assert event_types.index("subagent_end") < event_types.index("done")
 
-    def test_namespaced_events_wait_for_delayed_subagent_registration(self):
+    async def test_namespaced_events_wait_for_delayed_subagent_registration(self):
         """Subagent events are not dropped if protocol events arrive first."""
         namespace = ("task", "late")
 
@@ -900,7 +894,7 @@ class TestV3ProtocolStreaming:
 
                 return Snapshot()
 
-        events = collect_events(Agent())
+        events = await collect_events(Agent())
         event_types = [e["type"] for e in events]
         text = next(e for e in events if e.get("type") == "subagent_text")
 
@@ -908,7 +902,7 @@ class TestV3ProtocolStreaming:
         assert text["instance_id"] == "task:late"
         assert event_types.index("subagent_start") < event_types.index("subagent_text")
 
-    def test_subagent_tool_dedupe_uses_resolved_path(self):
+    async def test_subagent_tool_dedupe_uses_resolved_path(self):
         """Tool call/result events can arrive on namespace suffixes for one subagent."""
         subagent_path = ("task", "abc")
         call_namespace = (*subagent_path, "agent")
@@ -936,7 +930,7 @@ class TestV3ProtocolStreaming:
             ],
             subagents=[FakeSubagent(subagent_path, "research-agent")],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
 
         calls = [e for e in events if e.get("type") == "subagent_tool_call"]
         results = [e for e in events if e.get("type") == "subagent_tool_result"]
@@ -948,7 +942,7 @@ class TestV3ProtocolStreaming:
         assert results[0]["instance_id"] == "task:abc"
         assert results[0]["id"] == "sa-tc"
 
-    def test_subagent_end_is_emitted_before_later_root_text(self):
+    async def test_subagent_end_is_emitted_before_later_root_text(self):
         """Finished subagents stop showing as active while root streaming continues."""
         output_returned = asyncio.Event()
 
@@ -996,19 +990,19 @@ class TestV3ProtocolStreaming:
 
                 return Snapshot()
 
-        events = collect_events(Agent())
+        events = await collect_events(Agent())
         event_types = [e["type"] for e in events]
 
         assert event_types.index("subagent_end") < event_types.index("text")
 
-    def test_subagent_projection_is_subscribed_before_protocol_pump(self):
+    async def test_subagent_projection_is_subscribed_before_protocol_pump(self):
         """Subagent handles are not dropped by lazy projection subscription."""
         namespace = ("task", "early")
         agent = SubscriptionSensitiveV3Agent(
             [message_delta("Sub-agent finding.", namespace=namespace)],
             [FakeSubagent(namespace, "research-agent")],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         assert any(e.get("type") == "subagent_start" for e in events)
         assert any(e.get("type") == "subagent_end" for e in events)
         assert [e for e in events if e.get("type") == "text"] == []
@@ -1018,7 +1012,7 @@ class TestV3ProtocolStreaming:
         assert text["content"] == "Sub-agent finding."
         assert text["instance_id"] == "task:early"
 
-    def test_parallel_same_name_subagent_events_carry_instance_ids(self):
+    async def test_parallel_same_name_subagent_events_carry_instance_ids(self):
         """Lifecycle and tool events distinguish same-name parallel subagents."""
         ns1 = ("task", "one")
         ns2 = ("task", "two")
@@ -1048,7 +1042,7 @@ class TestV3ProtocolStreaming:
                 FakeSubagent(ns2, "research-agent"),
             ],
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
 
         starts = [e for e in events if e.get("type") == "subagent_start"]
         calls = [e for e in events if e.get("type") == "subagent_tool_call"]
@@ -1060,7 +1054,7 @@ class TestV3ProtocolStreaming:
         assert {e["instance_id"] for e in results} == {"task:one", "task:two"}
         assert {e["instance_id"] for e in ends} == {"task:one", "task:two"}
 
-    def test_stream_construction_error_emits_error_before_reraising(self):
+    async def test_stream_construction_error_emits_error_before_reraising(self):
         """astream_events construction failures preserve the UI error event contract."""
         events = []
 
@@ -1073,10 +1067,10 @@ class TestV3ProtocolStreaming:
                 events.append(ev)
 
         with pytest.raises(RuntimeError, match="boom"):
-            run_async(collect())
+            await collect()
         assert events == [{"type": "error", "message": "boom"}]
 
-    def test_generator_close_aborts_underlying_v3_stream(self):
+    async def test_generator_close_aborts_underlying_v3_stream(self):
         """Early consumer exit should abort the caller-driven v3 run."""
 
         async def consume_one_and_close():
@@ -1090,7 +1084,7 @@ class TestV3ProtocolStreaming:
             await stream.aclose()
             return first, agent.aborted
 
-        first, aborted = run_async(consume_one_and_close())
+        first, aborted = await consume_one_and_close()
         assert first["type"] == "text"
         assert first["content"] == "hi"
         assert aborted is True
@@ -1099,7 +1093,7 @@ class TestV3ProtocolStreaming:
 class TestUsageStatsExtraction:
     """Test token usage extraction from v3 message-finish events."""
 
-    def test_usage_metadata_emitted(self):
+    async def test_usage_metadata_emitted(self):
         """v3 message-finish usage emits usage_stats event."""
         agent = FakeV3Agent(
             [
@@ -1113,16 +1107,16 @@ class TestUsageStatsExtraction:
                 ),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         usage_events = [e for e in events if e.get("type") == "usage_stats"]
         assert len(usage_events) == 1
         assert usage_events[0]["input_tokens"] == 100
         assert usage_events[0]["output_tokens"] == 50
 
-    def test_no_usage_metadata_no_event(self):
+    async def test_no_usage_metadata_no_event(self):
         """message-finish without usage does not emit usage_stats."""
         agent = FakeV3Agent([message_delta("hi"), message_finish()])
-        events = collect_events(agent)
+        events = await collect_events(agent)
         usage_events = [e for e in events if e.get("type") == "usage_stats"]
         assert len(usage_events) == 0
 
@@ -1158,7 +1152,7 @@ class TestSummarizationHelpers:
         assert isinstance(summary_message, HumanMessage)
         assert summary_message.content == "Summary body"
 
-    def test_zero_tokens_not_emitted(self):
+    async def test_zero_tokens_not_emitted(self):
         """Zero input and output tokens should not emit usage_stats."""
         agent = FakeV3Agent(
             [
@@ -1168,6 +1162,6 @@ class TestSummarizationHelpers:
                 ),
             ]
         )
-        events = collect_events(agent)
+        events = await collect_events(agent)
         usage_events = [e for e in events if e.get("type") == "usage_stats"]
         assert len(usage_events) == 0

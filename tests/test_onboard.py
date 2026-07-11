@@ -184,6 +184,38 @@ class TestSharedConstantsAlignment:
                 )
 
 
+class TestOAuthModeReconcile:
+    def test_reconcile_preserves_auxiliary_openai_oauth(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            auxiliary_provider="openai",
+            auxiliary_model="gpt-5.5",
+            openai_auth_mode="oauth",
+            anthropic_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.openai_auth_mode == "oauth"
+        assert config.anthropic_auth_mode == "api_key"
+
+    def test_reconcile_preserves_auxiliary_provider_without_model(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            auxiliary_provider="openai",
+            auxiliary_model="",
+            openai_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.openai_auth_mode == "oauth"
+
+
 # =============================================================================
 # Test render_progress
 # =============================================================================
@@ -384,6 +416,109 @@ class TestStepProvider:
             mock_q.select.return_value.ask.return_value = None
             with pytest.raises(KeyboardInterrupt):
                 _step_provider(config)
+
+
+class TestStepOAuthAuthMode:
+    @pytest.mark.parametrize(
+        (
+            "step_name",
+            "config_attr",
+            "provider_label",
+            "oauth_choice_label",
+            "ccproxy_provider",
+            "status_label",
+            "question_label",
+            "login_prompt",
+        ),
+        [
+            (
+                "_step_anthropic_auth_mode",
+                "anthropic_auth_mode",
+                "Anthropic",
+                "Claude Code OAuth",
+                "claude_api",
+                "OAuth",
+                "Authentication mode",
+                "Log in to Claude now?",
+            ),
+            (
+                "_step_openai_auth_mode",
+                "openai_auth_mode",
+                "OpenAI",
+                "Codex OAuth",
+                "codex",
+                "Codex OAuth",
+                "OpenAI authentication mode",
+                "Log in to Codex now?",
+            ),
+        ],
+    )
+    def test_oauth_wrappers_use_provider_specific_ccproxy_flow(
+        self,
+        step_name,
+        config_attr,
+        provider_label,
+        oauth_choice_label,
+        ccproxy_provider,
+        status_label,
+        question_label,
+        login_prompt,
+    ):
+        """Anthropic/OpenAI wrappers share flow but keep provider-specific IDs."""
+        from EvoScientist.config.onboard import steps as onboard_steps
+
+        config = EvoScientistConfig(**{config_attr: "oauth"})
+        select_question = MagicMock()
+        select_question.ask.return_value = "oauth"
+        confirm_question = MagicMock()
+        confirm_question.ask.return_value = True
+
+        with (
+            patch(
+                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
+            ),
+            patch(
+                "EvoScientist.ccproxy_manager.check_ccproxy_auth",
+                return_value=(False, "not authenticated"),
+            ) as mock_check_auth,
+            patch(
+                "EvoScientist.config.onboard.prompter.install_navigation_keys"
+            ) as mock_nav,
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.select",
+                return_value=select_question,
+            ) as mock_select,
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.confirm",
+                return_value=confirm_question,
+            ) as mock_confirm,
+            patch(
+                "EvoScientist.config.onboard.steps._prompt_ccproxy_port"
+            ) as mock_port,
+            patch("EvoScientist.config.onboard.steps._run_ccproxy_login") as mock_login,
+        ):
+            result = getattr(onboard_steps, step_name)(config)
+
+        assert result == "oauth"
+        mock_nav.assert_called_once_with(select_question, with_back=True)
+        mock_port.assert_called_once_with(config)
+        mock_check_auth.assert_called_once_with(ccproxy_provider)
+        mock_login.assert_called_once_with(ccproxy_provider, status_label)
+
+        select_call = mock_select.call_args
+        assert select_call.args[0] == f"{question_label}  [Esc/← to go back]:"
+        assert select_call.kwargs["default"] == "oauth"
+        choice_titles = [
+            choice.title
+            for choice in select_call.kwargs["choices"]
+            if getattr(choice, "value", None) in {"api_key", "oauth"}
+        ]
+        assert choice_titles == [
+            f"API Key (direct {provider_label} access)",
+            f"{oauth_choice_label} (via ccproxy — no API key needed)",
+        ]
+        mock_confirm.assert_called_once()
+        assert mock_confirm.call_args.args[0] == login_prompt
 
 
 class TestStepModel:
@@ -1266,6 +1401,7 @@ class TestRunOnboard:
                 "claude-sonnet-4-6",  # Model
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider (a different company)
+                "api_key",  # Auxiliary OpenAI auth mode
                 "gpt-5.5",  # Auxiliary model
                 "daemon",  # Workspace mode
                 True,  # Show thinking
@@ -1289,11 +1425,184 @@ class TestRunOnboard:
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
         assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_auth_mode == "api_key"
         # The auxiliary provider's key is stored in its per-provider field.
         assert final_config.openai_api_key == "sk-aux-openai"
         # Main agent is untouched.
         assert final_config.provider == "anthropic"
         assert final_config.model == "claude-sonnet-4-6"
+
+    def test_auxiliary_same_provider_reuses_main_credentials(self):
+        """Same-provider co-pilot should not imply separate credentials exist."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="openai",
+                model="gpt-5.5",
+                openai_api_key="sk-main-openai",
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Same provider as the main model
+                "gpt-5.5",  # Auxiliary model
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_api_key == "sk-main-openai"
+        mock_q.password.assert_not_called()
+        assert mock_q.select.return_value.ask.call_count == 3
+
+    def test_auxiliary_same_provider_prompts_when_shared_key_missing(self):
+        """Same-provider reuse should not hide a missing shared API key."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+            patch(
+                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
+            ),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="openai",
+                model="gpt-5.5",
+                openai_auth_mode="api_key",
+                openai_api_key="",
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Same provider as the main model
+                "api_key",  # Shared OpenAI auth mode
+                "gpt-5.5",  # Auxiliary model
+            ]
+            mock_q.password.return_value.ask.side_effect = [
+                "sk-shared-openai",
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_auth_mode == "api_key"
+        assert final_config.openai_api_key == "sk-shared-openai"
+        mock_q.password.assert_called_once()
+        assert mock_q.select.return_value.ask.call_count == 4
+
+    def test_auxiliary_openai_oauth_skips_api_key(self):
+        """Auxiliary OpenAI now uses the shared auth flow and skips keys on OAuth."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+            patch(
+                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
+            ),
+            patch(
+                "EvoScientist.ccproxy_manager.check_ccproxy_auth",
+                return_value=(False, "not authenticated"),
+            ) as mock_auth,
+        ):
+            mock_load.return_value = EvoScientistConfig()
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "openai",  # Auxiliary provider
+                "oauth",  # OpenAI auth mode
+                "gpt-5.5",  # Auxiliary model
+            ]
+            mock_q.text.return_value.ask.side_effect = [
+                "",  # ccproxy port (keep default)
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [
+                False,  # Do not log in to Codex now
+                True,  # Save config
+            ]
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "openai"
+        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.openai_auth_mode == "oauth"
+        assert final_config.openai_api_key == ""
+        mock_q.password.assert_not_called()
+        mock_auth.assert_called_once_with("codex")
+
+    def test_auxiliary_reconfigure_clears_unused_openai_oauth(self):
+        """Switching co-pilot away from OpenAI clears stale OpenAI OAuth mode."""
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                anthropic_auth_mode="oauth",
+                auxiliary_provider="openai",
+                auxiliary_model="gpt-5.5",
+                openai_auth_mode="oauth",
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "assemble",  # Auxiliary: Assemble
+                "minimax",  # Auxiliary provider no longer uses OpenAI
+                "global",  # MiniMax region
+                "minimax-m2",  # Auxiliary model
+            ]
+            mock_q.password.return_value.ask.side_effect = [
+                "sk-minimax",  # MiniMax API key
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(
+                skip_validation=True, only_sections={"auxiliary_model"}
+            )
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.auxiliary_provider == "minimax"
+        assert final_config.openai_auth_mode == "api_key"
+        assert final_config.anthropic_auth_mode == "oauth"
 
     def test_auxiliary_custom_provider_collects_base_url(self):
         """Regression for the custom-provider fix: a custom auxiliary provider

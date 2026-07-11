@@ -149,40 +149,34 @@ class TestWrapToolCallAsync:
     def setup_method(self):
         self.mw = ToolErrorHandlerMiddleware()
 
-    @staticmethod
-    def _run(coro):
-        from tests.conftest import run_async
-
-        return run_async(coro)
-
-    def test_success_passes_through(self):
+    async def test_success_passes_through(self):
         expected = ToolMessage(content="ok", tool_call_id="tc_001", name="t")
 
         async def handler(req):
             return expected
 
         req = _make_request()
-        result = self._run(self.mw.awrap_tool_call(req, handler))
+        result = await self.mw.awrap_tool_call(req, handler)
 
         assert result is expected
 
-    def test_command_passes_through(self):
+    async def test_command_passes_through(self):
         cmd = Command(update={"messages": []})
 
         async def handler(req):
             return cmd
 
         req = _make_request()
-        result = self._run(self.mw.awrap_tool_call(req, handler))
+        result = await self.mw.awrap_tool_call(req, handler)
 
         assert result is cmd
 
-    def test_exception_returns_error_tool_message(self):
+    async def test_exception_returns_error_tool_message(self):
         async def handler(req):
             raise RuntimeError("MCP server timed out")
 
         req = _make_request("slow_tool", "tc_async")
-        result = self._run(self.mw.awrap_tool_call(req, handler))
+        result = await self.mw.awrap_tool_call(req, handler)
 
         assert isinstance(result, ToolMessage)
         assert result.status == "error"
@@ -190,21 +184,21 @@ class TestWrapToolCallAsync:
         assert result.name == "slow_tool"
         assert "MCP server timed out" in result.content
 
-    def test_exception_does_not_propagate(self):
+    async def test_exception_does_not_propagate(self):
         async def handler(req):
             raise ConnectionError("connection lost")
 
         req = _make_request()
-        result = self._run(self.mw.awrap_tool_call(req, handler))
+        result = await self.mw.awrap_tool_call(req, handler)
         assert isinstance(result, ToolMessage)
 
-    def test_keyboard_interrupt_propagates(self):
+    async def test_keyboard_interrupt_propagates(self):
         async def handler(req):
             raise KeyboardInterrupt()
 
         req = _make_request()
         with pytest.raises(KeyboardInterrupt):
-            self._run(self.mw.awrap_tool_call(req, handler))
+            await self.mw.awrap_tool_call(req, handler)
 
 
 # ---------------------------------------------------------------------------

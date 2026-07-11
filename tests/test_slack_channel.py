@@ -4,7 +4,6 @@ import pytest
 
 from EvoScientist.channels.base import ChannelError
 from EvoScientist.channels.slack.channel import SlackChannel, SlackConfig
-from tests.conftest import run_async as _run
 
 
 class TestSlackConfig:
@@ -38,24 +37,24 @@ class TestSlackChannel:
         assert channel.config is config
         assert channel._running is False
 
-    def test_start_raises_without_bot_token(self):
+    async def test_start_raises_without_bot_token(self):
         config = SlackConfig(bot_token="", app_token="xapp-test")
         channel = SlackChannel(config)
         with pytest.raises(ChannelError, match="bot token"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_without_app_token(self):
+    async def test_start_raises_without_app_token(self):
         config = SlackConfig(bot_token="xoxb-test", app_token="")
         channel = SlackChannel(config)
         with pytest.raises(ChannelError, match="app token"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_stop_when_not_running(self):
+    async def test_stop_when_not_running(self):
         config = SlackConfig(bot_token="xoxb-test", app_token="xapp-test")
         channel = SlackChannel(config)
-        _run(channel.stop())
+        await channel.stop()
 
-    def test_send_returns_false_without_client(self):
+    async def test_send_returns_false_without_client(self):
         from EvoScientist.channels.base import OutboundMessage
 
         config = SlackConfig(bot_token="xoxb-test", app_token="xapp-test")
@@ -66,7 +65,7 @@ class TestSlackChannel:
             content="hello",
             metadata={"chat_id": "C123"},
         )
-        result = _run(channel.send(msg))
+        result = await channel.send(msg)
         assert result is False
 
 
