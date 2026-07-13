@@ -233,7 +233,15 @@ async def _try_fallbacks(
         "Primary model failed: %s: %s", type(primary_exc).__name__, primary_exc
     )
 
+    # Track the request whose model actually raised ``last_exc`` so we
+    # can attribute the exception to the failing model, not the
+    # original ``request.model``. Without this, a fallback chain
+    # ``deepseek → moonshot`` where moonshot exhausts its quota would
+    # surface as ``provider: deepseek`` — the model the user never
+    # actually saw fail.
     last_exc = primary_exc
+    last_failing_request = request
+
     for model_name, provider in get_fallback_chain():
         events.emit_fallback_notice(
             f"  -> Falling back to {model_name} ({provider}) due to: "
@@ -258,8 +266,9 @@ async def _try_fallbacks(
                     f"-- aborting fallback chain",
                     "red",
                 )
-                raise
+                _raise_normalized(fb_request, fb_exc)
             last_exc = fb_exc
+            last_failing_request = fb_request
             events.emit_fallback_notice(
                 f"  x {model_name} also failed: {type(fb_exc).__name__}: {fb_exc}",
                 "red",
@@ -275,7 +284,24 @@ async def _try_fallbacks(
     events.emit_fallback_notice(
         "  All fallbacks exhausted -- re-raising last error", "red"
     )
-    raise last_exc
+    _raise_normalized(last_failing_request, last_exc)
+
+
+def _raise_normalized(request: ModelRequest, exc: Exception) -> None:
+    """Wrap *exc* in a ``ProviderStreamError`` attributed to
+    ``request.model`` and raise, so the outer chain sees the failure
+    tagged with the model that actually raised.
+
+    Falls back to a plain ``raise`` when the model isn't from a
+    recognized provider (``_normalize`` returns None) — nothing useful
+    to add.
+    """
+    from .error_normalization import _normalize
+
+    normalized = _normalize(request, exc)
+    if normalized is not None:
+        raise normalized from exc
+    raise exc
 
 
 def _guard_and_fallback(
@@ -304,7 +330,7 @@ def _guard_and_fallback(
             f"Model error ({reason}) -- not eligible for fallback, re-raising",
             "red",
         )
-        raise primary_exc
+        _raise_normalized(request, primary_exc)
     return _try_fallbacks(request, invoke, primary_exc, events)
 
 

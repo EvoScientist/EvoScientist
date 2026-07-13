@@ -307,6 +307,7 @@ def _inject_subagent_middleware(
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -335,6 +336,11 @@ def _inject_subagent_middleware(
             memory_scheduler=memory_scheduler,
         )
         middleware = [
+            # Outermost — catches provider-SDK exceptions from the
+            # model call (including inner middlewares) and normalizes
+            # them into a non-dataclass envelope wrapper before
+            # anything downstream sees them.
+            ErrorNormalizationMiddleware(),
             # Subagents share the main agent's model: use the threaded
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
@@ -678,6 +684,7 @@ def _get_default_middleware(
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
+        ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         create_code_interpreter_middleware,
@@ -747,6 +754,11 @@ def _get_default_middleware(
 
             tool_selector_model = get_chat_model(model=aux_model, provider=aux_provider)
     mw = [
+        # Outermost — catches provider-SDK exceptions from the model
+        # call (including exceptions surfaced through inner
+        # middlewares) and normalizes them into a non-dataclass
+        # envelope wrapper before anything downstream sees them.
+        ErrorNormalizationMiddleware(),
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(events=events),

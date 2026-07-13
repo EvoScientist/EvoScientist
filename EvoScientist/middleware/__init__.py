@@ -18,6 +18,7 @@ from .context_editing import (
     create_context_editing_middleware,
 )
 from .context_overflow import ContextOverflowMapperMiddleware
+from .error_normalization import ErrorNormalizationMiddleware
 from .memory import (
     EvoMemoryMiddleware,
     create_memory_middleware,
@@ -44,6 +45,7 @@ __all__ = [
     "Choice",
     "ConfigurableModelMiddleware",
     "ContextOverflowMapperMiddleware",
+    "ErrorNormalizationMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
     "ModelFallbackMiddleware",
