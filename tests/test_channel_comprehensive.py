@@ -881,11 +881,13 @@ class TestChannelReconnect:
         run_task = asyncio.create_task(ch.run())
         await first_retry_waiting.wait()
 
-        assert ch._startup_event.is_set() is False
-        assert ch._startup_error is None
-        assert mgr.startup_results() == [("stub", False, "starting (bus)")]
+        try:
+            assert ch._startup_event.is_set() is False
+            assert ch._startup_error is None
+            assert mgr.startup_results() == [("stub", False, "starting (bus)")]
+        finally:
+            allow_retries.set()
 
-        allow_retries.set()
         await run_task
         assert start_count == 3
         assert ch._startup_event.is_set()
