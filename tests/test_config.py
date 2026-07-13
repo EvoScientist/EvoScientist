@@ -242,6 +242,23 @@ class TestLoadSaveReset:
         assert data["provider"] == "openai"
         assert data["model"] == "gpt-4o"
 
+    def test_save_restricts_config_permissions(self, temp_config_dir, clean_env):
+        """Config file permissions should not depend on the process umask."""
+        original_umask = os.umask(0)
+        try:
+            save_config(EvoScientistConfig(anthropic_api_key="test-key"))
+        finally:
+            os.umask(original_umask)
+
+        config_path = get_config_path()
+        if os.name == "nt":
+            assert config_path.exists()
+            # Windows reports pseudo-permission bits, so we don't test them here.
+            return
+
+        assert config_path.parent.stat().st_mode & 0o777 == 0o700
+        assert config_path.stat().st_mode & 0o777 == 0o600
+
     def test_load_reads_saved_config(self, temp_config_dir, clean_env):
         """Test that load reads previously saved config."""
         original = EvoScientistConfig(
