@@ -1197,8 +1197,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 self._running = False
                 break
             except Exception as e:
-                self._startup_error = str(e)
-                self._startup_event.set()
                 self._trace_event(
                     "channel_runtime_error",
                     error_type=type(e).__name__,
