@@ -1273,8 +1273,10 @@ def _auto_start_channel(
     )
     # A channel that is still starting may connect later and needs the runtime
     # binding. Immediate failures must not leave a stale binding behind.
+    from ..channels.channel_manager import CHANNEL_STARTUP_PENDING_DETAIL
+
     has_active_channel = any(
-        ok or detail == "starting (bus)" for _, ok, detail in results
+        ok or detail == CHANNEL_STARTUP_PENDING_DETAIL for _, ok, detail in results
     )
     if runtime is not None and has_active_channel:
         runtime.bind(agent, thread_id)

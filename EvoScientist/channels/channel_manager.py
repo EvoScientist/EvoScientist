@@ -29,6 +29,8 @@ from .plugin import ChannelPlugin
 
 logger = logging.getLogger(__name__)
 
+CHANNEL_STARTUP_PENDING_DETAIL = "starting (bus)"
+
 
 # ═════════════════════════════════════════════════════════════════════
 # Account management (formerly account.py)
@@ -994,7 +996,7 @@ class ChannelManager:
         results: list[tuple[str, bool, str]] = []
         for name, channel in self._channels.items():
             if not channel._startup_event.is_set():
-                results.append((name, False, "starting (bus)"))
+                results.append((name, False, CHANNEL_STARTUP_PENDING_DETAIL))
             elif channel._startup_error:
                 results.append((name, False, f"failed: {channel._startup_error}"))
             elif channel._running:

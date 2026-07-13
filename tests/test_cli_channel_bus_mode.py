@@ -79,3 +79,29 @@ def test_auto_start_channel_reports_startup_failure(monkeypatch):
     assert rendered == [rows]
     assert runtime.agent is None
     assert runtime.thread_id is None
+
+
+def test_auto_start_channel_binds_runtime_while_starting(monkeypatch):
+    from EvoScientist.channels.channel_manager import CHANNEL_STARTUP_PENDING_DETAIL
+    from EvoScientist.commands.base import ChannelRuntime
+
+    rows = [("telegram", False, CHANNEL_STARTUP_PENDING_DETAIL)]
+    monkeypatch.setattr(
+        channel_cli,
+        "_start_channels_bus_mode",
+        lambda *_args, **_kwargs: rows,
+    )
+    monkeypatch.setattr(channel_cli, "_print_channel_panel", lambda _rows: None)
+    agent = object()
+    runtime = ChannelRuntime()
+
+    result = channel_cli._auto_start_channel(
+        agent,
+        "thread-1",
+        SimpleNamespace(channel_enabled="telegram"),
+        runtime=runtime,
+    )
+
+    assert result == rows
+    assert runtime.agent is agent
+    assert runtime.thread_id == "thread-1"
