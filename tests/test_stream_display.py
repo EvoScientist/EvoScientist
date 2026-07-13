@@ -29,6 +29,21 @@ def test_resolve_final_status_footer_keeps_footer_for_noninteractive():
     assert resolve_final_status_footer(False, lambda: "footer") == "footer"
 
 
+def test_final_display_respects_disabled_thinking():
+    """A final-frame preference must not override the user visibility flag."""
+    renderable = create_streaming_display(
+        thinking_text="private reasoning",
+        show_thinking=False,
+        is_final=True,
+        final_show_thinking=True,
+    )
+
+    rendered = _render_text(renderable)
+
+    assert "private reasoning" not in rendered
+    assert "Thinking" not in rendered
+
+
 def test_streaming_display_keeps_narration_visible_with_pending_memory_tool():
     """Profile-memory reads still block, while lead-in text remains visible."""
     narration = "Here is the answer."

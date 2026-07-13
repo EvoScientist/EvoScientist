@@ -558,7 +558,9 @@ def create_streaming_display(
         return Group(*elements)
 
     # Thinking panel
-    _show_thinking = final_show_thinking if is_final else show_thinking
+    # ``final_show_thinking`` controls the final-frame layout, but it must
+    # never override the caller's user-level visibility setting.
+    _show_thinking = show_thinking and (final_show_thinking if is_final else True)
     if _show_thinking and thinking_text:
         thinking_title = "Thinking"
         display_thinking = thinking_text.rstrip()
