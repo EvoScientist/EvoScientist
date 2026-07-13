@@ -1538,7 +1538,13 @@ def cmd_run(
             raise typer.Exit(1) from e
         else:
             console.print(f"[red]Error: {e}[/red]")
-            raise
+            # This is the process boundary for single-shot text mode.  Letting
+            # provider exceptions escape makes Typer/Rich render the complete
+            # async exception chain after we already printed a concise error;
+            # large OpenAI/httpx chains can keep the CLI busy well after the
+            # resume hint is shown.  Convert the failure to Click's controlled
+            # exit signal while preserving the cause for programmatic callers.
+            raise typer.Exit(1) from e
 
 
 def _wait_for_memory_workers_before_exit(

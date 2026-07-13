@@ -8,10 +8,13 @@ allowlist (``task()`` stays reachable as the REPL global, with responseSchema).
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from EvoScientist.middleware.code_interpreter import (
     _DEFAULT_PTC_ALLOWLIST,
+    aclose_code_interpreters,
     create_code_interpreter_middleware,
 )
 
@@ -45,3 +48,14 @@ def test_filter_tools_for_ptc_accepts_default_allowlist():
 
 def test_create_code_interpreter_middleware_builds():
     assert create_code_interpreter_middleware() is not None
+
+
+@pytest.mark.asyncio
+async def test_aclose_code_interpreters_closes_registered_instances(monkeypatch):
+    middleware = create_code_interpreter_middleware()
+    close = AsyncMock()
+    monkeypatch.setattr(middleware, "aclose", close)
+
+    await aclose_code_interpreters()
+
+    close.assert_awaited_once_with()
