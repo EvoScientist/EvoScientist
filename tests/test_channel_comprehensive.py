@@ -878,6 +878,8 @@ class TestChannelReconnect:
         ch.start = fatal_start
         await ch.run()
         assert ch._running is False
+        assert ch._startup_event.is_set()
+        assert ch._startup_error == "fatal"
 
 
 class TestExtractRetryAfter:
@@ -1273,6 +1275,23 @@ class TestChannelManagerStatus:
         assert mgr.running_channels() == []
         ch._running = True
         assert mgr.running_channels() == ["stub"]
+
+    def test_startup_results_report_fatal_error(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        mgr.register(ch)
+        ch._startup_error = "dependency missing"
+        ch._startup_event.set()
+
+        assert mgr.startup_results() == [("stub", False, "failed: dependency missing")]
+
+    def test_startup_results_do_not_assume_pending_channel_is_connected(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        mgr.register(StubChannel())
+
+        assert mgr.startup_results() == [("stub", False, "starting (bus)")]
 
     def test_get_stats(self):
         bus = MessageBus()

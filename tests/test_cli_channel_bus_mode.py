@@ -32,6 +32,7 @@ def test_auto_start_channel_passes_send_thinking(monkeypatch):
         captured["send_thinking"] = send_thinking
         captured["thread_id"] = thread_id
         captured["agent"] = agent
+        return [("telegram", True, "connected (bus)")]
 
     monkeypatch.setattr(channel_cli, "_start_channels_bus_mode", _fake_start)
     monkeypatch.setattr(channel_cli, "_print_channel_panel", lambda _rows: None)
@@ -52,3 +53,29 @@ def test_auto_start_channel_passes_send_thinking(monkeypatch):
     assert captured["agent"] is agent
     assert runtime.agent is agent
     assert runtime.thread_id == "thread-1"
+
+
+def test_auto_start_channel_reports_startup_failure(monkeypatch):
+    from EvoScientist.commands.base import ChannelRuntime
+
+    rows = [("telegram", False, "failed: dependency missing")]
+    rendered = []
+    monkeypatch.setattr(
+        channel_cli,
+        "_start_channels_bus_mode",
+        lambda *_args, **_kwargs: rows,
+    )
+    monkeypatch.setattr(channel_cli, "_print_channel_panel", rendered.append)
+    runtime = ChannelRuntime()
+
+    result = channel_cli._auto_start_channel(
+        object(),
+        "thread-1",
+        SimpleNamespace(channel_enabled="telegram"),
+        runtime=runtime,
+    )
+
+    assert result == rows
+    assert rendered == [rows]
+    assert runtime.agent is None
+    assert runtime.thread_id is None

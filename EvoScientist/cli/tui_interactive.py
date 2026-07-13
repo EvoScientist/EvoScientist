@@ -53,7 +53,6 @@ from .channel import (
     ChannelMessage,
     _auto_start_channel,
     _channels_is_running,
-    _channels_running_list,
     _channels_stop,
     _message_queue,
     _set_channel_response,
@@ -446,7 +445,7 @@ def run_textual_interactive(
             self._resumed = resumed
             self._resume_warning = resume_warning
             self._channel_timer: Any = None
-            self._started_channel_types: list[str] = []
+            self._channel_start_results: list[tuple[str, bool, str]] = []
             self._busy = False
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
@@ -895,17 +894,14 @@ def run_textual_interactive(
 
                 cfg = load_config()
                 if cfg and cfg.channel_enabled and not _channels_is_running():
-                    _auto_start_channel(
+                    results = _auto_start_channel(
                         self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
                         send_thinking=self._channel_send_thinking,
                         runtime=self._channel_runtime,
                     )
-                    types = [
-                        t.strip() for t in cfg.channel_enabled.split(",") if t.strip()
-                    ]
-                    self._started_channel_types = types
+                    self._channel_start_results = results
                     self._render_welcome()
             except Exception as e:
                 _channel_logger.debug(f"Channel auto-start failed: {e}")
@@ -2985,7 +2981,7 @@ def run_textual_interactive(
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None
-            self._started_channel_types.clear()
+            self._channel_start_results.clear()
             if _channels_is_running():
                 try:
                     _channels_stop(runtime=self._channel_runtime)
@@ -3114,11 +3110,12 @@ def run_textual_interactive(
         def _render_welcome(self) -> None:
             channels_info: list[tuple[str, bool, str]] | None = None
             try:
-                running = _channels_running_list()
-                started = self._started_channel_types
-                if running or started:
-                    all_types = list(dict.fromkeys(running + started))
-                    channels_info = [(ct, True, "connected (bus)") for ct in all_types]
+                if _ch_mod._manager is not None:
+                    current = _ch_mod._manager.startup_results()
+                    if current:
+                        self._channel_start_results = current
+                if self._channel_start_results:
+                    channels_info = self._channel_start_results
                 else:
                     from ..config import load_config
 
