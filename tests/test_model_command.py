@@ -5,8 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tests.conftest import run_async as _run
-
 
 class TestExtractModelAndProvider:
     """Unit tests for the argument parser helper."""
@@ -80,7 +78,7 @@ class TestExtractModelAndProvider:
 class TestModelCommandUnknownModel:
     """Verify error message for unknown models."""
 
-    def test_unknown_model_shows_error(self):
+    async def test_unknown_model_shows_error(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -95,7 +93,7 @@ class TestModelCommandUnknownModel:
             "EvoScientist.EvoScientist._ensure_config",
             return_value=cfg,
         ):
-            _run(cmd.execute(ctx, ["nonexistent-model-xyz"]))
+            await cmd.execute(ctx, ["nonexistent-model-xyz"])
 
         ui.append_system.assert_called_once()
         call_args = ui.append_system.call_args
@@ -106,7 +104,7 @@ class TestModelCommandUnknownModel:
 class TestModelCommandPickerCancelled:
     """Verify no-op when the interactive picker is cancelled."""
 
-    def test_picker_returns_none(self):
+    async def test_picker_returns_none(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -122,7 +120,7 @@ class TestModelCommandPickerCancelled:
             "EvoScientist.EvoScientist._ensure_config",
             return_value=cfg,
         ):
-            _run(cmd.execute(ctx, []))
+            await cmd.execute(ctx, [])
 
         # No model switch should have happened
         ui.append_system.assert_not_called()
@@ -131,7 +129,7 @@ class TestModelCommandPickerCancelled:
 class TestModelCommandSwitch:
     """Verify a successful model switch updates config and rebuilds agent."""
 
-    def test_switch_known_model(self):
+    async def test_switch_known_model(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -158,7 +156,7 @@ class TestModelCommandSwitch:
                 return_value=new_agent,
             ),
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-8"]))
+            await cmd.execute(ctx, ["claude-opus-4-8"])
 
         # The switch is committed via set_active_config(temp_cfg), not by
         # mutating the original cfg object in place.
@@ -176,7 +174,7 @@ class TestModelCommandSwitch:
         assert "claude-opus-4-8" in msg
         assert "anthropic" in msg
 
-    def test_switch_with_save_flag(self):
+    async def test_switch_with_save_flag(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -203,7 +201,7 @@ class TestModelCommandSwitch:
             ),
             patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-8", "--save"]))
+            await cmd.execute(ctx, ["claude-opus-4-8", "--save"])
 
         # Config file should be updated
         mock_save.assert_any_call("model", "claude-opus-4-8")
@@ -213,7 +211,7 @@ class TestModelCommandSwitch:
         msg = ui.append_system.call_args[0][0]
         assert "saved to config" in msg
 
-    def test_switch_without_save_flag_does_not_persist(self):
+    async def test_switch_without_save_flag_does_not_persist(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -240,7 +238,7 @@ class TestModelCommandSwitch:
             ),
             patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-8"]))
+            await cmd.execute(ctx, ["claude-opus-4-8"])
 
         # Config file should NOT be updated
         mock_save.assert_not_called()
@@ -253,7 +251,7 @@ class TestModelCommandSwitch:
 class TestModelCommandFailure:
     """Verify error handling when chat-model construction raises."""
 
-    def test_build_chat_model_error(self):
+    async def test_build_chat_model_error(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -276,7 +274,7 @@ class TestModelCommandFailure:
                 side_effect=RuntimeError("API key missing"),
             ) as mock_build,
         ):
-            _run(cmd.execute(ctx, ["claude-opus-4-8"]))
+            await cmd.execute(ctx, ["claude-opus-4-8"])
 
         mock_build.assert_called_once()
         ui.append_system.assert_called_once()
@@ -446,7 +444,7 @@ class TestApplyModelIntegration:
     pair so we can assert on identity.
     """
 
-    def test_new_agent_is_bound_to_newly_selected_model(self, evo_module_state):
+    async def test_new_agent_is_bound_to_newly_selected_model(self, evo_module_state):
         from EvoScientist.commands.implementation.model import ModelCommand
         from EvoScientist.config.settings import EvoScientistConfig
 
@@ -502,7 +500,7 @@ class TestApplyModelIntegration:
             ),
         ):
             cmd = ModelCommand()
-            _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
+            await cmd._apply_model(ctx, "minimax-m2.7", "openrouter")
 
         # The agent produced by _apply_model must be bound to the
         # NEWLY requested model, threaded in via chat_model=.
@@ -539,7 +537,9 @@ class TestApplyModelPreservesConfigByReference:
     switch (the held object stops being the active ``_config`` after the first).
     """
 
-    def test_held_config_reference_tracks_repeated_switches(self, evo_module_state):
+    async def test_held_config_reference_tracks_repeated_switches(
+        self, evo_module_state
+    ):
         from EvoScientist.commands.implementation.model import ModelCommand
         from EvoScientist.config.settings import EvoScientistConfig
 
@@ -592,7 +592,7 @@ class TestApplyModelPreservesConfigByReference:
                 ("minimax-m2.7", "openrouter"),
                 ("claude-sonnet-4-6", "anthropic"),
             ]:
-                _run(cmd._apply_model(ctx, model, provider))
+                await cmd._apply_model(ctx, model, provider)
                 # The held reference must reflect the LATEST switch on every
                 # iteration — not just the first — and stay the active config.
                 assert agent_holder["config"].model == model
@@ -610,7 +610,7 @@ class TestModelCommandLoadAgentFailure:
     the ordering could silently regress (e.g. if ``_apply_model`` were
     reordered to call ``set_chat_model`` first)."""
 
-    def test_load_agent_error_is_transactional(self):
+    async def test_load_agent_error_is_transactional(self):
         from EvoScientist.commands.implementation.model import ModelCommand
 
         cmd = ModelCommand()
@@ -646,7 +646,7 @@ class TestModelCommandLoadAgentFailure:
             # Pass ``--save`` to strengthen the assertion: if the ordering
             # ever regresses, ``set_config_value`` would be called with
             # stale data.
-            _run(cmd.execute(ctx, ["claude-opus-4-8", "--save"]))
+            await cmd.execute(ctx, ["claude-opus-4-8", "--save"])
 
         # _load_agent was attempted (transactional first step).
         mock_load.assert_called_once()
@@ -677,7 +677,7 @@ class TestApplyModelLoadAgentFailureTransactional:
     downstream setters never run on failure.
     """
 
-    def test_globals_unchanged_when_load_agent_raises(self, evo_module_state):
+    async def test_globals_unchanged_when_load_agent_raises(self, evo_module_state):
         from EvoScientist.commands.implementation.model import ModelCommand
         from EvoScientist.config.settings import EvoScientistConfig
 
@@ -721,7 +721,7 @@ class TestApplyModelLoadAgentFailureTransactional:
             ),
         ):
             cmd = ModelCommand()
-            _run(cmd._apply_model(ctx, "minimax-m2.7", "openrouter"))
+            await cmd._apply_model(ctx, "minimax-m2.7", "openrouter")
 
         # All four globals are unchanged — nothing was committed.
         assert mod._config is cfg
@@ -753,7 +753,7 @@ class TestModelCommandOllamaPicker:
         ctx.ui = ui
         return ctx, cfg, ui
 
-    def test_picker_entries_include_detected_ollama_models(self):
+    async def test_picker_entries_include_detected_ollama_models(self):
         """When Ollama is reachable, detected models appear in entries with
         provider='ollama' and the Custom sentinel is appended."""
         from EvoScientist.commands.implementation.model import ModelCommand
@@ -773,7 +773,7 @@ class TestModelCommandOllamaPicker:
                 side_effect=fake_discover,
             ),
         ):
-            _run(ModelCommand().execute(ctx, []))
+            await ModelCommand().execute(ctx, [])
 
         entries = ui.wait_for_model_pick.call_args[0][0]
         ollama_rows = [(n, mid, p) for (n, mid, p) in entries if p == "ollama"]
@@ -785,7 +785,7 @@ class TestModelCommandOllamaPicker:
             "ollama",
         ) in ollama_rows
 
-    def test_picker_entries_include_sentinel_when_discovery_empty(self):
+    async def test_picker_entries_include_sentinel_when_discovery_empty(self):
         """Daemon unreachable / no models pulled — sentinel is the user's
         escape hatch and must always be present."""
         from EvoScientist.commands.implementation.model import ModelCommand
@@ -805,7 +805,7 @@ class TestModelCommandOllamaPicker:
                 side_effect=fake_discover,
             ),
         ):
-            _run(ModelCommand().execute(ctx, []))
+            await ModelCommand().execute(ctx, [])
 
         entries = ui.wait_for_model_pick.call_args[0][0]
         ollama_rows = [(n, mid, p) for (n, mid, p) in entries if p == "ollama"]
@@ -813,7 +813,7 @@ class TestModelCommandOllamaPicker:
             ("Custom Ollama model...", "__custom_ollama__", "ollama")
         ]
 
-    def test_picker_skips_ollama_section_when_not_configured(self):
+    async def test_picker_skips_ollama_section_when_not_configured(self):
         """ollama_base_url unset → no discovery call, no ollama entries,
         no sentinel (issue non-goal: no implicit localhost detection)."""
         from EvoScientist.commands.implementation.model import ModelCommand
@@ -832,13 +832,13 @@ class TestModelCommandOllamaPicker:
                 discovery,
             ),
         ):
-            _run(ModelCommand().execute(ctx, []))
+            await ModelCommand().execute(ctx, [])
 
         discovery.assert_not_called()
         entries = ui.wait_for_model_pick.call_args[0][0]
         assert not any(p == "ollama" for (_, _, p) in entries)
 
-    def test_picker_handles_cfg_without_ollama_base_url_attr(self):
+    async def test_picker_handles_cfg_without_ollama_base_url_attr(self):
         """getattr(cfg, 'ollama_base_url', None) fallback: old configs
         (or SimpleNamespace test fixtures) may not carry the attribute
         at all. Must not raise AttributeError, must not probe."""
@@ -864,13 +864,13 @@ class TestModelCommandOllamaPicker:
                 discovery,
             ),
         ):
-            _run(ModelCommand().execute(ctx, []))
+            await ModelCommand().execute(ctx, [])
 
         discovery.assert_not_called()
         entries = ui.wait_for_model_pick.call_args[0][0]
         assert not any(p == "ollama" for (_, _, p) in entries)
 
-    def test_picker_sentinel_result_is_treated_as_cancel(self):
+    async def test_picker_sentinel_result_is_treated_as_cancel(self):
         """Defense-in-depth: if the widget ever returns the sentinel name
         itself (shouldn't happen — it should substitute the typed name),
         dispatch treats it as a cancel and does NOT call _apply_model."""
@@ -893,12 +893,12 @@ class TestModelCommandOllamaPicker:
             ),
             patch("EvoScientist.cli.agent._load_agent") as load_agent,
         ):
-            _run(ModelCommand().execute(ctx, []))
+            await ModelCommand().execute(ctx, [])
 
         load_agent.assert_not_called()
         assert cfg.model == "claude-sonnet-4-6"  # unchanged
 
-    def test_picker_applies_detected_ollama_model(self):
+    async def test_picker_applies_detected_ollama_model(self):
         """User picks a live-detected Ollama model → _apply_model is invoked
         with (name, "ollama") and the agent is rebuilt."""
         from EvoScientist.commands.implementation.model import ModelCommand
@@ -928,7 +928,7 @@ class TestModelCommandOllamaPicker:
                 return_value=MagicMock(),
             ),
         ):
-            _run(ModelCommand().execute(ctx, []))
+            await ModelCommand().execute(ctx, [])
 
         # Committed via set_active_config(temp_cfg); original cfg untouched.
         set_cfg.assert_called_once()

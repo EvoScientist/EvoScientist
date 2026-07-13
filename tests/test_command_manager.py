@@ -46,15 +46,15 @@ class TestCommandManagerSubcommands:
         names = {name for name, _desc in scs}
         assert {"list", "add", "remove", "clear", "save", "help"} <= names
 
-    def test_channel_has_status_stop(self):
-        """``/channel`` must expose status + stop subcommands."""
+    def test_channel_has_subcommands(self):
+        """``/channel`` must expose status, stop, and channel type subcommands."""
         manager = CommandManager()
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
         manager.register(ChannelCommand())
         scs = manager.list_subcommands("/channel")
         names = {name for name, _desc in scs}
-        assert names == {"status", "stop"}
+        assert {"status", "stop", "telegram", "discord"}.issubset(names)
 
     def test_command_without_subcommands_returns_empty(self):
         """A command with no subcommands must return an empty list."""

@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from EvoScientist.stt import STT_MODELS, is_audio_file, transcribe_file
-from tests.conftest import run_async
 
 # ── is_audio_file ─────────────────────────────────────────────────────
 
@@ -50,8 +49,8 @@ def test_stt_models_keys():
 # ── transcribe_file: non-audio path ──────────────────────────────────
 
 
-def test_transcribe_non_audio_returns_none():
-    result = run_async(transcribe_file("photo.jpg", language="auto"))
+async def test_transcribe_non_audio_returns_none():
+    result = await transcribe_file("photo.jpg", language="auto")
     assert result is None
 
 
@@ -78,37 +77,37 @@ def _patch_whisper(whisper_model):
     )
 
 
-def test_transcribe_en_uses_whisper():
+async def test_transcribe_en_uses_whisper():
     import EvoScientist.stt as stt_mod
 
     stt_mod._engine = None
     with _patch_whisper(_make_whisper_mock("Hello world")):
-        result = run_async(transcribe_file("voice.mp3", language="en"))
+        result = await transcribe_file("voice.mp3", language="en")
     stt_mod._engine = None
     assert result == "Hello world"
 
 
-def test_transcribe_auto_uses_whisper():
+async def test_transcribe_auto_uses_whisper():
     import EvoScientist.stt as stt_mod
 
     stt_mod._engine = None
     with _patch_whisper(_make_whisper_mock("Bonjour monde")):
-        result = run_async(transcribe_file("voice.ogg", language="auto"))
+        result = await transcribe_file("voice.ogg", language="auto")
     stt_mod._engine = None
     assert result == "Bonjour monde"
 
 
-def test_transcribe_zh_uses_whisper():
+async def test_transcribe_zh_uses_whisper():
     import EvoScientist.stt as stt_mod
 
     stt_mod._engine = None
     with _patch_whisper(_make_whisper_mock("你好世界")):
-        result = run_async(transcribe_file("voice.ogg", language="zh"))
+        result = await transcribe_file("voice.ogg", language="zh")
     stt_mod._engine = None
     assert result == "你好世界"
 
 
-def test_transcribe_custom_model_override():
+async def test_transcribe_custom_model_override():
     """stt_model config overrides the default model mapping."""
     import EvoScientist.stt as stt_mod
 
@@ -121,10 +120,8 @@ def test_transcribe_custom_model_override():
         self._model = _make_whisper_mock("test")
 
     with patch.object(stt_mod._WhisperEngine, "__init__", patched_init):
-        run_async(
-            transcribe_file(
-                "voice.ogg", language="auto", model="openai/whisper-large-v3"
-            )
+        await transcribe_file(
+            "voice.ogg", language="auto", model="openai/whisper-large-v3"
         )
     stt_mod._engine = None
     assert captured_model_id == ["openai/whisper-large-v3"]
@@ -133,7 +130,7 @@ def test_transcribe_custom_model_override():
 # ── transcribe_file: missing dependency ──────────────────────────────
 
 
-def test_transcribe_missing_dep_returns_none():
+async def test_transcribe_missing_dep_returns_none():
     import sys
 
     import EvoScientist.stt as stt_mod
@@ -142,7 +139,7 @@ def test_transcribe_missing_dep_returns_none():
     saved = sys.modules.pop("faster_whisper", None)
     try:
         with patch.dict("sys.modules", {"faster_whisper": None}):
-            result = run_async(transcribe_file("voice.mp3", language="auto"))
+            result = await transcribe_file("voice.mp3", language="auto")
     finally:
         if saved is not None:
             sys.modules["faster_whisper"] = saved
@@ -169,7 +166,7 @@ def _make_channel():
     return ch, captured
 
 
-def test_enqueue_raw_stt_prepends_transcript():
+async def test_enqueue_raw_stt_prepends_transcript():
     """_enqueue_raw prepends STT transcript to raw.text when stt_enabled."""
     from EvoScientist.channels.base import RawIncoming
 
@@ -189,22 +186,18 @@ def test_enqueue_raw_stt_prepends_transcript():
         timestamp=datetime.now(),
     )
 
-    async def _run():
-        with (
-            patch(
-                "EvoScientist.stt.transcribe_file", new=AsyncMock(return_value="你好")
-            ),
-            patch("EvoScientist.stt.is_audio_file", return_value=True),
-        ):
-            await ch._enqueue_raw(raw)
+    with (
+        patch("EvoScientist.stt.transcribe_file", new=AsyncMock(return_value="你好")),
+        patch("EvoScientist.stt.is_audio_file", return_value=True),
+    ):
+        await ch._enqueue_raw(raw)
 
-    run_async(_run())
     assert captured[0].text == "你好"
     # annotation should be removed after transcription
     assert captured[0].content_annotations == []
 
 
-def test_enqueue_raw_stt_disabled_skips_transcription():
+async def test_enqueue_raw_stt_disabled_skips_transcription():
     """When stt_enabled=False, transcription is not called."""
     from EvoScientist.channels.base import RawIncoming
 
@@ -221,16 +214,14 @@ def test_enqueue_raw_stt_disabled_skips_transcription():
 
     mock_transcribe = AsyncMock()
 
-    async def _run():
-        with patch("EvoScientist.stt.transcribe_file", mock_transcribe):
-            await ch._enqueue_raw(raw)
+    with patch("EvoScientist.stt.transcribe_file", mock_transcribe):
+        await ch._enqueue_raw(raw)
 
-    run_async(_run())
     mock_transcribe.assert_not_called()
     assert captured[0].text == ""
 
 
-def test_enqueue_raw_stt_appends_to_existing_text():
+async def test_enqueue_raw_stt_appends_to_existing_text():
     """Transcript is prepended before any existing caption text."""
     from EvoScientist.channels.base import RawIncoming
 
@@ -249,17 +240,15 @@ def test_enqueue_raw_stt_appends_to_existing_text():
         timestamp=datetime.now(),
     )
 
-    async def _run():
-        with (
-            patch(
-                "EvoScientist.stt.transcribe_file",
-                new=AsyncMock(return_value="hello world"),
-            ),
-            patch("EvoScientist.stt.is_audio_file", return_value=True),
-        ):
-            await ch._enqueue_raw(raw)
+    with (
+        patch(
+            "EvoScientist.stt.transcribe_file",
+            new=AsyncMock(return_value="hello world"),
+        ),
+        patch("EvoScientist.stt.is_audio_file", return_value=True),
+    ):
+        await ch._enqueue_raw(raw)
 
-    run_async(_run())
     assert captured[0].text == "hello world\ncaption text"
 
 

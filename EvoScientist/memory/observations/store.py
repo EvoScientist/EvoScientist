@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import yaml
@@ -68,21 +68,23 @@ class ObservationSourceFrontmatter(BaseModel):
 
     type: MemorySourceType
     agent: str = Field(min_length=1, strict=True)
-    session_id: str = Field(min_length=1, strict=True)
+    session_id: str | None = Field(default=None, min_length=1, strict=True)
 
     @field_validator("agent", "session_id")
     @classmethod
-    def _non_blank(cls, value: str) -> str:
-        if not value.strip():
+    def _non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
 
     def to_frontmatter_dict(self) -> dict[str, str]:
-        return {
+        payload = {
             "type": self.type.value,
             "agent": self.agent,
-            "session_id": self.session_id,
         }
+        if self.session_id is not None:
+            payload["session_id"] = self.session_id
+        return payload
 
 
 class ObservationFrontmatter(BaseModel):
@@ -102,6 +104,18 @@ class ObservationFrontmatter(BaseModel):
     def _non_blank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
+        return value
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def _coerce_yaml_timestamp(cls, value: object) -> object:
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(UTC)
+                return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+            return value.strftime("%Y-%m-%dT%H:%M:%S")
+        if isinstance(value, date):
+            return value.isoformat()
         return value
 
     def to_frontmatter_dict(self) -> ObservationFrontmatterPayload:

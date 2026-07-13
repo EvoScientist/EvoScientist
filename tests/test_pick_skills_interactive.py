@@ -79,14 +79,13 @@ class TestPickSkillsInteractive:
 class TestInstallSkillsHandlesEmpty:
     """InstallSkills.execute must distinguish None vs [] from the picker."""
 
-    def test_empty_list_suppresses_cancel_message(self):
+    async def test_empty_list_suppresses_cancel_message(self):
         """When picker returns [], user should NOT see "Browse cancelled"
         (the picker already printed its own message)."""
         from unittest.mock import AsyncMock
 
         from EvoScientist.commands.base import CommandContext
         from EvoScientist.commands.implementation.skills import InstallSkills
-        from tests.conftest import run_async as _run
 
         ui = MagicMock()
         ui.supports_interactive = True
@@ -97,18 +96,17 @@ class TestInstallSkillsHandlesEmpty:
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",
             return_value=_INDEX,
         ):
-            _run(InstallSkills().execute(ctx, []))
+            await InstallSkills().execute(ctx, [])
 
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert not any("Browse cancelled" in m for m in msgs)
 
-    def test_none_shows_cancel_message(self):
+    async def test_none_shows_cancel_message(self):
         """When picker returns None (actual cancel), user sees the message."""
         from unittest.mock import AsyncMock
 
         from EvoScientist.commands.base import CommandContext
         from EvoScientist.commands.implementation.skills import InstallSkills
-        from tests.conftest import run_async as _run
 
         ui = MagicMock()
         ui.supports_interactive = True
@@ -119,7 +117,7 @@ class TestInstallSkillsHandlesEmpty:
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",
             return_value=_INDEX,
         ):
-            _run(InstallSkills().execute(ctx, []))
+            await InstallSkills().execute(ctx, [])
 
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Browse cancelled" in m for m in msgs)

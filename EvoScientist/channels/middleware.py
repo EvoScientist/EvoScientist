@@ -75,11 +75,13 @@ class DedupCache:
         max_size: int = _DEDUP_MAX,
         trim_to: int = _DEDUP_TRIM,
         ttl_seconds: float = _DEDUP_TTL,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._seen: OrderedDict[str, float] = OrderedDict()
         self._max = max_size
         self._trim = trim_to
         self._ttl = ttl_seconds
+        self._clock = clock or time.monotonic
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -93,15 +95,16 @@ class DedupCache:
         if not msg_id:
             return False
 
-        self._prune()
+        now = self._clock()
+        self._prune(now)
 
         if msg_id in self._seen:
             # LRU: refresh position and timestamp
             self._seen.move_to_end(msg_id)
-            self._seen[msg_id] = time.monotonic()
+            self._seen[msg_id] = now
             return True
 
-        self._seen[msg_id] = time.monotonic()
+        self._seen[msg_id] = now
         if len(self._seen) > self._max:
             while len(self._seen) > self._trim:
                 self._seen.popitem(last=False)
@@ -118,9 +121,9 @@ class DedupCache:
 
     # ── internal ────────────────────────────────────────────────────
 
-    def _prune(self) -> None:
+    def _prune(self, now: float | None = None) -> None:
         """Remove entries older than *ttl_seconds*."""
-        cutoff = time.monotonic() - self._ttl
+        cutoff = (self._clock() if now is None else now) - self._ttl
         # OrderedDict is insertion-ordered; oldest entries are first.
         while self._seen:
             _key, ts = next(iter(self._seen.items()))
@@ -428,11 +431,13 @@ class DedupMiddleware(InboundMiddleware):
         max_size: int = 1000,
         trim_to: int = 500,
         ttl_seconds: float = 3600.0,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._cache = DedupCache(
             max_size=max_size,
             trim_to=trim_to,
             ttl_seconds=ttl_seconds,
+            clock=clock,
         )
 
     async def process_inbound(

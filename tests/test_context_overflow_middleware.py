@@ -66,7 +66,6 @@ def test_wrap_model_call_raises_context_overflow():
     assert handler.call_count == 1
 
 
-@pytest.mark.anyio
 async def test_awrap_model_call_raises_context_overflow():
     # Setup mocks
     msgs = [HumanMessage(content=f"msg {i}") for i in range(10)]
@@ -91,7 +90,6 @@ async def test_awrap_model_call_raises_context_overflow():
     assert handler.call_count == 1
 
 
-@pytest.mark.anyio
 async def test_awrap_model_call_passes_through_other_errors():
     request = ModelRequest(
         messages=[],

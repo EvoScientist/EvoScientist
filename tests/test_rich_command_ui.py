@@ -5,8 +5,6 @@ from unittest.mock import MagicMock
 from rich.console import Console
 from rich.table import Table
 
-from tests.conftest import run_async as _run
-
 
 def _make_ui(**kwargs):
     """Build a RichCLICommandUI backed by a MagicMock console."""
@@ -40,9 +38,9 @@ class TestBasicIO:
         ui.mount_renderable(table)
         console.print.assert_called_once_with(table)
 
-    def test_flush_is_async_noop(self):
+    async def test_flush_is_async_noop(self):
         ui, console = _make_ui()
-        _run(ui.flush())
+        await ui.flush()
         # flush should not print anything
         console.print.assert_not_called()
 
@@ -50,33 +48,29 @@ class TestBasicIO:
 class TestWaitForModelPick:
     """CLI model picker fallback: print table + return None."""
 
-    def test_returns_none(self):
+    async def test_returns_none(self):
         ui, _ = _make_ui()
         entries = [
             ("claude-sonnet-4-6", "anthropic/claude-sonnet", "anthropic"),
             ("gpt-4o", "openai/gpt-4o", "openai"),
         ]
-        result = _run(
-            ui.wait_for_model_pick(
-                entries,
-                current_model="claude-sonnet-4-6",
-                current_provider="anthropic",
-            )
+        result = await ui.wait_for_model_pick(
+            entries,
+            current_model="claude-sonnet-4-6",
+            current_provider="anthropic",
         )
         assert result is None
 
-    def test_prints_table_with_current_model_marker(self):
+    async def test_prints_table_with_current_model_marker(self):
         ui, console = _make_ui()
         entries = [
             ("claude-sonnet-4-6", "anthropic/claude-sonnet", "anthropic"),
             ("gpt-4o", "openai/gpt-4o", "openai"),
         ]
-        _run(
-            ui.wait_for_model_pick(
-                entries,
-                current_model="claude-sonnet-4-6",
-                current_provider="anthropic",
-            )
+        await ui.wait_for_model_pick(
+            entries,
+            current_model="claude-sonnet-4-6",
+            current_provider="anthropic",
         )
         # First call renders the Table (Rich renderable), second prints usage.
         assert console.print.call_count == 2
@@ -87,27 +81,23 @@ class TestWaitForModelPick:
         assert "Usage: /model" in usage_arg
         assert "--save" in usage_arg
 
-    def test_no_current_model_no_marker(self):
+    async def test_no_current_model_no_marker(self):
         ui, console = _make_ui()
         entries = [("claude-sonnet-4-6", "anthropic/claude-sonnet", "anthropic")]
-        _run(
-            ui.wait_for_model_pick(
-                entries,
-                current_model=None,
-                current_provider=None,
-            )
+        await ui.wait_for_model_pick(
+            entries,
+            current_model=None,
+            current_provider=None,
         )
         # Just asserts the coroutine runs without marker-branch issues.
         assert console.print.call_count == 2
 
-    def test_empty_entries_still_prints_header_and_usage(self):
+    async def test_empty_entries_still_prints_header_and_usage(self):
         ui, console = _make_ui()
-        result = _run(
-            ui.wait_for_model_pick(
-                [],
-                current_model=None,
-                current_provider=None,
-            )
+        result = await ui.wait_for_model_pick(
+            [],
+            current_model=None,
+            current_provider=None,
         )
         assert result is None
         # Header table + usage hint should still be printed even with
@@ -213,7 +203,7 @@ class TestWaitForThreadPick:
             },
         ]
 
-    def test_returns_selected_thread_id(self, monkeypatch):
+    async def test_returns_selected_thread_id(self, monkeypatch):
         import EvoScientist.cli.rich_command_ui as mod
 
         ui, _ = _make_ui()
@@ -226,7 +216,7 @@ class TestWaitForThreadPick:
             return prompt
 
         monkeypatch.setattr("questionary.select", fake_select)
-        result = _run(ui.wait_for_thread_pick(self._threads(), "abc123", "pick:"))
+        result = await ui.wait_for_thread_pick(self._threads(), "abc123", "pick:")
         assert result == "abc123"
         assert called["title"] == "pick:"
         # _build_items prepends a workspace header — choices has headers +
@@ -235,14 +225,14 @@ class TestWaitForThreadPick:
         # Table import removed; this test no longer depends on console output.
         assert mod.RichCLICommandUI is not None  # sanity
 
-    def test_cancel_returns_none(self, monkeypatch):
+    async def test_cancel_returns_none(self, monkeypatch):
         ui, _ = _make_ui()
         prompt = self._fake_prompt(None)
         monkeypatch.setattr("questionary.select", lambda *a, **k: prompt)
-        result = _run(ui.wait_for_thread_pick(self._threads(), "abc123", "pick:"))
+        result = await ui.wait_for_thread_pick(self._threads(), "abc123", "pick:")
         assert result is None
 
-    def test_current_thread_marker_in_label(self, monkeypatch):
+    async def test_current_thread_marker_in_label(self, monkeypatch):
         ui, _ = _make_ui()
         prompt = self._fake_prompt(None)
         captured_choices: list = []
@@ -252,7 +242,7 @@ class TestWaitForThreadPick:
             return prompt
 
         monkeypatch.setattr("questionary.select", fake_select)
-        _run(ui.wait_for_thread_pick(self._threads(), "abc123", "pick:"))
+        await ui.wait_for_thread_pick(self._threads(), "abc123", "pick:")
         # At least one Choice title contains "abc123 *" (current marker)
         choice_titles = [getattr(c, "title", "") for c in captured_choices]
         assert any("abc123 *" in t for t in choice_titles)
@@ -282,38 +272,38 @@ class TestCompactIndicator:
 class TestPhaseBMigrated:
     """Session lifecycle callbacks (start/resume) filled in Phase B."""
 
-    def test_start_new_session_fires_callback(self):
+    async def test_start_new_session_fires_callback(self):
         from unittest.mock import AsyncMock
 
         cb = AsyncMock()
         ui, _ = _make_ui(on_start_new_session=cb)
-        _run(ui.start_new_session())
+        await ui.start_new_session()
         cb.assert_awaited_once()
 
-    def test_start_new_session_without_callback_is_noop(self):
+    async def test_start_new_session_without_callback_is_noop(self):
         ui, console = _make_ui()
-        _run(ui.start_new_session())
+        await ui.start_new_session()
         console.print.assert_not_called()
 
-    def test_handle_session_resume_awaits_callback(self):
+    async def test_handle_session_resume_awaits_callback(self):
         from unittest.mock import AsyncMock
 
         cb = AsyncMock()
         ui, _ = _make_ui(on_handle_session_resume=cb)
-        _run(ui.handle_session_resume("tid-x", "/workspace"))
+        await ui.handle_session_resume("tid-x", "/workspace")
         cb.assert_awaited_once_with("tid-x", "/workspace")
 
-    def test_handle_session_resume_without_callback_is_noop(self):
+    async def test_handle_session_resume_without_callback_is_noop(self):
         ui, _ = _make_ui()
         # Should not raise
-        _run(ui.handle_session_resume("tid-x"))
+        await ui.handle_session_resume("tid-x")
 
-    def test_handle_session_resume_workspace_defaults_none(self):
+    async def test_handle_session_resume_workspace_defaults_none(self):
         from unittest.mock import AsyncMock
 
         cb = AsyncMock()
         ui, _ = _make_ui(on_handle_session_resume=cb)
-        _run(ui.handle_session_resume("tid-x"))
+        await ui.handle_session_resume("tid-x")
         cb.assert_awaited_once_with("tid-x", None)
 
 
@@ -321,7 +311,7 @@ class TestPhaseCMigrated:
     """Skill/MCP browse pickers delegate to questionary helpers via
     ``asyncio.to_thread`` since questionary blocks the event loop."""
 
-    def test_skill_browse_delegates_to_picker(self, monkeypatch):
+    async def test_skill_browse_delegates_to_picker(self, monkeypatch):
         from unittest.mock import MagicMock
 
         picker = MagicMock(return_value=["skill-a", "skill-b"])
@@ -330,11 +320,11 @@ class TestPhaseCMigrated:
             picker,
         )
         ui, _ = _make_ui()
-        result = _run(ui.wait_for_skill_browse([{"name": "a"}], {"installed"}, "core"))
+        result = await ui.wait_for_skill_browse([{"name": "a"}], {"installed"}, "core")
         assert result == ["skill-a", "skill-b"]
         picker.assert_called_once_with([{"name": "a"}], {"installed"}, "core")
 
-    def test_skill_browse_cancel_returns_none(self, monkeypatch):
+    async def test_skill_browse_cancel_returns_none(self, monkeypatch):
         from unittest.mock import MagicMock
 
         monkeypatch.setattr(
@@ -342,10 +332,10 @@ class TestPhaseCMigrated:
             MagicMock(return_value=None),
         )
         ui, _ = _make_ui()
-        result = _run(ui.wait_for_skill_browse([], set(), ""))
+        result = await ui.wait_for_skill_browse([], set(), "")
         assert result is None
 
-    def test_mcp_browse_delegates_to_picker(self, monkeypatch):
+    async def test_mcp_browse_delegates_to_picker(self, monkeypatch):
         from unittest.mock import MagicMock
 
         sentinel_entries = [MagicMock(name="entry1"), MagicMock(name="entry2")]
@@ -355,11 +345,11 @@ class TestPhaseCMigrated:
             picker,
         )
         ui, _ = _make_ui()
-        result = _run(ui.wait_for_mcp_browse([MagicMock()], {"configured"}, ""))
+        result = await ui.wait_for_mcp_browse([MagicMock()], {"configured"}, "")
         assert result is sentinel_entries
         picker.assert_called_once()
 
-    def test_mcp_browse_cancel_returns_none(self, monkeypatch):
+    async def test_mcp_browse_cancel_returns_none(self, monkeypatch):
         from unittest.mock import MagicMock
 
         monkeypatch.setattr(
@@ -367,5 +357,5 @@ class TestPhaseCMigrated:
             MagicMock(return_value=None),
         )
         ui, _ = _make_ui()
-        result = _run(ui.wait_for_mcp_browse([], set(), ""))
+        result = await ui.wait_for_mcp_browse([], set(), "")
         assert result is None

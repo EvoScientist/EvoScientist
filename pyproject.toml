@@ -1,6 +1,6 @@
 [project]
 name = "EvoScientist"
-version = "0.2.0"
+version = "0.2.2"
 description = "EvoScientist: Towards Self-Evolving AI Scientists for End-to-End Scientific Discovery"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ dependencies = [
     "langchain-nvidia-ai-endpoints>=1.2",
     "langchain-google-genai>=4.2",
     "langchain-ollama>=1.1",
-    "langchain-openrouter>=0.2.3",
+    "langchain-openrouter>=0.2.5",
     "tavily-python>=0.7",
     "pyyaml>=6.0",
     "rich>=15.0",
@@ -48,6 +48,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=1.0",
     "pytest-cov>=5.0",
     "pytest-timeout>=2.4",
     "ruff>=0.5",
@@ -58,6 +59,7 @@ dev = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=1.0",
     "pytest-cov>=5.0",
     "pytest-timeout>=2.4",
     "ruff>=0.5",
@@ -117,6 +119,8 @@ EvoScientist = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     "ignore::UserWarning:langchain_nvidia_ai_endpoints",
 ]

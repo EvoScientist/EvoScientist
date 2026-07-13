@@ -14,7 +14,6 @@ from EvoScientist.channels.feishu.channel import (
     _parse_inline_elements,
     _parse_inline_text,
 )
-from tests.conftest import run_async as _run
 
 
 class TestFeishuConfig:
@@ -57,24 +56,24 @@ class TestFeishuChannel:
         assert channel._running is False
         assert channel.name == "feishu"
 
-    def test_start_raises_without_app_id(self):
+    async def test_start_raises_without_app_id(self):
         config = FeishuConfig(app_id="", app_secret="test-secret")
         channel = FeishuChannel(config)
         with pytest.raises(ChannelError, match="app_id"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_start_raises_without_app_secret(self):
+    async def test_start_raises_without_app_secret(self):
         config = FeishuConfig(app_id="test-id", app_secret="")
         channel = FeishuChannel(config)
         with pytest.raises(ChannelError, match="app_secret"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_stop_when_not_running(self):
+    async def test_stop_when_not_running(self):
         config = FeishuConfig(app_id="test-id", app_secret="test-secret")
         channel = FeishuChannel(config)
-        _run(channel.stop())
+        await channel.stop()
 
-    def test_send_returns_false_without_client(self):
+    async def test_send_returns_false_without_client(self):
         config = FeishuConfig(app_id="test-id", app_secret="test-secret")
         channel = FeishuChannel(config)
         msg = OutboundMessage(
@@ -83,7 +82,7 @@ class TestFeishuChannel:
             content="hello",
             metadata={"chat_id": "oc_test"},
         )
-        result = _run(channel.send(msg))
+        result = await channel.send(msg)
         assert result is False
 
     def test_capabilities(self):
@@ -201,7 +200,7 @@ class TestFeishuWebhookEvent:
         channel._enqueue_raw = AsyncMock()
         return channel
 
-    def test_text_message_v2(self):
+    async def test_text_message_v2(self):
         channel = self._make_channel()
         event = {
             "sender": {
@@ -217,7 +216,7 @@ class TestFeishuWebhookEvent:
                 "create_time": "1700000000000",
             },
         }
-        _run(channel._on_message(event))
+        await channel._on_message(event)
         channel._enqueue_raw.assert_called_once()
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.text == "hello feishu"
@@ -225,7 +224,7 @@ class TestFeishuWebhookEvent:
         assert raw.chat_id == "oc_chat1"
         assert raw.is_group is False
 
-    def test_group_message_with_mention(self):
+    async def test_group_message_with_mention(self):
         channel = self._make_channel()
         event = {
             "sender": {
@@ -242,13 +241,13 @@ class TestFeishuWebhookEvent:
                 "mentions": [{"key": "@_user_1", "id": {}}],
             },
         }
-        _run(channel._on_message(event))
+        await channel._on_message(event)
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.is_group is True
         assert raw.was_mentioned is True
         assert channel._mention_names == ["@_user_1"]
 
-    def test_group_message_no_mention(self):
+    async def test_group_message_no_mention(self):
         channel = self._make_channel()
         event = {
             "sender": {
@@ -264,12 +263,12 @@ class TestFeishuWebhookEvent:
                 "create_time": "1700000000000",
             },
         }
-        _run(channel._on_message(event))
+        await channel._on_message(event)
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.is_group is True
         assert raw.was_mentioned is False
 
-    def test_skips_bot_messages(self):
+    async def test_skips_bot_messages(self):
         channel = self._make_channel()
         event = {
             "sender": {
@@ -283,10 +282,10 @@ class TestFeishuWebhookEvent:
                 "content": json.dumps({"text": "bot reply"}),
             },
         }
-        _run(channel._on_message(event))
+        await channel._on_message(event)
         channel._enqueue_raw.assert_not_called()
 
-    def test_post_message(self):
+    async def test_post_message(self):
         channel = self._make_channel()
         post_content = {
             "zh_cn": {
@@ -308,12 +307,12 @@ class TestFeishuWebhookEvent:
                 "create_time": "1700000000000",
             },
         }
-        _run(channel._on_message(event))
+        await channel._on_message(event)
         raw = channel._enqueue_raw.call_args[0][0]
         assert "Test" in raw.text
         assert "Post body" in raw.text
 
-    def test_unsupported_msg_type_annotation(self):
+    async def test_unsupported_msg_type_annotation(self):
         channel = self._make_channel()
         event = {
             "sender": {
@@ -329,7 +328,7 @@ class TestFeishuWebhookEvent:
                 "create_time": "1700000000000",
             },
         }
-        _run(channel._on_message(event))
+        await channel._on_message(event)
         raw = channel._enqueue_raw.call_args[0][0]
         assert "share_chat" in raw.text
 
@@ -337,7 +336,7 @@ class TestFeishuWebhookEvent:
 class TestFeishuSendChunk:
     """Test _send_chunk with mocked HTTP client."""
 
-    def test_send_chunk_post_format(self):
+    async def test_send_chunk_post_format(self):
         config = FeishuConfig(app_id="test-app", app_secret="test-secret")
         channel = FeishuChannel(config)
         channel._access_token = "fake-token"
@@ -348,14 +347,14 @@ class TestFeishuSendChunk:
         channel._http_client = MagicMock()
         channel._http_client.post = AsyncMock(return_value=mock_response)
 
-        _run(channel._send_chunk("oc_chat1", "formatted", "raw **text**", None, {}))
+        await channel._send_chunk("oc_chat1", "formatted", "raw **text**", None, {})
         channel._http_client.post.assert_called()
         # Should try post format first
         call_args = channel._http_client.post.call_args
         body = call_args.kwargs.get("json") or call_args[1].get("json")
         assert body["receive_id"] == "oc_chat1"
 
-    def test_send_chunk_with_reply(self):
+    async def test_send_chunk_with_reply(self):
         config = FeishuConfig(app_id="test-app", app_secret="test-secret")
         channel = FeishuChannel(config)
         channel._access_token = "fake-token"
@@ -366,7 +365,7 @@ class TestFeishuSendChunk:
         channel._http_client = MagicMock()
         channel._http_client.post = AsyncMock(return_value=mock_response)
 
-        _run(channel._send_chunk("oc_chat1", "reply", "reply text", "om_reply_id", {}))
+        await channel._send_chunk("oc_chat1", "reply", "reply text", "om_reply_id", {})
         # Should call the reply API endpoint
         first_call_url = channel._http_client.post.call_args_list[0][0][0]
         assert "reply" in first_call_url
@@ -484,17 +483,17 @@ class TestFeishuChannelRegistration:
 
 
 class TestFeishuProbe:
-    def test_missing_app_id(self):
+    async def test_missing_app_id(self):
         from EvoScientist.channels.feishu.probe import validate_feishu_credentials
 
-        ok, msg = _run(validate_feishu_credentials("", "secret"))
+        ok, msg = await validate_feishu_credentials("", "secret")
         assert ok is False
         assert "app_id" in msg
 
-    def test_missing_app_secret(self):
+    async def test_missing_app_secret(self):
         from EvoScientist.channels.feishu.probe import validate_feishu_credentials
 
-        ok, msg = _run(validate_feishu_credentials("id", ""))
+        ok, msg = await validate_feishu_credentials("id", "")
         assert ok is False
         assert "app_secret" in msg
 
@@ -510,7 +509,7 @@ class TestFeishuWebSocketMode:
         )
         assert config.subscription_mode == "websocket"
 
-    def test_start_websocket_raises_without_lark_oapi(self):
+    async def test_start_websocket_raises_without_lark_oapi(self):
         config = FeishuConfig(
             app_id="test-id",
             app_secret="test-secret",
@@ -520,9 +519,9 @@ class TestFeishuWebSocketMode:
         # Temporarily hide lark_oapi if it's installed
         with patch.dict(sys.modules, {"lark_oapi": None}):
             with pytest.raises(ChannelError, match="lark-oapi"):
-                _run(channel.start())
+                await channel.start()
 
-    def test_start_webhook_mode_still_works(self):
+    async def test_start_webhook_mode_still_works(self):
         """Ensure subscription_mode='webhook' still validates as before."""
         config = FeishuConfig(
             app_id="",
@@ -531,9 +530,9 @@ class TestFeishuWebSocketMode:
         )
         channel = FeishuChannel(config)
         with pytest.raises(ChannelError, match="app_id"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_invalid_subscription_mode_raises(self):
+    async def test_invalid_subscription_mode_raises(self):
         config = FeishuConfig(
             app_id="test-id",
             app_secret="test-secret",
@@ -541,9 +540,9 @@ class TestFeishuWebSocketMode:
         )
         channel = FeishuChannel(config)
         with pytest.raises(ChannelError, match="Invalid feishu_subscription_mode"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_on_lark_sdk_message_bridges_to_on_message(self):
+    async def test_on_lark_sdk_message_bridges_to_on_message(self):
         """Test that _on_lark_sdk_message enqueues event dict via queue."""
         import queue as queue_mod
 
@@ -594,14 +593,14 @@ class TestFeishuWebSocketMode:
         )
 
         # Verify the consumer processes it correctly
-        _run(channel._on_message(event_dict))
+        await channel._on_message(event_dict)
         channel._enqueue_raw.assert_called_once()
         raw = channel._enqueue_raw.call_args[0][0]
         assert raw.text == "hello from websocket"
         assert raw.sender_id == "ou_test_ws"
         assert raw.is_group is False
 
-    def test_cleanup_websocket_mode(self):
+    async def test_cleanup_websocket_mode(self):
         config = FeishuConfig(
             app_id="test-id",
             app_secret="test-secret",
@@ -617,7 +616,7 @@ class TestFeishuWebSocketMode:
         channel._ws_consumer_task = None
         channel._access_token = "fake-token"
 
-        _run(channel._cleanup())
+        await channel._cleanup()
 
         mock_client.aclose.assert_called_once()
         assert channel._http_client is None

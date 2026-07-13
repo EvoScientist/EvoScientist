@@ -8,7 +8,6 @@ import pytest
 
 from EvoScientist.commands.channel_ui import ChannelCommandUI
 from EvoScientist.gateway import ThreadStore
-from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -57,7 +56,7 @@ def _sent_text(bus_ref) -> str:
     )
 
 
-def test_handle_session_resume_sends_history_back_to_channel_without_local_duplicate():
+async def test_handle_session_resume_sends_history_back_to_channel_without_local_duplicate():
     callback = AsyncMock()
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
 
@@ -72,7 +71,7 @@ def test_handle_session_resume_sends_history_back_to_channel_without_local_dupli
         thread_store=thread_store,
     )
 
-    _run(_run_resume(ui, "thread-42", "/workspace"))
+    await _run_resume(ui, "thread-42", "/workspace")
 
     callback.assert_awaited_once_with("thread-42", "/workspace")
     assert thread_store.calls == [("get_thread_messages", "thread-42")]
@@ -84,7 +83,7 @@ def test_handle_session_resume_sends_history_back_to_channel_without_local_dupli
     assert "EvoScientist: Here is the saved answer." in text
 
 
-def test_handle_session_resume_propagates_callback_abort_without_history():
+async def test_handle_session_resume_propagates_callback_abort_without_history():
     callback = AsyncMock(side_effect=RuntimeError("workspace conflict"))
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
     thread_store = FakeThreadStore()
@@ -95,7 +94,7 @@ def test_handle_session_resume_propagates_callback_abort_without_history():
     )
 
     with pytest.raises(RuntimeError, match="workspace conflict"):
-        _run(_run_resume(ui, "thread-42", "/workspace"))
+        await _run_resume(ui, "thread-42", "/workspace")
 
     callback.assert_awaited_once_with("thread-42", "/workspace")
     assert thread_store.calls == []
@@ -103,7 +102,7 @@ def test_handle_session_resume_propagates_callback_abort_without_history():
     assert captured == []
 
 
-def test_handle_session_resume_reports_history_load_error():
+async def test_handle_session_resume_reports_history_load_error():
     callback = AsyncMock()
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
     ui, captured = _make_ui(
@@ -114,7 +113,7 @@ def test_handle_session_resume_reports_history_load_error():
         ),
     )
 
-    _run(_run_resume(ui, "thread-42", "/workspace"))
+    await _run_resume(ui, "thread-42", "/workspace")
 
     callback.assert_awaited_once_with("thread-42", "/workspace")
     assert captured == []
@@ -123,7 +122,7 @@ def test_handle_session_resume_reports_history_load_error():
     assert "history unavailable: db locked" in text
 
 
-def test_handle_session_resume_distinguishes_non_displayable_messages():
+async def test_handle_session_resume_distinguishes_non_displayable_messages():
     bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
     ui, captured = _make_ui(
         bus_ref=bus_ref,
@@ -132,7 +131,7 @@ def test_handle_session_resume_distinguishes_non_displayable_messages():
         ),
     )
 
-    _run(_run_resume(ui, "thread-42", "/workspace"))
+    await _run_resume(ui, "thread-42", "/workspace")
 
     assert captured == [
         "Resumed session: thread-42\nNo displayable messages in this session."

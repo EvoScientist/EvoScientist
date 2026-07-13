@@ -18,7 +18,6 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
 
-from ... import paths as _paths
 from ...config import (
     MemoryControls,
     MemoryObservationTarget,
@@ -26,11 +25,17 @@ from ...config import (
     get_effective_config,
 )
 from ..types import MemorySourceType
+from ._factory import (
+    build_memory_agent_graph,
+    memory_agent_middleware,
+    resolve_memory_agent_paths,
+)
 
 logger = logging.getLogger(__name__)
 
-MEMORY_WORKER_RECURSION_LIMIT = 100
-_MEMORY_WORKER_EXCLUDED_TOOLS = frozenset({"execute", "task", "write_todos"})
+_MEMORY_WORKER_EXCLUDED_TOOLS = frozenset(
+    {"execute", "task", "write_file", "write_todos"}
+)
 
 
 def _memory_worker_observation_target(
@@ -423,10 +428,7 @@ def _memory_worker_middleware(
     enable_observation_memory: bool = True,
 ):
     """Build middleware for memory workers, excluding task execution tools."""
-    from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
-
     from ...middleware.memory import create_memory_middleware
-    from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
 
     memory_controls = MemoryControls(
         profile_enabled=enable_profile_memory,
@@ -437,8 +439,7 @@ def _memory_worker_middleware(
     enable_observation_tool = memory_controls.observation_tool_enabled(
         _memory_worker_observation_target(source_type)
     )
-    return [
-        ToolErrorHandlerMiddleware(),
+    return memory_agent_middleware(
         create_memory_middleware(
             str(memory_dir),
             workspace_dir=workspace_dir,
@@ -448,10 +449,8 @@ def _memory_worker_middleware(
             enable_observation_memory=enable_observation_memory,
             enable_observation_tool=enable_observation_tool,
         ),
-        _ToolExclusionMiddleware(
-            excluded=_MEMORY_WORKER_EXCLUDED_TOOLS,
-        ),
-    ]
+        excluded_tools=_MEMORY_WORKER_EXCLUDED_TOOLS,
+    )
 
 
 def _build_memory_worker_agent(
@@ -467,22 +466,14 @@ def _build_memory_worker_agent(
     middleware: list[AgentMiddleware] | None = None,
 ) -> CompiledStateGraph:
     """Create a background memory worker agent for one lifecycle hook."""
-    from deepagents import create_deep_agent
+    from ...backends import build_memory_worker_backend
 
-    from ...backends import build_memory_agent_backend
-    from ...EvoScientist import _ensure_auxiliary_chat_model
-
-    agent = create_deep_agent(
+    return build_memory_agent_graph(
         name=_memory_worker_agent_name(source_type),
-        # Memory workers are background helper agents; use the auxiliary model
-        # and fall back to the main model when auxiliary_* is unset.
-        model=_ensure_auxiliary_chat_model(),
         system_prompt=system_prompt,
         tools=[],
-        backend=build_memory_agent_backend(
-            workspace_dir=workspace_dir,
-            memory_dir=memory_dir,
-        ),
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
         middleware=[
             *_memory_worker_middleware(
                 memory_dir=memory_dir,
@@ -494,10 +485,12 @@ def _build_memory_worker_agent(
             ),
             *(middleware or []),
         ],
-        subagents=[],
         response_format=response_format,
+        backend=build_memory_worker_backend(
+            workspace_dir=workspace_dir,
+            memory_dir=memory_dir,
+        ),
     )
-    return agent.with_config({"recursion_limit": MEMORY_WORKER_RECURSION_LIMIT})
 
 
 class _SubagentSummaryWriterMiddleware(AgentMiddleware):
@@ -588,17 +581,15 @@ def build_memory_worker_graph(
         _memory_worker_observation_target(source_type)
     )
 
-    worker_memory_dir = Path(
-        _paths.MEMORIES_DIR if memory_dir is None else memory_dir
-    ).expanduser()
-    worker_workspace_dir = Path(
-        _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
-    ).expanduser()
+    agent_paths = resolve_memory_agent_paths(
+        memory_dir=memory_dir,
+        workspace_dir=workspace_dir,
+    )
     middleware: list[AgentMiddleware] = []
     response_format: type[BaseModel] | None = None
     if source_type == MemorySourceType.SUBAGENT:
         middleware.append(
-            _SubagentSummaryWriterMiddleware(memory_dir=worker_memory_dir)
+            _SubagentSummaryWriterMiddleware(memory_dir=agent_paths.memory_dir)
         )
         response_format = SubagentMemoryDecision
     return _build_memory_worker_agent(
@@ -609,8 +600,8 @@ def build_memory_worker_graph(
             enable_observation_tool=enable_observation_tool,
         ),
         response_format=response_format,
-        memory_dir=worker_memory_dir,
-        workspace_dir=worker_workspace_dir,
+        memory_dir=agent_paths.memory_dir,
+        workspace_dir=agent_paths.workspace_dir,
         enable_profile_memory=memory_controls.profile_enabled,
         enable_observation_memory=memory_controls.observations_enabled,
         observation_writer=memory_controls.observation_writer,
