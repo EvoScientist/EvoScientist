@@ -53,11 +53,6 @@ def temp_config_dir(tmp_path, monkeypatch):
     """Use a temporary directory for config during tests."""
     config_dir = tmp_path / "evoscientist"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    # Prevent load_dotenv from loading the project's real .env file
-    monkeypatch.setattr(
-        "EvoScientist.config.settings.find_dotenv",
-        lambda *a, **k: str(tmp_path / ".env"),
-    )
     # Also clear any API keys from environment
     for key in [
         "ANTHROPIC_API_KEY",
@@ -77,6 +72,9 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -104,6 +102,9 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -129,8 +130,13 @@ class TestEvoScientistConfig:
         assert config.show_thinking is True
         assert config.ui_backend == "tui"
         assert config.log_level == "warning"
-        assert config.reasoning_effort == "high"
+        assert config.reasoning_effort == ""
         assert config.openrouter_anthropic_prompt_cache is True
+        assert config.openrouter_http_referer == (
+            "https://github.com/EvoScientist/EvoScientist"
+        )
+        assert config.openrouter_app_title == "EvoScientist"
+        assert config.openrouter_app_categories == "creative-writing,personal-agent"
         assert config.memory_profile_enabled is True
         assert config.memory_observations_enabled is True
         assert config.memory_observation_writer == MemoryObservationWriter.ALL
@@ -672,6 +678,22 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.openrouter_anthropic_prompt_cache is False
 
+    def test_env_openrouter_app_attribution_override(
+        self, temp_config_dir, monkeypatch
+    ):
+        """OpenRouter app-attribution env vars should override file config."""
+        save_config(EvoScientistConfig())
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://acme.test")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "cli-agent,programming-app"
+        )
+
+        config = get_effective_config()
+        assert config.openrouter_http_referer == "https://acme.test"
+        assert config.openrouter_app_title == "Acme"
+        assert config.openrouter_app_categories == "cli-agent,programming-app"
+
     def test_set_openrouter_anthropic_prompt_cache(self, temp_config_dir, clean_env):
         """Test OpenRouter Anthropic prompt cache can be set through config."""
         save_config(EvoScientistConfig())
@@ -731,6 +753,60 @@ class TestApplyConfigToEnv:
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") == (
             "false"
         )
+
+    def test_openrouter_app_attribution_applied_to_env(self, clean_env, monkeypatch):
+        """Config app-attribution values are exported to env for models.py."""
+        for env in (
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+            "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        config = EvoScientistConfig(
+            openrouter_http_referer="https://acme.test",
+            openrouter_app_title="Acme",
+            openrouter_app_categories="cli-agent,programming-app",
+        )
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER") == (
+            "https://acme.test"
+        )
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") == "Acme"
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES") == (
+            "cli-agent,programming-app"
+        )
+
+    def test_openrouter_app_attribution_env_not_overwritten(
+        self, clean_env, monkeypatch
+    ):
+        """apply_config_to_env must not clobber an already-set attribution env var."""
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "existing-title")
+        config = EvoScientistConfig(openrouter_app_title="config-title")
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") == "existing-title"
+
+    def test_openrouter_app_attribution_empty_config_not_applied(
+        self, clean_env, monkeypatch
+    ):
+        """Empty-string attribution config must not create env vars."""
+        for env in (
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+            "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        config = EvoScientistConfig(
+            openrouter_http_referer="",
+            openrouter_app_title="",
+            openrouter_app_categories="",
+        )
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER") is None
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") is None
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES") is None
 
     def test_dangerous_mode_round_trips_to_env(self, clean_env, monkeypatch):
         """dangerous_mode set via CLI override must survive a fresh re-read.
@@ -849,3 +925,30 @@ def test_scheduler_config_defaults_and_env(monkeypatch):
     assert eff2.memory_skill_synthesis_mode == MemorySkillSynthesisMode.AUTO
     assert eff2.memory_skill_synthesis_cadence == MemorySkillSynthesisCadence.MONTHLY
     assert eff2.memory_skill_synthesis_time == "04:30"
+
+
+# =============================================================================
+# Dotenv isolation (issue #322)
+# =============================================================================
+
+
+class TestDotenvIsolation:
+    def test_env_file_not_leaked_into_process_env(self, tmp_path, monkeypatch):
+        """A .env in cwd must not leak into os.environ during tests.
+
+        Without the suite-wide ``_isolate_dotenv`` fixture,
+        ``get_effective_config`` loads the developer's real .env with
+        ``override=True``; an empty-valued line like ``MINIMAX_BASE_URL=``
+        then poisons ``os.environ.get(key, default)`` lookups for every
+        test that runs afterwards in the same process.
+        """
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        repro_dir = tmp_path / "repro"
+        repro_dir.mkdir()
+        (repro_dir / ".env").write_text("MINIMAX_BASE_URL=\n")
+        monkeypatch.chdir(repro_dir)
+        monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+
+        get_effective_config()
+
+        assert "MINIMAX_BASE_URL" not in os.environ

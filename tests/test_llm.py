@@ -439,6 +439,200 @@ class TestThirdPartyRouting:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
 
+    # --- OpenRouter app attribution (issue #339) ---
+
+    _APP_ATTR_ENV = (
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+    )
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_defaults(self, mock_init, monkeypatch):
+        """OpenRouter init should carry EvoScientist's default app attribution."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        # Isolate from any leaked env overrides so we assert the built-in defaults.
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
+        assert call_kwargs["app_title"] == "EvoScientist"
+        # Must be a list[str] (not the comma string) — langchain-openrouter joins it.
+        assert call_kwargs["app_categories"] == ["creative-writing", "personal-agent"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_from_env(self, mock_init, monkeypatch):
+        """Env vars should override the default app attribution values."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://acme.test")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        # Include a space to prove each category is stripped.
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "cli-agent, programming-app"
+        )
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://acme.test"
+        assert call_kwargs["app_title"] == "Acme"
+        assert call_kwargs["app_categories"] == ["cli-agent", "programming-app"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_user_override_not_clobbered(
+        self, mock_init, monkeypatch
+    ):
+        """Caller-supplied attribution kwargs must beat both env and defaults."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        # Env is also set, to prove an explicit kwarg outranks the env override
+        # (not just the built-in default).
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://env.example"
+        )
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "EnvTitle")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "env-cat")
+
+        get_chat_model(
+            "x-ai/grok-4.3",
+            provider="openrouter",
+            app_url="https://mine.example",
+            app_title="MyApp",
+            app_categories=["only-this"],
+        )
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://mine.example"
+        assert call_kwargs["app_title"] == "MyApp"
+        # An explicit list is preserved verbatim, not re-split.
+        assert call_kwargs["app_categories"] == ["only-this"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_non_openrouter_providers_get_no_app_attribution(
+        self, mock_init, monkeypatch
+    ):
+        """Only the openrouter provider should receive app-attribution kwargs."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-real")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+        for model, provider in (
+            ("claude-sonnet-4-6", "anthropic"),
+            ("llama3.1:8b", "ollama"),
+        ):
+            get_chat_model(model, provider=provider)
+            call_kwargs = mock_init.call_args[1]
+            assert "app_url" not in call_kwargs
+            assert "app_title" not in call_kwargs
+            assert "app_categories" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_attribution_coexists_with_reasoning_and_cache(
+        self, mock_init, monkeypatch
+    ):
+        """Attribution must not disturb reasoning or Anthropic prompt caching."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+        monkeypatch.delenv(
+            "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", raising=False
+        )
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+
+        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+
+        call_kwargs = mock_init.call_args[1]
+        # Existing behavior intact.
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+        # Attribution added alongside.
+        assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
+        assert call_kwargs["app_title"] == "EvoScientist"
+        assert call_kwargs["app_categories"] == ["creative-writing", "personal-agent"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_categories_env_strips_blank_items(
+        self, mock_init, monkeypatch
+    ):
+        """A messy comma value (stray commas / spaces) yields a clean list."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "a,,  b  ")
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        assert mock_init.call_args[1]["app_categories"] == ["a", "b"]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_categories_capped_to_per_request_limit(
+        self, mock_init, monkeypatch
+    ):
+        """Over-configuring categories caps to the first N and warns the user."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+            "cli-agent,programming-app,personal-agent,writing-assistant",
+        )
+
+        with pytest.warns(UserWarning, match="at most 2 app categories"):
+            get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        # OpenRouter honors at most 2 per request, so only the first 2 are sent.
+        assert mock_init.call_args[1]["app_categories"] == [
+            "cli-agent",
+            "programming-app",
+        ]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_app_categories_all_separators_omit_kwarg(
+        self, mock_init, monkeypatch
+    ):
+        """A categories value with no real items omits the kwarg entirely."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", " , , ")
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        # No app_categories kwarg at all — not an empty list (which the library
+        # would reject / send as an empty header).
+        assert "app_categories" not in mock_init.call_args[1]
+
+    def test_openrouter_app_attribution_lands_on_real_model(self, monkeypatch):
+        """Build a REAL ChatOpenRouter (no mock) and assert the attribution
+        values land on the instance rather than being silently dumped into
+        model_kwargs.
+
+        The mocked tests above assert on the kwargs handed to init_chat_model,
+        so they cannot catch a param-name typo or a langchain-openrouter version
+        that accepts these only as passthrough model params (which the library
+        does with a warning, not an error). This test is the guard for both.
+        """
+        from langchain_openrouter import ChatOpenRouter
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+
+        model = get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        assert isinstance(model, ChatOpenRouter)
+        assert model.app_url == "https://github.com/EvoScientist/EvoScientist"
+        assert model.app_title == "EvoScientist"
+        assert model.app_categories == ["creative-writing", "personal-agent"]
+        # Not silently swallowed into model_kwargs (the passthrough failure mode).
+        model_kwargs = model.model_kwargs or {}
+        assert "app_url" not in model_kwargs
+        assert "app_title" not in model_kwargs
+        assert "app_categories" not in model_kwargs
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_anthropic_prompt_cache_enabled_by_default(
         self, mock_init, monkeypatch
@@ -2238,6 +2432,11 @@ class TestPatchOpenrouterStripResponsesReasoning:
 
 
 class TestAutoConfig:
+    @pytest.fixture(autouse=True)
+    def _clear_reasoning_effort_env(self, monkeypatch):
+        """Keep auto-config tests independent of the developer environment."""
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_5_thinking(self, mock_init, monkeypatch):
         """Anthropic 4-5 models get enabled thinking with budget."""
@@ -2327,6 +2526,7 @@ class TestAutoConfig:
         """gpt-5.4+ and codex models get xhigh reasoning."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
 
         get_chat_model("gpt-5.4", provider="openai")
         assert mock_init.call_args[1]["reasoning"] == {
@@ -2343,6 +2543,26 @@ class TestAutoConfig:
         get_chat_model("gpt-5.5", provider="openai")
         assert mock_init.call_args[1]["reasoning"] == {
             "effort": "xhigh",
+            "summary": "auto",
+        }
+
+        get_chat_model("gpt-5.6-sol", provider="openai")
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "xhigh",
+            "summary": "auto",
+        }
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_reasoning_effort_from_env(self, mock_init, monkeypatch):
+        """Native OpenAI reasoning effort should be configurable via env var."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "high")
+
+        get_chat_model("gpt-5.5", provider="openai")
+
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "high",
             "summary": "auto",
         }
 
@@ -2377,8 +2597,8 @@ class TestAutoConfig:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "http://127.0.0.1:8000/codex/v1"
         assert call_kwargs["api_key"] == "ccproxy-oauth"
-        # Proxy mode: reasoning skipped (ccproxy untested)
-        assert "reasoning" not in call_kwargs
+        # ccproxy uses the Responses API, so reasoning configuration is valid.
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
         # Proxy mode: Responses API (bypasses format chain), streaming ON
         assert call_kwargs["use_responses_api"] is True
         assert "streaming" not in call_kwargs
@@ -2411,6 +2631,120 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
         assert "use_responses_api" not in call_kwargs
+        assert "default_headers" not in call_kwargs
+
+    @patch(
+        "EvoScientist.llm.models._installed_codex_client_version",
+        return_value="0.144.1",
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_client_headers(
+        self, mock_init, mock_installed_version, monkeypatch
+    ):
+        """ccproxy Codex mode sends Codex-CLI-shaped client headers."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.delenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", raising=False)
+
+        get_chat_model("gpt-5.5", provider="openai")
+
+        headers = mock_init.call_args[1]["default_headers"]
+        assert headers["originator"] == "codex_cli_rs"
+        assert headers["version"] == "0.144.1"
+        assert headers["User-Agent"].startswith("codex_cli_rs/0.144.1")
+        mock_installed_version.assert_called_once_with()
+        assert mock_init.call_args[1]["reasoning"]["effort"] == "xhigh"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_client_version_env(self, mock_init, monkeypatch):
+        """EVOSCIENTIST_CODEX_CLIENT_VERSION overrides the pinned version."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", "9.9.9")
+
+        get_chat_model("gpt-5.5", provider="openai")
+
+        headers = mock_init.call_args[1]["default_headers"]
+        assert headers["version"] == "9.9.9"
+        assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
+
+    @patch("EvoScientist.llm.models.subprocess.run")
+    def test_installed_codex_client_version(self, mock_run):
+        """The advertised version follows the installed Codex CLI."""
+        from EvoScientist.llm.models import _installed_codex_client_version
+
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "codex-cli 0.144.1\n"
+        mock_run.return_value.stderr = ""
+        _installed_codex_client_version.cache_clear()
+        try:
+            assert _installed_codex_client_version() == "0.144.1"
+            assert _installed_codex_client_version() == "0.144.1"
+        finally:
+            _installed_codex_client_version.cache_clear()
+        mock_run.assert_called_once_with(
+            ["codex", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+
+    @patch(
+        "EvoScientist.llm.models._installed_codex_client_version",
+        return_value="0.140.0",
+    )
+    def test_older_installed_codex_uses_fallback(
+        self, mock_installed_version, monkeypatch
+    ):
+        """An outdated installed CLI must not undercut the safe fallback."""
+        from EvoScientist.llm.models import (
+            _CODEX_CLIENT_VERSION_FALLBACK,
+            _resolve_codex_client_version,
+        )
+
+        monkeypatch.delenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", raising=False)
+
+        assert _resolve_codex_client_version() == _CODEX_CLIENT_VERSION_FALLBACK
+        mock_installed_version.assert_called_once_with()
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_headers_respect_caller(self, mock_init, monkeypatch):
+        """Caller-supplied default_headers keys are not overridden."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        get_chat_model(
+            "gpt-5.5",
+            provider="openai",
+            default_headers={"originator": "codex_vscode", "version": "9.9.9"},
+        )
+
+        headers = mock_init.call_args[1]["default_headers"]
+        assert headers["originator"] == "codex_vscode"
+        assert headers["version"] == "9.9.9"
+        assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_none_headers(self, mock_init, monkeypatch):
+        """An explicit default_headers=None is normalized before gap-filling."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", "9.9.9")
+
+        get_chat_model(
+            "gpt-5.5",
+            provider="openai",
+            default_headers=None,
+        )
+
+        headers = mock_init.call_args[1]["default_headers"]
+        assert headers["originator"] == "codex_cli_rs"
+        assert headers["version"] == "9.9.9"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_ccproxy_key_but_wrong_path_not_ccproxy(

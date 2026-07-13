@@ -1,6 +1,10 @@
 """Shared fixtures for EvoScientist tests."""
 
+from pathlib import Path
+
 import pytest
+
+_NONEXISTENT_DOTENV = str(Path(__file__).with_name(".pytest-dotenv-does-not-exist"))
 
 
 @pytest.fixture(autouse=True)
@@ -164,3 +168,24 @@ def restore_model_passthrough_patch():
         yield
     finally:
         _reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dotenv(monkeypatch):
+    """Keep the developer's real .env out of the test environment.
+
+    ``get_effective_config`` runs ``load_dotenv(find_dotenv(usecwd=True),
+    override=True)``, so any test that loads config injects the repo's
+    real .env into ``os.environ`` for the rest of the pytest process.
+    An empty-valued line like ``MINIMAX_BASE_URL=`` then makes
+    ``os.environ.get(key, default)`` return "" instead of the default,
+    breaking unrelated tests later in the run (see issue #322).
+
+    Pointing ``find_dotenv`` at a fixed path that does not exist makes
+    ``load_dotenv`` a no-op without creating a temporary directory for
+    every test.
+    """
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.find_dotenv",
+        lambda *args, **kwargs: _NONEXISTENT_DOTENV,
+    )

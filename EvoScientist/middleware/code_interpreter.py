@@ -45,7 +45,21 @@ _MEMORY_FIRST_INTERPRETER_PROMPT = (
 
 
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
-    """Code interpreter middleware with EvoScientist's memory preflight hint."""
+    """Code interpreter middleware with EvoScientist's memory preflight hint.
+
+    ``after_agent`` / ``aafter_agent`` are intentionally NOT overridden. An
+    earlier "conditional snapshot" gate that skipped ``after_agent`` on turns
+    where ``code_interpreter`` wasn't called saved ~50 ms/turn of
+    ``create_snapshot()`` work, but also skipped the slot eviction upstream
+    performs in the same hook (``finally: self._registry.evict(thread_id)``
+    in ``langchain_quickjs.middleware.CodeInterpreterMiddleware.after_agent``).
+    ``before_agent`` restores the REPL on every turn that follows a touched
+    one via ``self._registry.get(thread_id)`` (get-or-create), so skipping
+    eviction leaked one ``ThreadWorker`` + QuickJS Runtime per persistent
+    ``thread_id`` that ever went touched → quiet. The regression test
+    ``test_after_agent_evicts_slot_on_untouched_turn`` guards against
+    reintroducing the gate.
+    """
 
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
