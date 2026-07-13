@@ -866,6 +866,11 @@ _bus_loop: asyncio.AbstractEventLoop | None = None
 _bus_thread: threading.Thread | None = None
 
 
+def get_channel_startup_results() -> list[tuple[str, bool, str]]:
+    """Return the current channel startup snapshot without waiting."""
+    return _manager.startup_results() if _manager is not None else []
+
+
 def _channels_is_running(channel_type: str | None = None) -> bool:
     """Check whether channels are running."""
     if _manager is None:

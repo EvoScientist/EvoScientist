@@ -105,3 +105,21 @@ def test_auto_start_channel_binds_runtime_while_starting(monkeypatch):
     assert result == rows
     assert runtime.agent is agent
     assert runtime.thread_id == "thread-1"
+
+
+def test_get_channel_startup_results_without_manager():
+    channel_cli._manager = None
+
+    assert channel_cli.get_channel_startup_results() == []
+
+
+def test_get_channel_startup_results_uses_manager_snapshot():
+    rows = [("telegram", True, "connected (bus)")]
+
+    class Manager:
+        def startup_results(self):
+            return rows
+
+    channel_cli._manager = Manager()
+
+    assert channel_cli.get_channel_startup_results() is rows

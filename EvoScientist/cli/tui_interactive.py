@@ -57,6 +57,7 @@ from .channel import (
     _message_queue,
     _set_channel_response,
     dispatch_channel_slash_command,
+    get_channel_startup_results,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .history_suggester import HistorySuggester
@@ -3116,10 +3117,9 @@ def run_textual_interactive(
         def _render_welcome(self) -> None:
             channels_info: list[tuple[str, bool, str]] | None = None
             try:
-                if _ch_mod._manager is not None:
-                    current = _ch_mod._manager.startup_results()
-                    if current:
-                        self._channel_start_results = current
+                current = get_channel_startup_results()
+                if current:
+                    self._channel_start_results = current
                 if self._channel_start_results:
                     channels_info = self._channel_start_results
                 else:
