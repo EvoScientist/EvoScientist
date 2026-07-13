@@ -15,7 +15,6 @@ from EvoScientist.middleware.configurable_model import (
     ConfigurableModelMiddleware,
     _read_model_override,
 )
-from tests.conftest import run_async as _run
 
 
 @contextmanager
@@ -134,7 +133,7 @@ class TestPassThrough:
         handler.assert_called_once_with(req)
         req.override.assert_not_called()
 
-    def test_async_no_override_passes_request_unchanged(self):
+    async def test_async_no_override_passes_request_unchanged(self):
         mw = ConfigurableModelMiddleware()
         req = _make_request()
 
@@ -143,7 +142,7 @@ class TestPassThrough:
             return "ok"
 
         with _patched_config({}):
-            result = _run(mw.awrap_model_call(req, handler))
+            result = await mw.awrap_model_call(req, handler)
         assert result == "ok"
         req.override.assert_not_called()
 
@@ -185,7 +184,7 @@ class TestModelOverride:
         assert called_with is not req
         assert called_with.model is new_model
 
-    def test_async_override_path_parity(self):
+    async def test_async_override_path_parity(self):
         mw = ConfigurableModelMiddleware()
         req = _make_request()
         new_model = MagicMock()
@@ -202,7 +201,7 @@ class TestModelOverride:
                 "EvoScientist.llm.get_chat_model", return_value=new_model
             ) as mock_get,
         ):
-            result = _run(mw.awrap_model_call(req, handler))
+            result = await mw.awrap_model_call(req, handler)
 
         assert result == "ok"
         mock_get.assert_called_once_with(model="claude-opus-4-8", provider="anthropic")
@@ -316,7 +315,7 @@ class TestResolveFailure:
         handler.assert_called_once_with(req)
         req.override.assert_not_called()
 
-    def test_async_falls_back_when_resolve_raises(self):
+    async def test_async_falls_back_when_resolve_raises(self):
         mw = ConfigurableModelMiddleware()
         req = _make_request()
 
@@ -333,7 +332,7 @@ class TestResolveFailure:
                 side_effect=ValueError("unknown model"),
             ),
         ):
-            result = _run(mw.awrap_model_call(req, handler))
+            result = await mw.awrap_model_call(req, handler)
 
         assert result == "ok"
         assert called == [req]

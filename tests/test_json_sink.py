@@ -19,7 +19,7 @@ async def _agen(items):
         yield item
 
 
-def test_writes_each_event_as_one_jsonl_line(run_async):
+async def test_writes_each_event_as_one_jsonl_line():
     """Each event dict is serialized to exactly one JSON line, in order."""
     events = [
         {"type": "thinking", "content": "hmm", "id": 0},
@@ -34,7 +34,7 @@ def test_writes_each_event_as_one_jsonl_line(run_async):
     ]
     out = io.StringIO()
 
-    run_async(write_events_as_json(_agen(events), out))
+    await write_events_as_json(_agen(events), out)
 
     lines = out.getvalue().splitlines()
     assert len(lines) == len(events)
@@ -43,7 +43,7 @@ def test_writes_each_event_as_one_jsonl_line(run_async):
     assert parsed[2]["args"] == {"path": "a.md"}
 
 
-def test_returns_final_response_from_done_event(run_async):
+async def test_returns_final_response_from_done_event():
     """The sink returns the response text carried by the terminal `done` event."""
     events = [
         {"type": "text", "content": "partial"},
@@ -51,12 +51,12 @@ def test_returns_final_response_from_done_event(run_async):
     ]
     out = io.StringIO()
 
-    result = run_async(write_events_as_json(_agen(events), out))
+    result = await write_events_as_json(_agen(events), out)
 
     assert result == "the answer"
 
 
-def test_non_serializable_arg_does_not_crash_the_stream(run_async):
+async def test_non_serializable_arg_does_not_crash_the_stream():
     """A non-JSON-serializable value degrades to its str form instead of raising."""
 
     class Weird:
@@ -72,7 +72,7 @@ def test_non_serializable_arg_does_not_crash_the_stream(run_async):
     ]
     out = io.StringIO()
 
-    run_async(write_events_as_json(_agen(events), out))
+    await write_events_as_json(_agen(events), out)
 
     lines = out.getvalue().splitlines()
     # Both lines must be valid JSON; the non-serializable value falls back to str.
@@ -80,7 +80,7 @@ def test_non_serializable_arg_does_not_crash_the_stream(run_async):
     assert first["args"]["obj"] == "WEIRD"
 
 
-def test_stream_json_sources_events_from_gateway(run_async):
+async def test_stream_json_sources_events_from_gateway():
     """stream_json pulls events from gateway.stream_events(request) and serializes
     them — it does not reach past the gateway abstraction."""
     seen: dict[str, object] = {}
@@ -98,7 +98,7 @@ def test_stream_json_sources_events_from_gateway(run_async):
             return _agen(events)
 
     out = io.StringIO()
-    result = run_async(stream_json(_FakeGateway(), object(), out=out))
+    result = await stream_json(_FakeGateway(), object(), out=out)
 
     assert result == "hi"
     assert "request" in seen  # the request was forwarded to the gateway
@@ -106,7 +106,7 @@ def test_stream_json_sources_events_from_gateway(run_async):
     assert types == ["text", "done"]
 
 
-def test_stream_json_propagates_gateway_errors(run_async):
+async def test_stream_json_propagates_gateway_errors():
     """An error from the gateway stream propagates out of stream_json so the CLI
     dispatch can turn it into a clean exit."""
 
@@ -124,4 +124,4 @@ def test_stream_json_propagates_gateway_errors(run_async):
 
     out = io.StringIO()
     with pytest.raises(RuntimeError, match="boom"):
-        run_async(stream_json(_FakeGateway(), object(), out=out))
+        await stream_json(_FakeGateway(), object(), out=out)

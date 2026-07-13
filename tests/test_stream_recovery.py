@@ -16,7 +16,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from EvoScientist.stream.events import _clear_interrupted_graph_state
-from tests.conftest import run_async as _run
 
 
 class _S(TypedDict):
@@ -58,7 +57,7 @@ def _interrupting_app():
     return g.compile(checkpointer=InMemorySaver())
 
 
-def test_recovery_clears_stuck_state_after_crash():
+async def test_recovery_clears_stuck_state_after_crash():
     app = _crashing_app()
     cfg = {"configurable": {"thread_id": "t1"}}
     try:
@@ -68,7 +67,7 @@ def test_recovery_clears_stuck_state_after_crash():
     # The crash left the graph frozen at node 'b'.
     assert app.get_state(cfg).next == ("b",)
 
-    _run(_clear_interrupted_graph_state(app, cfg))
+    await _clear_interrupted_graph_state(app, cfg)
 
     snap = app.get_state(cfg)
     assert snap.next == ()  # stuck state actually cleared
@@ -79,7 +78,7 @@ def test_recovery_clears_stuck_state_after_crash():
     assert app.invoke({"x": 41}, cfg)["x"] == 142
 
 
-def test_recovery_preserves_pending_hitl_interrupt():
+async def test_recovery_preserves_pending_hitl_interrupt():
     app = _interrupting_app()
     cfg = {"configurable": {"thread_id": "t1"}}
     app.invoke({"x": 0}, cfg)  # parks at interrupt()
@@ -87,7 +86,7 @@ def test_recovery_preserves_pending_hitl_interrupt():
     assert before.next == ("ask",)
     assert before.interrupts
 
-    _run(_clear_interrupted_graph_state(app, cfg))
+    await _clear_interrupted_graph_state(app, cfg)
 
     after = app.get_state(cfg)
     assert after.next == ("ask",)  # interrupt left intact, still resumable

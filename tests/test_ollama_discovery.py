@@ -17,7 +17,6 @@ from EvoScientist.llm.ollama_discovery import (
     discover_ollama_models,
     validate_ollama_connection,
 )
-from tests.conftest import run_async as _run
 
 
 class TestValidateOllamaConnection:
@@ -71,17 +70,17 @@ class TestValidateOllamaConnection:
 class TestDiscoverOllamaModels:
     """Async probe — contract: never raise, return list[str]."""
 
-    def test_empty_base_url_returns_empty_without_http(self):
+    async def test_empty_base_url_returns_empty_without_http(self):
         # No HTTP call should be made for an empty base_url — verified by
         # the fact that no mock is set up and the test completes.
-        names = _run(discover_ollama_models(""))
+        names = await discover_ollama_models("")
         assert names == []
 
-    def test_none_base_url_returns_empty(self):
-        names = _run(discover_ollama_models(None))
+    async def test_none_base_url_returns_empty(self):
+        names = await discover_ollama_models(None)
         assert names == []
 
-    def test_200_returns_names(self):
+    async def test_200_returns_names(self):
         async def fake_get(self, url):
             resp = MagicMock()
             resp.status_code = 200
@@ -93,10 +92,10 @@ class TestDiscoverOllamaModels:
             return resp
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == ["llama3.3:latest", "qwen3:8b"]
 
-    def test_strips_entries_without_name(self):
+    async def test_strips_entries_without_name(self):
         async def fake_get(self, url):
             resp = MagicMock()
             resp.status_code = 200
@@ -112,36 +111,36 @@ class TestDiscoverOllamaModels:
             return resp
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == ["llama3.3"]
 
-    def test_timeout_returns_empty(self):
+    async def test_timeout_returns_empty(self):
         async def fake_get(self, url):
             raise httpx.TimeoutException("timed out")
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == []
 
-    def test_connect_error_returns_empty(self):
+    async def test_connect_error_returns_empty(self):
         async def fake_get(self, url):
             raise httpx.ConnectError("refused")
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == []
 
-    def test_non_200_returns_empty(self):
+    async def test_non_200_returns_empty(self):
         async def fake_get(self, url):
             resp = MagicMock()
             resp.status_code = 500
             return resp
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == []
 
-    def test_malformed_json_returns_empty(self):
+    async def test_malformed_json_returns_empty(self):
         async def fake_get(self, url):
             resp = MagicMock()
             resp.status_code = 200
@@ -149,10 +148,10 @@ class TestDiscoverOllamaModels:
             return resp
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == []
 
-    def test_missing_models_key_returns_empty(self):
+    async def test_missing_models_key_returns_empty(self):
         async def fake_get(self, url):
             resp = MagicMock()
             resp.status_code = 200
@@ -160,10 +159,10 @@ class TestDiscoverOllamaModels:
             return resp
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            names = _run(discover_ollama_models("http://localhost:11434"))
+            names = await discover_ollama_models("http://localhost:11434")
         assert names == []
 
-    def test_trailing_slash_stripped_from_url(self):
+    async def test_trailing_slash_stripped_from_url(self):
         called = {}
 
         async def fake_get(self, url):
@@ -174,7 +173,7 @@ class TestDiscoverOllamaModels:
             return resp
 
         with patch.object(httpx.AsyncClient, "get", fake_get):
-            _run(discover_ollama_models("http://localhost:11434/"))
+            await discover_ollama_models("http://localhost:11434/")
         assert called["url"] == "http://localhost:11434/api/tags"
 
 

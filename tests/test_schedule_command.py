@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from tests.conftest import run_async as _run
-
 
 def _ctx():
     from EvoScientist.commands.base import CommandContext
@@ -12,17 +10,17 @@ def _ctx():
     return CommandContext(agent=None, thread_id="tid", ui=ui), ui
 
 
-def test_list_when_backend_down():
+async def test_list_when_backend_down():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     ctx, ui = _ctx()
     with patch("EvoScientist.cron.schedule.is_available", return_value=False):
-        _run(ScheduleCommand().execute(ctx, ["list"]))
+        await ScheduleCommand().execute(ctx, ["list"])
     msgs = [c.args[0] for c in ui.append_system.call_args_list]
     assert any("unavailable" in m.lower() for m in msgs)
 
 
-def test_add_parses_five_field_cron_and_prompt():
+async def test_add_parses_five_field_cron_and_prompt():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     ctx, _ui = _ctx()
@@ -33,17 +31,15 @@ def test_add_parses_five_field_cron_and_prompt():
             return_value={"cron_id": "c-9"},
         ) as mk,
     ):
-        _run(
-            ScheduleCommand().execute(
-                ctx, ["add", "*/10", "*", "*", "*", "*", "search", "uk", "weather"]
-            )
+        await ScheduleCommand().execute(
+            ctx, ["add", "*/10", "*", "*", "*", "*", "search", "uk", "weather"]
         )
     kw = mk.call_args.kwargs
     assert kw["schedule"] == "*/10 * * * *"
     assert kw["prompt"] == "search uk weather"
 
 
-def test_list_renders_table():
+async def test_list_renders_table():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     ctx, ui = _ctx()
@@ -60,11 +56,11 @@ def test_list_renders_table():
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
         patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
     ):
-        _run(ScheduleCommand().execute(ctx, ["list"]))
+        await ScheduleCommand().execute(ctx, ["list"])
     ui.mount_renderable.assert_called_once()
 
 
-def test_add_parses_quoted_cron_and_prompt():
+async def test_add_parses_quoted_cron_and_prompt():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     ctx, _ui = _ctx()
@@ -75,15 +71,15 @@ def test_add_parses_quoted_cron_and_prompt():
             return_value={"cron_id": "c-9"},
         ) as mk,
     ):
-        _run(
-            ScheduleCommand().execute(ctx, ["add", "*/10 * * * *", "search uk weather"])
+        await ScheduleCommand().execute(
+            ctx, ["add", "*/10 * * * *", "search uk weather"]
         )
     kw = mk.call_args.kwargs
     assert kw["schedule"] == "*/10 * * * *"
     assert kw["prompt"] == "search uk weather"
 
 
-def test_run_with_matching_prefix_fires_matched_prompt():
+async def test_run_with_matching_prefix_fires_matched_prompt():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     ctx, _ui = _ctx()
@@ -96,11 +92,11 @@ def test_run_with_matching_prefix_fires_matched_prompt():
             return_value={"run_id": "r-1"},
         ) as rn,
     ):
-        _run(ScheduleCommand().execute(ctx, ["run", "c-123"]))
+        await ScheduleCommand().execute(ctx, ["run", "c-123"])
     rn.assert_called_once_with("do the thing")
 
 
-def test_run_with_no_match_reports():
+async def test_run_with_no_match_reports():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     ctx, ui = _ctx()
@@ -109,13 +105,13 @@ def test_run_with_no_match_reports():
         patch("EvoScientist.cron.schedule.list_schedules", return_value=[]),
         patch("EvoScientist.cron.schedule.run_now") as rn,
     ):
-        _run(ScheduleCommand().execute(ctx, ["run", "nope"]))
+        await ScheduleCommand().execute(ctx, ["run", "nope"])
     rn.assert_not_called()
     msgs = [c.args[0] for c in ui.append_system.call_args_list]
     assert any("No schedule matching" in m for m in msgs)
 
 
-def test_pause_resume_set_enabled_with_resolved_id():
+async def test_pause_resume_set_enabled_with_resolved_id():
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
     rows = [{"cron_id": "c-abcdef", "metadata": {"name": "t"}}]
@@ -126,7 +122,7 @@ def test_pause_resume_set_enabled_with_resolved_id():
             patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
             patch("EvoScientist.cron.schedule.set_enabled") as se,
         ):
-            _run(ScheduleCommand().execute(ctx, [sub, "c-abc"]))
+            await ScheduleCommand().execute(ctx, [sub, "c-abc"])
         se.assert_called_once_with("c-abcdef", expected)
 
 
@@ -135,7 +131,7 @@ def test_pause_resume_set_enabled_with_resolved_id():
 # ---------------------------------------------------------------------------
 
 
-def test_list_error_shows_red_message_no_exception():
+async def test_list_error_shows_red_message_no_exception():
     """B1: list_schedules raising after is_available() shows a red error, not a traceback."""
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
@@ -147,7 +143,7 @@ def test_list_error_shows_red_message_no_exception():
             side_effect=RuntimeError("backend gone"),
         ),
     ):
-        _run(ScheduleCommand().execute(ctx, ["list"]))
+        await ScheduleCommand().execute(ctx, ["list"])
     msgs = [c.args[0] for c in ui.append_system.call_args_list]
     assert any("Error:" in m for m in msgs)
     # Verify no exception escaped (test would have raised above otherwise)
@@ -158,7 +154,7 @@ def test_list_error_shows_red_message_no_exception():
 # ---------------------------------------------------------------------------
 
 
-def test_remove_ambiguous_prefix_aborts_without_deleting():
+async def test_remove_ambiguous_prefix_aborts_without_deleting():
     """B2: two crons sharing a prefix → ambiguity message, delete NOT called."""
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
@@ -172,7 +168,7 @@ def test_remove_ambiguous_prefix_aborts_without_deleting():
         patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
         patch("EvoScientist.cron.schedule.delete_schedule") as mk,
     ):
-        _run(ScheduleCommand().execute(ctx, ["remove", "abc"]))
+        await ScheduleCommand().execute(ctx, ["remove", "abc"])
     mk.assert_not_called()
     msgs = [c.args[0] for c in ui.append_system.call_args_list]
     assert any("Multiple" in m for m in msgs)
@@ -183,7 +179,7 @@ def test_remove_ambiguous_prefix_aborts_without_deleting():
 # ---------------------------------------------------------------------------
 
 
-def test_remove_backend_error_shows_red_error_not_no_match():
+async def test_remove_backend_error_shows_red_error_not_no_match():
     """FIX 1: list_schedules() crashing in _resolve → red 'Error:' message, not 'No schedule matching'."""
     from EvoScientist.commands.implementation.schedule import ScheduleCommand
 
@@ -196,7 +192,7 @@ def test_remove_backend_error_shows_red_error_not_no_match():
         ),
         patch("EvoScientist.cron.schedule.delete_schedule") as mk,
     ):
-        _run(ScheduleCommand().execute(ctx, ["remove", "abc"]))
+        await ScheduleCommand().execute(ctx, ["remove", "abc"])
     mk.assert_not_called()
     msgs = [c.args[0] for c in ui.append_system.call_args_list]
     assert any("Error:" in m for m in msgs), f"Expected red Error: message, got: {msgs}"
@@ -209,7 +205,7 @@ def test_remove_backend_error_shows_red_error_not_no_match():
     )
 
 
-def test_add_name_sanitized_from_nasty_prompt():
+async def test_add_name_sanitized_from_nasty_prompt():
     """B3: prompt with newline / slashes / special chars → clean kebab-case name."""
     import re
 
@@ -225,7 +221,7 @@ def test_add_name_sanitized_from_nasty_prompt():
             return_value={"cron_id": "c-x"},
         ) as mk,
     ):
-        _run(ScheduleCommand().execute(ctx, ["add", "*/5 * * * *", nasty_prompt]))
+        await ScheduleCommand().execute(ctx, ["add", "*/5 * * * *", nasty_prompt])
     name = mk.call_args.kwargs["name"]
     # Must be non-empty, no spaces, no newlines, no slashes
     assert name

@@ -1655,9 +1655,7 @@ def test_turn_compaction_uses_latest_user_turn_only():
     ]
 
 
-def test_lifecycle_schedules_turn_worker_without_awaiting(
-    tmp_path, monkeypatch, run_async
-):
+async def test_lifecycle_schedules_turn_worker_without_awaiting(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
     calls = []
@@ -1682,21 +1680,18 @@ def test_lifecycle_schedules_turn_worker_without_awaiting(
     )
     runtime = _runtime("thread-1")
 
-    async def run():
-        state: AgentState[object] = {
-            "messages": [
-                HumanMessage("previous turn"),
-                AIMessage("previous answer"),
-                HumanMessage("hi"),
-                AIMessage("done"),
-            ]
-        }
-        await middleware.aafter_agent(
-            state,
-            runtime,
-        )
-
-    run_async(run())
+    state: AgentState[object] = {
+        "messages": [
+            HumanMessage("previous turn"),
+            AIMessage("previous answer"),
+            HumanMessage("hi"),
+            AIMessage("done"),
+        ]
+    }
+    await middleware.aafter_agent(
+        state,
+        runtime,
+    )
 
     assert len(calls) == 1
     request, hooks = calls[0]
@@ -2182,10 +2177,9 @@ def test_observation_linker_does_not_launch_when_observations_disabled(
     launch_call.assert_not_called()
 
 
-def test_async_observation_linker_does_not_launch_when_observations_disabled(
+async def test_async_observation_linker_does_not_launch_when_observations_disabled(
     tmp_path,
     monkeypatch,
-    run_async,
 ):
     context = _linker_context(
         memory_dir=tmp_path / "memories",
@@ -2200,7 +2194,7 @@ def test_async_observation_linker_does_not_launch_when_observations_disabled(
     launch_call = MagicMock()
     monkeypatch.setattr(memory_launch, "alaunch_background_run", launch_call)
 
-    run = run_async(memory_launch.alaunch_observation_linker(context))
+    run = await memory_launch.alaunch_observation_linker(context)
 
     assert run is None
     launch_call.assert_not_called()
@@ -2335,8 +2329,8 @@ def test_sync_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     assert status.observations_recorded == 0
 
 
-def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
-    tmp_path, monkeypatch, run_async
+async def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
+    tmp_path, monkeypatch
 ):
     memory_dir = tmp_path / "memories"
     _mark_worker_started(memory_dir)
@@ -2348,14 +2342,12 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
         async def get(self, **_kwargs):
             raise RuntimeError("poll failed")
 
-    run_async(
-        background_runs.awatch_background_run(
-            SimpleNamespace(runs=_Runs()),
-            thread_id="worker-thread",
-            run_id="run-1",
-            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
-            watcher_config=_fast_watcher_config(max_poll_failures=1),
-        )
+    await background_runs.awatch_background_run(
+        SimpleNamespace(runs=_Runs()),
+        thread_id="worker-thread",
+        run_id="run-1",
+        hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+        watcher_config=_fast_watcher_config(max_poll_failures=1),
     )
     status = worker_activity.memory_worker_status()
     assert status.is_running is False
@@ -2363,8 +2355,8 @@ def test_async_memory_worker_watcher_untracks_without_counting_on_poll_abort(
     assert status.observations_recorded == 0
 
 
-def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
-    tmp_path, run_async
+async def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
+    tmp_path,
 ):
     memory_dir = tmp_path / "memories"
     _mark_worker_started(memory_dir)
@@ -2376,20 +2368,17 @@ def test_async_memory_worker_watcher_counts_completion_under_blockbuster(
         async def get(self, **_kwargs):
             return {"status": "success"}
 
-    async def run():
-        blocker = BlockBuster(scanned_modules=[memory_worker, worker_activity])
-        blocker.activate()
-        try:
-            await background_runs.awatch_background_run(
-                SimpleNamespace(runs=_Runs()),
-                thread_id="worker-thread",
-                run_id="run-1",
-                hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
-            )
-        finally:
-            blocker.deactivate()
-
-    run_async(run())
+    blocker = BlockBuster(scanned_modules=[memory_worker, worker_activity])
+    blocker.activate()
+    try:
+        await background_runs.awatch_background_run(
+            SimpleNamespace(runs=_Runs()),
+            thread_id="worker-thread",
+            run_id="run-1",
+            hooks=memory_launch._memory_worker_launch_hooks(memory_dir),
+        )
+    finally:
+        blocker.deactivate()
     status = worker_activity.memory_worker_status()
     assert status.is_running is False
     assert status.profile_updates == 1
@@ -2527,7 +2516,7 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     assert status.observations_recorded == 1
 
 
-def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_async):
+async def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch):
     monkeypatch.setattr(
         background_runs, "default_background_run_url", lambda: "http://x"
     )
@@ -2569,22 +2558,18 @@ def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch, run_a
 
     spawned: list[background_runs.BackgroundRun] = []
 
-    async def run():
-        event_loop_thread = threading.get_ident()
-        context = _memory_source_context(
-            memory_dir=tmp_path / "memories",
-            workspace_dir=tmp_path / "workspace",
-            trajectory=[{"role": "human", "content": "hi"}],
-        )
-        request = memory_launch.memory_worker_launch_request(context)
-        await background_runs.alaunch_background_run(
-            request,
-            hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
-            spawn_status_watcher=spawned.append,
-        )
-        return event_loop_thread
-
-    event_loop_thread = run_async(run())
+    event_loop_thread = threading.get_ident()
+    context = _memory_source_context(
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        trajectory=[{"role": "human", "content": "hi"}],
+    )
+    request = memory_launch.memory_worker_launch_request(context)
+    await background_runs.alaunch_background_run(
+        request,
+        hooks=memory_launch._memory_worker_launch_hooks(tmp_path / "memories"),
+        spawn_status_watcher=spawned.append,
+    )
     assert [name for name, _thread_id in call_threads] == ["health", "snapshot"]
     assert all(thread_id != event_loop_thread for _name, thread_id in call_threads)
     assert worker_activity.memory_worker_status().is_running is True

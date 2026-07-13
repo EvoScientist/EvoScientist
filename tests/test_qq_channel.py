@@ -8,7 +8,6 @@ from EvoScientist.channels.qq.channel import (
     QQConfig,
     _build_qq_keyboard,
 )
-from tests.conftest import run_async as _run
 
 
 class TestQQChannelSend:
@@ -22,7 +21,7 @@ class TestQQChannelSend:
         channel._client.api.post_group_message = AsyncMock()
         return channel
 
-    def test_send_prefers_native_markdown_for_c2c(self):
+    async def test_send_prefers_native_markdown_for_c2c(self):
         channel = self._make_ready_channel()
         msg = OutboundMessage(
             channel="qq",
@@ -35,7 +34,7 @@ class TestQQChannelSend:
             },
         )
 
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
 
         channel._client.api.post_c2c_message.assert_awaited_once()
         sent = channel._client.api.post_c2c_message.await_args.kwargs
@@ -46,7 +45,7 @@ class TestQQChannelSend:
         assert sent["msg_seq"] == 1
         assert "content" not in sent
 
-    def test_send_falls_back_to_plain_text_when_markdown_send_fails(self):
+    async def test_send_falls_back_to_plain_text_when_markdown_send_fails(self):
         channel = self._make_ready_channel()
         channel._trace_event = MagicMock(side_effect=RuntimeError("trace failed"))
         channel._client.api.post_c2c_message = AsyncMock(
@@ -63,7 +62,7 @@ class TestQQChannelSend:
             },
         )
 
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
 
         assert channel._client.api.post_c2c_message.await_count == 2
         first = channel._client.api.post_c2c_message.await_args_list[0].kwargs
@@ -80,7 +79,7 @@ class TestQQChannelSend:
         # trigger "duplicate msg_seq".
         assert second["msg_seq"] == 2
 
-    def test_send_does_not_fallback_on_transport_error(self):
+    async def test_send_does_not_fallback_on_transport_error(self):
         channel = self._make_ready_channel()
 
         async def _send_once(coro_factory, max_retries=3):
@@ -101,13 +100,13 @@ class TestQQChannelSend:
             },
         )
 
-        assert _run(channel.send(msg)) is False
+        assert await channel.send(msg) is False
         channel._client.api.post_c2c_message.assert_awaited_once()
         sent = channel._client.api.post_c2c_message.await_args.kwargs
         assert sent["msg_type"] == 2
         assert "content" not in sent
 
-    def test_send_does_not_fallback_when_transport_error_mentions_markdown(self):
+    async def test_send_does_not_fallback_when_transport_error_mentions_markdown(self):
         """A transport-layer error whose message incidentally contains the word
         "markdown" must NOT be reclassified as a markdown compatibility failure,
         otherwise genuine send failures get silently swallowed as plain-text."""
@@ -133,10 +132,10 @@ class TestQQChannelSend:
             },
         )
 
-        assert _run(channel.send(msg)) is False
+        assert await channel.send(msg) is False
         channel._client.api.post_c2c_message.assert_awaited_once()
 
-    def test_send_falls_back_on_qq_server_error_code(self):
+    async def test_send_falls_back_on_qq_server_error_code(self):
         """QQ server-side markdown errors (e.g. 304014 template not configured)
         should trigger plain-text fallback with a fresh msg_seq."""
         channel = self._make_ready_channel()
@@ -159,7 +158,7 @@ class TestQQChannelSend:
             },
         )
 
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
 
         assert channel._client.api.post_c2c_message.await_count == 2
         first = channel._client.api.post_c2c_message.await_args_list[0].kwargs
@@ -231,7 +230,7 @@ class TestQQSendWithButtons:
         channel._client.api.post_group_message = AsyncMock()
         return channel
 
-    def test_c2c_send_attaches_keyboard(self):
+    async def test_c2c_send_attaches_keyboard(self):
         channel = self._make_channel()
         msg = OutboundMessage(
             channel="qq",
@@ -247,7 +246,7 @@ class TestQQSendWithButtons:
                 ],
             },
         )
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
 
         sent = channel._client.api.post_c2c_message.await_args.kwargs
         assert sent["msg_type"] == 2
@@ -256,7 +255,7 @@ class TestQQSendWithButtons:
         assert rows[0]["buttons"][0]["action"]["data"] == "1"
         assert rows[1]["buttons"][0]["action"]["data"] == "2"
 
-    def test_group_send_does_not_attach_keyboard(self):
+    async def test_group_send_does_not_attach_keyboard(self):
         """Group keyboards are out of scope — silently dropped."""
         channel = self._make_channel()
         msg = OutboundMessage(
@@ -270,11 +269,11 @@ class TestQQSendWithButtons:
                 "buttons": [{"text": "Approve", "value": "1"}],
             },
         )
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
         sent = channel._client.api.post_group_message.await_args.kwargs
         assert "keyboard" not in sent
 
-    def test_fallback_appends_button_hint_when_keyboard_present(self):
+    async def test_fallback_appends_button_hint_when_keyboard_present(self):
         """If markdown send fails and we fall back to plain text, the
         keyboard is lost — append a textual hint so the user still has
         a way to reply (the values still pass `_parse_approval_reply`).
@@ -302,7 +301,7 @@ class TestQQSendWithButtons:
                 ],
             },
         )
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
 
         plain_call = channel._client.api.post_c2c_message.await_args_list[1].kwargs
         assert plain_call["msg_type"] == 0
@@ -311,7 +310,7 @@ class TestQQSendWithButtons:
         assert "1=Approve" in plain_call["content"]
         assert "2=Reject" in plain_call["content"]
 
-    def test_fallback_hint_handles_non_string_button_value(self):
+    async def test_fallback_hint_handles_non_string_button_value(self):
         """Regression: integer/None button values must not crash the
         plain-text fallback (the keyboard builder already coerces them)."""
         channel = self._make_channel()
@@ -335,7 +334,7 @@ class TestQQSendWithButtons:
                 ],
             },
         )
-        assert _run(channel.send(msg)) is True
+        assert await channel.send(msg) is True
         plain_call = channel._client.api.post_c2c_message.await_args_list[1].kwargs
         assert "42=OK" in plain_call["content"]
         assert "Cancel=Cancel" in plain_call["content"]
@@ -392,9 +391,9 @@ class TestQQInteractionCallback:
         )
         return interaction
 
-    def test_click_publishes_to_bus_with_button_data(self):
+    async def test_click_publishes_to_bus_with_button_data(self):
         channel = self._make_channel()
-        _run(channel._on_interaction(self._make_interaction("1")))
+        await channel._on_interaction(self._make_interaction("1"))
 
         channel._bus.publish_inbound.assert_awaited_once()
         inbound = channel._bus.publish_inbound.await_args[0][0]
@@ -405,63 +404,61 @@ class TestQQInteractionCallback:
         assert inbound.metadata["button_value"] == "1"
         assert inbound.metadata["msg_type"] == "c2c"
 
-    def test_click_acks_interaction(self):
+    async def test_click_acks_interaction(self):
         channel = self._make_channel()
-        _run(channel._on_interaction(self._make_interaction("1")))
+        await channel._on_interaction(self._make_interaction("1"))
         channel._client.api.on_interaction_result.assert_awaited_once_with("intr_1", 0)
 
-    def test_click_bypasses_debounce(self):
+    async def test_click_bypasses_debounce(self):
         """Click never hits queue_message (debounce buffer)."""
         channel = self._make_channel()
         channel.queue_message = AsyncMock()
-        _run(channel._on_interaction(self._make_interaction("3")))
+        await channel._on_interaction(self._make_interaction("3"))
         channel.queue_message.assert_not_called()
         channel._bus.publish_inbound.assert_awaited_once()
 
-    def test_group_interaction_ignored(self):
+    async def test_group_interaction_ignored(self):
         """No user_openid → group/guild click → don't publish."""
         channel = self._make_channel()
         intr = self._make_interaction(user_openid="")
         intr.group_openid = "group_xxx"
-        _run(channel._on_interaction(intr))
+        await channel._on_interaction(intr)
         channel._bus.publish_inbound.assert_not_called()
         # ACK still fires — it runs first, before the group-skip return.
         channel._client.api.on_interaction_result.assert_awaited_once_with("intr_1", 0)
 
-    def test_click_dropped_when_middleware_rejects(self):
+    async def test_click_dropped_when_middleware_rejects(self):
         channel = self._make_channel()
         channel._build_inbound_async = AsyncMock(return_value=None)
-        _run(channel._on_interaction(self._make_interaction("1")))
+        await channel._on_interaction(self._make_interaction("1"))
         channel._bus.publish_inbound.assert_not_called()
         # ACK still fires (we don't want the user staring at a stuck button)
         channel._client.api.on_interaction_result.assert_awaited_once()
 
-    def test_empty_button_data_falls_back_to_button_id(self):
+    async def test_empty_button_data_falls_back_to_button_id(self):
         channel = self._make_channel()
-        _run(
-            channel._on_interaction(
-                self._make_interaction(button_data="", button_id="btn_3")
-            )
+        await channel._on_interaction(
+            self._make_interaction(button_data="", button_id="btn_3")
         )
         inbound = channel._bus.publish_inbound.await_args[0][0]
         assert inbound.content == "btn_3"
 
-    def test_ack_fires_even_when_handler_throws(self):
+    async def test_ack_fires_even_when_handler_throws(self):
         """ACK must run before downstream processing so the QQ button UI
         stays responsive even if middleware/bus crashes."""
         channel = self._make_channel()
         channel._build_inbound_async = AsyncMock(side_effect=RuntimeError("boom"))
         # Should not raise — handler swallows downstream errors.
-        _run(channel._on_interaction(self._make_interaction("1")))
+        await channel._on_interaction(self._make_interaction("1"))
         channel._client.api.on_interaction_result.assert_awaited_once_with("intr_1", 0)
 
-    def test_button_value_metadata_is_string_coerced(self):
+    async def test_button_value_metadata_is_string_coerced(self):
         """Regression: metadata['button_value'] must be a string (was raw)."""
         channel = self._make_channel()
         resolved = MagicMock(button_id="btn_0", button_data=42, message_id="msg_orig")
         data = MagicMock(type=None, resolved=resolved)
         intr = MagicMock(id="intr_1", user_openid="u_x", group_openid=None, data=data)
-        _run(channel._on_interaction(intr))
+        await channel._on_interaction(intr)
         inbound = channel._bus.publish_inbound.await_args[0][0]
         assert inbound.content == "42"
         assert inbound.metadata["button_value"] == "42"

@@ -14,7 +14,6 @@ from EvoScientist.cli.channel import (
 from EvoScientist.cli.channel import (
     dispatch_channel_slash_command as _dispatch_channel_slash_command,
 )
-from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -43,25 +42,23 @@ def _make_msg(
     )
 
 
-def test_non_slash_returns_false():
+async def test_non_slash_returns_false():
     """Plain text messages must fall through to the agent."""
     msg = _make_msg(content="hello agent")
     append = MagicMock()
-    handled = _run(
-        dispatch_channel_slash_command(
-            msg,
-            agent=None,
-            thread_id="t1",
-            workspace_dir=None,
-            checkpointer=None,
-            append_system=append,
-        )
+    handled = await dispatch_channel_slash_command(
+        msg,
+        agent=None,
+        thread_id="t1",
+        workspace_dir=None,
+        checkpointer=None,
+        append_system=append,
     )
     assert handled is False
     append.assert_not_called()
 
 
-def test_unresolved_slash_returns_false():
+async def test_unresolved_slash_returns_false():
     """Unknown slash commands must fall through (matches TUI behavior)."""
     msg = _make_msg(content="/unknown-cmd")
     append = MagicMock()
@@ -69,20 +66,18 @@ def test_unresolved_slash_returns_false():
         "EvoScientist.commands.manager.manager.resolve",
         return_value=None,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=append,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=append,
         )
     assert handled is False
 
 
-def test_successful_slash_execution_sets_response_and_breadcrumb():
+async def test_successful_slash_execution_sets_response_and_breadcrumb():
     """Known slash command: cmd_manager.execute ran, helper returns True,
     sends a confirmation to the channel user, and appends a local log line."""
     msg = _make_msg()
@@ -100,15 +95,13 @@ def test_successful_slash_execution_sets_response_and_breadcrumb():
         ) as mock_execute,
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent="fake-agent",
-                thread_id="t1",
-                workspace_dir="/tmp",
-                checkpointer=None,
-                append_system=append,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent="fake-agent",
+            thread_id="t1",
+            workspace_dir="/tmp",
+            checkpointer=None,
+            append_system=append,
         )
     assert handled is True
     mock_execute.assert_awaited_once()
@@ -119,7 +112,7 @@ def test_successful_slash_execution_sets_response_and_breadcrumb():
     assert any("Executed command from" in t for t in breadcrumbs)
 
 
-def test_slash_dispatch_passes_graph_gateway_to_command_context():
+async def test_slash_dispatch_passes_graph_gateway_to_command_context():
     msg = _make_msg()
     fake_cmd = MagicMock()
     fake_cmd.needs_agent.return_value = False
@@ -142,23 +135,21 @@ def test_slash_dispatch_passes_graph_gateway_to_command_context():
         ),
         patch("EvoScientist.cli.channel._set_channel_response"),
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent="fake-agent",
-                thread_id="t1",
-                workspace_dir="/tmp",
-                checkpointer=None,
-                append_system=append,
-                graph_gateway=graph_gateway,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent="fake-agent",
+            thread_id="t1",
+            workspace_dir="/tmp",
+            checkpointer=None,
+            append_system=append,
+            graph_gateway=graph_gateway,
         )
 
     assert handled is True
     assert captured["graph_gateway"] is graph_gateway
 
 
-def test_needs_agent_awaits_loader_and_passes_result():
+async def test_needs_agent_awaits_loader_and_passes_result():
     """Commands with needs_agent=True must await the loader and the
     resulting agent must flow through the CommandContext."""
     msg = _make_msg()
@@ -182,16 +173,14 @@ def test_needs_agent_awaits_loader_and_passes_result():
         ) as mock_execute,
         patch("EvoScientist.cli.channel._set_channel_response"),
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=append,
-                await_agent_ready=_await_ready,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=append,
+            await_agent_ready=_await_ready,
         )
     assert handled is True
     await_called.assert_called_once()
@@ -201,7 +190,7 @@ def test_needs_agent_awaits_loader_and_passes_result():
     assert ctx_arg.agent == "ready-agent"
 
 
-def test_await_agent_ready_failure_sets_error_response():
+async def test_await_agent_ready_failure_sets_error_response():
     msg = _make_msg()
     fake_cmd = MagicMock()
     fake_cmd.needs_agent.return_value = True
@@ -217,16 +206,14 @@ def test_await_agent_ready_failure_sets_error_response():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=append,
-                await_agent_ready=_await_ready,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=append,
+            await_agent_ready=_await_ready,
         )
     assert handled is True
     mock_set_resp.assert_called_once()
@@ -235,7 +222,7 @@ def test_await_agent_ready_failure_sets_error_response():
     assert "agent blew up" in resp_text
 
 
-def test_cmd_manager_raises_returns_true_with_error():
+async def test_cmd_manager_raises_returns_true_with_error():
     """If cmd_manager.execute raises past its own try/except, the helper
     must absorb it, return True, and report via _set_channel_response."""
     msg = _make_msg()
@@ -253,15 +240,13 @@ def test_cmd_manager_raises_returns_true_with_error():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=append,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=append,
         )
     assert handled is True
     mock_set_resp.assert_called_once()
@@ -270,7 +255,7 @@ def test_cmd_manager_raises_returns_true_with_error():
     assert "boom" in resp_text
 
 
-def test_on_cmd_completed_awaited_with_ctx_original_agent_and_cmd():
+async def test_on_cmd_completed_awaited_with_ctx_original_agent_and_cmd():
     """After a successful slash execute, the on_cmd_completed hook must
     be awaited with (ctx, original_agent, cmd) so Rich CLI can adopt an
     ``/model`` agent swap and refresh status for state-mutating commands."""
@@ -302,16 +287,14 @@ def test_on_cmd_completed_awaited_with_ctx_original_agent_and_cmd():
         ),
         patch("EvoScientist.cli.channel._set_channel_response"),
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent="original-agent",
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=append,
-                on_cmd_completed=_on_completed,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent="original-agent",
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=append,
+            on_cmd_completed=_on_completed,
         )
     assert handled is True
     assert captured["ctx_agent"] == "swapped-agent"
@@ -319,7 +302,7 @@ def test_on_cmd_completed_awaited_with_ctx_original_agent_and_cmd():
     assert captured["cmd_name"] == "/model"
 
 
-def test_on_cmd_completed_receives_cmd_for_new_and_compact():
+async def test_on_cmd_completed_receives_cmd_for_new_and_compact():
     """``/new`` / ``/compact`` invoked via channel must flow the cmd into
     the hook so the callback can still refresh status when the agent
     didn't swap — mirrors REPL ``interactive.py:1027-1030``."""
@@ -343,21 +326,19 @@ def test_on_cmd_completed_receives_cmd_for_new_and_compact():
             ),
             patch("EvoScientist.cli.channel._set_channel_response"),
         ):
-            _run(
-                dispatch_channel_slash_command(
-                    _make_msg(content=cmd_name),
-                    agent="same-agent",
-                    thread_id="t1",
-                    workspace_dir=None,
-                    checkpointer=None,
-                    append_system=MagicMock(),
-                    on_cmd_completed=_on_completed,
-                )
+            await dispatch_channel_slash_command(
+                _make_msg(content=cmd_name),
+                agent="same-agent",
+                thread_id="t1",
+                workspace_dir=None,
+                checkpointer=None,
+                append_system=MagicMock(),
+                on_cmd_completed=_on_completed,
             )
         assert captured["cmd_name"] == cmd_name, cmd_name
 
 
-def test_on_cmd_completed_skipped_on_fall_through_and_error():
+async def test_on_cmd_completed_skipped_on_fall_through_and_error():
     """The hook must NOT fire for unresolved slash, non-slash text, or
     when cmd_manager.execute raised."""
     fake_cmd = MagicMock()
@@ -369,16 +350,14 @@ def test_on_cmd_completed_skipped_on_fall_through_and_error():
 
     # Non-slash
     with patch("EvoScientist.cli.channel._set_channel_response"):
-        _run(
-            dispatch_channel_slash_command(
-                _make_msg(content="hi"),
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=MagicMock(),
-                on_cmd_completed=_noop,
-            )
+        await dispatch_channel_slash_command(
+            _make_msg(content="hi"),
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
+            on_cmd_completed=_noop,
         )
     # Unresolved slash
     with (
@@ -388,16 +367,14 @@ def test_on_cmd_completed_skipped_on_fall_through_and_error():
         ),
         patch("EvoScientist.cli.channel._set_channel_response"),
     ):
-        _run(
-            dispatch_channel_slash_command(
-                _make_msg(content="/nope"),
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=MagicMock(),
-                on_cmd_completed=_noop,
-            )
+        await dispatch_channel_slash_command(
+            _make_msg(content="/nope"),
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
+            on_cmd_completed=_noop,
         )
     # Execute raises
     with (
@@ -411,22 +388,20 @@ def test_on_cmd_completed_skipped_on_fall_through_and_error():
         ),
         patch("EvoScientist.cli.channel._set_channel_response"),
     ):
-        _run(
-            dispatch_channel_slash_command(
-                _make_msg(),
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=MagicMock(),
-                on_cmd_completed=_noop,
-            )
+        await dispatch_channel_slash_command(
+            _make_msg(),
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
+            on_cmd_completed=_noop,
         )
 
     completed.assert_not_called()
 
 
-def test_command_error_skips_completion_hook_and_reports_error():
+async def test_command_error_skips_completion_hook_and_reports_error():
     """A command caught as failed by CommandManager must not look successful."""
     msg = _make_msg(content="/resume abc")
     fake_cmd = MagicMock()
@@ -450,16 +425,14 @@ def test_command_error_skips_completion_hook_and_reports_error():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="old-thread",
-                workspace_dir="/old-workspace",
-                checkpointer=None,
-                append_system=MagicMock(),
-                on_cmd_completed=completed,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="old-thread",
+            workspace_dir="/old-workspace",
+            checkpointer=None,
+            append_system=MagicMock(),
+            on_cmd_completed=completed,
         )
 
     assert handled is True
@@ -467,7 +440,7 @@ def test_command_error_skips_completion_hook_and_reports_error():
     mock_set_resp.assert_called_once_with("msg-1", "Command error: workspace conflict")
 
 
-def test_empty_command_error_still_reports_error():
+async def test_empty_command_error_still_reports_error():
     """An empty string error is still a command failure sentinel."""
     msg = _make_msg(content="/resume abc")
     fake_cmd = MagicMock()
@@ -489,16 +462,14 @@ def test_empty_command_error_still_reports_error():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="old-thread",
-                workspace_dir="/old-workspace",
-                checkpointer=None,
-                append_system=MagicMock(),
-                on_cmd_completed=completed,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="old-thread",
+            workspace_dir="/old-workspace",
+            checkpointer=None,
+            append_system=MagicMock(),
+            on_cmd_completed=completed,
         )
 
     assert handled is True
@@ -506,7 +477,7 @@ def test_empty_command_error_still_reports_error():
     mock_set_resp.assert_called_once_with("msg-1", "Command error: (no details)")
 
 
-def test_on_cmd_completed_exception_is_absorbed():
+async def test_on_cmd_completed_exception_is_absorbed():
     """A raising hook must NOT prevent the channel response from being set."""
     msg = _make_msg()
     fake_cmd = MagicMock()
@@ -526,23 +497,21 @@ def test_on_cmd_completed_exception_is_absorbed():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent="orig",
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=MagicMock(),
-                on_cmd_completed=_boom,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent="orig",
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
+            on_cmd_completed=_boom,
         )
     assert handled is True
     mock_set_resp.assert_called_once()
     assert "Command executed" in mock_set_resp.call_args[0][1]
 
 
-def test_top_level_exception_is_absorbed():
+async def test_top_level_exception_is_absorbed():
     """Last-ditch safety net: if anything inside the dispatch pipeline
     raises unexpectedly (lazy import failure, ChannelCommandUI ctor,
     terminal I/O from append_system, ...), the helper must NOT
@@ -557,15 +526,13 @@ def test_top_level_exception_is_absorbed():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=MagicMock(),
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
         )
     assert handled is True
     mock_set_resp.assert_called_once()
@@ -574,7 +541,7 @@ def test_top_level_exception_is_absorbed():
     assert "exploded during resolve" in resp_text
 
 
-def test_cmd_execute_returning_false_falls_through():
+async def test_cmd_execute_returning_false_falls_through():
     """When cmd_manager.execute returns False (empty/unparseable input),
     the helper must return False so the caller falls through to the agent."""
     msg = _make_msg(content="/")
@@ -592,15 +559,13 @@ def test_cmd_execute_returning_false_falls_through():
         ),
         patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
     ):
-        handled = _run(
-            dispatch_channel_slash_command(
-                msg,
-                agent=None,
-                thread_id="t1",
-                workspace_dir=None,
-                checkpointer=None,
-                append_system=append,
-            )
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=append,
         )
     assert handled is False
     mock_set_resp.assert_not_called()

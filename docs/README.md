@@ -11,6 +11,11 @@
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
 | [macOS 24/7 Deployment](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/deployment-macos-24h.md#running-evoscientist-247-on-macos-telegram-bot--stt--ccproxy)   | Run EvoScientist as an always-on service on macOS with OAuth + Telegram + STT   |
 
+
+| Guide                                                      | Description                                                                     |
+|------------------------------------------------------------|---------------------------------------------------------------------------------|
+| [`stream-json` output protocol](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/stream-json.md#stream-json-output-protocol)   | Line-delimited JSON event stream (`--output-format stream-json`) for driving EvoScientist headlessly from SDK / programmatic clients |
+
 ## Contributing a Recipe
 
 See the [Contributing Guide](../CONTRIBUTING.md) for general guidelines. When adding a new recipe:
