@@ -123,6 +123,16 @@ def get_config_path() -> Path:
 # Configuration dataclass
 # =============================================================================
 
+# OpenRouter app-attribution defaults (issue #339). Single source of truth: the
+# EvoScientistConfig fields below default to these, and llm/models.py imports
+# them for its env-fallback, so the values never drift across the two layers.
+OPENROUTER_DEFAULT_HTTP_REFERER = "https://github.com/EvoScientist/EvoScientist"
+OPENROUTER_DEFAULT_APP_TITLE = "EvoScientist"
+# OpenRouter honors only the first 2 categories per request (server-side limit)
+# and silently ignores the rest, so keep the two most relevant ones. Chosen per
+# maintainer review — creative-writing is a less competitive marketplace group.
+OPENROUTER_DEFAULT_APP_CATEGORIES = "creative-writing,personal-agent"
+
 
 @dataclass
 class EvoScientistConfig:
@@ -278,10 +288,21 @@ class EvoScientistConfig:
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
-    reasoning_effort: str = "high"
+    # Empty means use the provider/model default. A non-empty value is an
+    # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
+    reasoning_effort: str = ""
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
     openrouter_anthropic_prompt_cache: bool = True
+    # OpenRouter app attribution (issue #339). Sent only for the openrouter
+    # provider; identifies EvoScientist in OpenRouter's app rankings/analytics.
+    # Override (e.g. a private fork) via these fields or their env vars.
+    # Defaults live in the module constants above (also imported by llm/models.py).
+    openrouter_http_referer: str = OPENROUTER_DEFAULT_HTTP_REFERER
+    openrouter_app_title: str = OPENROUTER_DEFAULT_APP_TITLE
+    # Comma-separated; split into a list before being passed to
+    # langchain-openrouter (its app_categories kwarg expects list[str]).
+    openrouter_app_categories: str = OPENROUTER_DEFAULT_APP_CATEGORIES
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -761,6 +782,9 @@ _ENV_MAPPINGS = {
     "openrouter_anthropic_prompt_cache": (
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ),
+    "openrouter_http_referer": "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+    "openrouter_app_title": "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+    "openrouter_app_categories": "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
     "dangerous_mode": "EVOSCIENTIST_DANGEROUS_MODE",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
@@ -892,6 +916,22 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
+    if config.openrouter_http_referer and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_HTTP_REFERER"] = (
+            config.openrouter_http_referer
+        )
+    if config.openrouter_app_title and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_TITLE"] = config.openrouter_app_title
+    if config.openrouter_app_categories and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"] = (
+            config.openrouter_app_categories
+        )
     if not config.openrouter_anthropic_prompt_cache and not os.environ.get(
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):
