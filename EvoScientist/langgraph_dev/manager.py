@@ -306,14 +306,19 @@ def is_async_subagents_available() -> bool:
 
 def _langgraph_exe() -> str | None:
     """Return the path to the langgraph CLI binary, or None if not found."""
+    import sys
+
+    executable_dir = os.path.dirname(sys.executable)
+    candidate_names = (
+        ["langgraph.exe", "langgraph"] if os.name == "nt" else ["langgraph"]
+    )
+    for candidate_name in candidate_names:
+        candidate = os.path.join(executable_dir, candidate_name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     found = shutil.which("langgraph")
     if found:
         return found
-    import sys as _sys
-
-    candidate = os.path.join(os.path.dirname(_sys.executable), "langgraph")
-    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        return candidate
     return None
 
 
@@ -709,6 +714,7 @@ def start_langgraph_dev(
     sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "full" if deploy_mode else "stripped"
 
     try:
+        logger.info("Starting langgraph dev with CLI: %s", exe)
         proc = subprocess.Popen(
             [
                 exe,

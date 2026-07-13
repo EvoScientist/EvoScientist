@@ -548,6 +548,10 @@ def save_config(config: EvoScientistConfig) -> None:
     """
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        config_path.parent.chmod(0o700)
+    except OSError:
+        pass
 
     data = _config_to_dict(config)
 
@@ -560,6 +564,10 @@ def save_config(config: EvoScientistConfig) -> None:
             sort_keys=False,
             allow_unicode=True,
         )
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def reset_config() -> None:

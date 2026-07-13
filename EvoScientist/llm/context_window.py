@@ -20,9 +20,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
-    # xAI Grok — per-model windows (build-0.1: 256K, 4.3: 1M).
+    # xAI Grok — per-model windows (build-0.1: 256K, 4.5: 500K).
     "grok-build-0.1": 256_000,
-    "grok-4.3": 1_000_000,
+    "grok-4.5": 500_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
     # MiniMax M3 — 1M context (M2.x variants stay at provider default ~204K).
@@ -32,6 +32,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Zhipu GLM-5.2 — 1M context, an exception to the ``glm-5`` family (203K).
     # Matches OpenRouter ``z-ai/glm-5.2`` via split('/')[-1].
     "glm-5.2": 1_000_000,
+    # Tencent Hunyuan HY3 — 262K context (OpenRouter ``tencent/hy3``).
+    "hy3": 262_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
@@ -40,6 +42,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     # All Claude — 1M via the ``context-1m-2025-08-07`` beta header.
     ("claude-", 1_000_000),
+    # OpenAI GPT-5.6 family — sol, terra, luna variants
+    ("gpt-5.6", 1_050_000),
     # OpenAI GPT-5.5 family — base, pro, future variants
     ("gpt-5.5", 1_050_000),
     # Google Gemini 3.x family — flash, flash-lite, pro (1.05M). Excludes 2.5.
