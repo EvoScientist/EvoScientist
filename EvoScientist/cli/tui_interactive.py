@@ -219,6 +219,9 @@ async def _sync_tui_command_completion(
     cmd: Command,
 ) -> None:
     """Adopt successful command-side state changes back into the TUI app."""
+    if app._exiting:
+        return
+
     agent_swapped = ctx.agent is not None and ctx.agent is not original_agent
     if agent_swapped:
         from ..EvoScientist import _ensure_config
@@ -472,6 +475,7 @@ def run_textual_interactive(
 
             self._channel_runtime = ChannelRuntime()
             self._quit_pending: bool = False
+            self._exiting: bool = False
             self._current_model: str | None = model
             self._current_provider: str | None = provider
             self._status_started_at = datetime.now()
@@ -2871,8 +2875,9 @@ def run_textual_interactive(
                 self._render_status()
             finally:
                 self._busy = False
-                prompt_widget.disabled = False
-                prompt_widget.focus()
+                if not self._exiting:
+                    prompt_widget.disabled = False
+                    prompt_widget.focus()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -2977,6 +2982,7 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
+            self._exiting = True
             event_sink.set_fallback_display(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
