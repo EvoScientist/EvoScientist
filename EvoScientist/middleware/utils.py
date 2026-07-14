@@ -20,6 +20,12 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
     OpenAI reasoning can conflict.  Strip these settings so structured
     output calls work reliably.
 
+    DeepSeek enables thinking server-side by default (no client field to
+    clear), and its thinking mode rejects the forced ``tool_choice`` that
+    ``with_structured_output`` sends ("Thinking mode does not support this
+    tool_choice"). For DeepSeek models the copy gets an explicit
+    ``extra_body["thinking"] = {"type": "disabled"}`` request field instead.
+
     Uses ``model_copy()`` to produce a real new instance — ``bind()`` only
     wraps the model in a ``RunnableBinding`` whose kwargs do NOT override
     first-class Pydantic fields like ``thinking`` on ``ChatAnthropic``.
@@ -32,17 +38,32 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
     if getattr(model, "reasoning", None) or "reasoning" in model_kwargs:
         updates["reasoning"] = None
 
+    if type(model).__module__.startswith("langchain_deepseek"):
+        extra_body = dict(getattr(model, "extra_body", None) or {})
+        if extra_body.get("thinking") != {"type": "disabled"}:
+            extra_body["thinking"] = {"type": "disabled"}
+            updates["extra_body"] = extra_body
+
     if not updates:
         return model
 
     # Prefer Pydantic model_copy (creates a true new instance with the
     # field cleared) over bind() which only adds invocation kwargs.
     try:
-        return model.model_copy(update=updates)
+        copy = model.model_copy(update=updates)
     except Exception:
         # Fallback for non-Pydantic or unusual model classes
         # Note: bind() may not effectively override first-class Pydantic fields
         return model.bind(**updates)
+
+    # The DeepSeek passback patch closes over the main model. model_copy()
+    # carries that closure onto the helper copy, where it would serialize
+    # with the main model's settings and lose the thinking override above.
+    # Thinking is disabled on this helper, so reasoning passback is not needed.
+    copied_payload = copy.__dict__.get("_get_request_payload")
+    if getattr(copied_payload, "_evosci_deepseek_reasoning_passback", False):
+        copy.__dict__.pop("_get_request_payload", None)
+    return copy
 
 
 def append_to_system_message(

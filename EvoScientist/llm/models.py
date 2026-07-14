@@ -41,7 +41,6 @@ _VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _DASHSCOPE_CODE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 
-_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 
@@ -92,7 +91,6 @@ def _resolve_reasoning_effort(default: str) -> str:
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
 _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
-    "deepseek": (_DEEPSEEK_BASE_URL, "DEEPSEEK_API_KEY"),
     "moonshot": (_MOONSHOT_BASE_URL, "MOONSHOT_API_KEY"),
     "siliconflow": (_SILICONFLOW_BASE_URL, "SILICONFLOW_API_KEY"),
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
@@ -528,6 +526,11 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
 
+    elif provider == "deepseek":
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if api_key:
+            kwargs["api_key"] = api_key
+
     # OpenAI-routed providers → route through OpenAI provider with base_url
     elif provider in _OPENAI_ROUTED_PROVIDERS:
         _original_provider = provider
@@ -686,7 +689,7 @@ def get_chat_model(
 
     # DeepSeek thinking mode requires reasoning_content passback in multi-turn
     # + tool_use scenarios.
-    if _original_provider == "deepseek":
+    if provider == "deepseek":
         _patch_deepseek_reasoning_passback(chat_model)
 
     if _is_openai_proxy:

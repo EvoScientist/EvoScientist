@@ -363,3 +363,41 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     te_idx = type_names.index("ToolErrorHandlerMiddleware")
     mem_idx = type_names.index("EvoMemoryMiddleware")
     assert te_idx < ts_idx < tracker_idx < mem_idx
+
+
+# ---------------------------------------------------------------------------
+# disable_thinking: DeepSeek helper copies (issue #348)
+# ---------------------------------------------------------------------------
+
+
+def _deepseek_model(monkeypatch, **kwargs):
+    from langchain_deepseek import ChatDeepSeek
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    return ChatDeepSeek(model="deepseek-v4-pro", **kwargs)
+
+
+def test_disable_thinking_deepseek_sets_request_field(monkeypatch):
+    """DeepSeek thinking is a server-side default; the helper copy must
+    disable it in the request body, or the selector's forced tool_choice
+    is rejected ("Thinking mode does not support this tool_choice")."""
+    from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+    from EvoScientist.middleware.utils import disable_thinking
+
+    model = _deepseek_model(monkeypatch)
+    _patch_deepseek_reasoning_passback(model)
+    safe = disable_thinking(model)
+
+    assert safe is not model
+    assert safe.extra_body == {"thinking": {"type": "disabled"}}
+    assert model.extra_body is None  # original untouched
+
+
+def test_disable_thinking_deepseek_preserves_extra_body(monkeypatch):
+    from EvoScientist.middleware.utils import disable_thinking
+
+    model = _deepseek_model(monkeypatch, extra_body={"custom": 1})
+    safe = disable_thinking(model)
+
+    assert safe.extra_body == {"custom": 1, "thinking": {"type": "disabled"}}
+    assert model.extra_body == {"custom": 1}

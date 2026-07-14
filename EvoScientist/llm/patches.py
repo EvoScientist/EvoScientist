@@ -846,10 +846,10 @@ def _patch_openrouter_strip_responses_reasoning() -> None:
 # ---------------------------------------------------------------------------
 # Patch: DeepSeek thinking mode requires reasoning_content to be passed back
 # in all assistant messages for multi-turn + tool_use scenarios.
-# langchain-openai's _convert_message_to_dict drops this field, causing
+# langchain-openai's _convert_message_to_dict drops this field (including
+# in langchain-deepseek 1.1.0, whose ChatDeepSeek inherits it), causing
 # HTTP 400 "The reasoning_content in the thinking mode must be passed back".
-# Mirrors langchain-ai/langchain PR #34516 (which patches langchain-deepseek;
-# we apply equivalent logic to a langchain-openai ChatOpenAI instance).
+# Mirrors langchain-ai/langchain PR #34516.
 # ---------------------------------------------------------------------------
 def _patch_deepseek_reasoning_passback(model: Any) -> None:
     """Inject reasoning_content into outgoing payload assistant messages.
@@ -872,7 +872,7 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
     EvoScientist/llm/models.py), so all callers are DeepSeek endpoints.
 
     Args:
-        model: A langchain-openai ChatOpenAI instance configured for DeepSeek.
+        model: A BaseChatOpenAI-shaped instance configured for DeepSeek.
     """
     import functools
 
@@ -929,6 +929,7 @@ def _patch_deepseek_reasoning_passback(model: Any) -> None:
 
         return payload
 
+    _patched._evosci_deepseek_reasoning_passback = True  # type: ignore[attr-defined]
     model._get_request_payload = _patched
 
 

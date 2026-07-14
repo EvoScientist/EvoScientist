@@ -205,6 +205,8 @@ def _provider_from_model(model: Any) -> str | None:
         return "openrouter"
     if cls_module.startswith("langchain_google_genai"):
         return "google_genai"
+    if cls_module.startswith("langchain_deepseek"):
+        return "deepseek"
     if cls_module.startswith("langchain_openai"):
         return _lookup_host_or_compat(
             getattr(model, "openai_api_base", None), module_tag="openai"
