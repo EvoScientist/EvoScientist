@@ -235,7 +235,7 @@ class QQChannel(Channel):
 
         Surfaces the click as an :class:`InboundMessage` whose ``content`` is
         the button's ``data`` verbatim — so a "1"/"approve"/… click flows
-        through ``_parse_approval_reply`` exactly like a typed reply.
+        through ``parse_approval_reply`` exactly like a typed reply.
 
         The click runs through inbound middleware (Dedup suppresses QQ
         retries) but is published directly to the bus so the per-sender
@@ -264,7 +264,7 @@ class QQChannel(Channel):
             triggering_msg_id = getattr(resolved, "message_id", "") or ""
 
             # QQ may serialize non-str values; coerce.  Fall back to button id
-            # when no data — same path as a typed reply via _parse_approval_reply.
+            # when no data — same path as a typed reply via parse_approval_reply.
             button_value = str(button_data) if button_data != "" else ""
             text = button_value or button_id
 
@@ -360,7 +360,7 @@ class QQChannel(Channel):
         plain_text = self._plain_formatter.format(raw_text)
         # Plain-text fallback can't carry a keyboard.  Append `value=label`
         # pairs so the user can still type "1"/"approve"/… instead of
-        # tapping (`_parse_approval_reply` accepts the same values).
+        # tapping (`parse_approval_reply` accepts the same values).
         if buttons:
             pairs = []
             for btn in buttons:

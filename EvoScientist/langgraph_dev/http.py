@@ -43,7 +43,7 @@ async def get_models(_request: Request) -> JSONResponse:
     ``discover_ollama_models()`` call, same 1.5-s timeout, same
     fail-soft semantics (the probe returns ``[]`` on any error, never
     raises). The TUI's "Custom Ollama model…" sentinel is intentionally
-    omitted: that's a widget-specific input affordance, not part of
+    omitted — that's a widget-specific input affordance, not part of
     the registry surface.
 
     ``default`` reflects the deployment's currently-configured fallback
