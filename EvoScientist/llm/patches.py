@@ -730,6 +730,66 @@ _patch_openai_capture_reasoning_content()
 
 
 # ---------------------------------------------------------------------------
+# Patch (module-level): silence langgraph_api's OpenAPI schema-generation
+# warnings for endpoints whose docstrings aren't valid YAML.
+#
+# Upstream ``langgraph_api.utils.SchemaGenerator.get_schema`` calls
+# ``parse_docstring`` (inherited from Starlette's ``BaseSchemaGenerator``)
+# on every registered endpoint. When the docstring is prose with stray
+# ``:`` characters, ``yaml.safe_load`` raises and upstream logs the
+# failure + full traceback at WARNING level. It then falls back to
+# ``{"description": docstring}`` — the endpoint still ends up in the
+# schema with its prose as the description, just without structured
+# ``parameters``/``responses``/``tags`` fields.
+#
+# The fallback path is fine; the warning + traceback is just noise. And
+# it's only triggered for our deploy because mounting any custom Starlette
+# app (``EvoScientist/langgraph_dev/http.py``) makes upstream call
+# ``update_openapi_spec`` at startup — which iterates EVERY route,
+# including upstream's own endpoints whose prose docstrings predate the
+# YAML convention.
+#
+# Fix: wrap ``parse_docstring`` itself and absorb ``yaml.YAMLError`` by
+# returning the same fallback shape upstream's except branch produces.
+# Non-YAML exceptions are deliberately left to propagate — upstream's
+# ``get_schema`` already catches them and logs WARNING + traceback, so
+# unexpected failures remain debuggable. Patching ``parse_docstring`` (a
+# small, stable method) instead of ``get_schema`` (the larger loop body)
+# minimizes our exposure to upstream churn.
+# ---------------------------------------------------------------------------
+_langgraph_schema_silenced_patched = False
+
+
+def _patch_langgraph_schema_generator_silence_warnings() -> None:
+    global _langgraph_schema_silenced_patched
+    if _langgraph_schema_silenced_patched:
+        return
+    try:
+        import langgraph_api.utils as _lgapi_utils
+        import yaml
+
+        _SchemaGenerator = _lgapi_utils.SchemaGenerator
+        _orig_parse_docstring = _SchemaGenerator.parse_docstring
+
+        def _patched_parse_docstring(self: Any, func: Any) -> dict[str, Any]:
+            try:
+                return _orig_parse_docstring(self, func)
+            except yaml.YAMLError:
+                return {"description": getattr(func, "__doc__", None) or ""}
+
+        _SchemaGenerator.parse_docstring = _patched_parse_docstring
+        _langgraph_schema_silenced_patched = True
+    except Exception:
+        # Patches are loader-safe: never crash the import. Silent failure
+        # here just leaves the upstream warnings visible in deploy logs,
+        # which is a benign fallback.
+        pass
+
+
+_patch_langgraph_schema_generator_silence_warnings()
+
+
+# ---------------------------------------------------------------------------
 # Patch (lazy, OpenRouter only): strip OpenAI-Responses encrypted reasoning
 # items from outgoing assistant messages.
 #

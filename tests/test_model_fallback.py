@@ -6,6 +6,7 @@ fallback chain behaviour via _try_fallbacks / _guard_and_fallback.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -223,6 +224,89 @@ class TestTryFallbacks:
         # fb-b should never be reached.
         assert mock_gcm.call_count == 1
 
+    async def test_exhausted_fallbacks_attribute_to_last_failing_model(self):
+        """Regression: when every fallback fails, the raised
+        ``ProviderStreamError`` must be attributed to the model that
+        ACTUALLY failed last, not the original ``request.model``.
+        Prevents a ``deepseek → moonshot`` chain from surfacing as
+        ``provider: deepseek`` after moonshot exhausts its quota.
+        """
+        from EvoScientist.llm.errors import ProviderStreamError
+
+        add_fallback("moonshot-model", "moonshot")
+        # Original request's model is openai-shape. Fallback's model
+        # will be openai-shape with a moonshot base_url.
+        req = _fake_request()
+
+        # ChatOpenAI-shape model instance so ``_provider_from_model``
+        # returns a recognized provider.
+        def _make_openai_model(base_url=None):
+            cls = type(
+                "ChatOpenAI",
+                (),
+                {"__module__": "langchain_openai.chat_models.base"},
+            )
+            inst = cls()
+            inst.openai_api_base = base_url
+            return inst
+
+        req.model = _make_openai_model()  # primary
+        fallback_model = _make_openai_model(base_url="https://api.moonshot.cn/v1")
+        # ``request.override(model=...)`` must return the request with the
+        # new model so ``_try_fallbacks`` tracks the failing model.
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+
+        async def _invoke(_r):
+            raise Exception("429 quota exceeded")
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = fallback_model
+            with pytest.raises(ProviderStreamError) as exc_info:
+                await _try_fallbacks(req, _invoke, Exception("openai primary failed"))
+
+        # Attribution flipped to moonshot (the failing fallback), not
+        # openai (the original request's model).
+        assert exc_info.value.provider == "moonshot"
+        assert "quota exceeded" in exc_info.value.message
+
+    async def test_langgraph_error_at_fallback_raise_point_passes_through(self):
+        """Regression: ``_raise_normalized`` calls ``_normalize``
+        directly, so its ``_should_pass_through`` gate must fire even
+        without the ``ErrorNormalizationMiddleware`` wrap sites' own
+        check. Prevents a ``langgraph.errors.*`` exception hitting the
+        fallback chain from being wrapped as a provider incident.
+        """
+        from langgraph.errors import InvalidUpdateError
+
+        add_fallback("fb-a", "prov-a")
+        req = _fake_request()
+
+        # Use a recognized-provider model so ``_provider_from_model``
+        # wouldn't short-circuit — the guard has to come from
+        # ``_should_pass_through``, not the provider check.
+        cls = type(
+            "ChatOpenAI", (), {"__module__": "langchain_openai.chat_models.base"}
+        )
+        model = cls()
+        model.openai_api_base = None
+        req.model = model
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+
+        raised = InvalidUpdateError("state mismatch")
+
+        async def _invoke(_r):
+            raise raised
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = model
+            with pytest.raises(InvalidUpdateError) as exc_info:
+                await _try_fallbacks(req, _invoke, Exception("primary failed"))
+        assert exc_info.value is raised
+
 
 # ═════════════════════════════════════════════════════════════════
 # 3. _guard_and_fallback — pre-check before chain walk
@@ -240,6 +324,34 @@ class TestGuardAndFallback:
         with pytest.raises(ContextOverflowError):
             await _guard_and_fallback(ContextOverflowError("overflow"), req, invoke)
 
+        invoke.assert_not_awaited()
+
+    async def test_context_overflow_with_provider_model_passes_through_unwrapped(self):
+        """Regression: a ``ContextOverflowError`` entering
+        ``_guard_and_fallback`` under a recognized-provider model must
+        come out unwrapped. Otherwise ``_raise_normalized`` →
+        ``_normalize`` would wrap it as a ``ProviderStreamError`` and
+        deepagents' ``SummarizationMiddleware`` (which sits outside
+        the user middleware stack and catches by exact type) would
+        stop compressing history and retrying.
+        """
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        # Recognized provider — without the gate in ``_normalize`` this
+        # would wrap. With the gate, the raw type propagates.
+        cls = type(
+            "ChatOpenAI", (), {"__module__": "langchain_openai.chat_models.base"}
+        )
+        model = cls()
+        model.openai_api_base = None
+        req.model = model
+        invoke = AsyncMock()
+
+        raised = ContextOverflowError("context length exceeded")
+        with pytest.raises(ContextOverflowError) as exc_info:
+            await _guard_and_fallback(raised, req, invoke)
+
+        assert exc_info.value is raised
         invoke.assert_not_awaited()
 
     async def test_malformed_400_raises_immediately(self):
