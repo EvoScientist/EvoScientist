@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta
 from typing import ClassVar
 
@@ -243,7 +242,7 @@ def test_build_status_text_uses_rich_styles():
     assert text.spans
 
 
-def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
+async def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
     class _FakeModel:
         model_name: ClassVar[str] = "provider/demo-model"
         profile: ClassVar[dict[str, object]] = {}
@@ -262,16 +261,12 @@ def test_build_session_status_snapshot_uses_fallback_window(monkeypatch):
         _fake_count,
     )
 
-    snapshot = asyncio.run(
-        build_session_status_snapshot(
-            "thread-1",
-            pending_user_text="pending",
-            graph_gateway=FakeGraphGateway(
-                thread_store=FakeThreadStore(
-                    messages=[HumanMessage(content="existing")]
-                )
-            ),
-        )
+    snapshot = await build_session_status_snapshot(
+        "thread-1",
+        pending_user_text="pending",
+        graph_gateway=FakeGraphGateway(
+            thread_store=FakeThreadStore(messages=[HumanMessage(content="existing")])
+        ),
     )
 
     assert snapshot.model_full == "provider/demo-model"

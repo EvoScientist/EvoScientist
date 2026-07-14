@@ -1,6 +1,5 @@
 """Tests for CLI interactive UI backend dispatch."""
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -101,7 +100,7 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
     assert calls == [(config, "/tmp/workspace")]
 
 
-def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
+async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
     monkeypatch,
 ):
     import EvoScientist.cli.commands as cmds
@@ -117,11 +116,9 @@ def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
     )
 
     config = SimpleNamespace(enable_async_subagents=False)
-    asyncio.run(
-        cmds._sync_background_agent_server_workspace(
-            config,
-            workspace_dir="/tmp/resumed-workspace",
-        )
+    await cmds._sync_background_agent_server_workspace(
+        config,
+        workspace_dir="/tmp/resumed-workspace",
     )
 
     assert calls == [(config, "/tmp/resumed-workspace")]

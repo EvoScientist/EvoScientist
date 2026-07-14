@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -179,7 +178,7 @@ def test_launch_background_run_deletes_thread_when_run_creation_fails(monkeypatc
     fake_client.threads.delete.assert_called_once_with("thread-1")
 
 
-def test_async_launch_background_run_deletes_thread_when_run_creation_fails(
+async def test_async_launch_background_run_deletes_thread_when_run_creation_fails(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -204,11 +203,8 @@ def test_async_launch_background_run_deletes_thread_when_run_creation_fails(
         lambda **_kwargs: SimpleNamespace(threads=_Threads(), runs=_Runs()),
     )
 
-    async def run() -> None:
-        with pytest.raises(RuntimeError, match="run creation failed"):
-            await background_runs.alaunch_background_run(_request())
-
-    asyncio.run(run())
+    with pytest.raises(RuntimeError, match="run creation failed"):
+        await background_runs.alaunch_background_run(_request())
 
     assert deleted == ["thread-1"]
 
@@ -278,7 +274,7 @@ def test_sync_status_watcher_preserves_thread_on_poll_failure(
     assert deleted == []
 
 
-def test_async_status_watcher_aborts_and_deletes_thread_on_error_status():
+async def test_async_status_watcher_aborts_and_deletes_thread_on_error_status():
     finished: list[background_runs.BackgroundRun] = []
     aborted: list[background_runs.BackgroundRun] = []
     deleted: list[str] = []
@@ -291,29 +287,26 @@ def test_async_status_watcher_aborts_and_deletes_thread_on_error_status():
         async def delete(self, thread_id: str):
             deleted.append(thread_id)
 
-    async def run() -> None:
-        await background_runs.awatch_background_run(
-            SimpleNamespace(runs=_Runs(), threads=_Threads()),
-            thread_id="thread-1",
-            run_id="run-1",
-            name="test worker",
-            hooks=background_runs.BackgroundRunHooks(
-                on_finished=finished.append,
-                on_aborted=aborted.append,
-            ),
-            watcher_config=background_runs.BackgroundRunWatcherConfig(
-                poll_interval_seconds=0,
-            ),
-        )
-
-    asyncio.run(run())
+    await background_runs.awatch_background_run(
+        SimpleNamespace(runs=_Runs(), threads=_Threads()),
+        thread_id="thread-1",
+        run_id="run-1",
+        name="test worker",
+        hooks=background_runs.BackgroundRunHooks(
+            on_finished=finished.append,
+            on_aborted=aborted.append,
+        ),
+        watcher_config=background_runs.BackgroundRunWatcherConfig(
+            poll_interval_seconds=0,
+        ),
+    )
 
     assert finished == []
     assert [run.run_id for run in aborted] == ["run-1"]
     assert deleted == ["thread-1"]
 
 
-def test_async_status_watcher_preserves_run_url():
+async def test_async_status_watcher_preserves_run_url():
     finished: list[background_runs.BackgroundRun] = []
 
     class _Runs:
@@ -324,21 +317,18 @@ def test_async_status_watcher_preserves_run_url():
         async def delete(self, _thread_id: str):
             return None
 
-    async def run() -> None:
-        await background_runs.awatch_background_run(
-            SimpleNamespace(runs=_Runs(), threads=_Threads()),
-            url="http://worker.example",
-            thread_id="thread-1",
-            run_id="run-1",
-            name="test worker",
-            hooks=background_runs.BackgroundRunHooks(
-                on_finished=finished.append,
-            ),
-            watcher_config=background_runs.BackgroundRunWatcherConfig(
-                poll_interval_seconds=0,
-            ),
-        )
-
-    asyncio.run(run())
+    await background_runs.awatch_background_run(
+        SimpleNamespace(runs=_Runs(), threads=_Threads()),
+        url="http://worker.example",
+        thread_id="thread-1",
+        run_id="run-1",
+        name="test worker",
+        hooks=background_runs.BackgroundRunHooks(
+            on_finished=finished.append,
+        ),
+        watcher_config=background_runs.BackgroundRunWatcherConfig(
+            poll_interval_seconds=0,
+        ),
+    )
 
     assert [run.url for run in finished] == ["http://worker.example"]

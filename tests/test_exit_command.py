@@ -2,11 +2,9 @@
 
 from unittest.mock import MagicMock
 
-from tests.conftest import run_async as _run
-
 
 class TestExitCommand:
-    def test_execute_calls_force_quit(self):
+    async def test_execute_calls_force_quit(self):
         from EvoScientist.commands.base import CommandContext
         from EvoScientist.commands.implementation.session import ExitCommand
 
@@ -17,7 +15,7 @@ class TestExitCommand:
             ui=ui,
         )
         cmd = ExitCommand()
-        _run(cmd.execute(ctx, []))
+        await cmd.execute(ctx, [])
         ui.force_quit.assert_called_once()
 
     def test_aliases_registered(self):

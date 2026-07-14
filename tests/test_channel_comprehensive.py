@@ -15,7 +15,6 @@ Test groups:
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -44,9 +43,36 @@ from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
-from tests.conftest import run_async as _run
 from tests.fakes import FakeChannelConfig as _FakeConfig
 from tests.fakes import FakeGraphGateway, StubChannel
+
+
+class ManualClock:
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+async def _flush_debounce(ch: StubChannel, sender: str) -> None:
+    task = ch._debounce_tasks.get(sender)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await ch._process_buffered_messages(sender)
+
+
+async def _wait_for_async(predicate) -> None:
+    while not predicate():
+        await asyncio.sleep(0)
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. DedupCache
@@ -69,9 +95,10 @@ class TestDedupCache:
         assert dc.is_duplicate("") is False
 
     def test_ttl_expiry(self):
-        dc = DedupCache(ttl_seconds=0.05)
+        clock = ManualClock()
+        dc = DedupCache(ttl_seconds=0.05, clock=clock)
         dc.is_duplicate("msg_001")
-        time.sleep(0.1)
+        clock.advance(0.051)
         # After TTL, the entry should be pruned
         assert dc.is_duplicate("msg_001") is False
 
@@ -109,7 +136,7 @@ class TestDedupCache:
 
 
 class TestRetryAsync:
-    def test_success_on_first_attempt(self):
+    async def test_success_on_first_attempt(self):
         call_count = 0
 
         async def _fn():
@@ -117,11 +144,11 @@ class TestRetryAsync:
             call_count += 1
             return "ok"
 
-        result = _run(retry_async(_fn))
+        result = await retry_async(_fn)
         assert result == "ok"
         assert call_count == 1
 
-    def test_retries_on_failure_then_succeeds(self):
+    async def test_retries_on_failure_then_succeeds(self):
         attempts = []
 
         async def _fn():
@@ -130,28 +157,24 @@ class TestRetryAsync:
                 raise RuntimeError("transient")
             return "recovered"
 
-        result = _run(
-            retry_async(
-                _fn,
-                config=RetryConfig(attempts=5, min_delay_s=0.01, max_delay_s=0.05),
-            )
+        result = await retry_async(
+            _fn,
+            config=RetryConfig(attempts=5, min_delay_s=0.01, max_delay_s=0.05),
         )
         assert result == "recovered"
         assert len(attempts) == 3
 
-    def test_exhausts_retries_raises(self):
+    async def test_exhausts_retries_raises(self):
         async def _fn():
             raise ValueError("permanent")
 
         with pytest.raises(ValueError, match="permanent"):
-            _run(
-                retry_async(
-                    _fn,
-                    config=RetryConfig(attempts=2, min_delay_s=0.01),
-                )
+            await retry_async(
+                _fn,
+                config=RetryConfig(attempts=2, min_delay_s=0.01),
             )
 
-    def test_should_retry_false_aborts(self):
+    async def test_should_retry_false_aborts(self):
         """[B-01] should_retry returning False should abort immediately."""
         call_count = 0
 
@@ -161,16 +184,14 @@ class TestRetryAsync:
             raise PermissionError("forbidden")
 
         with pytest.raises(PermissionError):
-            _run(
-                retry_async(
-                    _fn,
-                    config=RetryConfig(attempts=5, min_delay_s=0.01),
-                    should_retry=lambda exc, _: False,
-                )
+            await retry_async(
+                _fn,
+                config=RetryConfig(attempts=5, min_delay_s=0.01),
+                should_retry=lambda exc, _: False,
             )
         assert call_count == 1  # No retry happened
 
-    def test_server_retry_after_respected(self):
+    async def test_server_retry_after_respected(self):
         """retry_after_s callback provides server-supplied delay."""
         delays = []
 
@@ -182,20 +203,16 @@ class TestRetryAsync:
         def _on_retry(info: RetryInfo):
             delays.append(info.delay_s)
 
-        _run(
-            retry_async(
-                _fn,
-                config=RetryConfig(
-                    attempts=3, min_delay_s=0.01, max_delay_s=10, jitter=0
-                ),
-                retry_after_s=lambda _: 0.5,
-                on_retry=_on_retry,
-            )
+        await retry_async(
+            _fn,
+            config=RetryConfig(attempts=3, min_delay_s=0.01, max_delay_s=10, jitter=0),
+            retry_after_s=lambda _: 0.5,
+            on_retry=_on_retry,
         )
         assert len(delays) == 1
         assert delays[0] >= 0.5
 
-    def test_jitter_applied(self):
+    async def test_jitter_applied(self):
         """With jitter > 0, delays should vary."""
         delays = []
 
@@ -204,14 +221,12 @@ class TestRetryAsync:
                 raise RuntimeError("fail")
             return "ok"
 
-        _run(
-            retry_async(
-                _fn,
-                config=RetryConfig(
-                    attempts=10, min_delay_s=0.01, max_delay_s=1.0, jitter=0.5
-                ),
-                on_retry=lambda info: delays.append(info.delay_s),
-            )
+        await retry_async(
+            _fn,
+            config=RetryConfig(
+                attempts=10, min_delay_s=0.01, max_delay_s=1.0, jitter=0.5
+            ),
+            on_retry=lambda info: delays.append(info.delay_s),
         )
         # With 50% jitter, not all delays should be identical
         if len(delays) > 1:
@@ -426,103 +441,88 @@ class TestMarkdownUtils:
 
 
 class TestChannelSend:
-    def test_send_single_chunk(self):
-        async def _test():
-            ch = StubChannel()
-            msg = OutboundMessage(
-                channel="stub",
-                chat_id="c1",
-                content="hello",
-                metadata={"chat_id": "c1"},
-            )
-            ok = await ch.send(msg)
-            assert ok is True
-            assert len(ch._sent_chunks) == 1
-            assert ch._sent_chunks[0][0] == "c1"
-            assert ch._sent_chunks[0][2] == "hello"  # raw
+    async def test_send_single_chunk(self):
+        ch = StubChannel()
+        msg = OutboundMessage(
+            channel="stub",
+            chat_id="c1",
+            content="hello",
+            metadata={"chat_id": "c1"},
+        )
+        ok = await ch.send(msg)
+        assert ok is True
+        assert len(ch._sent_chunks) == 1
+        assert ch._sent_chunks[0][0] == "c1"
+        assert ch._sent_chunks[0][2] == "hello"  # raw
 
-        _run(_test())
+    async def test_send_multi_chunk(self):
+        cfg = _FakeConfig(text_chunk_limit=10)
+        ch = StubChannel(cfg)
+        msg = OutboundMessage(
+            channel="stub",
+            chat_id="c1",
+            content="hello world this is a long message",
+            metadata={"chat_id": "c1"},
+        )
+        ok = await ch.send(msg)
+        assert ok is True
+        assert len(ch._sent_chunks) > 1
 
-    def test_send_multi_chunk(self):
-        async def _test():
-            cfg = _FakeConfig(text_chunk_limit=10)
-            ch = StubChannel(cfg)
-            msg = OutboundMessage(
-                channel="stub",
-                chat_id="c1",
-                content="hello world this is a long message",
-                metadata={"chat_id": "c1"},
-            )
-            ok = await ch.send(msg)
-            assert ok is True
-            assert len(ch._sent_chunks) > 1
+    async def test_send_returns_false_when_not_ready(self):
+        ch = StubChannel()
+        ch._is_ready = lambda: False
+        msg = OutboundMessage(channel="stub", chat_id="c1", content="hi")
+        ok = await ch.send(msg)
+        assert ok is False
 
-        _run(_test())
-
-    def test_send_returns_false_when_not_ready(self):
-        async def _test():
-            ch = StubChannel()
-            ch._is_ready = lambda: False
-            msg = OutboundMessage(channel="stub", chat_id="c1", content="hi")
-            ok = await ch.send(msg)
-            assert ok is False
-
-        _run(_test())
-
-    def test_send_per_chat_lock_serializes(self):
+    async def test_send_per_chat_lock_serializes(self):
         """[B-03] Per-chat locks prevent message reordering."""
 
-        async def _test():
-            ch = StubChannel()
-            order = []
+        ch = StubChannel()
+        order = []
 
-            original_send_chunk = ch._send_chunk
+        original_send_chunk = ch._send_chunk
 
-            async def slow_send(chat_id, fmt, raw, reply_to, meta):
-                order.append(raw)
-                await asyncio.sleep(0.05)
-                await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
+        async def slow_send(chat_id, fmt, raw, reply_to, meta):
+            order.append(raw)
+            await asyncio.sleep(0.05)
+            await original_send_chunk(chat_id, fmt, raw, reply_to, meta)
 
-            ch._send_chunk = slow_send
+        ch._send_chunk = slow_send
 
-            msg1 = OutboundMessage(
-                channel="stub",
-                chat_id="c1",
-                content="first",
-                metadata={"chat_id": "c1"},
-            )
-            msg2 = OutboundMessage(
-                channel="stub",
-                chat_id="c1",
-                content="second",
-                metadata={"chat_id": "c1"},
-            )
+        msg1 = OutboundMessage(
+            channel="stub",
+            chat_id="c1",
+            content="first",
+            metadata={"chat_id": "c1"},
+        )
+        msg2 = OutboundMessage(
+            channel="stub",
+            chat_id="c1",
+            content="second",
+            metadata={"chat_id": "c1"},
+        )
 
-            await asyncio.gather(ch.send(msg1), ch.send(msg2))
-            # Both complete; order may vary but no interleaving within a single send
-            assert len(order) == 2
+        await asyncio.gather(ch.send(msg1), ch.send(msg2))
+        # Both complete; order may vary but no interleaving within a single send
+        assert len(order) == 2
 
-        _run(_test())
-
-    def test_reply_to_only_on_first_chunk(self):
+    async def test_reply_to_only_on_first_chunk(self):
         """reply_to should only be passed to the first chunk."""
 
-        async def _test():
-            cfg = _FakeConfig(text_chunk_limit=10)
-            ch = StubChannel(cfg)
-            msg = OutboundMessage(
-                channel="stub",
-                chat_id="c1",
-                content="a very long message that will be split into multiple parts",
-                reply_to="msg_42",
-                metadata={"chat_id": "c1"},
-            )
-            await ch.send(msg)
-            reply_tos = [c[3] for c in ch._sent_chunks]
-            assert reply_tos[0] == "msg_42"
-            assert all(r is None for r in reply_tos[1:])
-
-        _run(_test())
+        cfg = _FakeConfig(text_chunk_limit=10)
+        ch = StubChannel(cfg)
+        msg = OutboundMessage(
+            channel="stub",
+            chat_id="c1",
+            content="a very long message that will be split into multiple parts",
+            reply_to="msg_42",
+            metadata={"chat_id": "c1"},
+        )
+        await ch.send(msg)
+        reply_tos = [c[3] for c in ch._sent_chunks]
+        assert reply_tos[0] == "msg_42"
+        assert all(r is None for r in reply_tos[1:])
 
 
 class TestChannelAllowList:
@@ -608,25 +608,19 @@ class TestChannelBuildInbound:
         assert msg.content == "hello"
         assert msg.media == ["/path/img.jpg"]
 
-    def test_drops_disallowed_sender(self):
-        async def _test():
-            cfg = _FakeConfig(allowed_senders=["alice"])
-            ch = StubChannel(cfg)
-            raw = RawIncoming(sender_id="eve", chat_id="c1", text="hack")
-            await ch._enqueue_raw(raw)
-            assert ch._queue.qsize() == 0
+    async def test_drops_disallowed_sender(self):
+        cfg = _FakeConfig(allowed_senders=["alice"])
+        ch = StubChannel(cfg)
+        raw = RawIncoming(sender_id="eve", chat_id="c1", text="hack")
+        await ch._enqueue_raw(raw)
+        assert ch._queue.qsize() == 0
 
-        _run(_test())
-
-    def test_drops_disallowed_channel(self):
-        async def _test():
-            cfg = _FakeConfig(allowed_channels=["c1"])
-            ch = StubChannel(cfg)
-            raw = RawIncoming(sender_id="u1", chat_id="c2", text="hello")
-            await ch._enqueue_raw(raw)
-            assert ch._queue.qsize() == 0
-
-        _run(_test())
+    async def test_drops_disallowed_channel(self):
+        cfg = _FakeConfig(allowed_channels=["c1"])
+        ch = StubChannel(cfg)
+        raw = RawIncoming(sender_id="u1", chat_id="c2", text="hello")
+        await ch._enqueue_raw(raw)
+        assert ch._queue.qsize() == 0
 
     def test_drops_empty_content_no_media(self):
         ch = StubChannel()
@@ -669,267 +663,221 @@ class TestChannelBuildInbound:
 class TestInboundPipeline:
     """Tests for the new middleware-based inbound pipeline in _enqueue_raw()."""
 
-    def test_pipeline_dedup(self):
+    async def test_pipeline_dedup(self):
         """Duplicate messages are dropped by the pipeline."""
 
-        async def _test():
-            ch = StubChannel()
-            raw = RawIncoming(
-                sender_id="u1", chat_id="c1", text="hello", message_id="m1"
-            )
-            await ch._enqueue_raw(raw)
-            await ch._enqueue_raw(raw)
-            assert ch._queue.qsize() == 1
+        ch = StubChannel()
+        raw = RawIncoming(sender_id="u1", chat_id="c1", text="hello", message_id="m1")
+        await ch._enqueue_raw(raw)
+        await ch._enqueue_raw(raw)
+        assert ch._queue.qsize() == 1
 
-        _run(_test())
-
-    def test_pipeline_allowlist_blocks(self):
+    async def test_pipeline_allowlist_blocks(self):
         """Non-allowed senders are blocked by the pipeline."""
 
-        async def _test():
-            cfg = _FakeConfig(allowed_senders=["alice"])
-            ch = StubChannel(cfg)
-            raw = RawIncoming(sender_id="eve", chat_id="c1", text="hack")
-            await ch._enqueue_raw(raw)
-            assert ch._queue.qsize() == 0
+        cfg = _FakeConfig(allowed_senders=["alice"])
+        ch = StubChannel(cfg)
+        raw = RawIncoming(sender_id="eve", chat_id="c1", text="hack")
+        await ch._enqueue_raw(raw)
+        assert ch._queue.qsize() == 0
 
-        _run(_test())
-
-    def test_pipeline_allowlist_passes(self):
+    async def test_pipeline_allowlist_passes(self):
         """Allowed senders pass through the pipeline."""
 
-        async def _test():
-            cfg = _FakeConfig(allowed_senders=["alice"])
-            ch = StubChannel(cfg)
-            raw = RawIncoming(sender_id="alice", chat_id="c1", text="hello")
-            await ch._enqueue_raw(raw)
-            assert ch._queue.qsize() == 1
+        cfg = _FakeConfig(allowed_senders=["alice"])
+        ch = StubChannel(cfg)
+        raw = RawIncoming(sender_id="alice", chat_id="c1", text="hello")
+        await ch._enqueue_raw(raw)
+        assert ch._queue.qsize() == 1
 
-        _run(_test())
-
-    def test_pipeline_channel_allowlist_blocks(self):
+    async def test_pipeline_channel_allowlist_blocks(self):
         """Non-allowed channels are blocked by the pipeline."""
 
-        async def _test():
-            cfg = _FakeConfig(allowed_channels=["c1"])
-            ch = StubChannel(cfg)
-            raw = RawIncoming(sender_id="u1", chat_id="c2", text="hello")
-            await ch._enqueue_raw(raw)
-            assert ch._queue.qsize() == 0
+        cfg = _FakeConfig(allowed_channels=["c1"])
+        ch = StubChannel(cfg)
+        raw = RawIncoming(sender_id="u1", chat_id="c2", text="hello")
+        await ch._enqueue_raw(raw)
+        assert ch._queue.qsize() == 0
 
-        _run(_test())
-
-    def test_pipeline_inbound_has_is_group(self):
+    async def test_pipeline_inbound_has_is_group(self):
         """InboundMessage carries is_group and was_mentioned from RawIncoming."""
 
-        async def _test():
-            ch = StubChannel()
-            raw = RawIncoming(
-                sender_id="u1",
-                chat_id="c1",
-                text="hello",
-                is_group=True,
-                was_mentioned=True,
-            )
-            await ch._enqueue_raw(raw)
-            msg = await ch._queue.get()
-            assert msg.is_group is True
-            assert msg.was_mentioned is True
-
-        _run(_test())
+        ch = StubChannel()
+        raw = RawIncoming(
+            sender_id="u1",
+            chat_id="c1",
+            text="hello",
+            is_group=True,
+            was_mentioned=True,
+        )
+        await ch._enqueue_raw(raw)
+        msg = await ch._queue.get()
+        assert msg.is_group is True
+        assert msg.was_mentioned is True
 
 
 class TestChannelDebounce:
-    def test_single_message_processed(self):
+    async def test_single_message_processed(self):
         """A single message should be published after debounce delay."""
 
-        async def _test():
-            bus = MessageBus()
-            ch = StubChannel()
-            ch.set_bus(bus)
-            ch.initial_debounce = 0.05
-            ch.max_debounce = 0.1
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 0.05
+        ch.max_debounce = 0.1
 
+        msg = InboundMessage(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="hello",
+            message_id="m1",
+            metadata={"chat_id": "c1"},
+        )
+        await ch.queue_message(msg)
+        await _flush_debounce(ch, "u1")
+
+        # Check bus received the message
+        assert bus.inbound.qsize() == 1
+        received = await bus.consume_inbound()
+        assert received.content == "hello"
+
+    async def test_rapid_messages_merged(self):
+        """[B-05] Multiple rapid messages should be merged."""
+
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 0.1
+        ch.max_debounce = 0.3
+
+        for i in range(3):
             msg = InboundMessage(
                 channel="stub",
                 sender_id="u1",
                 chat_id="c1",
-                content="hello",
-                message_id="m1",
+                content=f"part{i}",
+                message_id=f"m{i}",
                 metadata={"chat_id": "c1"},
             )
             await ch.queue_message(msg)
-            await asyncio.sleep(0.2)
 
-            # Check bus received the message
-            assert bus.inbound.qsize() == 1
-            received = await bus.consume_inbound()
-            assert received.content == "hello"
+        await _flush_debounce(ch, "u1")
+        assert bus.inbound.qsize() == 1
+        received = await bus.consume_inbound()
+        assert "part0" in received.content
+        assert "part1" in received.content
+        assert "part2" in received.content
 
-        _run(_test())
-
-    def test_rapid_messages_merged(self):
-        """[B-05] Multiple rapid messages should be merged."""
-
-        async def _test():
-            bus = MessageBus()
-            ch = StubChannel()
-            ch.set_bus(bus)
-            ch.initial_debounce = 0.1
-            ch.max_debounce = 0.3
-
-            for i in range(3):
-                msg = InboundMessage(
-                    channel="stub",
-                    sender_id="u1",
-                    chat_id="c1",
-                    content=f"part{i}",
-                    message_id=f"m{i}",
-                    metadata={"chat_id": "c1"},
-                )
-                await ch.queue_message(msg)
-                await asyncio.sleep(0.01)
-
-            await asyncio.sleep(0.5)
-            assert bus.inbound.qsize() == 1
-            received = await bus.consume_inbound()
-            assert "part0" in received.content
-            assert "part1" in received.content
-            assert "part2" in received.content
-
-        _run(_test())
-
-    def test_dedup_skips_duplicate(self):
+    async def test_dedup_skips_duplicate(self):
         """Dedup is now handled in _enqueue_raw pipeline, not queue_message."""
 
-        async def _test():
-            ch = StubChannel()
+        ch = StubChannel()
 
-            raw = RawIncoming(
-                sender_id="u1",
-                chat_id="c1",
-                text="hello",
-                message_id="m1",
-            )
-            await ch._enqueue_raw(raw)
-            await ch._enqueue_raw(raw)  # duplicate
+        raw = RawIncoming(
+            sender_id="u1",
+            chat_id="c1",
+            text="hello",
+            message_id="m1",
+        )
+        await ch._enqueue_raw(raw)
+        await ch._enqueue_raw(raw)  # duplicate
 
-            # Only one should be enqueued (dedup catches second)
-            assert ch._queue.qsize() == 1
+        # Only one should be enqueued (dedup catches second)
+        assert ch._queue.qsize() == 1
 
-        _run(_test())
-
-    def test_debounce_metadata_from_first_message(self):
+    async def test_debounce_metadata_from_first_message(self):
         """[B-05] Metadata from the first message in a debounce window is kept."""
 
-        async def _test():
-            bus = MessageBus()
-            ch = StubChannel()
-            ch.set_bus(bus)
-            ch.initial_debounce = 0.1
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 0.1
 
-            msg1 = InboundMessage(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="first",
-                message_id="m1",
-                metadata={"chat_id": "c1", "key": "val1"},
-            )
-            msg2 = InboundMessage(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="second",
-                message_id="m2",
-                metadata={"chat_id": "c2", "key": "val2"},
-            )
-            await ch.queue_message(msg1)
-            await asyncio.sleep(0.01)
-            await ch.queue_message(msg2)
-            await asyncio.sleep(0.3)
+        msg1 = InboundMessage(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="first",
+            message_id="m1",
+            metadata={"chat_id": "c1", "key": "val1"},
+        )
+        msg2 = InboundMessage(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="second",
+            message_id="m2",
+            metadata={"chat_id": "c2", "key": "val2"},
+        )
+        await ch.queue_message(msg1)
+        await ch.queue_message(msg2)
+        await _flush_debounce(ch, "u1")
 
-            received = await bus.consume_inbound()
-            # BUG: metadata is from msg1 only; msg2's metadata is lost
-            assert received.metadata["key"] == "val1"
-
-        _run(_test())
+        received = await bus.consume_inbound()
+        # BUG: metadata is from msg1 only; msg2's metadata is lost
+        assert received.metadata["key"] == "val1"
 
 
 class TestChannelTyping:
-    def test_start_and_stop_typing(self):
-        async def _test():
-            ch = StubChannel()
-            await ch.start_typing("c1")
-            assert "c1" in ch._typing_tasks
-            await asyncio.sleep(0.1)
-            await ch.stop_typing("c1")
-            assert "c1" not in ch._typing_tasks
+    async def test_start_and_stop_typing(self):
+        ch = StubChannel()
+        await ch.start_typing("c1")
+        assert "c1" in ch._typing_tasks
+        await asyncio.sleep(0)
+        await ch.stop_typing("c1")
+        assert "c1" not in ch._typing_tasks
 
-        _run(_test())
+    async def test_double_start_cancels_previous(self):
+        ch = StubChannel()
+        await ch.start_typing("c1")
+        task1 = ch._typing_tasks["c1"]
+        await ch.start_typing("c1")
+        task2 = ch._typing_tasks["c1"]
+        assert task1 is not task2
+        # Allow the event loop to process the cancellation
+        await asyncio.sleep(0)
+        assert task1.cancelled() or task1.done()
+        await ch.stop_typing("c1")
 
-    def test_double_start_cancels_previous(self):
-        async def _test():
-            ch = StubChannel()
-            await ch.start_typing("c1")
-            task1 = ch._typing_tasks["c1"]
-            await ch.start_typing("c1")
-            task2 = ch._typing_tasks["c1"]
-            assert task1 is not task2
-            # Allow the event loop to process the cancellation
-            await asyncio.sleep(0)
-            assert task1.cancelled() or task1.done()
-            await ch.stop_typing("c1")
-
-        _run(_test())
-
-    def test_stop_typing_idempotent(self):
-        async def _test():
-            ch = StubChannel()
-            # Should not raise even if never started
-            await ch.stop_typing("nonexistent")
-
-        _run(_test())
+    async def test_stop_typing_idempotent(self):
+        ch = StubChannel()
+        # Should not raise even if never started
+        await ch.stop_typing("nonexistent")
 
 
 class TestChannelReconnect:
-    def test_run_reconnects_on_error(self):
+    async def test_run_reconnects_on_error(self):
         """Channel.run() should reconnect with backoff on transient errors."""
 
-        async def _test():
-            ch = StubChannel()
-            start_count = 0
-            original_start = ch.start
+        ch = StubChannel()
+        start_count = 0
+        original_start = ch.start
 
-            async def flaky_start():
-                nonlocal start_count
-                start_count += 1
-                if start_count <= 2:
-                    raise ConnectionError("transient")
-                await original_start()
-                # Stop after successful start to end the test
-                ch._running = False
+        async def flaky_start():
+            nonlocal start_count
+            start_count += 1
+            if start_count <= 2:
+                raise ConnectionError("transient")
+            await original_start()
+            # Stop after successful start to end the test
+            ch._running = False
 
-            ch.start = flaky_start
-            await ch.run()
-            assert start_count == 3
+        ch.start = flaky_start
+        await ch.run()
+        assert start_count == 3
 
-        _run(_test())
-
-    def test_run_stops_on_channel_error(self):
+    async def test_run_stops_on_channel_error(self):
         """ChannelError should stop the channel permanently."""
 
-        async def _test():
-            ch = StubChannel()
+        ch = StubChannel()
 
-            async def fatal_start():
-                raise ChannelError("fatal")
+        async def fatal_start():
+            raise ChannelError("fatal")
 
-            ch.start = fatal_start
-            await ch.run()
-            assert ch._running is False
-
-        _run(_test())
+        ch.start = fatal_start
+        await ch.run()
+        assert ch._running is False
 
 
 class TestExtractRetryAfter:
@@ -969,14 +917,11 @@ class TestChannelAttachments:
         assert result is not None
         assert "too large" in result
 
-    def test_send_media_returns_false_when_not_ready(self):
-        async def _test():
-            ch = StubChannel()
-            ch._is_ready = lambda: False
-            ok = await ch.send_media("r1", "/path/file.txt")
-            assert ok is False
-
-        _run(_test())
+    async def test_send_media_returns_false_when_not_ready(self):
+        ch = StubChannel()
+        ch._is_ready = lambda: False
+        ok = await ch.send_media("r1", "/path/file.txt")
+        assert ok is False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1023,129 +968,135 @@ class TestChannelManagerRegister:
 
 
 class TestChannelManagerDispatch:
-    def test_dispatch_routes_to_channel(self):
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            ch = StubChannel()
-            # Override send to track calls
-            sent = []
-            ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or True)
-            mgr.register(ch)
+    async def test_dispatch_routes_to_channel(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        # Override send to track calls
+        sent = []
+        sent_event = asyncio.Event()
 
-            task = asyncio.create_task(mgr._dispatch_outbound())
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel="stub",
-                    chat_id="c1",
-                    content="hello",
-                )
+        async def send(msg):
+            sent.append(msg)
+            sent_event.set()
+            return True
+
+        ch.send = send
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="hello",
             )
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        )
+        await asyncio.wait_for(sent_event.wait(), timeout=1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-            assert len(sent) == 1
-            assert sent[0].content == "hello"
+        assert len(sent) == 1
+        assert sent[0].content == "hello"
 
-        _run(_test())
-
-    def test_dispatch_unknown_channel_logged(self):
+    async def test_dispatch_unknown_channel_logged(self):
         """Messages to unknown channels should be logged, not crash."""
 
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
 
-            task = asyncio.create_task(mgr._dispatch_outbound())
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel="nonexistent",
-                    chat_id="c1",
-                    content="hello",
-                )
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="nonexistent",
+                chat_id="c1",
+                content="hello",
             )
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            # Should not raise
+        )
+        await asyncio.wait_for(
+            _wait_for_async(lambda: bus.outbound_size == 0),
+            timeout=1.0,
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # Should not raise
 
-        _run(_test())
-
-    def test_dispatch_send_return_false_counts_failure(self):
+    async def test_dispatch_send_return_false_counts_failure(self):
         """send() returning False should mark the delivery as failed."""
 
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            ch = StubChannel()
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        failed_event = asyncio.Event()
 
-            async def failing_send(msg):
-                return False  # Indicates failure
+        async def failing_send(msg):
+            failed_event.set()
+            return False  # Indicates failure
 
-            ch.send = failing_send
-            mgr.register(ch)
+        ch.send = failing_send
+        mgr.register(ch)
 
-            task = asyncio.create_task(mgr._dispatch_outbound())
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel="stub",
-                    chat_id="c1",
-                    content="hello",
-                )
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="hello",
             )
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        )
+        await asyncio.wait_for(failed_event.wait(), timeout=1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-            health = mgr._health["stub"]
-            assert health.total_successes == 0
-            assert health.total_failures == 1
-            assert health.consecutive_failures == 1
+        health = mgr._health["stub"]
+        assert health.total_successes == 0
+        assert health.total_failures == 1
+        assert health.consecutive_failures == 1
 
-        _run(_test())
-
-    def test_dispatch_send_media_return_false_counts_failure(self):
+    async def test_dispatch_send_media_return_false_counts_failure(self):
         """send_media() returning False should mark the delivery as failed."""
 
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            ch = StubChannel()
-            ch.send_media = AsyncMock(return_value=False)
-            mgr.register(ch)
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        failed_event = asyncio.Event()
 
-            task = asyncio.create_task(mgr._dispatch_outbound())
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel="stub",
-                    chat_id="c1",
-                    content="",
-                    media=["/tmp/file.png"],
-                )
+        async def failing_send_media(**kwargs):
+            failed_event.set()
+            return False
+
+        ch.send_media = failing_send_media
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="",
+                media=["/tmp/file.png"],
             )
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        )
+        await asyncio.wait_for(failed_event.wait(), timeout=1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-            health = mgr._health["stub"]
-            assert health.total_successes == 0
-            assert health.total_failures == 1
-            assert health.consecutive_failures == 1
-
-        _run(_test())
+        health = mgr._health["stub"]
+        assert health.total_successes == 0
+        assert health.total_failures == 1
+        assert health.consecutive_failures == 1
 
 
 class TestChannelManagerHealth:
@@ -1175,83 +1126,71 @@ class TestChannelManagerDynamicOps:
         """[B-15] add_channel uses channel_type as key for start_times
         but register() uses channel.name — potential mismatch."""
 
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            # We can't easily test add_channel without registry,
-            # but we can verify the key mismatch concern
-            ch = StubChannel()
-            ch.name = "custom_name"
-            mgr.register(ch)
-            assert "custom_name" in mgr._channels
-            # If add_channel used "other_type" but channel.name is "custom_name",
-            # start_times would be keyed differently
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        # We can't easily test add_channel without registry,
+        # but we can verify the key mismatch concern
+        ch = StubChannel()
+        ch.name = "custom_name"
+        mgr.register(ch)
+        assert "custom_name" in mgr._channels
+        # If add_channel used "other_type" but channel.name is "custom_name",
+        # start_times would be keyed differently
 
-        _run(_test())
-
-    def test_remove_channel(self):
+    async def test_remove_channel(self):
         """[B-14] remove_channel removes from dict but doesn't cancel task."""
 
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            ch = StubChannel()
-            mgr.register(ch)
-            assert "stub" in mgr._channels
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        mgr.register(ch)
+        assert "stub" in mgr._channels
 
-            await mgr.remove_channel("stub")
-            assert "stub" not in mgr._channels
+        await mgr.remove_channel("stub")
+        assert "stub" not in mgr._channels
 
-        _run(_test())
-
-    def test_remove_nonexistent_channel(self):
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            await mgr.remove_channel("ghost")  # should not raise
-
-        _run(_test())
+    async def test_remove_nonexistent_channel(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        await mgr.remove_channel("ghost")  # should not raise
 
 
 class TestChannelManagerDrain:
-    def test_stop_all_drains_outbound(self):
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus, drain_timeout=1.0)
-            ch = StubChannel()
-            sent = []
-            ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or True)
-            mgr.register(ch)
+    async def test_stop_all_drains_outbound(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus, drain_timeout=1.0)
+        ch = StubChannel()
+        sent = []
+        ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or True)
+        mgr.register(ch)
 
-            # Pre-load an outbound message
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel="stub",
-                    chat_id="c1",
-                    content="drain me",
-                )
+        # Pre-load an outbound message
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="drain me",
             )
+        )
 
-            await mgr.stop_all()
-            # The drain loop should have sent it
-            assert len(sent) == 1
-            assert sent[0].content == "drain me"
+        await mgr.stop_all()
+        # The drain loop should have sent it
+        assert len(sent) == 1
+        assert sent[0].content == "drain me"
 
-        _run(_test())
+    async def test_stop_all_drains_media_and_counts_only_success(self, caplog):
+        bus = MessageBus()
+        mgr = ChannelManager(bus, drain_timeout=1.0)
+        ch = StubChannel()
+        sent = []
+        media_sent = []
+        ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or False)
+        ch.send_media = AsyncMock(
+            side_effect=lambda **kw: media_sent.append(kw) or True
+        )
+        mgr.register(ch)
 
-    def test_stop_all_drains_media_and_counts_only_success(self, caplog):
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus, drain_timeout=1.0)
-            ch = StubChannel()
-            sent = []
-            media_sent = []
-            ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or False)
-            ch.send_media = AsyncMock(
-                side_effect=lambda **kw: media_sent.append(kw) or True
-            )
-            mgr.register(ch)
-
+        with caplog.at_level("INFO"):
             await bus.publish_outbound(
                 OutboundMessage(
                     channel="stub",
@@ -1266,8 +1205,6 @@ class TestChannelManagerDrain:
             assert len(sent) == 1
             assert len(media_sent) == 1
 
-        with caplog.at_level("INFO"):
-            _run(_test())
         assert "Outbound drain:" not in caplog.text
 
 
@@ -1378,25 +1315,25 @@ class TestInboundConsumer:
         msg = BusInbound(channel="tg", sender_id="u1", chat_id="c1", content="hi")
         assert msg.session_key == "tg:c1"
 
-    def test_get_thread_id_creates_unique(self):
+    async def test_get_thread_id_creates_unique(self):
         consumer = self._make_consumer(
             graph_gateway=FakeGraphGateway(
                 generated_thread_ids=["thread-a", "thread-b"]
             )
         )
-        tid1 = _run(consumer._get_thread_id("user_a"))
-        tid2 = _run(consumer._get_thread_id("user_b"))
+        tid1 = await consumer._get_thread_id("user_a")
+        tid2 = await consumer._get_thread_id("user_b")
         assert tid1 != tid2
 
-    def test_get_thread_id_returns_same_for_same_sender(self):
+    async def test_get_thread_id_returns_same_for_same_sender(self):
         consumer = self._make_consumer(
             graph_gateway=FakeGraphGateway(generated_thread_ids=["thread-a"])
         )
-        tid1 = _run(consumer._get_thread_id("user_a"))
-        tid2 = _run(consumer._get_thread_id("user_a"))
+        tid1 = await consumer._get_thread_id("user_a")
+        tid2 = await consumer._get_thread_id("user_a")
         assert tid1 == tid2
 
-    def test_shared_thread_id_bug(self):
+    async def test_shared_thread_id_bug(self):
         """[B-20] If thread_id is non-empty, senders get unique thread IDs with shared prefix."""
         bus = MessageBus()
         mgr = ChannelManager(bus)
@@ -1408,14 +1345,14 @@ class TestInboundConsumer:
             thread_id="shared_thread",  # Non-empty!
             graph_gateway=FakeGraphGateway(),
         )
-        tid1 = _run(consumer._get_thread_id("alice"))
-        tid2 = _run(consumer._get_thread_id("bob"))
+        tid1 = await consumer._get_thread_id("alice")
+        tid2 = await consumer._get_thread_id("bob")
         # Fixed: Each sender gets a unique thread_id using thread_id as prefix
         assert tid1 != tid2
         assert tid1 == "shared_thread:alice"
         assert tid2 == "shared_thread:bob"
 
-    def test_session_eviction_is_lru(self):
+    async def test_session_eviction_is_lru(self):
         """Sessions use LRU eviction: recently accessed senders are kept."""
         consumer = self._make_consumer()
         consumer._sessions.clear()
@@ -1425,7 +1362,7 @@ class TestInboundConsumer:
             consumer._sessions[f"user_{i}"] = f"thread_{i}"
 
         # Access "user_0" via _get_thread_id (triggers LRU move_to_end)
-        _run(consumer._get_thread_id("user_0"))
+        await consumer._get_thread_id("user_0")
 
         # "user_0" should now be at the end (most recently used)
         oldest = next(iter(consumer._sessions))
@@ -1439,17 +1376,17 @@ class TestInboundConsumer:
         assert m["total_failures"] == 0
         assert m["total_timeouts"] == 0
 
-    def test_stop_graceful(self):
-        async def _test():
-            consumer = self._make_consumer()
-            # Start and immediately stop
-            task = asyncio.create_task(consumer.run())
-            await asyncio.sleep(0.1)
-            await consumer.stop()
-            await task
-            assert consumer._stopping is True
-
-        _run(_test())
+    async def test_stop_graceful(self):
+        consumer = self._make_consumer()
+        # Start and immediately stop
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0)
+        await consumer.stop()
+        await consumer.bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="wake")
+        )
+        await task
+        assert consumer._stopping is True
 
 
 class TestInboundConsumerErrorHandling:
@@ -1457,26 +1394,23 @@ class TestInboundConsumerErrorHandling:
         """[B-22] Exception messages are sent directly to users."""
 
         # This test documents that internal error details are exposed
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            ch = StubChannel()
-            mgr.register(ch)
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        mgr.register(ch)
 
-            _consumer = InboundConsumer(
-                bus=bus,
-                manager=mgr,
-                agent=MagicMock(),
-                thread_id="",
-                graph_gateway=FakeGraphGateway(),
-            )
+        _consumer = InboundConsumer(
+            bus=bus,
+            manager=mgr,
+            agent=MagicMock(),
+            thread_id="",
+            graph_gateway=FakeGraphGateway(),
+        )
 
-            # The error message format includes the raw exception
-            # This should be sanitized in production
-            error_msg = f"Error: {RuntimeError('secret internal path /etc/passwd')}"
-            assert "/etc/passwd" in error_msg  # Documents the leak
-
-        _run(_test())
+        # The error message format includes the raw exception
+        # This should be sanitized in production
+        error_msg = f"Error: {RuntimeError('secret internal path /etc/passwd')}"
+        assert "/etc/passwd" in error_msg  # Documents the leak
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1492,47 +1426,36 @@ class TestMessageBus:
     ``TestChannelManagerDispatch`` for that coverage.
     """
 
-    def test_publish_consume_inbound(self):
-        async def _test():
-            bus = MessageBus()
-            msg = BusInbound(
-                channel="tg", sender_id="u1", chat_id="c1", content="hello"
+    async def test_publish_consume_inbound(self):
+        bus = MessageBus()
+        msg = BusInbound(channel="tg", sender_id="u1", chat_id="c1", content="hello")
+        await bus.publish_inbound(msg)
+        assert bus.inbound_size == 1
+        received = await bus.consume_inbound()
+        assert received.content == "hello"
+        assert bus.inbound_size == 0
+
+    async def test_publish_consume_outbound(self):
+        bus = MessageBus()
+        msg = BusOutbound(channel="tg", chat_id="c1", content="reply")
+        await bus.publish_outbound(msg)
+        assert bus.outbound_size == 1
+        received = await bus.consume_outbound()
+        assert received.content == "reply"
+
+    async def test_queue_sizes(self):
+        bus = MessageBus()
+        assert bus.inbound_size == 0
+        assert bus.outbound_size == 0
+        await bus.publish_inbound(
+            BusInbound(
+                channel="x",
+                sender_id="u",
+                chat_id="c",
+                content="a",
             )
-            await bus.publish_inbound(msg)
-            assert bus.inbound_size == 1
-            received = await bus.consume_inbound()
-            assert received.content == "hello"
-            assert bus.inbound_size == 0
-
-        _run(_test())
-
-    def test_publish_consume_outbound(self):
-        async def _test():
-            bus = MessageBus()
-            msg = BusOutbound(channel="tg", chat_id="c1", content="reply")
-            await bus.publish_outbound(msg)
-            assert bus.outbound_size == 1
-            received = await bus.consume_outbound()
-            assert received.content == "reply"
-
-        _run(_test())
-
-    def test_queue_sizes(self):
-        async def _test():
-            bus = MessageBus()
-            assert bus.inbound_size == 0
-            assert bus.outbound_size == 0
-            await bus.publish_inbound(
-                BusInbound(
-                    channel="x",
-                    sender_id="u",
-                    chat_id="c",
-                    content="a",
-                )
-            )
-            assert bus.inbound_size == 1
-
-        _run(_test())
+        )
+        assert bus.inbound_size == 1
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1569,120 +1492,113 @@ class TestEvents:
 
 
 class TestIntegration:
-    def test_full_inbound_pipeline(self):
+    async def test_full_inbound_pipeline(self):
         """Raw message → build_inbound → queue_message → bus."""
 
-        async def _test():
-            bus = MessageBus()
-            ch = StubChannel()
-            ch.set_bus(bus)
-            ch.initial_debounce = 0.05
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 0.05
 
-            raw = RawIncoming(
-                sender_id="user1",
-                chat_id="chat1",
-                text="integration test",
-                message_id="int_001",
-            )
-            await ch._enqueue_raw(raw)
+        raw = RawIncoming(
+            sender_id="user1",
+            chat_id="chat1",
+            text="integration test",
+            message_id="int_001",
+        )
+        await ch._enqueue_raw(raw)
 
-            # _enqueue_raw puts on internal queue, not bus
-            assert ch._queue.qsize() == 1
-            inbound = await ch._queue.get()
-            assert inbound.content == "integration test"
+        # _enqueue_raw puts on internal queue, not bus
+        assert ch._queue.qsize() == 1
+        inbound = await ch._queue.get()
+        assert inbound.content == "integration test"
 
-            # Now simulate the bus path via queue_message
-            await ch.queue_message(inbound)
-            await asyncio.sleep(0.2)
-            assert bus.inbound_size == 1
+        # Now simulate the bus path via queue_message
+        await ch.queue_message(inbound)
+        await _flush_debounce(ch, "user1")
+        assert bus.inbound_size == 1
 
-        _run(_test())
-
-    def test_outbound_dispatch_with_media(self):
+    async def test_outbound_dispatch_with_media(self):
         """Dispatch routes media alongside text content."""
 
-        async def _test():
-            bus = MessageBus()
-            mgr = ChannelManager(bus)
-            ch = StubChannel()
-            media_sent = []
-            ch.send_media = AsyncMock(
-                side_effect=lambda **kw: media_sent.append(kw) or True,
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        media_sent = []
+        media_event = asyncio.Event()
+
+        async def send_media(**kw):
+            media_sent.append(kw)
+            media_event.set()
+            return True
+
+        ch.send_media = send_media
+        ch.send = AsyncMock(return_value=True)
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="see attached",
+                media=["/path/doc.pdf"],
             )
-            ch.send = AsyncMock(return_value=True)
-            mgr.register(ch)
+        )
+        await asyncio.wait_for(media_event.wait(), timeout=1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-            task = asyncio.create_task(mgr._dispatch_outbound())
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel="stub",
-                    chat_id="c1",
-                    content="see attached",
-                    media=["/path/doc.pdf"],
-                )
-            )
-            await asyncio.sleep(0.1)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        assert len(media_sent) == 1
 
-            assert len(media_sent) == 1
-
-        _run(_test())
-
-    def test_debounce_lost_on_stop(self):
+    async def test_debounce_lost_on_stop(self):
         """Buffered messages should be flushed when stop() is called."""
 
-        async def _test():
-            bus = MessageBus()
-            ch = StubChannel()
-            ch.set_bus(bus)
-            ch.initial_debounce = 5.0  # Long debounce
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 5.0  # Long debounce
 
-            msg = InboundMessage(
-                channel="stub",
-                sender_id="u1",
-                chat_id="c1",
-                content="will be lost",
-                message_id="m1",
-                metadata={"chat_id": "c1"},
-            )
-            await ch.queue_message(msg)
-            # Message is buffered but debounce hasn't fired yet
+        msg = InboundMessage(
+            channel="stub",
+            sender_id="u1",
+            chat_id="c1",
+            content="will be lost",
+            message_id="m1",
+            metadata={"chat_id": "c1"},
+        )
+        await ch.queue_message(msg)
+        # Message is buffered but debounce hasn't fired yet
 
-            assert len(ch._message_buffers) == 1
+        assert len(ch._message_buffers) == 1
 
-            # Stop the channel — debounce tasks are cancelled
-            ch._running = True
-            await ch.stop()
+        # Stop the channel — debounce tasks are cancelled
+        ch._running = True
+        await ch.stop()
 
-            assert bus.inbound_size == 1
-            flushed = await bus.consume_inbound()
-            assert flushed.content == "will be lost"
+        assert bus.inbound_size == 1
+        flushed = await bus.consume_inbound()
+        assert flushed.content == "will be lost"
 
-        _run(_test())
-
-    def test_send_locks_bounded_growth(self):
+    async def test_send_locks_bounded_growth(self):
         """_send_locks stays bounded via LRU eviction of unlocked entries."""
 
-        async def _test():
-            ch = StubChannel()
-            ch._send_locks_max = 10  # Small limit for testing
-            for i in range(20):
-                msg = OutboundMessage(
-                    channel="stub",
-                    chat_id=f"chat_{i}",
-                    content="hi",
-                    metadata={"chat_id": f"chat_{i}"},
-                )
-                await ch.send(msg)
+        ch = StubChannel()
+        ch._send_locks_max = 10  # Small limit for testing
+        for i in range(20):
+            msg = OutboundMessage(
+                channel="stub",
+                chat_id=f"chat_{i}",
+                content="hi",
+                metadata={"chat_id": f"chat_{i}"},
+            )
+            await ch.send(msg)
 
-            # Should be bounded at max + 1 (the newly inserted entry)
-            assert len(ch._send_locks) <= ch._send_locks_max + 1
-
-        _run(_test())
+        # Should be bounded at max + 1 (the newly inserted entry)
+        assert len(ch._send_locks) <= ch._send_locks_max + 1
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1707,16 +1623,13 @@ class TestEdgeCases:
         for _ in range(100):
             assert dc.is_duplicate("x") is True
 
-    def test_channel_send_empty_content(self):
-        async def _test():
-            ch = StubChannel()
-            msg = OutboundMessage(channel="stub", chat_id="c1", content="")
-            ok = await ch.send(msg)
-            # Empty content goes through chunk_text which returns []
-            assert ok is True
-            assert len(ch._sent_chunks) == 0
-
-        _run(_test())
+    async def test_channel_send_empty_content(self):
+        ch = StubChannel()
+        msg = OutboundMessage(channel="stub", chat_id="c1", content="")
+        ok = await ch.send(msg)
+        # Empty content goes through chunk_text which returns []
+        assert ok is True
+        assert len(ch._sent_chunks) == 0
 
     def test_raw_incoming_defaults(self):
         raw = RawIncoming(sender_id="u1", chat_id="c1")

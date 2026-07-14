@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 
 from rich.table import Table
 
-from tests.conftest import run_async as _run
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -24,15 +23,15 @@ def _ctx(**overrides):
 
 
 class TestThreadsCommand:
-    def test_empty_list_prints_message(self):
+    async def test_empty_list_prints_message(self):
         from EvoScientist.commands.implementation.session import ThreadsCommand
 
         ctx, ui = _ctx()
-        _run(ThreadsCommand().execute(ctx, []))
+        await ThreadsCommand().execute(ctx, [])
         ui.append_system.assert_called_once()
         assert "No saved sessions" in ui.append_system.call_args.args[0]
 
-    def test_renders_table_with_current_marker(self):
+    async def test_renders_table_with_current_marker(self):
         from EvoScientist.commands.implementation.session import ThreadsCommand
 
         ctx, ui = _ctx(thread_id="current")
@@ -54,7 +53,7 @@ class TestThreadsCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        _run(ThreadsCommand().execute(ctx, []))
+        await ThreadsCommand().execute(ctx, [])
         ui.mount_renderable.assert_called_once()
         table = ui.mount_renderable.call_args.args[0]
         assert isinstance(table, Table)
@@ -64,7 +63,7 @@ class TestThreadsCommand:
         assert "/delete" in footer
         assert "/new" in footer
 
-    def test_footer_hint_suppressed_in_channel_mode(self):
+    async def test_footer_hint_suppressed_in_channel_mode(self):
         """Channels don't get the footer — keeps outbound text short."""
         from EvoScientist.commands.implementation.session import ThreadsCommand
 
@@ -80,10 +79,10 @@ class TestThreadsCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        _run(ThreadsCommand().execute(ctx, []))
+        await ThreadsCommand().execute(ctx, [])
         ui.append_system.assert_not_called()
 
-    def test_channel_mode_drops_model_column(self):
+    async def test_channel_mode_drops_model_column(self):
         """Non-interactive (channel) UIs get a narrower table."""
         from EvoScientist.commands.implementation.session import ThreadsCommand
 
@@ -99,7 +98,7 @@ class TestThreadsCommand:
         ]
         store = FakeThreadStore(threads=threads)
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
-        _run(ThreadsCommand().execute(ctx, []))
+        await ThreadsCommand().execute(ctx, [])
         # Channel mode: no Model column. 4 columns: ID, Preview, Msgs, Last Used.
         table = ui.mount_renderable.call_args.args[0]
         column_headers = [col.header for col in table.columns]

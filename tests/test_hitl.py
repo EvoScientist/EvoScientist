@@ -378,7 +378,7 @@ class TestHitlConfig:
 
 
 class TestInterruptEventParsing:
-    def test_interrupt_from_updates_mode(self):
+    async def test_interrupt_from_updates_mode(self):
         """__interrupt__ in updates mode yields interrupt event."""
         interrupt_data = {
             "__interrupt__": [
@@ -405,7 +405,7 @@ class TestInterruptEventParsing:
                 protocol_event("updates", interrupt_data),
             ]
         )
-        events = collect_events(agent, message="test", thread_id="thread-1")
+        events = await collect_events(agent, message="test", thread_id="thread-1")
 
         types = [e["type"] for e in events]
         assert "interrupt" in types
@@ -415,14 +415,14 @@ class TestInterruptEventParsing:
         assert interrupt_ev["action_requests"][0]["name"] == "execute"
         assert interrupt_ev["interrupt_id"] == "main"
 
-    def test_updates_without_interrupt_skipped(self):
+    async def test_updates_without_interrupt_skipped(self):
         """Regular updates mode data is skipped as before."""
         agent = FakeV3Agent(
             [
                 protocol_event("updates", {"some_node": {"key": "value"}}),
             ]
         )
-        events = collect_events(agent, message="test", thread_id="thread-1")
+        events = await collect_events(agent, message="test", thread_id="thread-1")
 
         types = [e["type"] for e in events]
         assert "interrupt" not in types

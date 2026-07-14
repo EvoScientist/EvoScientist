@@ -117,8 +117,8 @@ def _capture_app(monkeypatch) -> object:
 # ---------------------------------------------------------------------------
 
 
-def test_clear_chat_resets_scroll_after_long_anchored_conversation(
-    monkeypatch, run_async
+async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
+    monkeypatch,
 ):
     """Repro of issue #301: clear after a long anchored stream → banner on top.
 
@@ -128,104 +128,91 @@ def test_clear_chat_resets_scroll_after_long_anchored_conversation(
     the now-empty bottom of the previous content.
     """
 
-    async def scenario():
-        from textual.containers import VerticalScroll
-        from textual.widgets import Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
 
-        app = _capture_app(monkeypatch)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            chat = app.query_one("#chat", VerticalScroll)
-            welcome = app.query_one("#welcome", Static)
+    app = _capture_app(monkeypatch)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        chat = app.query_one("#chat", VerticalScroll)
+        welcome = app.query_one("#welcome", Static)
 
-            for i in range(80):
-                await chat.mount(Static(f"prior message {i}\n" * 2))
-            await pilot.pause()
-            chat.scroll_end(animate=False)
-            await pilot.pause()
-            chat.anchor()
-            await pilot.pause()
+        for i in range(80):
+            await chat.mount(Static(f"prior message {i}\n" * 2))
+        await pilot.pause()
+        chat.scroll_end(animate=False)
+        await pilot.pause()
+        chat.anchor()
+        await pilot.pause()
 
-            assert chat.scroll_y > 0, "precondition: viewport must be scrolled"
+        assert chat.scroll_y > 0, "precondition: viewport must be scrolled"
 
-            app.clear_chat()
-            app._append_system("New session: tid", style="green")
-            await pilot.pause()
-            await pilot.pause()
+        app.clear_chat()
+        app._append_system("New session: tid", style="green")
+        await pilot.pause()
+        await pilot.pause()
 
-            _assert_banner_at_top(
-                chat, welcome, label="after /new on long anchored convo"
-            )
-            assert len(chat.children) == 2
-
-    run_async(scenario())
+        _assert_banner_at_top(chat, welcome, label="after /new on long anchored convo")
+        assert len(chat.children) == 2
 
 
-def test_clear_chat_with_anchor_released_also_resets(monkeypatch, run_async):
+async def test_clear_chat_with_anchor_released_also_resets(monkeypatch):
     """User scrolled up (anchor released) before /new → still lands at top."""
 
-    async def scenario():
-        from textual.containers import VerticalScroll
-        from textual.widgets import Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
 
-        app = _capture_app(monkeypatch)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            chat = app.query_one("#chat", VerticalScroll)
-            welcome = app.query_one("#welcome", Static)
+    app = _capture_app(monkeypatch)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        chat = app.query_one("#chat", VerticalScroll)
+        welcome = app.query_one("#welcome", Static)
 
-            for i in range(80):
-                await chat.mount(Static(f"msg {i}\n" * 2))
-            await pilot.pause()
-            chat.anchor()
-            chat.scroll_to(y=80, animate=False)
-            await pilot.pause()
+        for i in range(80):
+            await chat.mount(Static(f"msg {i}\n" * 2))
+        await pilot.pause()
+        chat.anchor()
+        chat.scroll_to(y=80, animate=False)
+        await pilot.pause()
 
-            app.clear_chat()
-            app._append_system("New session: tid", style="green")
-            await pilot.pause()
-            await pilot.pause()
+        app.clear_chat()
+        app._append_system("New session: tid", style="green")
+        await pilot.pause()
+        await pilot.pause()
 
-            _assert_banner_at_top(
-                chat, welcome, label="after /new with released anchor"
-            )
-            assert len(chat.children) == 2
-
-    run_async(scenario())
+        _assert_banner_at_top(chat, welcome, label="after /new with released anchor")
+        assert len(chat.children) == 2
 
 
-def test_clear_chat_short_conversation_anchored(monkeypatch, run_async):
+async def test_clear_chat_short_conversation_anchored(monkeypatch):
     """Even with a short conversation, anchor + clear should not push banner down."""
 
-    async def scenario():
-        from textual.containers import VerticalScroll
-        from textual.widgets import Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
 
-        app = _capture_app(monkeypatch)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            chat = app.query_one("#chat", VerticalScroll)
-            welcome = app.query_one("#welcome", Static)
+    app = _capture_app(monkeypatch)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        chat = app.query_one("#chat", VerticalScroll)
+        welcome = app.query_one("#welcome", Static)
 
-            # Just enough content to overflow the viewport.
-            for i in range(30):
-                await chat.mount(Static(f"short msg {i}\n" * 2))
-            await pilot.pause()
-            chat.scroll_end(animate=False)
-            chat.anchor()
-            await pilot.pause()
+        # Just enough content to overflow the viewport.
+        for i in range(30):
+            await chat.mount(Static(f"short msg {i}\n" * 2))
+        await pilot.pause()
+        chat.scroll_end(animate=False)
+        chat.anchor()
+        await pilot.pause()
 
-            app.clear_chat()
-            app._append_system("New session: tid", style="green")
-            await pilot.pause()
-            await pilot.pause()
+        app.clear_chat()
+        app._append_system("New session: tid", style="green")
+        await pilot.pause()
+        await pilot.pause()
 
-            _assert_banner_at_top(chat, welcome, label="after /new on short convo")
-
-    run_async(scenario())
+        _assert_banner_at_top(chat, welcome, label="after /new on short convo")
 
 
-def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch, run_async):
+async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
     """Repro of the user-reported scenario: clear → mount welcome banner →
     mount new-session → mount user message → mount assistant reply, in a
     normal-sized terminal where the resulting content fits in the viewport.
@@ -237,69 +224,64 @@ def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch, run_asy
     wipe even when more widgets are mounted afterwards.
     """
 
-    async def scenario():
-        from textual.containers import VerticalScroll
-        from textual.widgets import Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
 
-        app = _capture_app(monkeypatch)
-        # Tall-ish terminal: welcome + a few messages must fit in the
-        # viewport, mirroring the user's manual-test setup.
-        async with app.run_test(size=(80, 40)) as pilot:
-            await pilot.pause()
-            chat = app.query_one("#chat", VerticalScroll)
-            welcome = app.query_one("#welcome", Static)
+    app = _capture_app(monkeypatch)
+    # Tall-ish terminal: welcome + a few messages must fit in the
+    # viewport, mirroring the user's manual-test setup.
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        chat = app.query_one("#chat", VerticalScroll)
+        welcome = app.query_one("#welcome", Static)
 
-            # Long conversation, then /new.
-            for i in range(80):
-                await chat.mount(Static(f"prior message {i}\n" * 2))
-            await pilot.pause()
-            chat.scroll_end(animate=False)
-            chat.anchor()
-            await pilot.pause()
+        # Long conversation, then /new.
+        for i in range(80):
+            await chat.mount(Static(f"prior message {i}\n" * 2))
+        await pilot.pause()
+        chat.scroll_end(animate=False)
+        chat.anchor()
+        await pilot.pause()
 
-            app.clear_chat()
-            # Render the actual banner (not the empty placeholder) and add
-            # the /new system message — this is exactly what
-            # ``start_new_session`` does after clearing.
-            app._render_welcome()
-            app._append_system("New session: tid", style="green")
-            await pilot.pause()
-            await pilot.pause()
+        app.clear_chat()
+        # Render the actual banner (not the empty placeholder) and add
+        # the /new system message — this is exactly what
+        # ``start_new_session`` does after clearing.
+        app._render_welcome()
+        app._append_system("New session: tid", style="green")
+        await pilot.pause()
+        await pilot.pause()
 
-            # User types "hello" — _run_turn mounts UserMessage then calls
-            # ``container.scroll_end(animate=False)`` (line 1305 in the
-            # real code).  In a tall viewport this still lands at scroll_y
-            # == 0 because content fits.
-            from EvoScientist.cli.widgets.assistant_message import AssistantMessage
-            from EvoScientist.cli.widgets.user_message import UserMessage
+        # User types "hello" — _run_turn mounts UserMessage then calls
+        # ``container.scroll_end(animate=False)`` (line 1305 in the
+        # real code).  In a tall viewport this still lands at scroll_y
+        # == 0 because content fits.
+        from EvoScientist.cli.widgets.assistant_message import AssistantMessage
+        from EvoScientist.cli.widgets.user_message import UserMessage
 
-            await chat.mount(UserMessage("hello"))
-            chat.scroll_end(animate=False)
-            await pilot.pause()
+        await chat.mount(UserMessage("hello"))
+        chat.scroll_end(animate=False)
+        await pilot.pause()
 
-            await chat.mount(
-                AssistantMessage(
-                    "Hello. What research problem are we working on today?"
-                )
-            )
-            await pilot.pause()
-            await pilot.pause()
+        await chat.mount(
+            AssistantMessage("Hello. What research problem are we working on today?")
+        )
+        await pilot.pause()
+        await pilot.pause()
 
-            _assert_banner_at_top(
-                chat,
-                welcome,
-                label=(
-                    f"after full /new → user msg → reply "
-                    f"(max={chat.max_scroll_y}, "
-                    f"viewport={chat.scrollable_content_region.height}, "
-                    f"content={chat.content_size.height})"
-                ),
-            )
-
-    run_async(scenario())
+        _assert_banner_at_top(
+            chat,
+            welcome,
+            label=(
+                f"after full /new → user msg → reply "
+                f"(max={chat.max_scroll_y}, "
+                f"viewport={chat.scrollable_content_region.height}, "
+                f"content={chat.content_size.height})"
+            ),
+        )
 
 
-def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch, run_async):
+async def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
     """Regression for the second symptom of issue #301: after a short
     user/assistant turn that fits in the viewport, end-of-stream
     ``_anchor_chat`` must NOT leave the chat anchored.
@@ -313,83 +295,73 @@ def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch, run_as
     overflows (``max_scroll_y > 0``).
     """
 
-    async def scenario():
-        from textual.containers import VerticalScroll
-        from textual.widgets import Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
 
-        from EvoScientist.cli.widgets.assistant_message import AssistantMessage
-        from EvoScientist.cli.widgets.user_message import UserMessage
+    from EvoScientist.cli.widgets.assistant_message import AssistantMessage
+    from EvoScientist.cli.widgets.user_message import UserMessage
 
-        app = _capture_app(monkeypatch)
-        # Tall terminal: welcome + a short exchange fits with room to spare,
-        # which is exactly the bug condition (content < viewport).
-        async with app.run_test(size=(80, 40)) as pilot:
-            await pilot.pause()
-            chat = app.query_one("#chat", VerticalScroll)
-            welcome = app.query_one("#welcome", Static)
+    app = _capture_app(monkeypatch)
+    # Tall terminal: welcome + a short exchange fits with room to spare,
+    # which is exactly the bug condition (content < viewport).
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        chat = app.query_one("#chat", VerticalScroll)
+        welcome = app.query_one("#welcome", Static)
 
-            await chat.mount(UserMessage("hi"))
-            await pilot.pause()
-            await chat.mount(
-                AssistantMessage("Hi. What are you looking to work on today?")
-            )
-            await pilot.pause()
+        await chat.mount(UserMessage("hi"))
+        await pilot.pause()
+        await chat.mount(AssistantMessage("Hi. What are you looking to work on today?"))
+        await pilot.pause()
 
-            # End-of-stream re-anchor (matches _stream_with_widgets).
-            app._anchor_chat(chat)
-            await pilot.pause()
+        # End-of-stream re-anchor (matches _stream_with_widgets).
+        app._anchor_chat(chat)
+        await pilot.pause()
 
-            # Any subsequent mount triggers a layout refresh — this is when
-            # the compositor would push scroll_y negative without the fix.
-            # In production this happens via Markdown re-renders, status-bar
-            # updates, the system "usage" line, etc.
-            await chat.mount(Static("trailing line\n"))
-            await pilot.pause()
-            await pilot.pause()
+        # Any subsequent mount triggers a layout refresh — this is when
+        # the compositor would push scroll_y negative without the fix.
+        # In production this happens via Markdown re-renders, status-bar
+        # updates, the system "usage" line, etc.
+        await chat.mount(Static("trailing line\n"))
+        await pilot.pause()
+        await pilot.pause()
 
-            _assert_banner_at_top(
-                chat, welcome, label="after short turn + trailing mount"
-            )
-
-    run_async(scenario())
+        _assert_banner_at_top(chat, welcome, label="after short turn + trailing mount")
 
 
-def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch, run_async):
+async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
     """When the conversation overflows, ``_anchor_chat`` must still engage
     the anchor so streaming output remains visible. The issue #301 fix
     only suppresses anchoring when content fits — long content must
     continue to behave as before.
     """
 
-    async def scenario():
-        from textual.containers import VerticalScroll
-        from textual.widgets import Static
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
 
-        app = _capture_app(monkeypatch)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            chat = app.query_one("#chat", VerticalScroll)
+    app = _capture_app(monkeypatch)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        chat = app.query_one("#chat", VerticalScroll)
 
-            for i in range(50):
-                await chat.mount(Static(f"prior message {i}\n" * 2))
-            await pilot.pause()
+        for i in range(50):
+            await chat.mount(Static(f"prior message {i}\n" * 2))
+        await pilot.pause()
 
-            app._anchor_chat(chat)
-            await pilot.pause()
-            assert chat.scroll_y == chat.max_scroll_y, (
-                "long content must anchor to bottom after _anchor_chat"
-            )
+        app._anchor_chat(chat)
+        await pilot.pause()
+        assert chat.scroll_y == chat.max_scroll_y, (
+            "long content must anchor to bottom after _anchor_chat"
+        )
 
-            # Trailing mount must keep the viewport pinned to the new bottom.
-            await chat.mount(Static("trailing line\n"))
-            await pilot.pause()
-            await pilot.pause()
-            assert chat.scroll_y == chat.max_scroll_y, (
-                "anchored viewport must follow new bottom after trailing mount"
-            )
-            assert chat.scroll_y > 0, "long content must have positive scroll_y"
-
-    run_async(scenario())
+        # Trailing mount must keep the viewport pinned to the new bottom.
+        await chat.mount(Static("trailing line\n"))
+        await pilot.pause()
+        await pilot.pause()
+        assert chat.scroll_y == chat.max_scroll_y, (
+            "anchored viewport must follow new bottom after trailing mount"
+        )
+        assert chat.scroll_y > 0, "long content must have positive scroll_y"
 
 
 # ---------------------------------------------------------------------------

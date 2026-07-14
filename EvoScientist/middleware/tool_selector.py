@@ -132,10 +132,21 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return self._build_selector(request).wrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception:
+        except Exception as exc:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
-            # Selector itself failed (e.g., structured output not supported).
+            from ..llm.errors import ProviderStreamError
+            from .error_normalization import _is_provider_error
+
+            if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
+                # Auth / quota / connection failures on the selector's
+                # own model. Falling back to "use all tools" would hit
+                # the same provider anyway (same client, likely same
+                # credentials). Surface it instead so the user sees
+                # the real cause.
+                raise
+            # Structured-output shape / config failure — gracefully
+            # degrade to using all tools.
             logger.debug("Tool selector failed, using all tools", exc_info=True)
             if self._track_stream_selection:
                 _selector_active = False
@@ -171,8 +182,15 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await self._build_selector(request).awrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception:
+        except Exception as exc:
             if _handler_called:
+                raise
+            from ..llm.errors import ProviderStreamError
+            from .error_normalization import _is_provider_error
+
+            if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
+                # See sync path — surface provider errors, degrade only
+                # on shape / config failures.
                 raise
             logger.debug("Tool selector failed, using all tools", exc_info=True)
             if self._track_stream_selection:

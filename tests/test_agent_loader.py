@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -93,87 +94,94 @@ def _make_loader_fn(agent_value="AGENT", fail_with=None, capture=None):
     return _loader
 
 
-def _run(coro):
-    return asyncio.run(coro)
+class _GatedThreadLoader:
+    """Callable loader that blocks until tests explicitly release it."""
+
+    def __init__(self, agent_value="AGENT", progress_events=()):
+        self.agent_value = agent_value
+        self.progress_events = tuple(progress_events)
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+
+    def __call__(self, *, on_mcp_progress=None):
+        self.started.set()
+        self.release.wait(timeout=1)
+        try:
+            if on_mcp_progress is not None:
+                for event in self.progress_events:
+                    on_mcp_progress(*event)
+            return self.agent_value
+        finally:
+            self.finished.set()
+
+
+async def _wait_for_event(event, timeout=1):
+    return await asyncio.to_thread(event.wait, timeout)
 
 
 class TestBackgroundAgentLoaderStart:
-    def test_start_creates_task_and_forwards_kwargs(self):
+    async def test_start_creates_task_and_forwards_kwargs(self):
         captured: dict = {}
         loader = BackgroundAgentLoader(_make_loader_fn(capture=captured))
 
-        async def _go():
-            loader.start(workspace_dir="/ws", checkpointer="CK")
-            assert loader.task is not None
-            assert loader.is_pending
-            await loader.await_ready()
+        loader.start(workspace_dir="/ws", checkpointer="CK")
+        assert loader.task is not None
+        assert loader.is_pending
+        await loader.await_ready()
 
-        _run(_go())
         assert captured["kwargs"][0] == {"workspace_dir": "/ws", "checkpointer": "CK"}
 
-    def test_start_bumps_load_id(self):
+    async def test_start_bumps_load_id(self):
         loader = BackgroundAgentLoader(_make_loader_fn())
 
-        async def _go():
-            assert loader._load_id == 0
-            loader.start()
-            assert loader._load_id == 1
-            loader.start()
-            assert loader._load_id == 2
-            await loader.await_ready()
+        assert loader._load_id == 0
+        loader.start()
+        assert loader._load_id == 1
+        loader.start()
+        assert loader._load_id == 2
+        await loader.await_ready()
 
-        _run(_go())
+    async def test_start_cancels_in_flight_prior_task(self):
+        blocking = _GatedThreadLoader("LATE")
 
-    def test_start_cancels_in_flight_prior_task(self):
-        import time
-
-        def _blocking(*, on_mcp_progress=None):
-            time.sleep(0.05)
-            return "LATE"
-
-        async def _go():
-            loader = BackgroundAgentLoader(_blocking)
-            loader.start()
-            first_task = loader.task
-            # Supersede immediately; asyncio.to_thread wrapper gets cancelled.
-            loader._loader_fn = _make_loader_fn("FRESH")
-            loader.start()
-            agent = await loader.await_ready()
-            assert agent == "FRESH"
-            # Let the first thread drain so its done callback (gated) fires.
-            await asyncio.sleep(0.1)
-            assert first_task.cancelled() or first_task.done()
-
-        _run(_go())
+        loader = BackgroundAgentLoader(blocking)
+        loader.start()
+        first_task = loader.task
+        assert first_task is not None
+        assert await _wait_for_event(blocking.started)
+        # Supersede immediately; asyncio.to_thread wrapper gets cancelled.
+        loader._loader_fn = _make_loader_fn("FRESH")
+        loader.start()
+        agent = await loader.await_ready()
+        assert agent == "FRESH"
+        blocking.release.set()
+        try:
+            await first_task
+        except asyncio.CancelledError:
+            pass
+        assert first_task.cancelled() or first_task.done()
 
 
 class TestBackgroundAgentLoaderCallbacks:
-    def test_progress_hook_sees_events_in_order(self):
+    async def test_progress_hook_sees_events_in_order(self):
         events: list[tuple[str, str, str]] = []
         loader = BackgroundAgentLoader(
             _make_loader_fn(capture={}),
             on_progress=lambda e, s, d: events.append((e, s, d)),
         )
 
-        async def _go():
-            loader.start()
-            await loader.await_ready()
+        loader.start()
+        await loader.await_ready()
 
-        _run(_go())
         assert events == [("start", "srv", ""), ("success", "srv", "1")]
 
-    def test_stale_progress_events_are_dropped(self):
+    async def test_stale_progress_events_are_dropped(self):
         """A progress event fired after a newer `start` must not reach the hook."""
-        import time
-
+        slow_loader = _GatedThreadLoader(
+            "slow-agent", progress_events=[("success", "from-slow", "1")]
+        )
         seen: list[str] = []
-
-        # Loader 1 sleeps so its progress event fires AFTER load 2 starts.
-        def slow_loader(*, on_mcp_progress=None):
-            time.sleep(0.08)
-            if on_mcp_progress is not None:
-                on_mcp_progress("success", "from-slow", "1")
-            return "slow-agent"
 
         def fast_loader(*, on_mcp_progress=None):
             if on_mcp_progress is not None:
@@ -184,36 +192,32 @@ class TestBackgroundAgentLoaderCallbacks:
             slow_loader, on_progress=lambda e, s, d: seen.append(s)
         )
 
-        async def _go():
-            loader.start()
-            # Supersede before the slow thread's event fires.
-            await asyncio.sleep(0.01)
-            loader._loader_fn = fast_loader
-            loader.start()
-            await loader.await_ready()
-            # Let the superseded thread finish (its event is gated out).
-            await asyncio.sleep(0.1)
+        loader.start()
+        assert await _wait_for_event(slow_loader.started)
+        # Loader 1 waits so its progress event fires AFTER load 2 starts.
+        loader._loader_fn = fast_loader
+        loader.start()
+        await loader.await_ready()
+        slow_loader.release.set()
+        assert await _wait_for_event(slow_loader.finished)
 
-        _run(_go())
         assert "from-fast" in seen
         assert "from-slow" not in seen
 
-    def test_success_callback_fires_on_completion(self):
+    async def test_success_callback_fires_on_completion(self):
         got = []
         loader = BackgroundAgentLoader(
             _make_loader_fn("MY_AGENT"),
             on_success=lambda a: got.append(a),
         )
 
-        async def _go():
-            loader.start()
-            await loader.await_ready()
-            await asyncio.sleep(0)  # let done-callback run
+        loader.start()
+        await loader.await_ready()
+        await asyncio.sleep(0)  # let done-callback run
 
-        _run(_go())
         assert got == ["MY_AGENT"]
 
-    def test_failure_callback_fires_on_error(self):
+    async def test_failure_callback_fires_on_error(self):
         err = RuntimeError("load failed")
         got_failures = []
         got_successes = []
@@ -223,40 +227,33 @@ class TestBackgroundAgentLoaderCallbacks:
             on_failure=lambda e: got_failures.append(e),
         )
 
-        async def _go():
-            loader.start()
-            with pytest.raises(RuntimeError, match="load failed"):
-                await loader.await_ready()
-            await asyncio.sleep(0)
+        loader.start()
+        with pytest.raises(RuntimeError, match="load failed"):
+            await loader.await_ready()
+        await asyncio.sleep(0)
 
-        _run(_go())
         assert got_failures == [err]
         assert got_successes == []
 
 
 class TestBackgroundAgentLoaderAwaitReady:
-    def test_returns_cached_agent_without_reawaiting(self):
+    async def test_returns_cached_agent_without_reawaiting(self):
         captured: dict = {}
         loader = BackgroundAgentLoader(_make_loader_fn("A", capture=captured))
 
-        async def _go():
-            loader.start()
-            assert await loader.await_ready() == "A"
-            assert await loader.await_ready() == "A"
+        loader.start()
+        assert await loader.await_ready() == "A"
+        assert await loader.await_ready() == "A"
 
-        _run(_go())
         assert len(captured["kwargs"]) == 1
 
-    def test_raises_if_started_not_called(self):
+    async def test_raises_if_started_not_called(self):
         loader = BackgroundAgentLoader(_make_loader_fn())
 
-        async def _go():
-            with pytest.raises(RuntimeError, match="before start"):
-                await loader.await_ready()
+        with pytest.raises(RuntimeError, match="before start"):
+            await loader.await_ready()
 
-        _run(_go())
-
-    def test_reraises_real_error_on_subsequent_awaits(self):
+    async def test_reraises_real_error_on_subsequent_awaits(self):
         """After a failure, ``await_ready`` must keep raising the real exception —
         not the "before start()" sentinel — until ``start`` is called again."""
 
@@ -265,16 +262,13 @@ class TestBackgroundAgentLoaderAwaitReady:
 
         loader = BackgroundAgentLoader(_fail)
 
-        async def _go():
-            loader.start()
-            with pytest.raises(RuntimeError, match="bad MCP config"):
-                await loader.await_ready()
-            with pytest.raises(RuntimeError, match="bad MCP config"):
-                await loader.await_ready()
+        loader.start()
+        with pytest.raises(RuntimeError, match="bad MCP config"):
+            await loader.await_ready()
+        with pytest.raises(RuntimeError, match="bad MCP config"):
+            await loader.await_ready()
 
-        _run(_go())
-
-    def test_needs_restart_flags_failed_load_for_retry(self):
+    async def test_needs_restart_flags_failed_load_for_retry(self):
         calls = {"n": 0}
 
         def flaky(*, on_mcp_progress=None):
@@ -285,17 +279,14 @@ class TestBackgroundAgentLoaderAwaitReady:
 
         loader = BackgroundAgentLoader(flaky)
 
-        async def _go():
-            assert loader.needs_restart  # never started
-            loader.start()
-            with pytest.raises(RuntimeError):
-                await loader.await_ready()
-            assert loader.needs_restart  # failed, caller may retry
-            loader.start()
-            assert await loader.await_ready() == "SECOND"
-            assert not loader.needs_restart  # success → no retry
-
-        _run(_go())
+        assert loader.needs_restart  # never started
+        loader.start()
+        with pytest.raises(RuntimeError):
+            await loader.await_ready()
+        assert loader.needs_restart  # failed, caller may retry
+        loader.start()
+        assert await loader.await_ready() == "SECOND"
+        assert not loader.needs_restart  # success → no retry
 
 
 class TestBackgroundAgentLoaderAdopt:
@@ -305,26 +296,19 @@ class TestBackgroundAgentLoaderAdopt:
         assert loader.agent == "EXTERNAL"
         assert not loader.is_pending
 
-    def test_adopt_supersedes_in_flight_load(self):
+    async def test_adopt_supersedes_in_flight_load(self):
         """A late background completion must not overwrite an adopted agent."""
-        import time
+        slow_loader = _GatedThreadLoader("FROM_BACKGROUND")
 
-        def _slow(*, on_mcp_progress=None):
-            time.sleep(0.08)
-            return "FROM_BACKGROUND"
+        loader = BackgroundAgentLoader(slow_loader)
 
-        loader = BackgroundAgentLoader(_slow)
-
-        async def _go():
-            loader.start()
-            await asyncio.sleep(0.01)
-            loader.adopt("FROM_MODEL")
-            # Give the background thread time to finish and fire its
-            # done-callback; the generation token should make it a no-op.
-            await asyncio.sleep(0.1)
-            assert loader.agent == "FROM_MODEL"
-
-        _run(_go())
+        loader.start()
+        assert await _wait_for_event(slow_loader.started)
+        loader.adopt("FROM_MODEL")
+        slow_loader.release.set()
+        assert await _wait_for_event(slow_loader.finished)
+        await asyncio.sleep(0)
+        assert loader.agent == "FROM_MODEL"
 
 
 class TestBackgroundAgentLoaderIsPending:
@@ -332,29 +316,22 @@ class TestBackgroundAgentLoaderIsPending:
         loader = BackgroundAgentLoader(_make_loader_fn())
         assert not loader.is_pending
 
-    def test_false_after_completion(self):
+    async def test_false_after_completion(self):
         loader = BackgroundAgentLoader(_make_loader_fn())
 
-        async def _go():
-            loader.start()
-            await loader.await_ready()
+        loader.start()
+        await loader.await_ready()
 
-        _run(_go())
         assert not loader.is_pending
 
-    def test_true_between_start_and_completion(self):
-        import time
+    async def test_true_between_start_and_completion(self):
+        wait_loader = _GatedThreadLoader("ok")
 
-        def _wait_loader(*, on_mcp_progress=None):
-            time.sleep(0.05)
-            return "ok"
+        loader = BackgroundAgentLoader(wait_loader)
 
-        loader = BackgroundAgentLoader(_wait_loader)
-
-        async def _go():
-            loader.start()
-            assert loader.is_pending
-            await loader.await_ready()
-            assert not loader.is_pending
-
-        _run(_go())
+        loader.start()
+        assert await _wait_for_event(wait_loader.started)
+        assert loader.is_pending
+        wait_loader.release.set()
+        await loader.await_ready()
+        assert not loader.is_pending

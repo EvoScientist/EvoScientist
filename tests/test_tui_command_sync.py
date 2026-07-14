@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
-from tests.conftest import run_async as _run
 
 pytest.importorskip("textual")
 
@@ -43,7 +42,7 @@ class _StubApp:
         self.refresh_calls.append(reset_streaming_text)
 
 
-def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
+async def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
     import EvoScientist.cli.tui_interactive as tui_mod
     from EvoScientist import EvoScientist as evosci_mod
 
@@ -63,7 +62,7 @@ def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
     monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: True)
     app._channel_runtime.bind("old-agent", "old-thread")
 
-    _run(tui_mod._sync_tui_command_completion(app, ctx, "old-agent", cmd))
+    await tui_mod._sync_tui_command_completion(app, ctx, "old-agent", cmd)
 
     assert app._agent_loader.adopt_calls == ["new-agent"]
     assert app.model_updates == [("gpt-5.5", "openai")]
@@ -72,7 +71,7 @@ def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
     assert app._channel_runtime.thread_id == "thread-1"
 
 
-def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypatch):
+async def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypatch):
     import EvoScientist.cli.tui_interactive as tui_mod
 
     app = _StubApp()
@@ -85,14 +84,16 @@ def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypatch):
 
     monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: False)
 
-    _run(tui_mod._sync_tui_command_completion(app, ctx, "same-agent", cmd))
+    await tui_mod._sync_tui_command_completion(app, ctx, "same-agent", cmd)
 
     assert app._agent_loader.adopt_calls == []
     assert app.model_updates == []
     assert app.refresh_calls == [True]
 
 
-def test_sync_tui_rebinds_runtime_on_thread_rotation_without_agent_swap(monkeypatch):
+async def test_sync_tui_rebinds_runtime_on_thread_rotation_without_agent_swap(
+    monkeypatch,
+):
     """Regression: ``/new`` and ``/resume`` rotate ``app._conversation_tid``
     without swapping the agent.  The runtime must still pick up the new
     thread id so the bus contract stays consistent with serve mode."""
@@ -111,7 +112,7 @@ def test_sync_tui_rebinds_runtime_on_thread_rotation_without_agent_swap(monkeypa
 
     monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: True)
 
-    _run(tui_mod._sync_tui_command_completion(app, ctx, "same-agent", cmd))
+    await tui_mod._sync_tui_command_completion(app, ctx, "same-agent", cmd)
 
     assert app._channel_runtime.agent == "same-agent"
     assert app._channel_runtime.thread_id == "rotated-thread"

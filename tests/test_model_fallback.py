@@ -6,6 +6,7 @@ fallback chain behaviour via _try_fallbacks / _guard_and_fallback.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,7 +21,6 @@ from EvoScientist.middleware.model_fallback import (
     clear_fallbacks,
     set_ui_emit,
 )
-from tests.conftest import run_async as _run
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -146,7 +146,7 @@ class TestIsNonFallbackable:
 class TestTryFallbacks:
     """End-to-end tests for the fallback chain traversal."""
 
-    def test_first_fallback_succeeds(self):
+    async def test_first_fallback_succeeds(self):
         """When the first fallback model works, return its response."""
         add_fallback("fb-model", "fb-provider")
         req = _fake_request()
@@ -154,13 +154,13 @@ class TestTryFallbacks:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = _run(_try_fallbacks(req, invoke, Exception("503 boom")))
+            result = await _try_fallbacks(req, invoke, Exception("503 boom"))
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
         mock_gcm.assert_called_once_with(model="fb-model", provider="fb-provider")
 
-    def test_skips_failing_fallback_tries_next(self):
+    async def test_skips_failing_fallback_tries_next(self):
         """When the first fallback fails, try the second."""
         add_fallback("fb-bad", "prov-a")
         add_fallback("fb-good", "prov-b")
@@ -177,12 +177,12 @@ class TestTryFallbacks:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = _run(_try_fallbacks(req, _invoke, Exception("503 boom")))
+            result = await _try_fallbacks(req, _invoke, Exception("503 boom"))
 
         assert result is AI_RESPONSE
         assert call_count == 2
 
-    def test_all_fallbacks_exhausted_raises_last(self):
+    async def test_all_fallbacks_exhausted_raises_last(self):
         """When every fallback fails, re-raise the last exception."""
         add_fallback("fb-a", "prov-a")
         add_fallback("fb-b", "prov-b")
@@ -202,11 +202,11 @@ class TestTryFallbacks:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
             with pytest.raises(Exception, match="429 from fb-b") as exc_info:
-                _run(_try_fallbacks(req, _invoke, Exception("503 primary")))
+                await _try_fallbacks(req, _invoke, Exception("503 primary"))
 
         assert exc_info.value is last_error
 
-    def test_non_fallbackable_in_chain_aborts_immediately(self):
+    async def test_non_fallbackable_in_chain_aborts_immediately(self):
         """A non-fallbackable error from a fallback model aborts the chain."""
         add_fallback("fb-a", "prov-a")
         add_fallback("fb-b", "prov-b")  # should never be reached
@@ -218,11 +218,94 @@ class TestTryFallbacks:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
             with pytest.raises(Exception, match="context_length_exceeded"):
-                _run(_try_fallbacks(req, _invoke, Exception("503 primary")))
+                await _try_fallbacks(req, _invoke, Exception("503 primary"))
 
         # get_chat_model should only have been called once (for fb-a),
         # fb-b should never be reached.
         assert mock_gcm.call_count == 1
+
+    async def test_exhausted_fallbacks_attribute_to_last_failing_model(self):
+        """Regression: when every fallback fails, the raised
+        ``ProviderStreamError`` must be attributed to the model that
+        ACTUALLY failed last, not the original ``request.model``.
+        Prevents a ``deepseek → moonshot`` chain from surfacing as
+        ``provider: deepseek`` after moonshot exhausts its quota.
+        """
+        from EvoScientist.llm.errors import ProviderStreamError
+
+        add_fallback("moonshot-model", "moonshot")
+        # Original request's model is openai-shape. Fallback's model
+        # will be openai-shape with a moonshot base_url.
+        req = _fake_request()
+
+        # ChatOpenAI-shape model instance so ``_provider_from_model``
+        # returns a recognized provider.
+        def _make_openai_model(base_url=None):
+            cls = type(
+                "ChatOpenAI",
+                (),
+                {"__module__": "langchain_openai.chat_models.base"},
+            )
+            inst = cls()
+            inst.openai_api_base = base_url
+            return inst
+
+        req.model = _make_openai_model()  # primary
+        fallback_model = _make_openai_model(base_url="https://api.moonshot.cn/v1")
+        # ``request.override(model=...)`` must return the request with the
+        # new model so ``_try_fallbacks`` tracks the failing model.
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+
+        async def _invoke(_r):
+            raise Exception("429 quota exceeded")
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = fallback_model
+            with pytest.raises(ProviderStreamError) as exc_info:
+                await _try_fallbacks(req, _invoke, Exception("openai primary failed"))
+
+        # Attribution flipped to moonshot (the failing fallback), not
+        # openai (the original request's model).
+        assert exc_info.value.provider == "moonshot"
+        assert "quota exceeded" in exc_info.value.message
+
+    async def test_langgraph_error_at_fallback_raise_point_passes_through(self):
+        """Regression: ``_raise_normalized`` calls ``_normalize``
+        directly, so its ``_should_pass_through`` gate must fire even
+        without the ``ErrorNormalizationMiddleware`` wrap sites' own
+        check. Prevents a ``langgraph.errors.*`` exception hitting the
+        fallback chain from being wrapped as a provider incident.
+        """
+        from langgraph.errors import InvalidUpdateError
+
+        add_fallback("fb-a", "prov-a")
+        req = _fake_request()
+
+        # Use a recognized-provider model so ``_provider_from_model``
+        # wouldn't short-circuit — the guard has to come from
+        # ``_should_pass_through``, not the provider check.
+        cls = type(
+            "ChatOpenAI", (), {"__module__": "langchain_openai.chat_models.base"}
+        )
+        model = cls()
+        model.openai_api_base = None
+        req.model = model
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+
+        raised = InvalidUpdateError("state mismatch")
+
+        async def _invoke(_r):
+            raise raised
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = model
+            with pytest.raises(InvalidUpdateError) as exc_info:
+                await _try_fallbacks(req, _invoke, Exception("primary failed"))
+        assert exc_info.value is raised
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -233,43 +316,69 @@ class TestTryFallbacks:
 class TestGuardAndFallback:
     """Verify that non-fallbackable errors are re-raised before trying the chain."""
 
-    def test_context_overflow_raises_immediately(self):
+    async def test_context_overflow_raises_immediately(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock()
 
         with pytest.raises(ContextOverflowError):
-            _run(_guard_and_fallback(ContextOverflowError("overflow"), req, invoke))
+            await _guard_and_fallback(ContextOverflowError("overflow"), req, invoke)
 
         invoke.assert_not_awaited()
 
-    def test_malformed_400_raises_immediately(self):
+    async def test_context_overflow_with_provider_model_passes_through_unwrapped(self):
+        """Regression: a ``ContextOverflowError`` entering
+        ``_guard_and_fallback`` under a recognized-provider model must
+        come out unwrapped. Otherwise ``_raise_normalized`` →
+        ``_normalize`` would wrap it as a ``ProviderStreamError`` and
+        deepagents' ``SummarizationMiddleware`` (which sits outside
+        the user middleware stack and catches by exact type) would
+        stop compressing history and retrying.
+        """
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        # Recognized provider — without the gate in ``_normalize`` this
+        # would wrap. With the gate, the raw type propagates.
+        cls = type(
+            "ChatOpenAI", (), {"__module__": "langchain_openai.chat_models.base"}
+        )
+        model = cls()
+        model.openai_api_base = None
+        req.model = model
+        invoke = AsyncMock()
+
+        raised = ContextOverflowError("context length exceeded")
+        with pytest.raises(ContextOverflowError) as exc_info:
+            await _guard_and_fallback(raised, req, invoke)
+
+        assert exc_info.value is raised
+        invoke.assert_not_awaited()
+
+    async def test_malformed_400_raises_immediately(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock()
 
         with pytest.raises(Exception, match="invalid_request_error"):
-            _run(
-                _guard_and_fallback(
-                    Exception("400: invalid_request_error"), req, invoke
-                )
+            await _guard_and_fallback(
+                Exception("400: invalid_request_error"), req, invoke
             )
 
         invoke.assert_not_awaited()
 
-    def test_server_error_proceeds_to_fallback(self):
+    async def test_server_error_proceeds_to_fallback(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock(return_value=AI_RESPONSE)
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = _run(_guard_and_fallback(Exception("503 overloaded"), req, invoke))
+            result = await _guard_and_fallback(Exception("503 overloaded"), req, invoke)
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
 
-    def test_auth_error_proceeds_to_fallback(self):
+    async def test_auth_error_proceeds_to_fallback(self):
         """Auth errors should try the fallback chain (different provider)."""
         add_fallback("fb", "other-prov")
         req = _fake_request()
@@ -277,10 +386,8 @@ class TestGuardAndFallback:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = _run(
-                _guard_and_fallback(
-                    Exception("400 Bad Request: invalid_api_key"), req, invoke
-                )
+            result = await _guard_and_fallback(
+                Exception("400 Bad Request: invalid_api_key"), req, invoke
             )
 
         assert result is AI_RESPONSE
@@ -295,7 +402,7 @@ class TestGuardAndFallback:
 class TestUiEmit:
     """Verify that fallback events are surfaced via the registered callback."""
 
-    def test_emit_captures_messages(self):
+    async def test_emit_captures_messages(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock(return_value=AI_RESPONSE)
@@ -305,14 +412,14 @@ class TestUiEmit:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            _run(_try_fallbacks(req, invoke, Exception("503 down")))
+            await _try_fallbacks(req, invoke, Exception("503 down"))
 
         texts = [t for t, _ in messages]
         assert any("Primary model failed" in t for t in texts)
         assert any("Falling back to fb (prov)" in t for t in texts)
         assert any("succeeded" in t for t in texts)
 
-    def test_emit_shows_non_fallbackable_rejection(self):
+    async def test_emit_shows_non_fallbackable_rejection(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock()
@@ -321,7 +428,7 @@ class TestUiEmit:
         set_ui_emit(lambda text, style: messages.append((text, style)))
 
         with pytest.raises(ContextOverflowError):
-            _run(_guard_and_fallback(ContextOverflowError("overflow"), req, invoke))
+            await _guard_and_fallback(ContextOverflowError("overflow"), req, invoke)
 
         texts = [t for t, _ in messages]
         assert any("not eligible for fallback" in t for t in texts)

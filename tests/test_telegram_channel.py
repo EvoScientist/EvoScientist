@@ -4,7 +4,6 @@ import pytest
 
 from EvoScientist.channels.base import ChannelError
 from EvoScientist.channels.telegram.channel import TelegramChannel, TelegramConfig
-from tests.conftest import run_async as _run
 
 
 class TestTelegramConfig:
@@ -32,18 +31,18 @@ class TestTelegramChannel:
         assert channel.config is config
         assert channel._running is False
 
-    def test_start_raises_without_token(self):
+    async def test_start_raises_without_token(self):
         config = TelegramConfig(bot_token="")
         channel = TelegramChannel(config)
         with pytest.raises(ChannelError, match="bot token"):
-            _run(channel.start())
+            await channel.start()
 
-    def test_stop_when_not_running(self):
+    async def test_stop_when_not_running(self):
         config = TelegramConfig(bot_token="test")
         channel = TelegramChannel(config)
-        _run(channel.stop())
+        await channel.stop()
 
-    def test_send_returns_false_without_app(self):
+    async def test_send_returns_false_without_app(self):
         from EvoScientist.channels.base import OutboundMessage
 
         config = TelegramConfig(bot_token="test")
@@ -54,5 +53,5 @@ class TestTelegramChannel:
             content="hello",
             metadata={"chat_id": "123"},
         )
-        result = _run(channel.send(msg))
+        result = await channel.send(msg)
         assert result is False

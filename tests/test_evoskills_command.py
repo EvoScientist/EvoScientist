@@ -2,8 +2,6 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import run_async as _run
-
 
 def _ctx(supports_interactive=True):
     from EvoScientist.commands.base import CommandContext
@@ -31,7 +29,7 @@ _INDEX = [
 
 
 class TestInstallSkills:
-    def test_picker_cancel_no_install(self):
+    async def test_picker_cancel_no_install(self):
         from EvoScientist.commands.implementation.skills import InstallSkills
 
         ctx, ui = _ctx()
@@ -45,12 +43,12 @@ class TestInstallSkills:
                 "EvoScientist.tools.skills_manager.install_skill",
             ) as install_mock,
         ):
-            _run(InstallSkills().execute(ctx, []))
+            await InstallSkills().execute(ctx, [])
         install_mock.assert_not_called()
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Browse cancelled" in m for m in msgs)
 
-    def test_picker_returns_selections_installs_each(self):
+    async def test_picker_returns_selections_installs_each(self):
         from EvoScientist.commands.implementation.skills import InstallSkills
 
         ctx, ui = _ctx()
@@ -68,10 +66,10 @@ class TestInstallSkills:
                 return_value={"success": True, "name": "x"},
             ) as install_mock,
         ):
-            _run(InstallSkills().execute(ctx, []))
+            await InstallSkills().execute(ctx, [])
         assert install_mock.call_count == 2
 
-    def test_channel_auto_install_on_tag(self):
+    async def test_channel_auto_install_on_tag(self):
         """Non-interactive UI + tag arg → auto-installs matching skills."""
         from EvoScientist.commands.implementation.skills import InstallSkills
 
@@ -86,12 +84,12 @@ class TestInstallSkills:
                 return_value={"success": True, "name": "x"},
             ) as install_mock,
         ):
-            _run(InstallSkills().execute(ctx, ["core"]))
+            await InstallSkills().execute(ctx, ["core"])
         # "core" matches research-ideation only → 1 install, no picker call
         assert install_mock.call_count == 1
         ui.wait_for_skill_browse.assert_not_called()
 
-    def test_fetch_failure_prints_error(self):
+    async def test_fetch_failure_prints_error(self):
         from EvoScientist.commands.implementation.skills import InstallSkills
 
         ctx, ui = _ctx()
@@ -99,6 +97,6 @@ class TestInstallSkills:
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",
             side_effect=RuntimeError("network fail"),
         ):
-            _run(InstallSkills().execute(ctx, []))
+            await InstallSkills().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Failed to fetch" in m for m in msgs)
