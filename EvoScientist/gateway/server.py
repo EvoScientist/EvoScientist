@@ -7,7 +7,10 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..middleware.events import SessionEvents
 
 from langchain_core.messages import BaseMessage, convert_to_messages, messages_from_dict
 from langgraph.types import Command
@@ -448,6 +451,7 @@ class LangGraphServerGateway:
     thread_store: LangGraphServerThreadStore
     graph_id: str = DEFAULT_GRAPH_ID
     interrupt_wait_seconds: float = 5.0
+    events: SessionEvents | None = None
 
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id

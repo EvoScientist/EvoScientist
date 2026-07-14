@@ -39,9 +39,8 @@ def clean_channel_state():
             channel_mod._channel_requests.clear()
             channel_mod._session_requests.clear()
             channel_mod._cancelled_channel_messages.clear()
-        with channel_mod._hitl_lock:
-            channel_mod._pending_hitl.clear()
-            channel_mod._hitl_auto_approve.clear()
+        channel_mod._reply_registry.clear()
+        channel_mod._approval_policy.clear_sessions()
         with display_mod._stream_cancel_lock:
             display_mod._stream_cancel_event.clear()
             display_mod._stream_cancel_events.clear()
@@ -365,7 +364,13 @@ class TestBusInboundConsumer:
             assert queued.msg_id not in channel_mod._pending_responses
 
     async def test_stop_during_hitl_wait_releases_wait_and_acks(self):
-        """`/stop` should wake pending HITL wait and publish immediate ack."""
+        """`/stop` should wake a pending interaction wait and publish an ack.
+
+        The bus consumer delivers ``/stop`` into the reply registry (so the
+        blocking engine unwinds) AND acks with "Stopped." — the registry
+        interception sits ahead of normal enqueue, so the message never
+        becomes a fresh agent turn.
+        """
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import _bus_inbound_consumer, _message_queue
 
@@ -374,7 +379,12 @@ class TestBusInboundConsumer:
         ch = FakeChannel()
         manager.register(ch)
 
-        hitl_event = channel_mod._register_hitl_wait("fake", "chat1")
+        # Simulate a HITL/ask_user prompt waiting for this chat's reply.
+        reply_fut = asyncio.ensure_future(
+            channel_mod._reply_registry.wait("fake:chat1", timeout=5.0)
+        )
+        await asyncio.sleep(0.01)  # let the wait register
+
         consumer = asyncio.create_task(_bus_inbound_consumer(bus, manager))
 
         await bus.publish_inbound(
@@ -387,12 +397,9 @@ class TestBusInboundConsumer:
             )
         )
 
-        for _ in range(20):
-            if hitl_event.is_set():
-                break
-            await asyncio.sleep(0.05)
-        assert hitl_event.is_set()
-        assert channel_mod._pop_hitl_reply("fake", "chat1") == "/stop"
+        # The pending wait receives "/stop" (engine will treat it as cancel).
+        released = await asyncio.wait_for(reply_fut, timeout=2.0)
+        assert released == "/stop"
 
         outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
         assert outbound.content == "Stopped."

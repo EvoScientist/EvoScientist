@@ -1,5 +1,6 @@
 """Tests for HITL (Human-in-the-Loop) approval mechanism."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 from langgraph.types import Interrupt
@@ -437,34 +438,34 @@ class TestInterruptEventParsing:
 
 class TestConsumerHitlHelpers:
     def test_parse_approval_approve(self):
-        from EvoScientist.channels.consumer import _parse_approval_reply
+        from EvoScientist.channels.interaction import parse_approval_reply
 
         for text in ("1", "y", "yes", "approve", "ok", " 1 ", "  Y  "):
-            assert _parse_approval_reply(text) == "approve", f"Failed for: {text!r}"
+            assert parse_approval_reply(text) == "approve", f"Failed for: {text!r}"
 
     def test_parse_approval_reject(self):
-        from EvoScientist.channels.consumer import _parse_approval_reply
+        from EvoScientist.channels.interaction import parse_approval_reply
 
         for text in ("2", "n", "no", "reject"):
-            assert _parse_approval_reply(text) == "reject", f"Failed for: {text!r}"
+            assert parse_approval_reply(text) == "reject", f"Failed for: {text!r}"
 
     def test_parse_approval_auto(self):
-        from EvoScientist.channels.consumer import _parse_approval_reply
+        from EvoScientist.channels.interaction import parse_approval_reply
 
         for text in ("3", "a", "auto", "approve all"):
-            assert _parse_approval_reply(text) == "auto", f"Failed for: {text!r}"
+            assert parse_approval_reply(text) == "auto", f"Failed for: {text!r}"
 
     def test_parse_approval_unrecognized(self):
-        from EvoScientist.channels.consumer import _parse_approval_reply
+        from EvoScientist.channels.interaction import parse_approval_reply
 
-        assert _parse_approval_reply("hello world") is None
-        assert _parse_approval_reply("") is None
-        assert _parse_approval_reply("maybe") is None
+        assert parse_approval_reply("hello world") is None
+        assert parse_approval_reply("") is None
+        assert parse_approval_reply("maybe") is None
 
     def test_format_approval_prompt(self):
-        from EvoScientist.channels.consumer import _format_approval_prompt
+        from EvoScientist.channels.interaction import format_approval_prompt
 
-        prompt = _format_approval_prompt(
+        prompt = format_approval_prompt(
             [
                 {"name": "execute", "args": {"command": "ls -la"}},
             ]
@@ -476,9 +477,9 @@ class TestConsumerHitlHelpers:
         assert "2=Reject" in prompt
 
     def test_format_approval_prompt_multiple(self):
-        from EvoScientist.channels.consumer import _format_approval_prompt
+        from EvoScientist.channels.interaction import format_approval_prompt
 
-        prompt = _format_approval_prompt(
+        prompt = format_approval_prompt(
             [
                 {"name": "execute", "args": {"command": "ls"}},
                 {"name": "write_file", "args": {"path": "/out.txt"}},
@@ -488,17 +489,17 @@ class TestConsumerHitlHelpers:
         assert "2. write_file: /out.txt" in prompt
 
     def test_should_auto_approve_non_execute(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.channels.interaction import config_auto_approve
 
-        assert _should_auto_approve([{"name": "write_file", "args": {}}]) is True
+        assert config_auto_approve([{"name": "write_file", "args": {}}]) is True
 
     def test_should_auto_approve_empty(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.channels.interaction import config_auto_approve
 
-        assert _should_auto_approve([]) is True
+        assert config_auto_approve([]) is True
 
     def test_should_auto_approve_execute_no_allowlist(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.channels.interaction import config_auto_approve
 
         # With default config (auto_approve=False, shell_allow_list=""),
         # execute should NOT auto-approve
@@ -506,7 +507,7 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = ""
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            result = config_auto_approve(
                 [
                     {"name": "execute", "args": {"command": "rm -rf /"}},
                 ]
@@ -515,13 +516,13 @@ class TestConsumerHitlHelpers:
 
     def test_should_auto_approve_run_in_background_no_allowlist(self):
         """Channel path must NOT auto-approve run_in_background (same as execute)."""
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.channels.interaction import config_auto_approve
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = ""
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            result = config_auto_approve(
                 [
                     {"name": "run_in_background", "args": {"command": "rm -rf /"}},
                 ]
@@ -529,12 +530,12 @@ class TestConsumerHitlHelpers:
         assert result is False
 
     def test_should_auto_approve_config_true(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.channels.interaction import config_auto_approve
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = True
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            result = config_auto_approve(
                 [
                     {"name": "execute", "args": {"command": "rm -rf /"}},
                 ]
@@ -542,13 +543,13 @@ class TestConsumerHitlHelpers:
         assert result is True
 
     def test_should_auto_approve_allowlist_match(self):
-        from EvoScientist.channels.consumer import _should_auto_approve
+        from EvoScientist.channels.interaction import config_auto_approve
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = "ls,python"
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
-            result = _should_auto_approve(
+            result = config_auto_approve(
                 [
                     {"name": "execute", "args": {"command": "ls -la"}},
                 ]
@@ -557,53 +558,48 @@ class TestConsumerHitlHelpers:
 
 
 # =============================================================================
-# Channel HITL intercept mechanism (channel.py)
+# Channel reply-interception mechanism (channel.py PendingReplyRegistry)
 # =============================================================================
+# The CLI bridge routes prompt replies through the shared asyncio-based
+# ``PendingReplyRegistry`` on the bus loop (replacing the old threading.Event
+# ``_pending_hitl`` globals). ``_bus_inbound_consumer`` feeds it via
+# ``try_resolve`` ahead of normal enqueue.
 
 
-class TestChannelHitlIntercept:
-    def test_register_and_set_hitl_reply(self):
-        from EvoScientist.cli.channel import (
-            _pop_hitl_reply,
-            _register_hitl_wait,
-            _try_set_hitl_reply,
+class TestChannelReplyRegistry:
+    async def test_register_and_resolve_reply(self):
+        from EvoScientist.cli import channel as channel_mod
+
+        reg = channel_mod._reply_registry
+        reg.clear()
+
+        async def _resolver():
+            await asyncio.sleep(0.01)  # let wait() register first
+            assert reg.try_resolve("telegram:chat123", "1") is True
+
+        got, _ = await asyncio.gather(
+            reg.wait("telegram:chat123", timeout=1.0), _resolver()
         )
+        assert got == "1"
+        assert "telegram:chat123" not in reg
 
-        event = _register_hitl_wait("telegram", "chat123")
-        assert not event.is_set()
+    def test_try_resolve_no_pending(self):
+        from EvoScientist.cli import channel as channel_mod
 
-        # Simulate reply arriving
-        intercepted = _try_set_hitl_reply("telegram", "chat123", "1")
-        assert intercepted is True
-        assert event.is_set()
+        channel_mod._reply_registry.clear()
+        # No pending wait — should not intercept.
+        resolved = channel_mod._reply_registry.try_resolve("discord:no_pending", "y")
+        assert resolved is False
 
-        reply = _pop_hitl_reply("telegram", "chat123")
-        assert reply == "1"
+    async def test_reply_timeout_returns_none(self):
+        from EvoScientist.cli import channel as channel_mod
 
-    def test_try_set_hitl_reply_no_pending(self):
-        from EvoScientist.cli.channel import _try_set_hitl_reply
-
-        # No pending HITL — should not intercept
-        assert _try_set_hitl_reply("discord", "no_pending", "y") is False
-
-    def test_pop_hitl_reply_no_pending(self):
-        from EvoScientist.cli.channel import _pop_hitl_reply
-
-        assert _pop_hitl_reply("discord", "no_pending") is None
-
-    def test_hitl_reply_timeout(self):
-        from EvoScientist.cli.channel import (
-            _pop_hitl_reply,
-            _register_hitl_wait,
-        )
-
-        event = _register_hitl_wait("telegram", "timeout_chat")
-        # Don't set reply — simulate timeout
-        replied = event.wait(timeout=0.01)
-        assert replied is False
-        # Pop should still return None (reply was never set)
-        reply = _pop_hitl_reply("telegram", "timeout_chat")
-        assert reply is None
+        reg = channel_mod._reply_registry
+        reg.clear()
+        # No reply delivered — wait should time out and clean up.
+        got = await reg.wait("telegram:timeout_chat", timeout=0.02)
+        assert got is None
+        assert "telegram:timeout_chat" not in reg
 
 
 # =============================================================================

@@ -13,16 +13,20 @@ import pytest
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, HumanMessage
 
+from EvoScientist.middleware.events import NoOpSink
 from EvoScientist.middleware.model_fallback import (
     _guard_and_fallback,
     _is_non_fallbackable,
     _try_fallbacks,
     add_fallback,
     clear_fallbacks,
-    set_ui_emit,
 )
+from EvoScientist.stream.sink import SessionEventSink
 
 # ── Helpers ──────────────────────────────────────────────────────
+
+# Silent sink for tests that don't assert on the fallback narration.
+_SINK = NoOpSink()
 
 
 def _fake_request():
@@ -38,12 +42,10 @@ AI_RESPONSE = AIMessage(content="ok")
 
 @pytest.fixture(autouse=True)
 def _clean_chain():
-    """Ensure a clean fallback chain and no UI callback for every test."""
+    """Ensure a clean fallback chain for every test."""
     clear_fallbacks()
-    set_ui_emit(None)
     yield
     clear_fallbacks()
-    set_ui_emit(None)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -154,7 +156,7 @@ class TestTryFallbacks:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = await _try_fallbacks(req, invoke, Exception("503 boom"))
+            result = await _try_fallbacks(req, invoke, Exception("503 boom"), _SINK)
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
@@ -177,7 +179,7 @@ class TestTryFallbacks:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = await _try_fallbacks(req, _invoke, Exception("503 boom"))
+            result = await _try_fallbacks(req, _invoke, Exception("503 boom"), _SINK)
 
         assert result is AI_RESPONSE
         assert call_count == 2
@@ -202,7 +204,7 @@ class TestTryFallbacks:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
             with pytest.raises(Exception, match="429 from fb-b") as exc_info:
-                await _try_fallbacks(req, _invoke, Exception("503 primary"))
+                await _try_fallbacks(req, _invoke, Exception("503 primary"), _SINK)
 
         assert exc_info.value is last_error
 
@@ -218,7 +220,7 @@ class TestTryFallbacks:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
             with pytest.raises(Exception, match="context_length_exceeded"):
-                await _try_fallbacks(req, _invoke, Exception("503 primary"))
+                await _try_fallbacks(req, _invoke, Exception("503 primary"), _SINK)
 
         # get_chat_model should only have been called once (for fb-a),
         # fb-b should never be reached.
@@ -264,7 +266,12 @@ class TestTryFallbacks:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = fallback_model
             with pytest.raises(ProviderStreamError) as exc_info:
-                await _try_fallbacks(req, _invoke, Exception("openai primary failed"))
+                await _try_fallbacks(
+                    req,
+                    _invoke,
+                    Exception("openai primary failed"),
+                    _SINK,
+                )
 
         # Attribution flipped to moonshot (the failing fallback), not
         # openai (the original request's model).
@@ -304,7 +311,12 @@ class TestTryFallbacks:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = model
             with pytest.raises(InvalidUpdateError) as exc_info:
-                await _try_fallbacks(req, _invoke, Exception("primary failed"))
+                await _try_fallbacks(
+                    req,
+                    _invoke,
+                    Exception("primary failed"),
+                    _SINK,
+                )
         assert exc_info.value is raised
 
 
@@ -322,7 +334,9 @@ class TestGuardAndFallback:
         invoke = AsyncMock()
 
         with pytest.raises(ContextOverflowError):
-            await _guard_and_fallback(ContextOverflowError("overflow"), req, invoke)
+            await _guard_and_fallback(
+                ContextOverflowError("overflow"), req, invoke, _SINK
+            )
 
         invoke.assert_not_awaited()
 
@@ -349,7 +363,7 @@ class TestGuardAndFallback:
 
         raised = ContextOverflowError("context length exceeded")
         with pytest.raises(ContextOverflowError) as exc_info:
-            await _guard_and_fallback(raised, req, invoke)
+            await _guard_and_fallback(raised, req, invoke, _SINK)
 
         assert exc_info.value is raised
         invoke.assert_not_awaited()
@@ -361,7 +375,7 @@ class TestGuardAndFallback:
 
         with pytest.raises(Exception, match="invalid_request_error"):
             await _guard_and_fallback(
-                Exception("400: invalid_request_error"), req, invoke
+                Exception("400: invalid_request_error"), req, invoke, _SINK
             )
 
         invoke.assert_not_awaited()
@@ -373,7 +387,9 @@ class TestGuardAndFallback:
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            result = await _guard_and_fallback(Exception("503 overloaded"), req, invoke)
+            result = await _guard_and_fallback(
+                Exception("503 overloaded"), req, invoke, _SINK
+            )
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
@@ -387,7 +403,7 @@ class TestGuardAndFallback:
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
             result = await _guard_and_fallback(
-                Exception("400 Bad Request: invalid_api_key"), req, invoke
+                Exception("400 Bad Request: invalid_api_key"), req, invoke, _SINK
             )
 
         assert result is AI_RESPONSE
@@ -400,35 +416,97 @@ class TestGuardAndFallback:
 
 
 class TestUiEmit:
-    """Verify that fallback events are surfaced via the registered callback."""
+    """Verify that fallback narration reaches the injected frontend sink.
+
+    The fallback middleware sends its narration lines through the same
+    ``fallback_display`` callback the frontend supplies, so capturing that
+    callback exercises the exact user-facing text.
+    """
+
+    def _capturing_sink(self):
+        messages: list[tuple[str, str]] = []
+        sink = SessionEventSink(
+            fallback_display=lambda text, style: messages.append((text, style))
+        )
+        return sink, messages
 
     async def test_emit_captures_messages(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock(return_value=AI_RESPONSE)
-
-        messages: list[tuple[str, str]] = []
-        set_ui_emit(lambda text, style: messages.append((text, style)))
+        sink, messages = self._capturing_sink()
 
         with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
             mock_gcm.return_value = MagicMock()
-            await _try_fallbacks(req, invoke, Exception("503 down"))
+            await _try_fallbacks(req, invoke, Exception("503 down"), sink)
 
         texts = [t for t, _ in messages]
         assert any("Primary model failed" in t for t in texts)
         assert any("Falling back to fb (prov)" in t for t in texts)
         assert any("succeeded" in t for t in texts)
 
+    async def test_default_sink_prints_to_console(self):
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        invoke = AsyncMock(return_value=AI_RESPONSE)
+        sink = SessionEventSink()
+
+        with (
+            patch("EvoScientist.llm.models.get_chat_model") as mock_gcm,
+            patch("EvoScientist.stream.sink.console.print") as mock_print,
+        ):
+            mock_gcm.return_value = MagicMock()
+            await _try_fallbacks(req, invoke, Exception("503 down"), sink)
+
+        texts = [call.args[0] for call in mock_print.call_args_list]
+        assert any("Primary model failed" in t for t in texts)
+        assert any("Falling back to fb (prov)" in t for t in texts)
+        assert any("succeeded" in t for t in texts)
+        assert all(
+            call.kwargs == {"style": "yellow"} for call in mock_print.call_args_list[:2]
+        )
+
+    async def test_display_failure_does_not_abort_fallback(self, caplog):
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        invoke = AsyncMock(return_value=AI_RESPONSE)
+        sink = SessionEventSink(
+            fallback_display=MagicMock(side_effect=RuntimeError("ui unavailable"))
+        )
+
+        with (
+            patch("EvoScientist.llm.models.get_chat_model") as mock_gcm,
+            patch("EvoScientist.stream.sink.console.print") as mock_print,
+        ):
+            mock_gcm.return_value = MagicMock()
+            result = await _try_fallbacks(req, invoke, Exception("503 down"), sink)
+
+        assert result is AI_RESPONSE
+        invoke.assert_awaited_once()
+        assert "Fallback display callback failed" in caplog.text
+        texts = [call.args[0] for call in mock_print.call_args_list]
+        assert any("Primary model failed" in t for t in texts)
+        assert any("Falling back to fb (prov)" in t for t in texts)
+        assert any("succeeded" in t for t in texts)
+
+    def test_noopsink_keeps_fallback_notices_silent(self):
+        sink = NoOpSink()
+
+        with patch("EvoScientist.stream.sink.console.print") as mock_print:
+            sink.emit_fallback_notice("hidden")
+
+        mock_print.assert_not_called()
+
     async def test_emit_shows_non_fallbackable_rejection(self):
         add_fallback("fb", "prov")
         req = _fake_request()
         invoke = AsyncMock()
-
-        messages: list[tuple[str, str]] = []
-        set_ui_emit(lambda text, style: messages.append((text, style)))
+        sink, messages = self._capturing_sink()
 
         with pytest.raises(ContextOverflowError):
-            await _guard_and_fallback(ContextOverflowError("overflow"), req, invoke)
+            await _guard_and_fallback(
+                ContextOverflowError("overflow"), req, invoke, sink
+            )
 
         texts = [t for t, _ in messages]
         assert any("not eligible for fallback" in t for t in texts)

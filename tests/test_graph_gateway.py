@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.gateway import (
@@ -280,6 +281,33 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     assert seen["thread_id"] == "generated-thread"
     assert isinstance(seen["gateway"], LocalGraphGateway)
     assert seen["gateway"].thread_store is thread_store
+
+
+def test_cmd_run_converts_stream_failure_to_controlled_exit(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    runtime_gateways = RuntimeGateways(
+        thread_store=FakeThreadStore(),
+        graph_gateway=FakeGraphGateway(),
+    )
+    provider_error = RuntimeError("provider unavailable")
+    monkeypatch.setattr(
+        interactive,
+        "run_streaming",
+        MagicMock(side_effect=provider_error),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        interactive.cmd_run(
+            MagicMock(),
+            "hello",
+            thread_id="failed-thread",
+            show_thinking=False,
+            runtime_gateways=runtime_gateways,
+        )
+
+    assert exc_info.value.exit_code == 1
+    assert exc_info.value.__cause__ is provider_error
 
 
 async def test_langgraph_server_thread_store_delegates_to_sdk_threads():

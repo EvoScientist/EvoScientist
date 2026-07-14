@@ -20,16 +20,23 @@ async def collect_events(
     agent,
     message: str = "hi",
     thread_id: str = "t1",
+    *,
+    events=None,
 ):
-    """Collect stream_agent_events output for tests."""
-    events = []
+    """Collect stream_agent_events output for tests.
+
+    ``events`` is the frontend tool-selection sink to drive suppression /
+    selection rendering (defaults to the silent NoOpSink inside the stream).
+    """
+    collected = []
     async for ev in stream_agent_events(
         agent,
         message,
         thread_id,
+        events=events,
     ):
-        events.append(ev)
-    return events
+        collected.append(ev)
+    return collected
 
 
 def protocol_event(

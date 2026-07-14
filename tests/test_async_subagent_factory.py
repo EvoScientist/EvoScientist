@@ -308,8 +308,11 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
     mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
     from EvoScientist.EvoScientist import _get_default_middleware
+    from EvoScientist.middleware.events import NoOpSink
 
     _get_default_middleware(for_async_subagent=True)
 
+    # Async subagents still select tools, but are wired to the silent NoOpSink
+    # so they never drive the main-agent tool-selection widget.
     mock_tool_selector.assert_called_once()
-    assert mock_tool_selector.call_args.kwargs["track_stream_selection"] is False
+    assert isinstance(mock_tool_selector.call_args.kwargs["events"], NoOpSink)

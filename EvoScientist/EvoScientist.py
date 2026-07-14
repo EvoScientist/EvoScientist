@@ -41,6 +41,8 @@ logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from .middleware.events import MiddlewareEventSink
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -465,9 +467,12 @@ def _maybe_swap_async_subagents(
             out.append(s)
 
     if agent_specs and middleware is not None:
+        from .cli import async_notifier
         from .middleware.async_watcher import AsyncWatcherMiddleware
 
-        middleware.append(AsyncWatcherMiddleware(agent_specs))
+        # Composition root wires the concrete notifier port into the middleware;
+        # the middleware itself never imports the CLI layer.
+        middleware.append(AsyncWatcherMiddleware(agent_specs, notifier=async_notifier))
 
     # Forward the CLI's live (model, provider) into deepagents'
     # start/update_async_task tool calls so the deployed graph can
@@ -650,6 +655,7 @@ def _get_default_middleware(
     cfg=None,
     chat_model=None,
     memory_source_agent: str = "EvoScientist",
+    events: "MiddlewareEventSink | None" = None,
 ):
     """Build the default middleware list.
 
@@ -669,6 +675,11 @@ def _get_default_middleware(
             (avoids writing module globals on the pure path).
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
+        events: Frontend/session-supplied event sink. Middleware report
+            tool-selection events and model-fallback notices to it.
+            Defaults to the current stream run's sink for main agents; async
+            sub-agent stacks are always forced to ``NoOpSink`` (they must not
+            drive the main-agent widgets).
     """
     from .middleware import (
         ConfigurableModelMiddleware,
@@ -686,6 +697,13 @@ def _get_default_middleware(
         default_memory_scheduler,
         load_fallback_chain,
     )
+    from .middleware.events import NO_OP_SINK, RunScopedEventSink
+
+    # Subagent stacks never drive the main-agent frontend widgets; force the
+    # no-op sink there regardless of what the caller passed. Main stacks built
+    # without an explicit frontend/session sink report into the active stream
+    # run's sink, preserving selector suppression for headless local runs.
+    events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
     if cfg.model_fallbacks:
@@ -743,12 +761,12 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware(),
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
-        ModelFallbackMiddleware(),
+        ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(
             model=tool_selector_model,
-            track_stream_selection=not for_async_subagent,
+            events=events,
         ),
         # Interpreter prompt must land before runtime/memory context, so this
         # middleware sits ahead of runtime_context in the stack.
@@ -783,9 +801,15 @@ def _get_default_middleware(
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
     # must not spawn local OS processes.
     if not for_async_subagent:
+        from .cli import async_notifier
         from .middleware.background import BackgroundExecutionMiddleware
 
-        mw.append(BackgroundExecutionMiddleware())
+        # Inject the notifier port + the assembly-time dangerous-mode policy
+        # (agents rebuild on config change, so the captured flag never staler
+        # than the agent it lives on).
+        mw.append(
+            BackgroundExecutionMiddleware(async_notifier, dangerous=cfg.dangerous_mode)
+        )
 
     return mw
 
@@ -880,6 +904,7 @@ def create_cli_agent(
     chat_model=None,
     *,
     on_mcp_progress=None,
+    events: "MiddlewareEventSink | None" = None,
 ) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
@@ -981,7 +1006,7 @@ def create_cli_agent(
     # CLI agent never drifts from the default chain. Anything CLI-specific
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
     mw: list[AgentMiddleware] = _get_default_middleware(
-        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model, events=events
     )
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent

@@ -847,11 +847,16 @@ class TestChannelTyping:
 
 
 class TestChannelReconnect:
-    async def test_run_reconnects_on_error(self):
+    async def test_run_reconnects_on_error(self, monkeypatch):
         """Channel.run() should reconnect with backoff on transient errors."""
 
         ch = StubChannel()
+        mgr = ChannelManager(MessageBus())
+        mgr.register(ch)
         start_count = 0
+        sleep_count = 0
+        first_retry_waiting = asyncio.Event()
+        allow_retries = asyncio.Event()
         original_start = ch.start
 
         async def flaky_start():
@@ -863,9 +868,73 @@ class TestChannelReconnect:
             # Stop after successful start to end the test
             ch._running = False
 
+        async def controlled_sleep(_delay):
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count == 1:
+                first_retry_waiting.set()
+                await allow_retries.wait()
+
         ch.start = flaky_start
-        await ch.run()
+        monkeypatch.setattr(asyncio, "sleep", controlled_sleep)
+
+        run_task = asyncio.create_task(ch.run())
+        await first_retry_waiting.wait()
+
+        try:
+            assert ch._startup_event.is_set() is False
+            assert ch._startup_error is None
+            assert mgr.startup_results() == [("stub", False, "starting (bus)")]
+        finally:
+            allow_retries.set()
+
+        await run_task
         assert start_count == 3
+        assert ch._startup_event.is_set()
+        assert ch._startup_error is None
+
+    async def test_runtime_error_does_not_overwrite_successful_startup(
+        self, monkeypatch
+    ):
+        """A receive failure should preserve the completed startup result."""
+
+        ch = StubChannel()
+        start_count = 0
+        receive_count = 0
+        state_before_reconnect: list[tuple[bool, str | None]] = []
+        original_start = ch.start
+
+        async def tracking_start():
+            nonlocal start_count
+            start_count += 1
+            if start_count == 2:
+                state_before_reconnect.append(
+                    (ch._startup_event.is_set(), ch._startup_error)
+                )
+            await original_start()
+            if start_count == 2:
+                ch._running = False
+
+        async def flaky_receive():
+            nonlocal receive_count
+            receive_count += 1
+            if receive_count == 1:
+                raise ConnectionError("receive transient")
+            if False:  # pragma: no cover - marks this as an async generator
+                yield None
+
+        async def no_sleep(_delay):
+            return None
+
+        ch.start = tracking_start
+        ch.receive = flaky_receive
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+        await ch.run()
+
+        assert state_before_reconnect == [(True, None)]
+        assert ch._startup_event.is_set()
+        assert ch._startup_error is None
 
     async def test_run_stops_on_channel_error(self):
         """ChannelError should stop the channel permanently."""
@@ -878,6 +947,8 @@ class TestChannelReconnect:
         ch.start = fatal_start
         await ch.run()
         assert ch._running is False
+        assert ch._startup_event.is_set()
+        assert ch._startup_error == "fatal"
 
 
 class TestExtractRetryAfter:
@@ -1273,6 +1344,23 @@ class TestChannelManagerStatus:
         assert mgr.running_channels() == []
         ch._running = True
         assert mgr.running_channels() == ["stub"]
+
+    def test_startup_results_report_fatal_error(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        mgr.register(ch)
+        ch._startup_error = "dependency missing"
+        ch._startup_event.set()
+
+        assert mgr.startup_results() == [("stub", False, "failed: dependency missing")]
+
+    def test_startup_results_do_not_assume_pending_channel_is_connected(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        mgr.register(StubChannel())
+
+        assert mgr.startup_results() == [("stub", False, "starting (bus)")]
 
     def test_get_stats(self):
         bus = MessageBus()

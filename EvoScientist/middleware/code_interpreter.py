@@ -29,6 +29,9 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
+import weakref
+
 from langchain.agents.middleware.types import ModelRequest
 from langchain_quickjs import CodeInterpreterMiddleware
 
@@ -42,6 +45,8 @@ _MEMORY_FIRST_INTERPRETER_PROMPT = (
     "\n\nWhen memory tools (search_observations, read_memory) are available, use "
     "them before `code_interpreter` for workspace inspection or implementation work."
 )
+
+_live_interpreters: weakref.WeakSet[EvoCodeInterpreterMiddleware]
 
 
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
@@ -63,6 +68,25 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
 
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
+
+    async def aclose(self) -> None:
+        """Evict active REPLs on their worker loops before event-loop shutdown."""
+        registry = self._registry
+        with registry._lock:
+            thread_ids = tuple(registry._slots)
+        for thread_id in thread_ids:
+            with contextlib.suppress(Exception):
+                await registry.aevict(thread_id)
+        self._ptc_tools_by_thread.clear()
+
+
+_live_interpreters = weakref.WeakSet()
+
+
+async def aclose_code_interpreters() -> None:
+    """Close all live EvoScientist QuickJS middleware instances."""
+    for middleware in tuple(_live_interpreters):
+        await middleware.aclose()
 
 
 # Read-only, batchable tools that benefit from being callable inside JS.
@@ -109,9 +133,11 @@ def create_code_interpreter_middleware(
         Configured ``CodeInterpreterMiddleware`` ready to append to an agent's
         middleware stack.
     """
-    return EvoCodeInterpreterMiddleware(
+    middleware = EvoCodeInterpreterMiddleware(
         ptc=_DEFAULT_PTC_ALLOWLIST,
         timeout=timeout,
         max_result_chars=max_result_chars,
         tool_name="code_interpreter",
     )
+    _live_interpreters.add(middleware)
+    return middleware

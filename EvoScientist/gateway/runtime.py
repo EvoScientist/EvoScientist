@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
@@ -13,6 +13,9 @@ from .server import (
     LangGraphServerThreadStore,
 )
 from .types import GraphGateway, ThreadStore
+
+if TYPE_CHECKING:
+    from ..middleware.events import SessionEvents
 
 RuntimeGatewayBackend = Literal["local", "langgraph_server"]
 
@@ -32,8 +35,14 @@ def create_runtime_gateways(
     graph_id: str = DEFAULT_GRAPH_ID,
     headers: dict[str, str] | None = None,
     langgraph_client: LangGraphClient | None = None,
+    events: SessionEvents | None = None,
 ) -> RuntimeGateways:
-    """Create gateway handles for CLI/TUI/serve execution."""
+    """Create gateway handles for CLI/TUI/serve execution.
+
+    ``events`` is the frontend event sink; it is attached to the local gateway
+    so the streaming path shares the same sink instance the frontend injects
+    into the agent's middleware. Server backends ignore it (headless).
+    """
     if backend == "langgraph_server":
         if base_url is None and langgraph_client is None:
             raise ValueError("base_url is required for langgraph_server gateways")
@@ -59,5 +68,5 @@ def create_runtime_gateways(
 
     return RuntimeGateways(
         thread_store=local_thread_store,
-        graph_gateway=LocalGraphGateway(thread_store=local_thread_store),
+        graph_gateway=LocalGraphGateway(thread_store=local_thread_store, events=events),
     )

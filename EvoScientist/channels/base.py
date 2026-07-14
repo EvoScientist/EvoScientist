@@ -7,6 +7,7 @@ This module defines the Channel interface that all messaging channels
 import asyncio
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -298,6 +299,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             maxsize=queue_maxsize
         )
         self._running = False
+        self._startup_event = threading.Event()
+        self._startup_error: str | None = None
 
         # Global tracing can be enabled via shared config/env even when
         # individual channel factories have not been updated yet.
@@ -1167,16 +1170,25 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Run the channel with auto-reconnect (exponential backoff)."""
         backoff = 1.0
         max_backoff = 60.0
+        self._startup_event.clear()
+        self._startup_error = None
         self._running = True
         while self._running:
             try:
                 await self.start()
+                self._startup_error = None
+                self._startup_event.set()
                 backoff = 1.0
                 async for msg in self.receive():
                     await self.queue_message(msg)
             except asyncio.CancelledError:
+                if not self._startup_event.is_set():
+                    self._startup_error = "startup cancelled"
+                    self._startup_event.set()
                 break
             except ChannelError as e:
+                self._startup_error = str(e)
+                self._startup_event.set()
                 self._trace_event(
                     "channel_fatal_error",
                     error_type=type(e).__name__,
@@ -1203,6 +1215,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 _logger.info(f"Reconnecting {self.name} in {backoff:.1f}s...")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+
+        if not self._startup_event.is_set():
+            self._startup_error = "channel stopped before startup completed"
+            self._startup_event.set()
 
     # ── Channel allow-list check ─────────────────────────────────────
 
