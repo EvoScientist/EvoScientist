@@ -1087,3 +1087,34 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
         }
     ]
     assert events == [{"type": "done", "content": "", "response": ""}]
+
+
+async def test_langgraph_server_thread_store_cancels_runs_before_delete():
+    threads = FakeLangGraphThreadsClient(threads=[{"thread_id": "abc12345"}])
+    client = FakeLangGraphClient(threads)
+    cancelled: list[str] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int):
+            return [
+                {"run_id": "run-pending", "status": "pending"},
+                {"run_id": "run-done", "status": "success"},
+            ]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancelled.extend(run_ids)
+
+    client.runs = _FakeRunsClient()
+    store = LangGraphServerThreadStore(client=client)
+
+    assert await store.delete_thread("abc12345") is True
+    assert cancelled == ["run-pending"]
+    assert threads.deleted == ["abc12345"]
+
+
+async def test_langgraph_server_thread_store_delete_survives_missing_runs_client():
+    threads = FakeLangGraphThreadsClient(threads=[{"thread_id": "abc12345"}])
+    store = LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+
+    assert await store.delete_thread("abc12345") is True
+    assert threads.deleted == ["abc12345"]
