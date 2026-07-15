@@ -15,6 +15,7 @@ import subprocess
 import warnings
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
 from langchain.chat_models import init_chat_model
 
@@ -24,10 +25,10 @@ from ..config.settings import (
     OPENROUTER_DEFAULT_HTTP_REFERER,
 )
 from .context_window import apply_known_context_window
+from .deepseek import EvoChatDeepSeek
 from .patches import (
     _is_ccproxy_codex,
     _patch_ccproxy_system_to_developer,
-    _patch_deepseek_reasoning_passback,
     _patch_openai_compat_content,
     _patch_openrouter_strip_responses_reasoning,
 )
@@ -86,6 +87,16 @@ def _resolve_codex_client_version() -> str:
 def _resolve_reasoning_effort(default: str) -> str:
     """Return the configured reasoning effort or a provider-specific default."""
     return os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
+
+
+def _is_deepseek_endpoint(base_url: str | None) -> bool:
+    """Return whether an OpenAI-compatible endpoint is DeepSeek's API."""
+    if not base_url:
+        return False
+    try:
+        return urlparse(base_url).hostname == "api.deepseek.com"
+    except ValueError:
+        return False
 
 
 # Providers routed through the OpenAI provider with a custom base_url.
@@ -659,10 +670,23 @@ def get_chat_model(
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
     _apply_openrouter_anthropic_prompt_cache(provider, model_id, kwargs)
 
+    _uses_native_deepseek = provider == "deepseek" or (
+        provider == "openai"
+        and _original_provider == "custom-openai"
+        and _is_deepseek_endpoint(kwargs.get("base_url"))
+    )
+
     # User-level override for the OpenAI Responses API vs Chat Completions.
     # When "false", force Chat Completions and drop reasoning (which triggers
     # the Responses API path in langchain-openai). Only applies to OpenAI.
-    if provider == "openai":
+    if _uses_native_deepseek:
+        if kwargs.get("use_responses_api") is True:
+            raise ValueError(
+                "DeepSeek does not support the OpenAI Responses API. "
+                "Remove use_responses_api=True."
+            )
+        kwargs.pop("use_responses_api", None)
+    elif provider == "openai":
         _responses_api_setting = (
             os.environ.get("EVOSCIENTIST_USE_RESPONSES_API", "").strip().lower()
         )
@@ -672,25 +696,25 @@ def get_chat_model(
         elif _responses_api_setting == "true":
             kwargs["use_responses_api"] = True
 
-    chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
+    if _uses_native_deepseek:
+        chat_model = EvoChatDeepSeek(model=model_id, **kwargs)
+    else:
+        chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
     # Flatten list content to strings for strict OpenAI-compatible providers
-    # (DeepSeek, SiliconFlow, OpenRouter, custom-openai, etc.) and
+    # (SiliconFlow, OpenRouter, custom-openai, etc.) and
     # native OpenAI through a proxy, to avoid "sequence expected string" errors.
     # Moonshot and Kimi Coding support standard format, no patch needed.
     _no_patch_providers = {"moonshot", "kimi-coding"}
     if (
-        _is_third_party or _is_openai_proxy
-    ) and _original_provider not in _no_patch_providers:
+        (_is_third_party or _is_openai_proxy)
+        and _original_provider not in _no_patch_providers
+        and not _uses_native_deepseek
+    ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
         _hoist = _original_provider not in _ANTHROPIC_ROUTED_PROVIDERS
         _patch_openai_compat_content(chat_model, hoist_tool_media=_hoist)
-
-    # DeepSeek thinking mode requires reasoning_content passback in multi-turn
-    # + tool_use scenarios.
-    if provider == "deepseek":
-        _patch_deepseek_reasoning_passback(chat_model)
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)

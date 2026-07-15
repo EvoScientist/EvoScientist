@@ -398,6 +398,17 @@ class TestThirdPartyRouting:
         assert call_kwargs["extra_body"]["enable_thinking"] is False
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_deepseek_uses_copy_safe_native_model(self, mock_init, monkeypatch):
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+        model = get_chat_model("deepseek-v4-flash", provider="deepseek")
+
+        mock_init.assert_not_called()
+        assert isinstance(model, EvoChatDeepSeek)
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_uses_native_provider(self, mock_init, monkeypatch):
         """OpenRouter should use native 'openrouter' provider via init_chat_model."""
         mock_init.return_value = "mock_model"
@@ -1947,279 +1958,119 @@ class TestNoVisionFallback:
 
 
 # =============================================================================
-# Test _patch_deepseek_reasoning_passback
+# Test DeepSeek model integration
 # =============================================================================
 
 
-class TestPatchDeepseekReasoningPassback:
-    """Verify reasoning_content is injected into DeepSeek payload assistant messages.
+def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
+    import json
 
-    This patch fixes the 400 error from DeepSeek V4 thinking mode in multi-turn
-    + tool_use scenarios.  See langchain PR #34516 for upstream reference.
-    """
+    import httpx
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-    def _make_model(self, model_name="deepseek-v4-pro", payload_messages=None):
-        """Create a mock ChatOpenAI-like model for the DeepSeek base URL."""
-        from unittest.mock import MagicMock
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    captured = {}
 
-        if payload_messages is None:
-            payload_messages = [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello"},
-                {"role": "user", "content": "ok"},
-            ]
-
-        model = MagicMock()
-        model.model_name = model_name
-
-        class _Wrapped:
-            def __init__(self, msgs):
-                self._msgs = msgs
-
-            def to_messages(self):
-                return self._msgs
-
-        model._convert_input = lambda x: _Wrapped(x)
-        model._get_request_payload = MagicMock(
-            return_value={"messages": payload_messages}
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
         )
-        return model
 
-    def test_injects_reasoning_content_from_additional_kwargs(self):
-        from langchain_core.messages import AIMessage, HumanMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        model = self._make_model()
-        _patch_deepseek_reasoning_passback(model)
-
-        messages = [
-            HumanMessage("hi"),
-            AIMessage(
-                content="hello",
-                additional_kwargs={"reasoning_content": "let me think..."},
-            ),
-            HumanMessage("ok"),
-        ]
-        payload = model._get_request_payload(messages)
-
-        assert payload["messages"][1]["reasoning_content"] == "let me think..."
-
-    def test_empty_reasoning_for_reasoner_model(self):
-        from langchain_core.messages import AIMessage, HumanMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        model = self._make_model(model_name="deepseek-reasoner")
-        _patch_deepseek_reasoning_passback(model)
-
-        messages = [
-            HumanMessage("hi"),
-            AIMessage(content="hello"),  # no reasoning_content
-            HumanMessage("ok"),
-        ]
-        payload = model._get_request_payload(messages)
-
-        assert payload["messages"][1]["reasoning_content"] == ""
-
-    def test_empty_fallback_for_non_reasoner_without_rc(self):
-        from langchain_core.messages import AIMessage, HumanMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        model = self._make_model(model_name="deepseek-v4-pro")
-        _patch_deepseek_reasoning_passback(model)
-
-        messages = [
-            HumanMessage("hi"),
-            AIMessage(content="hello"),  # no reasoning_content
-            HumanMessage("ok"),
-        ]
-        payload = model._get_request_payload(messages)
-
-        # Empty-string fallback applies to ALL DeepSeek models (not just
-        # reasoner) so cross-provider history doesn't trigger 400.
-        assert payload["messages"][1]["reasoning_content"] == ""
-
-    def test_handles_multiple_ai_messages(self):
-        from langchain_core.messages import AIMessage, HumanMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        model = self._make_model(
-            payload_messages=[
-                {"role": "user", "content": "q1"},
-                {"role": "assistant", "content": "a1"},
-                {"role": "user", "content": "q2"},
-                {"role": "assistant", "content": "a2"},
-                {"role": "user", "content": "q3"},
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = get_chat_model(
+            "deepseek-v4-flash",
+            provider="deepseek",
+            http_client=client,
+        )
+        model.invoke(
+            [
+                HumanMessage("inspect the file"),
+                AIMessage(
+                    "",
+                    tool_calls=[{"name": "read_file", "args": {}, "id": "call_1"}],
+                ),
+                ToolMessage(
+                    content_blocks=[
+                        {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+                    ],
+                    tool_call_id="call_1",
+                ),
             ]
         )
-        _patch_deepseek_reasoning_passback(model)
 
+    assert captured["messages"][2]["content"] == (
+        "[attachment omitted: this model does not support this input type]"
+    )
+
+
+class TestDeepseekReasoningPassback:
+    """Verify reasoning_content is retained in serialized DeepSeek history."""
+
+    def test_request_payload_preserves_reasoning_for_tool_history(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        model = EvoChatDeepSeek(model="deepseek-v4-flash")
         messages = [
             HumanMessage("q1"),
-            AIMessage(content="a1", additional_kwargs={"reasoning_content": "rc1"}),
+            AIMessage(
+                "",
+                additional_kwargs={"reasoning_content": "rc1"},
+                tool_calls=[{"name": "read_file", "args": {}, "id": "call_1"}],
+            ),
+            ToolMessage("result", tool_call_id="call_1"),
             HumanMessage("q2"),
-            AIMessage(content="a2", additional_kwargs={"reasoning_content": "rc2"}),
+            AIMessage("a2"),
             HumanMessage("q3"),
+            AIMessage("a3", additional_kwargs={"reasoning_content": "rc3"}),
+            HumanMessage("q4"),
         ]
         payload = model._get_request_payload(messages)
 
         assert payload["messages"][1]["reasoning_content"] == "rc1"
-        assert payload["messages"][3]["reasoning_content"] == "rc2"
-
-    def test_real_world_tool_use_flow(self):
-        """The real scenario this patch was built for: AI thinks → tool_call →
-        ToolMessage → next turn must carry reasoning_content from prior AI msg.
-
-        This mirrors what happens in /tmp/verify_deepseek.py and what the user
-        actually triggers via 'create file then read it' in EvoSci CLI.
-        """
-        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        # Mock payload that mirrors what langchain-openai produces:
-        # user → assistant (with tool_calls) → tool_result → user (next turn)
-        model = self._make_model(
-            payload_messages=[
-                {"role": "user", "content": "Read hello.txt"},
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "read_file", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {"role": "tool", "content": "file contents", "tool_call_id": "call_1"},
-                {"role": "user", "content": "now what?"},
-            ]
-        )
-        _patch_deepseek_reasoning_passback(model)
-
-        messages = [
-            HumanMessage("Read hello.txt"),
-            AIMessage(
-                content="",
-                additional_kwargs={"reasoning_content": "I should call read_file"},
-                tool_calls=[{"name": "read_file", "args": {}, "id": "call_1"}],
-            ),
-            ToolMessage(content="file contents", tool_call_id="call_1"),
-            HumanMessage("now what?"),
-        ]
-        payload = model._get_request_payload(messages)
-
-        # The assistant message (index 1) must carry reasoning_content
-        assistant_msg = payload["messages"][1]
-        assert assistant_msg["role"] == "assistant"
-        assert assistant_msg["reasoning_content"] == "I should call read_file"
-        # tool_calls preserved
-        assert "tool_calls" in assistant_msg
-        # ToolMessage (index 2) untouched
+        assert "tool_calls" in payload["messages"][1]
         assert "reasoning_content" not in payload["messages"][2]
+        assert payload["messages"][4]["reasoning_content"] == ""
+        assert payload["messages"][6]["reasoning_content"] == "rc3"
 
-    def test_mixed_ai_messages_with_and_without_rc(self):
-        """Some AIMessages have reasoning_content, some don't (e.g., legacy turns
-        before patch was deployed). Each should be handled independently."""
+    def test_thinking_disabled_copy_omits_reasoning_passback(self, monkeypatch):
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+        from EvoScientist.middleware.utils import disable_thinking
 
-        model = self._make_model(
-            model_name="deepseek-v4-pro",
-            payload_messages=[
-                {"role": "user", "content": "q1"},
-                {"role": "assistant", "content": "a1"},  # no rc
-                {"role": "user", "content": "q2"},
-                {"role": "assistant", "content": "a2"},  # has rc
-                {"role": "user", "content": "q3"},
-            ],
-        )
-        _patch_deepseek_reasoning_passback(model)
-
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        model = disable_thinking(EvoChatDeepSeek(model="deepseek-v4-flash"))
         messages = [
             HumanMessage("q1"),
-            AIMessage(content="a1"),  # no reasoning_content
+            AIMessage("a1", additional_kwargs={"reasoning_content": "rc1"}),
             HumanMessage("q2"),
-            AIMessage(
-                content="a2",
-                additional_kwargs={"reasoning_content": "rc2"},
-            ),
-            HumanMessage("q3"),
         ]
+
         payload = model._get_request_payload(messages)
 
-        # First AI msg: no rc → empty-string fallback (covers cross-model switch)
-        assert payload["messages"][1]["reasoning_content"] == ""
-        # Second AI msg: has rc → injected
-        assert payload["messages"][3]["reasoning_content"] == "rc2"
-
-    def test_handles_responses_api_payload(self):
-        """Payload without 'messages' key (e.g. Responses API) should not crash."""
-        from unittest.mock import MagicMock
-
-        from langchain_core.messages import HumanMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        model = MagicMock()
-        model.model_name = "deepseek-v4-pro"
-
-        class _Wrapped:
-            def __init__(self, msgs):
-                self._msgs = msgs
-
-            def to_messages(self):
-                return self._msgs
-
-        model._convert_input = lambda x: _Wrapped(x)
-        # Simulate Responses API payload (no 'messages' key)
-        model._get_request_payload = MagicMock(
-            return_value={"input": [{"role": "user", "content": "hi"}]}
-        )
-
-        _patch_deepseek_reasoning_passback(model)
-
-        # Should not raise, just return the payload as-is
-        payload = model._get_request_payload([HumanMessage("hi")])
-        assert "input" in payload
-        assert "messages" not in payload
-
-    def test_cross_provider_switch_history(self):
-        """User chats with Anthropic/OpenAI then switches to DeepSeek V4 Pro.
-
-        Historical AI messages have no reasoning_content (the previous
-        provider never produced it). The patch must inject an empty-string
-        fallback so DeepSeek doesn't 400 on
-        "reasoning_content must be passed back to the API".
-        """
-        from langchain_core.messages import AIMessage, HumanMessage
-
-        from EvoScientist.llm.patches import _patch_deepseek_reasoning_passback
-
-        model = self._make_model(
-            model_name="deepseek-v4-pro",
-            payload_messages=[
-                {"role": "user", "content": "earlier question to anthropic"},
-                {"role": "assistant", "content": "anthropic answer"},
-                {"role": "user", "content": "now ask deepseek pro"},
-            ],
-        )
-        _patch_deepseek_reasoning_passback(model)
-
-        messages = [
-            HumanMessage("earlier question to anthropic"),
-            AIMessage(content="anthropic answer"),  # no reasoning_content
-            HumanMessage("now ask deepseek pro"),
-        ]
-        payload = model._get_request_payload(messages)
-
-        assert payload["messages"][1]["reasoning_content"] == ""
+        assert "reasoning_content" not in payload["messages"][1]
 
 
 # =============================================================================
@@ -2822,6 +2673,36 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert "use_responses_api" not in call_kwargs
         assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    def test_responses_api_env_ignored_for_host_routed_deepseek(self, monkeypatch):
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://api.deepseek.com")
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "true")
+
+        model = get_chat_model("deepseek-chat", provider="custom-openai")
+
+        assert isinstance(model, EvoChatDeepSeek)
+        assert model.use_responses_api is not True
+        assert "messages" in model._get_request_payload([HumanMessage("hi")])
+
+    @pytest.mark.parametrize("provider", ["deepseek", "custom-openai"])
+    def test_deepseek_rejects_explicit_responses_api(self, monkeypatch, provider):
+        if provider == "deepseek":
+            monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        else:
+            monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-test")
+            monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://api.deepseek.com")
+
+        with pytest.raises(ValueError, match="does not support the OpenAI Responses"):
+            get_chat_model(
+                "deepseek-chat",
+                provider=provider,
+                use_responses_api=True,
+            )
 
     @pytest.mark.parametrize("env_value", ["FALSE", " false ", "False"])
     @patch("EvoScientist.llm.models.init_chat_model")
