@@ -2966,6 +2966,9 @@ class TestOrphanedRunSweep:
 
         sweep_called = []
 
+        async def fake_restore():
+            return True
+
         async def fake_sweep():
             sweep_called.append(True)
 
@@ -2975,6 +2978,10 @@ class TestOrphanedRunSweep:
                 patch(
                     "EvoScientist.sessions.get_db_path",
                     return_value=_mock_path(db),
+                ),
+                patch(
+                    "EvoScientist.sessions._restore_webui_threads_to_global_store",
+                    side_effect=fake_restore,
                 ),
                 patch(
                     "EvoScientist.sessions._sweep_orphaned_runs_in_global_store",
