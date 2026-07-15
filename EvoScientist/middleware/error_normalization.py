@@ -90,6 +90,7 @@ _PROVIDER_EXC_MODULE_PREFIXES: tuple[str, ...] = (
     "google.api_core",
     "openrouter",
     "langchain_openai",
+    "langchain_deepseek",
     "langchain_anthropic",
     "langchain_google_genai",
     "langchain_openrouter",

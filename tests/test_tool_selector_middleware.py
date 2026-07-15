@@ -476,3 +476,118 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     te_idx = type_names.index("ToolErrorHandlerMiddleware")
     mem_idx = type_names.index("EvoMemoryMiddleware")
     assert te_idx < ts_idx < mem_idx
+
+
+# ---------------------------------------------------------------------------
+# disable_thinking: DeepSeek helper copies (issue #348)
+# ---------------------------------------------------------------------------
+
+
+def _deepseek_model(monkeypatch, **kwargs):
+    from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    return EvoChatDeepSeek(model="deepseek-v4-pro", **kwargs)
+
+
+def test_disable_thinking_deepseek_sets_request_field(monkeypatch):
+    """DeepSeek thinking is a server-side default; the helper copy must
+    disable it in the request body, or the selector's forced tool_choice
+    is rejected ("Thinking mode does not support this tool_choice")."""
+    from EvoScientist.middleware.utils import disable_thinking
+
+    model = _deepseek_model(monkeypatch)
+    safe = disable_thinking(model)
+
+    assert safe is not model
+    assert safe.extra_body == {"thinking": {"type": "disabled"}}
+    assert model.extra_body is None  # original untouched
+    assert type(safe) is type(model)
+
+
+def test_disable_thinking_deepseek_preserves_extra_body(monkeypatch):
+    from EvoScientist.middleware.utils import disable_thinking
+
+    model = _deepseek_model(monkeypatch, extra_body={"custom": 1})
+    safe = disable_thinking(model)
+
+    assert safe.extra_body == {"custom": 1, "thinking": {"type": "disabled"}}
+    assert model.extra_body == {"custom": 1}
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "custom-openai"])
+async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
+    import json
+
+    import httpx
+    from langchain_core.messages import HumanMessage
+
+    from EvoScientist.llm.models import get_chat_model
+
+    if provider == "deepseek":
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    else:
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://api.deepseek.com")
+    captured = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "ToolSelectionResponse",
+                                        "arguments": json.dumps({"tools": ["tool_1"]}),
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        model = get_chat_model(
+            "deepseek-v4-flash",
+            provider=provider,
+            http_async_client=client,
+        )
+        selector = create_tool_selector_middleware(model=model, threshold=0)[0]
+        request = ModelRequest(
+            model=model,
+            messages=[HumanMessage("pick a tool")],
+            tools=[_tool(f"tool_{index}") for index in range(3)],
+        )
+        selected = []
+
+        async def handler(req):
+            selected.extend(tool.name for tool in req.tools)
+
+        await selector.awrap_model_call(request, handler)
+
+    assert "response_format" not in captured
+    assert captured["thinking"] == {"type": "disabled"}
+    assert captured["tool_choice"]["function"]["name"] == "ToolSelectionResponse"
+    assert selected == ["tool_1"]

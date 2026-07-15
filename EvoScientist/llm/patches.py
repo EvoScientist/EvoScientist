@@ -11,9 +11,6 @@ Patches:
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
-    - _patch_deepseek_reasoning_passback: re-inject reasoning_content into
-      outgoing DeepSeek assistant messages for thinking-mode multi-turn /
-      tool_use scenarios
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
@@ -26,7 +23,10 @@ Utilities:
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from typing import Any
+
+from langchain_core.messages import BaseMessage
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +267,9 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
     return "\n\n".join(parts) if parts else ""
 
 
-def _sanitize_messages(messages: list[Any], hoist_tool_media: bool = True) -> list[Any]:
+def _sanitize_messages(
+    messages: list[BaseMessage], hoist_tool_media: bool = True
+) -> list[BaseMessage]:
     """Flatten list content for OpenAI-compatible APIs, preserving media.
 
     Text/reasoning content is flattened to a string; image blocks are
@@ -282,7 +284,7 @@ def _sanitize_messages(messages: list[Any], hoist_tool_media: bool = True) -> li
 
     from langchain_core.messages import HumanMessage
 
-    out: list[Any] = []
+    out: list[BaseMessage] = []
     pending_media: list[Any] = []  # media hoisted out of a run of tool messages
 
     def _flush() -> None:
@@ -338,7 +340,7 @@ _FILE_ERROR_MARKERS = ("file input", "pdf input", "document input")
 _GENERIC_MEDIA_MARKERS = ("multimodal", "expected `text`")
 
 
-def _media_types_in(messages: list[Any]) -> set[str]:
+def _media_types_in(messages: list[BaseMessage]) -> set[str]:
     """Set of preserved-media block types present across the messages."""
     found: set[str] = set()
     for msg in messages:
@@ -375,7 +377,9 @@ def _is_http_400(exc: Exception) -> bool:
     return status == 400
 
 
-def _strip_media_types(messages: list[Any], types: set[str]) -> list[Any]:
+def _strip_media_types(
+    messages: list[BaseMessage], types: set[str]
+) -> list[BaseMessage]:
     """Replace blocks of the given types with a placeholder text block.
 
     Each stripped block is replaced IN PLACE (consecutive ones collapse into one
@@ -384,7 +388,7 @@ def _strip_media_types(messages: list[Any], types: set[str]) -> list[Any]:
     """
     import copy
 
-    out: list[Any] = []
+    out: list[BaseMessage] = []
     for msg in messages:
         content = getattr(msg, "content", None)
         if not isinstance(content, list) or not any(
@@ -410,47 +414,174 @@ def _strip_media_types(messages: list[Any], types: set[str]) -> list[Any]:
     return out
 
 
+class _OpenAICompatContent:
+    """Apply OpenAI-compatible content normalization without owning a model."""
+
+    def __init__(
+        self,
+        profile: Mapping[str, object] | None,
+        hoist_tool_media: bool,
+    ) -> None:
+        self.hoist_tool_media = hoist_tool_media
+        self.blocked: set[str] = set()
+        if profile is not None:
+            if profile.get("image_inputs") is False:
+                self.blocked |= _IMAGE_CONTENT_TYPES
+            if profile.get("pdf_inputs") is False:
+                self.blocked |= _FILE_CONTENT_TYPES
+
+    def _prepare(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+        prepared = (
+            _strip_media_types(messages, self.blocked) if self.blocked else messages
+        )
+        return _sanitize_messages(prepared, self.hoist_tool_media)
+
+    def _stripped(
+        self,
+        messages: list[BaseMessage],
+        suspects: set[str],
+    ) -> list[BaseMessage]:
+        return _sanitize_messages(
+            _strip_media_types(messages, self.blocked | suspects),
+            self.hoist_tool_media,
+        )
+
+    def invoke(
+        self,
+        call: Callable[..., Any],
+        messages: list[BaseMessage],
+        *args,
+        **kwargs,
+    ) -> Any:
+        suspects = _media_types_in(messages) - self.blocked
+        prepared = self._prepare(messages)
+        if not suspects:
+            return call(prepared, *args, **kwargs)
+        try:
+            return call(prepared, *args, **kwargs)
+        except Exception as exc:
+            culprit = _media_error_types(exc) & suspects
+            if not culprit and not _is_http_400(exc):
+                raise
+            try:
+                result = call(self._stripped(messages, suspects), *args, **kwargs)
+            except Exception:
+                raise exc from None
+            self.blocked.update(culprit)
+            return result
+
+    async def ainvoke(
+        self,
+        call: Callable[..., Awaitable[Any]],
+        messages: list[BaseMessage],
+        *args,
+        **kwargs,
+    ) -> Any:
+        suspects = _media_types_in(messages) - self.blocked
+        prepared = self._prepare(messages)
+        if not suspects:
+            return await call(prepared, *args, **kwargs)
+        try:
+            return await call(prepared, *args, **kwargs)
+        except Exception as exc:
+            culprit = _media_error_types(exc) & suspects
+            if not culprit and not _is_http_400(exc):
+                raise
+            try:
+                result = await call(self._stripped(messages, suspects), *args, **kwargs)
+            except Exception:
+                # stripping didn't help — surface original, don't cache
+                raise exc from None
+            self.blocked.update(culprit)
+            return result
+
+    def stream(
+        self,
+        call: Callable[..., Iterator[Any]],
+        messages: list[BaseMessage],
+        *args,
+        **kwargs,
+    ) -> Iterator[Any]:
+        suspects = _media_types_in(messages) - self.blocked
+        prepared = self._prepare(messages)
+        if not suspects:
+            yield from call(prepared, *args, **kwargs)
+            return
+        started = False
+        try:
+            for chunk in call(prepared, *args, **kwargs):
+                started = True
+                yield chunk
+            return
+        except Exception as exc:
+            culprit = _media_error_types(exc) & suspects
+            if started or (not culprit and not _is_http_400(exc)):
+                raise
+            media_exc = exc
+        retry_started = False
+        try:
+            for chunk in call(self._stripped(messages, suspects), *args, **kwargs):
+                if not retry_started:
+                    retry_started = True
+                    self.blocked.update(culprit)
+                yield chunk
+        except Exception:
+            if retry_started:
+                raise
+            raise media_exc from None
+        if not retry_started:
+            raise media_exc from None
+
+    async def astream(
+        self,
+        call: Callable[..., AsyncIterator[Any]],
+        messages: list[BaseMessage],
+        *args,
+        **kwargs,
+    ) -> AsyncIterator[Any]:
+        suspects = _media_types_in(messages) - self.blocked
+        prepared = self._prepare(messages)
+        if not suspects:
+            async for chunk in call(prepared, *args, **kwargs):
+                yield chunk
+            return
+        started = False
+        try:
+            async for chunk in call(prepared, *args, **kwargs):
+                started = True
+                yield chunk
+            return
+        except Exception as exc:
+            culprit = _media_error_types(exc) & suspects
+            if started or (not culprit and not _is_http_400(exc)):
+                raise
+            media_exc = exc
+        retry_started = False
+        try:
+            async for chunk in call(
+                self._stripped(messages, suspects), *args, **kwargs
+            ):
+                if not retry_started:
+                    retry_started = True
+                    self.blocked.update(culprit)
+                yield chunk
+        except Exception:
+            if retry_started:
+                raise
+            raise media_exc from None
+        if not retry_started:
+            raise media_exc from None
+
+
 def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> None:
-    """Flatten list content to strings before OpenAI-compatible API calls.
-
-    Wraps ``_generate`` / ``_agenerate`` / ``_stream`` / ``_astream`` to prevent
-    "invalid type: sequence, expected a string" errors from strict APIs like
-    DeepSeek, while preserving image and file (PDF/document) blocks.  Tracks a
-    per-modality ``blocked`` set of media types the model rejects: when a request
-    fails with a media-looking error it is retried with the offending modalities
-    stripped to a placeholder, and those types are remembered ONLY after the
-    stripped retry succeeds — so an unrelated 400 never permanently degrades the
-    model, and a PDF rejection never disables images.  The profile pre-seeds the
-    set per modality (``image_inputs``/``pdf_inputs`` ``is False``).
-
-    Args:
-        model: A LangChain chat model instance to patch in-place.
-        hoist_tool_media: When True (OpenAI-compatible), media in a tool result
-            is hoisted into a following HumanMessage (tool content must be a
-            string).  Anthropic-routed providers pass False (native support).
-    """
+    """Normalize content for OpenAI-compatible models lacking a native adapter."""
     import functools
 
-    from langchain_core.messages import BaseMessage
-
-    # Media block types this model rejects.  Pre-seeded per modality from the
-    # profile, then grown reactively — but only after a stripped retry succeeds.
     profile = getattr(model, "profile", None)
-    blocked: set[str] = set()
-    if isinstance(profile, dict):
-        if profile.get("image_inputs") is False:
-            blocked |= _IMAGE_CONTENT_TYPES
-        if profile.get("pdf_inputs") is False:
-            blocked |= _FILE_CONTENT_TYPES
-
-    def _prepare(messages: list[BaseMessage]) -> list[BaseMessage]:
-        msgs = _strip_media_types(messages, blocked) if blocked else messages
-        return _sanitize_messages(msgs, hoist_tool_media)
-
-    def _stripped(messages: list[BaseMessage], suspects: set[str]) -> list[BaseMessage]:
-        return _sanitize_messages(
-            _strip_media_types(messages, blocked | suspects), hoist_tool_media
-        )
+    compat = _OpenAICompatContent(
+        profile if isinstance(profile, Mapping) else None,
+        hoist_tool_media,
+    )
 
     orig_generate = getattr(model, "_generate", None)
     if orig_generate is None:
@@ -460,23 +591,7 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
     def _patched_generate(
         messages: list[BaseMessage], *args: Any, **kwargs: Any
     ) -> Any:
-        prepared = _prepare(messages)
-        suspects = _media_types_in(messages) - blocked
-        if not suspects:
-            return orig_generate(prepared, *args, **kwargs)
-        try:
-            return orig_generate(prepared, *args, **kwargs)
-        except Exception as exc:
-            culprit = _media_error_types(exc) & suspects
-            if not culprit and not _is_http_400(exc):
-                raise
-            try:
-                result = orig_generate(_stripped(messages, suspects), *args, **kwargs)
-            except Exception:
-                # stripping didn't help — surface original, don't cache
-                raise exc from None
-            blocked.update(culprit)  # cache only the marker-identified modality
-            return result
+        return compat.invoke(orig_generate, messages, *args, **kwargs)
 
     model._generate = _patched_generate
 
@@ -487,24 +602,7 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
         async def _patched_agenerate(
             messages: list[BaseMessage], *args: Any, **kwargs: Any
         ) -> Any:
-            prepared = _prepare(messages)
-            suspects = _media_types_in(messages) - blocked
-            if not suspects:
-                return await orig_agenerate(prepared, *args, **kwargs)
-            try:
-                return await orig_agenerate(prepared, *args, **kwargs)
-            except Exception as exc:
-                culprit = _media_error_types(exc) & suspects
-                if not culprit and not _is_http_400(exc):
-                    raise
-                try:
-                    result = await orig_agenerate(
-                        _stripped(messages, suspects), *args, **kwargs
-                    )
-                except Exception:
-                    raise exc from None
-                blocked.update(culprit)
-                return result
+            return await compat.ainvoke(orig_agenerate, messages, *args, **kwargs)
 
         model._agenerate = _patched_agenerate
 
@@ -517,38 +615,7 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
         def _patched_stream(
             messages: list[BaseMessage], *args: Any, **kwargs: Any
         ) -> Any:
-            prepared = _prepare(messages)
-            suspects = _media_types_in(messages) - blocked
-            if not suspects:
-                yield from orig_stream(prepared, *args, **kwargs)
-                return
-            started = False
-            try:
-                for chunk in orig_stream(prepared, *args, **kwargs):
-                    started = True
-                    yield chunk
-                return
-            except Exception as exc:
-                culprit = _media_error_types(exc) & suspects
-                if started or (not culprit and not _is_http_400(exc)):
-                    raise
-                media_exc = exc
-                media_culprit = culprit
-            retry_started = False
-            try:
-                for chunk in orig_stream(
-                    _stripped(messages, suspects), *args, **kwargs
-                ):
-                    if not retry_started:
-                        retry_started = True
-                        blocked.update(media_culprit)
-                    yield chunk
-            except Exception:
-                if retry_started:
-                    raise
-                raise media_exc from None
-            if not retry_started:
-                raise media_exc from None  # stripped retry produced nothing
+            yield from compat.stream(orig_stream, messages, *args, **kwargs)
 
         model._stream = _patched_stream
 
@@ -559,39 +626,8 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
         async def _patched_astream(
             messages: list[BaseMessage], *args: Any, **kwargs: Any
         ) -> Any:
-            prepared = _prepare(messages)
-            suspects = _media_types_in(messages) - blocked
-            if not suspects:
-                async for chunk in orig_astream(prepared, *args, **kwargs):
-                    yield chunk
-                return
-            started = False
-            try:
-                async for chunk in orig_astream(prepared, *args, **kwargs):
-                    started = True
-                    yield chunk
-                return
-            except Exception as exc:
-                culprit = _media_error_types(exc) & suspects
-                if started or (not culprit and not _is_http_400(exc)):
-                    raise
-                media_exc = exc
-                media_culprit = culprit
-            retry_started = False
-            try:
-                async for chunk in orig_astream(
-                    _stripped(messages, suspects), *args, **kwargs
-                ):
-                    if not retry_started:
-                        retry_started = True
-                        blocked.update(media_culprit)
-                    yield chunk
-            except Exception:
-                if retry_started:
-                    raise
-                raise media_exc from None
-            if not retry_started:
-                raise media_exc from None  # stripped retry produced nothing
+            async for chunk in compat.astream(orig_astream, messages, *args, **kwargs):
+                yield chunk
 
         model._astream = _patched_astream
 
@@ -615,7 +651,7 @@ def _patch_ccproxy_system_to_developer(model: Any) -> None:
     import copy
     import functools
 
-    from langchain_core.messages import BaseMessage, SystemMessage
+    from langchain_core.messages import SystemMessage
 
     def _system_to_developer(messages: list[BaseMessage]) -> list[BaseMessage]:
         out: list[BaseMessage] = []
@@ -841,95 +877,6 @@ def _patch_openrouter_strip_responses_reasoning() -> None:
         _openrouter_reasoning_strip_patched = True
     except Exception:
         pass
-
-
-# ---------------------------------------------------------------------------
-# Patch: DeepSeek thinking mode requires reasoning_content to be passed back
-# in all assistant messages for multi-turn + tool_use scenarios.
-# langchain-openai's _convert_message_to_dict drops this field, causing
-# HTTP 400 "The reasoning_content in the thinking mode must be passed back".
-# Mirrors langchain-ai/langchain PR #34516 (which patches langchain-deepseek;
-# we apply equivalent logic to a langchain-openai ChatOpenAI instance).
-# ---------------------------------------------------------------------------
-def _patch_deepseek_reasoning_passback(model: Any) -> None:
-    """Inject reasoning_content into outgoing payload assistant messages.
-
-    DeepSeek V4 thinking mode + tool_use requires every historical assistant
-    message to carry its reasoning_content as a top-level field (sibling to
-    content / tool_calls).  Without this, multi-turn requests fail with 400.
-
-    For assistant messages where no reasoning_content was captured (e.g.
-    history left over from another provider, from DeepSeek Flash, or from an
-    older EvoSci version that ran before the capture patch landed), we
-    inject an empty string.  This satisfies DeepSeek's format requirement
-    in thinking mode.  Non-thinking DeepSeek endpoints are believed to
-    accept the extra field without complaint based on observed behavior,
-    but this has not been independently audited; if a future DeepSeek
-    release rejects empty reasoning_content on non-thinking models, this
-    fallback would need a per-call thinking-mode check instead of a blanket
-    inject.  The check is intentionally not gated on model name: this
-    function is only mounted when provider == "deepseek" (see
-    EvoScientist/llm/models.py), so all callers are DeepSeek endpoints.
-
-    Args:
-        model: A langchain-openai ChatOpenAI instance configured for DeepSeek.
-    """
-    import functools
-
-    from langchain_core.messages import AIMessage
-
-    orig = getattr(model, "_get_request_payload", None)
-    if orig is None:
-        return
-
-    import logging as _logging
-
-    _logger = _logging.getLogger(__name__)
-
-    @functools.wraps(orig)
-    def _patched(input_: Any, *, stop: Any = None, **kwargs: Any) -> dict:
-        try:
-            lc_messages = model._convert_input(input_).to_messages()
-        except Exception:
-            _logger.warning(
-                "DeepSeek passback patch: _convert_input failed, "
-                "falling back to unpatched payload (reasoning_content "
-                "will not be injected)",
-                exc_info=True,
-            )
-            return orig(input_, stop=stop, **kwargs)
-
-        ai_rcs: list[str | None] = [
-            m.additional_kwargs.get("reasoning_content")
-            for m in lc_messages
-            if isinstance(m, AIMessage)
-        ]
-
-        payload = orig(input_, stop=stop, **kwargs)
-        msgs = payload.get("messages")
-        if not isinstance(msgs, list):
-            return payload
-
-        ai_idx = 0
-        for msg in msgs:
-            if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                continue
-            rc = ai_rcs[ai_idx] if ai_idx < len(ai_rcs) else None
-            if rc:
-                msg["reasoning_content"] = rc
-            elif "reasoning_content" not in msg:
-                # Empty-string fallback for ALL DeepSeek models (not just
-                # reasoner). Required when history contains AI messages that
-                # came from a different provider (Anthropic / OpenAI /
-                # DeepSeek Flash) or from an older EvoSci that didn't capture
-                # reasoning_content. Empirically tolerated by non-thinking
-                # DeepSeek endpoints; see docstring for the audit caveat.
-                msg["reasoning_content"] = ""
-            ai_idx += 1
-
-        return payload
-
-    model._get_request_payload = _patched
 
 
 # ---------------------------------------------------------------------------

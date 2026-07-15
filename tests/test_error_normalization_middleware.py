@@ -126,6 +126,29 @@ class TestNormalize:
         req = _request(_google_model())
         assert _normalize(req, _make_exc()).provider == "google_genai"
 
+    def test_sdk_subclass_tagged_from_base_class(self):
+        sdk_class = type(
+            "ChatOpenAI",
+            (),
+            {"__module__": "langchain_openai.chat_models.base"},
+        )
+        evo_class = type(
+            "EvoChatOpenAI",
+            (sdk_class,),
+            {"__module__": "EvoScientist.llm.test_models"},
+        )
+        model = evo_class()
+        model.openai_api_base = None
+
+        assert _normalize(_request(model), _make_exc()).provider == "openai"
+
+    def test_deepseek_subclass_precedes_openai_base(self, monkeypatch):
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        req = _request(EvoChatDeepSeek(model="deepseek-v4-flash"))
+        assert _normalize(req, _make_exc()).provider == "deepseek"
+
     def test_unrecognized_model_class_returns_none(self):
         req = _request(_fake_model("some.other.pkg", "SomeModel"))
         assert _normalize(req, _make_exc()) is None

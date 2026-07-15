@@ -200,16 +200,22 @@ def _provider_from_model(model: Any) -> str | None:
     (``ErrorNormalizationMiddleware``) then passes the exception
     through unchanged.
     """
-    cls_module = type(model).__module__ or ""
-    if cls_module.startswith("langchain_openrouter"):
+    cls_modules = {cls.__module__ for cls in type(model).__mro__}
+
+    def _uses_sdk(module_prefix: str) -> bool:
+        return any(module.startswith(module_prefix) for module in cls_modules)
+
+    if _uses_sdk("langchain_openrouter"):
         return "openrouter"
-    if cls_module.startswith("langchain_google_genai"):
+    if _uses_sdk("langchain_google_genai"):
         return "google_genai"
-    if cls_module.startswith("langchain_openai"):
+    if _uses_sdk("langchain_deepseek"):
+        return "deepseek"
+    if _uses_sdk("langchain_openai"):
         return _lookup_host_or_compat(
             getattr(model, "openai_api_base", None), module_tag="openai"
         )
-    if cls_module.startswith("langchain_anthropic"):
+    if _uses_sdk("langchain_anthropic"):
         return _lookup_host_or_compat(
             getattr(model, "anthropic_api_url", None), module_tag="anthropic"
         )
