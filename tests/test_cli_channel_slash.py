@@ -112,6 +112,42 @@ async def test_successful_slash_execution_sets_response_and_breadcrumb():
     assert any("Executed command from" in t for t in breadcrumbs)
 
 
+async def test_slash_with_flushed_output_suppresses_executed_ack():
+    """When the command's own output already reached the channel, the
+    response is the already-sent sentinel, not a second ack message."""
+    from EvoScientist.cli.channel import COMMAND_OUTPUT_ALREADY_SENT
+
+    msg = _make_msg()
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+
+    async def _execute_with_output(content, ctx):
+        ctx.ui.sent_to_channel = True
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["core"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            new=AsyncMock(side_effect=_execute_with_output),
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent="fake-agent",
+            thread_id="t1",
+            workspace_dir="/tmp",
+            checkpointer=None,
+            append_system=MagicMock(),
+        )
+    assert handled is True
+    mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
+
+
 async def test_slash_dispatch_passes_graph_gateway_to_command_context():
     msg = _make_msg()
     fake_cmd = MagicMock()
