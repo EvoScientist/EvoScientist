@@ -684,19 +684,13 @@ NOTIFICATION_BATCH_GRACE_SECONDS = 0.3
 NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS = 3.0
 
 
-async def consume_notifications(
-    run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
+async def prepare_notifications(
     read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
     current_thread_id: str | None = None,
-) -> None:
-    """Drain queue, dedup, batch, and inject as a synthetic user message.
+) -> tuple[str, list[AsyncTaskNotification]] | None:
+    """Drain, batch, and deduplicate notifications without running a turn.
 
     Args:
-        run_message: async callable receiving (llm_text, notifs_list).
-            ``llm_text`` is the full structured message for the LLM
-            (from ``format_batch_message``).  ``notifs_list`` is the
-            survivors list so callers can render per-task visual lines
-            without re-parsing the text.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
         current_thread_id: the active CLI thread id. When given, only
@@ -735,5 +729,24 @@ async def consume_notifications(
         )
         return
 
-    text = format_batch_message(survivors)
+    return format_batch_message(survivors), survivors
+
+
+async def consume_notifications(
+    run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
+    read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
+    current_thread_id: str | None = None,
+) -> None:
+    """Prepare a notification batch and inject it as a synthetic user message.
+
+    ``run_message`` receives the structured LLM text and the surviving
+    notifications so frontends can render their visual frames.
+    """
+    prepared = await prepare_notifications(
+        read_async_tasks_state,
+        current_thread_id=current_thread_id,
+    )
+    if prepared is None:
+        return
+    text, survivors = prepared
     await run_message(text, survivors)

@@ -1,5 +1,6 @@
 """Tests for the /model command and extract_model_and_provider helper."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -173,6 +174,43 @@ class TestModelCommandSwitch:
         msg = ui.append_system.call_args[0][0]
         assert "claude-opus-4-8" in msg
         assert "anthropic" in msg
+
+    async def test_agent_rebuild_runs_off_event_loop_thread(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        cfg = SimpleNamespace(model="old-model", provider="anthropic")
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.workspace_dir = "/tmp/test"
+        ctx.checkpointer = None
+        event_loop_thread = threading.current_thread().name
+        build_threads: list[str] = []
+
+        def _build_chat_model(_cfg):
+            build_threads.append(threading.current_thread().name)
+            return MagicMock(name="new-chat-model")
+
+        def _load_agent(**_kwargs):
+            build_threads.append(threading.current_thread().name)
+            return MagicMock(name="new-agent")
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.EvoScientist._build_chat_model",
+                side_effect=_build_chat_model,
+            ),
+            patch(
+                "EvoScientist.cli.agent._load_agent",
+                side_effect=_load_agent,
+            ),
+            patch("EvoScientist.EvoScientist.set_active_config"),
+            patch("EvoScientist.EvoScientist.set_chat_model_instance"),
+        ):
+            await ModelCommand()._apply_model(ctx, "new-model", "openrouter")
+
+        assert len(build_threads) == 2
+        assert all(name != event_loop_thread for name in build_threads)
 
     async def test_switch_with_save_flag(self):
         from EvoScientist.commands.implementation.model import ModelCommand

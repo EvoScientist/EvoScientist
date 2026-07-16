@@ -21,6 +21,8 @@ class InstallMCPCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        import asyncio
+
         from ...mcp.registry import (
             fetch_marketplace_index,
             find_server_by_name,
@@ -35,11 +37,7 @@ class InstallMCPCommand(Command):
         ctx.ui.append_system("Fetching MCP server index...", style="dim")
         await ctx.ui.flush()
         try:
-            import asyncio
-
-            servers = await asyncio.get_event_loop().run_in_executor(
-                None, fetch_marketplace_index
-            )
+            servers = await asyncio.to_thread(fetch_marketplace_index)
         except Exception as e:
             ctx.ui.append_system(f"Failed to fetch server index: {e}", style="red")
             return
@@ -58,7 +56,19 @@ class InstallMCPCommand(Command):
                         f"{match.name} is already configured.", style="yellow"
                     )
                     return
-                if install_mcp_server(match, print_fn=ctx.ui.append_system):
+
+                def _install_one():
+                    messages: list[tuple[str, str]] = []
+
+                    def _collect(text: str, style: str = "") -> None:
+                        messages.append((text, style))
+
+                    return install_mcp_server(match, print_fn=_collect), messages
+
+                installed_ok, messages = await asyncio.to_thread(_install_one)
+                for text, style in messages:
+                    ctx.ui.append_system(text, style=style)
+                if installed_ok:
                     ctx.ui.append_system(f"Configured: {match.name}", style="green")
                     ctx.ui.append_system("Reload with /new to apply.", style="dim")
                 else:
@@ -93,7 +103,18 @@ class InstallMCPCommand(Command):
             ctx.ui.append_system("No servers selected.", style="dim")
             return
 
-        count = install_mcp_servers(selected_entries, print_fn=ctx.ui.append_system)
+        def _install_selected():
+            messages: list[tuple[str, str]] = []
+
+            def _collect(text: str, style: str = "") -> None:
+                messages.append((text, style))
+
+            count = install_mcp_servers(selected_entries, print_fn=_collect)
+            return count, messages
+
+        count, messages = await asyncio.to_thread(_install_selected)
+        for text, style in messages:
+            ctx.ui.append_system(text, style=style)
         if count:
             ctx.ui.append_system(
                 f"{count} server(s) configured. Reload with /new to apply.",

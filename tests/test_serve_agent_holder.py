@@ -8,6 +8,7 @@ captured at startup.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,7 @@ from EvoScientist.cli.commands import (
     _make_serve_cmd_completed_hook,
     _make_serve_handle_session_resume_cb,
     _make_serve_start_new_session_cb,
+    _serve_drain_notifications,
     _serve_process_message,
 )
 from EvoScientist.commands.base import ChannelRuntime
@@ -604,6 +606,157 @@ def test_serve_process_message_dispatches_slash_on_runtime_thread():
         test_runtime.close()
 
     assert dispatch_thread == ["evosci-runtime"]
+
+
+def test_serve_notification_turn_runs_on_calling_thread():
+    """Preparation uses the runtime, but the sync foreground turn must not be
+    orphaned behind ``asyncio.to_thread`` when the serve thread is interrupted.
+    """
+    state = _runtime_state(thread_id="tid")
+    preparation_threads: list[str] = []
+    turn_threads: list[str] = []
+    test_runtime = AgentRuntime()
+
+    async def _fake_prepare(*_args, **_kwargs):
+        preparation_threads.append(threading.current_thread().name)
+        return "notification text", [MagicMock()]
+
+    def _fake_run_streaming(**_kwargs):
+        turn_threads.append(threading.current_thread().name)
+        return "done"
+
+    try:
+        with (
+            patch("EvoScientist.cli.commands.runtime", test_runtime),
+            patch(
+                "EvoScientist.cli.async_notifier.prepare_notifications",
+                side_effect=_fake_prepare,
+            ),
+            patch(
+                "EvoScientist.cli.async_notifier.format_notification_lines",
+                return_value=[],
+            ),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming",
+                side_effect=_fake_run_streaming,
+            ),
+            patch(
+                "EvoScientist.cli.commands.publish_to_channel_origin",
+                return_value=False,
+            ),
+        ):
+            _serve_drain_notifications(
+                runtime_state=state,
+                model="model",
+                workspace_dir="/tmp",
+                show_thinking=False,
+            )
+    finally:
+        test_runtime.close()
+
+    assert preparation_threads == ["evosci-runtime"]
+    assert turn_threads == [threading.current_thread().name]
+
+
+def test_serve_channel_relay_does_not_block_runtime_loop():
+    bus_loop = asyncio.new_event_loop()
+    bus_ready = threading.Event()
+    send_started = threading.Event()
+    send_finished = threading.Event()
+    release_send: asyncio.Event | None = None
+
+    def _run_bus() -> None:
+        asyncio.set_event_loop(bus_loop)
+        bus_ready.set()
+        bus_loop.run_forever()
+
+    bus_thread = threading.Thread(target=_run_bus, name="test-channel-bus")
+    bus_thread.start()
+    assert bus_ready.wait(5)
+
+    class SlowChannel:
+        send_thinking = True
+
+        async def send_thinking_message(self, **_kwargs):
+            nonlocal release_send
+            release_send = asyncio.Event()
+            send_started.set()
+            await release_send.wait()
+            send_finished.set()
+
+    msg = ChannelMessage(
+        msg_id="msg-slow-relay",
+        content="hello",
+        sender="channel-user",
+        channel_type="imessage",
+        metadata={},
+        channel_ref=SlowChannel(),
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-slow-relay",
+    )
+    state = _runtime_state(thread_id="tid")
+    test_runtime = AgentRuntime()
+    caller_done = threading.Event()
+    caller_errors: list[BaseException] = []
+
+    async def _fake_dispatch(*_args, **_kwargs):
+        return False
+
+    def _fake_run_streaming(**kwargs):
+        kwargs["on_thinking"]("x" * 250)
+        return "done"
+
+    def _call_serve() -> None:
+        try:
+            _serve_process_message(
+                msg,
+                runtime_state=state,
+                model="model",
+                workspace_dir="/tmp",
+                show_thinking=True,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            caller_errors.append(exc)
+        finally:
+            caller_done.set()
+
+    try:
+        with (
+            patch("EvoScientist.cli.commands.runtime", test_runtime),
+            patch("EvoScientist.cli.channel._bus_loop", bus_loop),
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                side_effect=_fake_dispatch,
+            ),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming",
+                side_effect=_fake_run_streaming,
+            ),
+            patch("EvoScientist.cli.commands._set_channel_response"),
+        ):
+            _register_channel_request(msg)
+            caller = threading.Thread(target=_call_serve)
+            caller.start()
+            assert send_started.wait(5)
+            returned_before_send = caller_done.wait(0.5)
+            assert release_send is not None
+            bus_loop.call_soon_threadsafe(release_send.set)
+            caller.join(5)
+
+        assert returned_before_send is True
+        assert caller_errors == []
+        assert send_finished.wait(5)
+    finally:
+        if release_send is not None:
+            try:
+                bus_loop.call_soon_threadsafe(release_send.set)
+            except RuntimeError:
+                pass
+        test_runtime.close()
+        bus_loop.call_soon_threadsafe(bus_loop.stop)
+        bus_thread.join(5)
+        bus_loop.close()
 
 
 def test_serve_process_message_uses_runtime_workspace_from_state():

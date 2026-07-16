@@ -1,6 +1,8 @@
 """Tests for the /mcp command (MCPCommand subcommand dispatch)."""
 
-from unittest.mock import MagicMock, patch
+import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def _ctx():
@@ -109,3 +111,42 @@ class TestMCPCommandDispatch:
         await MCPCommand().execute(ctx, ["bogus"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("MCP commands:" in m for m in msgs)
+
+
+async def test_install_mcp_runs_package_install_off_event_loop_thread():
+    from EvoScientist.commands.base import CommandContext
+    from EvoScientist.commands.implementation.mcp_install import InstallMCPCommand
+
+    ui = MagicMock()
+    ui.flush = AsyncMock()
+    entry = SimpleNamespace(name="slow-server")
+    install_threads: list[str] = []
+
+    def _install(_entry, *, print_fn):
+        install_threads.append(threading.current_thread().name)
+        print_fn("Installing dependency...", "dim")
+        return True
+
+    ctx = CommandContext(agent=None, thread_id="tid", ui=ui)
+    event_loop_thread = threading.current_thread().name
+
+    with (
+        patch(
+            "EvoScientist.mcp.registry.fetch_marketplace_index",
+            return_value=[entry],
+        ),
+        patch(
+            "EvoScientist.mcp.registry.find_server_by_name",
+            return_value=entry,
+        ),
+        patch("EvoScientist.mcp.registry.get_installed_names", return_value=set()),
+        patch("EvoScientist.mcp.registry.install_mcp_server", side_effect=_install),
+    ):
+        await InstallMCPCommand().execute(ctx, ["slow-server"])
+
+    assert len(install_threads) == 1
+    assert install_threads[0] != event_loop_thread
+    assert any(
+        call.args[0] == "Installing dependency..."
+        for call in ui.append_system.call_args_list
+    )

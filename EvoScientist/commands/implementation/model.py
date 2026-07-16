@@ -130,6 +130,7 @@ class ModelCommand(Command):
         *,
         save: bool = False,
     ) -> None:
+        import asyncio
         import copy
 
         from ...cli.agent import _load_agent
@@ -156,7 +157,10 @@ class ModelCommand(Command):
         # after a /model switch (the sink lives on the gateway, not the agent).
         events = ctx.graph_gateway.events
 
-        try:
+        def _build_replacement():
+            # Agent construction is synchronous and may reconnect MCP tools on
+            # a config-cache miss. Keep both that I/O and any nested asyncio.run
+            # bridge off the process-wide runtime loop.
             new_chat_model = _build_chat_model(temp_cfg)
             new_agent = _load_agent(
                 workspace_dir=ctx.workspace_dir,
@@ -165,6 +169,10 @@ class ModelCommand(Command):
                 chat_model=new_chat_model,
                 events=events,
             )
+            return new_chat_model, new_agent
+
+        try:
+            new_chat_model, new_agent = await asyncio.to_thread(_build_replacement)
         except Exception as e:
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return

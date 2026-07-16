@@ -1141,12 +1141,33 @@ def _serve_process_message(
 
     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
         loop = _bus_loop
-        if not loop:
+        if not loop or loop.is_closed():
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             return
+
+        async def _bounded_send() -> None:
+            await asyncio.wait_for(coro, timeout=timeout)
+
+        bounded_send = _bounded_send()
         try:
-            asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
+            future = asyncio.run_coroutine_threadsafe(bounded_send, loop)
         except Exception as e:
+            bounded_send.close()
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             _serve_logger.debug(f"{label} send failed: {e}")
+            return
+
+        def _send_done(done) -> None:
+            try:
+                done.result()
+            except Exception as e:
+                _serve_logger.debug(f"{label} send failed: {e}")
+
+        future.add_done_callback(_send_done)
 
     def _send_thinking(thinking: str) -> None:
         ch = msg.channel_ref
@@ -1292,8 +1313,6 @@ def _serve_drain_notifications(
 
     Mirrors the Rich CLI's ``_check_channel_queue`` notification path.
     """
-    import asyncio as _aio
-
     from .tui_runtime import run_streaming
 
     def _run_notification_message(text: str, notifs: list) -> None:
@@ -1332,9 +1351,6 @@ def _serve_drain_notifications(
                     f"{origin.sender or origin.chat_id}[/dim]"
                 )
 
-    async def _run_notification_message_async(text: str, notifs: list) -> None:
-        await _aio.to_thread(_run_notification_message, text, notifs)
-
     async def _read_async_tasks() -> async_notifier.AsyncTasksState:
         thread_id = runtime_state.thread_id
         if not thread_id:
@@ -1348,17 +1364,24 @@ def _serve_drain_notifications(
             thread_id,
         )
 
-    async def _consume() -> None:
-        await async_notifier.consume_notifications(
-            run_message=_run_notification_message_async,
+    async def _prepare():
+        return await async_notifier.prepare_notifications(
             read_async_tasks_state=_read_async_tasks,
             current_thread_id=runtime_state.thread_id,
         )
 
     try:
-        runtime.run_sync(_consume())
+        prepared = runtime.run_sync(_prepare())
     except Exception as exc:
         _serve_logger.warning("Notification drain failed: %s", exc)
+        return
+
+    if prepared is not None:
+        text, notifs = prepared
+        # Run the synchronous foreground turn on the serve thread. Ctrl+C now
+        # reaches display.run_sync directly, so no executor worker can outlive
+        # cancellation and race interpreter shutdown.
+        _run_notification_message(text, notifs)
 
 
 @app.command()
