@@ -316,6 +316,107 @@ def _stopped_response_after_narration(
     return display_current, display_stopped, full_stopped
 
 
+# (kind, payload, item_index): kind is "header"/"sep"/"item"; payload is the
+# category name for headers or the candidate for items; item_index is the
+# candidate's position in the source list (-1 for non-item rows).
+_CompletionRow = tuple[str, Any, int]
+
+
+def _build_completion_rows(items: list[Any]) -> list[_CompletionRow]:
+    """Flatten completion candidates into render rows with category headers."""
+    rows: list[_CompletionRow] = []
+    last_cat = ""
+    for i, candidate in enumerate(items):
+        cat = getattr(candidate, "category", "")
+        if cat and cat != last_cat:
+            if last_cat:
+                rows.append(("sep", "", -1))
+            rows.append(("header", cat, -1))
+            last_cat = cat
+        rows.append(("item", candidate, i))
+    return rows
+
+
+def _window_completion_rows(
+    rows: list[_CompletionRow],
+    selected: int,
+    max_rows: int,
+) -> tuple[list[_CompletionRow], int, int]:
+    """Slice *rows* to a window of at most *max_rows* total display lines.
+
+    The window always contains the selected item (top of the list when
+    nothing is selected) and reserves one line per overflow indicator.
+    Returns ``(visible_rows, hidden_items_above, hidden_items_below)``.
+    """
+    max_rows = max(max_rows, 5)
+    if len(rows) <= max_rows:
+        return list(rows), 0, 0
+
+    sel_row = 0
+    if selected >= 0:
+        for r, (kind, _payload, idx) in enumerate(rows):
+            if kind == "item" and idx == selected:
+                sel_row = r
+                break
+
+    # Center the selection; centering keeps it clear of the indicator
+    # lines that replace the window's edge rows when content is clipped.
+    start = min(max(sel_row - max_rows // 2, 0), len(rows) - max_rows)
+    end = start + max_rows
+    content_start = start + (1 if start > 0 else 0)
+    content_end = end - (1 if end < len(rows) else 0)
+
+    above = sum(1 for kind, _p, _i in rows[:content_start] if kind == "item")
+    below = sum(1 for kind, _p, _i in rows[content_end:] if kind == "item")
+    return rows[content_start:content_end], above, below
+
+
+def _render_completion_text(items: list[Any], selected: int, max_rows: int) -> Text:
+    """Render the completion popup content bounded to *max_rows* lines."""
+    rows = _build_completion_rows(items)
+    visible, above, below = _window_completion_rows(rows, selected, max_rows)
+
+    # Blank separator lines are cosmetic — drop them at the window edges.
+    while visible and visible[0][0] == "sep":
+        visible = visible[1:]
+    while visible and visible[-1][0] == "sep":
+        visible = visible[:-1]
+
+    lines: list[Text] = []
+    if above:
+        lines.append(Text(f"   ↑ {above} more", style="dim italic"))
+    for kind, payload, idx in visible:
+        if kind == "sep":
+            lines.append(Text())
+        elif kind == "header":
+            lines.append(Text(f" {payload}", style="bold #6b7280"))
+        elif idx == selected:
+            lines.append(
+                Text.assemble(
+                    ("  ▸ ", "bold"),
+                    (f"{payload.text:<28}", "bold"),
+                    (payload.description, "bold"),
+                )
+            )
+        else:
+            lines.append(
+                Text.assemble(
+                    ("    ", "#888888"),
+                    (f"{payload.text:<28}", "#888888"),
+                    (payload.description, "#888888"),
+                )
+            )
+    if below:
+        lines.append(Text(f"   ↓ {below} more", style="dim italic"))
+    text = Text("\n").join(lines)
+    # Crop overlong lines so visual rows == logical rows. Textual's
+    # Content conversion drops these rich attributes, so the popup CSS
+    # (#completions text-wrap/text-overflow) enforces the same rule there.
+    text.no_wrap = True
+    text.overflow = "ellipsis"
+    return text
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -439,10 +540,11 @@ def run_textual_interactive(
         #completions {
             display: none;
             height: auto;
-            max-height: 15;
             background: #1e1f26;
             padding: 0 1;
             border-bottom: solid #0284c7;
+            text-wrap: nowrap;
+            text-overflow: ellipsis;
         }
         #status {
             height: 1;
@@ -911,6 +1013,17 @@ def run_textual_interactive(
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
             ch_task.add_done_callback(self._background_tasks.discard)
+
+        def on_resize(self, event: Any) -> None:
+            """Re-window the completion popup for the new terminal height."""
+            try:
+                comp_widget = self.query_one("#completions", Static)
+            except Exception:
+                return
+            if comp_widget.display and self._comp_items:
+                # Deferred: this handler can run before the base App
+                # handler updates self.size with the new dimensions.
+                self.call_after_refresh(self._render_completions)
 
         # ── Update check ──────────────────────────────────────
 
@@ -2860,27 +2973,18 @@ def run_textual_interactive(
             self._comp_index = -1
             self.query_one("#completions", Static).display = False
 
+        def _completion_max_rows(self) -> int:
+            """Popup line budget: keep the input row, status bar and a
+            slice of chat visible; fall back to 15 before layout."""
+            height = int(getattr(self.size, "height", 0) or 0)
+            if height <= 0:
+                return 15
+            return max(5, height - 12)
+
         def _render_completions(self) -> None:
-            comp_text = Text()
-            last_cat = ""
-            for i, candidate in enumerate(self._comp_items):
-                cmd, desc = candidate.text, candidate.description
-                cat = getattr(candidate, "category", "")
-                if cat and cat != last_cat:
-                    if last_cat:
-                        comp_text.append("\n")
-                    comp_text.append(f" {cat}\n", style="bold #6b7280")
-                    last_cat = cat
-                if i == self._comp_index:
-                    comp_text.append("  \u25b8 ", style="bold")
-                    comp_text.append(f"{cmd:<28}", style="bold")
-                    comp_text.append(desc, style="bold")
-                else:
-                    comp_text.append("    ", style="#888888")
-                    comp_text.append(f"{cmd:<28}", style="#888888")
-                    comp_text.append(desc, style="#888888")
-                if i < len(self._comp_items) - 1:
-                    comp_text.append("\n")
+            comp_text = _render_completion_text(
+                self._comp_items, self._comp_index, self._completion_max_rows()
+            )
             self.query_one("#completions", Static).update(comp_text)
 
         # ── Slash commands ─────────────────────────────────────
