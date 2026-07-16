@@ -11,7 +11,10 @@ items with overflow indicators.
 from __future__ import annotations
 
 from EvoScientist.cli.tui_interactive import (
+    _COMPLETIONS_CSS,
     _build_completion_rows,
+    _completion_row_budget,
+    _normalize_chat_scroll,
     _render_completion_text,
     _window_completion_rows,
 )
@@ -32,6 +35,20 @@ def _candidates(spec: list[tuple[str, str]]) -> list[CompletionCandidate]:
             category=category,
         )
         for text, category in spec
+    ]
+
+
+def _long_candidates() -> list[CompletionCandidate]:
+    """Three candidates whose lines far exceed a 40-column terminal."""
+    return [
+        CompletionCandidate(
+            text=f"/long-command-{i}",
+            description="x" * 120,
+            replace_start=0,
+            replace_end=1,
+            category="Session",
+        )
+        for i in range(3)
     ]
 
 
@@ -104,8 +121,25 @@ class TestWindowCompletionRows:
         assert above + below == 5 - sum(1 for k, _p, _i in visible if k == "item")
 
 
+class TestCompletionRowBudget:
+    """The popup line budget follows the terminal but is hard-capped so
+    the popup never dwarfs the chat area (mainstream CLI behavior)."""
+
+    def test_capped_on_tall_terminals(self):
+        assert _completion_row_budget(100) == 15
+
+    def test_shrinks_with_terminal(self):
+        assert _completion_row_budget(20) == 8
+
+    def test_floor_on_tiny_terminals(self):
+        assert _completion_row_budget(10) == 5
+
+    def test_unknown_height_falls_back_to_cap(self):
+        assert _completion_row_budget(0) == 15
+
+
 class TestRenderCompletionText:
-    def test_tall_terminal_renders_all_commands(self):
+    def test_generous_budget_renders_all_commands(self):
         """Regression for #354: with enough rows every category renders."""
         result = compute_completions("/", 1)
         text = _render_completion_text(result.candidates, -1, 100).plain
@@ -140,57 +174,11 @@ class TestRenderCompletionText:
         text = _render_completion_text(items, -1, 20).plain
         assert "more" not in text
 
-    def test_lines_never_wrap_on_narrow_terminal(self):
-        """A wrapped line would blow the height budget — long lines must
-        crop, so visual rows always equal logical rows.
-
-        Rendered via ``Console.render_lines`` (the pure-rich path).
-        ``Console.print`` is unsuitable here: it re-joins Text objects
-        and drops their no_wrap/overflow.
-        """
-        from rich.console import Console
-
-        text = _render_completion_text(_long_candidates(), 0, 20)
-        console = Console(width=40)
-        rendered = console.render_lines(text, console.options, pad=False)
-        assert len(rendered) == len(text.plain.splitlines())
-
-
-def _long_candidates() -> list[CompletionCandidate]:
-    """Three candidates whose lines far exceed a 40-column terminal."""
-    return [
-        CompletionCandidate(
-            text=f"/long-command-{i}",
-            description="x" * 120,
-            replace_start=0,
-            replace_end=1,
-            category="Session",
-        )
-        for i in range(3)
-    ]
-
-
-def _completions_css() -> str:
-    """Extract the real ``#completions`` CSS block from the TUI module."""
-    import inspect
-    import re
-
-    import EvoScientist.cli.tui_interactive as tui_mod
-
-    match = re.search(r"#completions \{[^}]*\}", inspect.getsource(tui_mod))
-    assert match, "#completions CSS block not found in tui_interactive.py"
-    return match.group(0)
-
 
 class TestCompletionPopupCss:
-    """Textual converts rich Text to Content and DROPS its no_wrap and
-    overflow attributes, so cropping must be enforced by the widget CSS.
+    """Textual converts rich Text to Content and drops rich no_wrap and
+    overflow attributes, so cropping is enforced by the widget CSS.
     """
-
-    def test_css_disables_wrapping(self):
-        css = _completions_css()
-        assert "text-wrap: nowrap" in css
-        assert "text-overflow: ellipsis" in css
 
     async def test_static_crops_long_lines_with_real_css(self):
         """Mount a Static with the real popup CSS and verify visual rows
@@ -199,7 +187,7 @@ class TestCompletionPopupCss:
         from textual.widgets import Static
 
         class PopupApp(App[None]):
-            CSS = _completions_css()
+            CSS = _COMPLETIONS_CSS
 
             def compose(self) -> ComposeResult:
                 yield Static("", id="completions")
@@ -219,3 +207,104 @@ class TestCompletionPopupCss:
                 for y in range(widget.size.height)
             ]
             assert any("…" in line for line in rendered)
+
+
+def _make_chat_app(n_lines: int):
+    """Minimal app mirroring the real chat + completion popup layout."""
+    from textual.app import App, ComposeResult
+    from textual.containers import Container, VerticalScroll
+    from textual.widgets import Static
+
+    class ChatApp(App[None]):
+        CSS = (
+            "Screen { layout: vertical; }\n"
+            "#chat { height: 1fr; }\n"
+            "#input-shell { height: auto; }\n"
+        ) + _COMPLETIONS_CSS
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="chat"):
+                for i in range(n_lines):
+                    yield Static(f"line {i}")
+            with Container(id="input-shell"):
+                yield Static("", id="completions")
+
+    return ChatApp()
+
+
+async def _toggle_popup_cycle(app, pilot):
+    """din0s's repro: popup open -> scroll to bottom -> hide -> reopen."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    chat = app.query_one("#chat", VerticalScroll)
+    comp = app.query_one("#completions", Static)
+    text = _render_completion_text(
+        _candidates([(f"/c{i}", "Session") for i in range(14)]), -1, 15
+    )
+    comp.update(text)
+    comp.display = True
+    await pilot.pause()
+    chat.scroll_end(animate=False)
+    await pilot.pause()
+    comp.display = False
+    await pilot.pause()
+    return chat, comp
+
+
+class TestNormalizeChatScroll:
+    """Popup show/hide resizes the chat viewport. For an anchored chat
+    whose content then fits, Textual's compositor pushes ``scroll_y``
+    negative (bypasses the validator, issue #301 family) — the scrollbar
+    then renders as if scrolled to the bottom while the content sits at
+    the top. ``_normalize_chat_scroll`` repairs the state.
+    """
+
+    async def test_releases_anchor_and_pins_top_when_content_fits(self):
+        from textual.widget import Widget
+
+        app = _make_chat_app(18)
+        async with app.run_test(size=(80, 30)) as pilot:
+            chat, comp = await _toggle_popup_cycle(app, pilot)
+            chat.anchor()
+            await pilot.pause()
+            # Deterministically inject the compositor's anchored-scroll
+            # bypass (set_reactive skips validator AND watcher — see
+            # textual _compositor.py) instead of racing its layout pass.
+            chat.set_reactive(Widget.scroll_y, -12.0)
+            chat.set_reactive(Widget.scroll_target_y, -12.0)
+            _normalize_chat_scroll(chat)
+            await pilot.pause()
+            assert chat.scroll_y == 0
+            assert not chat.is_anchored
+            # The scrollbar thumb must not keep a stale position: when it
+            # becomes visible again (popup reopens) it would render as if
+            # scrolled to the bottom while the content sits at the top.
+            comp.display = True
+            await pilot.pause()
+            _normalize_chat_scroll(chat)
+            await pilot.pause()
+            assert chat.vertical_scrollbar.position == chat.scroll_y
+
+    async def test_keeps_anchored_overflowing_chat_pinned(self):
+        app = _make_chat_app(60)
+        async with app.run_test(size=(80, 30)) as pilot:
+            chat, _comp = await _toggle_popup_cycle(app, pilot)
+            chat.anchor()
+            await pilot.pause()
+            _normalize_chat_scroll(chat)
+            await pilot.pause()
+            assert chat.is_anchored
+            assert chat.scroll_y == chat.max_scroll_y
+
+    async def test_preserves_position_when_user_scrolled_up(self):
+        app = _make_chat_app(60)
+        async with app.run_test(size=(80, 30)) as pilot:
+            chat, comp = await _toggle_popup_cycle(app, pilot)
+            chat.scroll_to(y=10, animate=False)
+            await pilot.pause()
+            comp.display = True
+            await pilot.pause()
+            _normalize_chat_scroll(chat)
+            await pilot.pause()
+            assert chat.scroll_y == 10
