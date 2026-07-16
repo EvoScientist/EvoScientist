@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict
 
+from ..runtime import runtime
+
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
 
@@ -74,14 +76,57 @@ _unrouted_queue: queue.Queue[AsyncTaskNotification] = queue.Queue()
 # working unchanged. New code should call ``_enqueue`` instead.
 _notification_queue = _unrouted_queue
 
-# Track active watcher tasks/futures for clean shutdown.
+# Track active watcher handles for clean shutdown.
 # dict[handle, origin_cli_thread_id] so the consumer's batching grace loop
 # can filter for watchers tied to the current CLI thread (or unrouted)
 # without being delayed by sibling-thread watchers.
 _active_watchers: dict[object, str | None] = {}
 # Map thread_id (sub-agent thread) → current watcher handle (supports
 # replacement on update_async_task).
-_watcher_by_thread: dict[str, asyncio.Task[None]] = {}
+_watcher_by_thread: dict[str, _WatcherHandle] = {}
+_watchers_lock = threading.Lock()
+
+
+class _WatcherHandle:
+    """Thread-safe cancellation and completion handle for a runtime watcher."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._task: asyncio.Task[None] | None = None
+        self._cancel_requested = False
+        self._done = threading.Event()
+
+    def bind(self, task: asyncio.Task[None]) -> None:
+        with self._lock:
+            self._task = task
+            cancel_requested = self._cancel_requested
+        if cancel_requested:
+            task.cancel()
+
+    def cancel(self) -> bool:
+        with self._lock:
+            if self._done.is_set():
+                return False
+            self._cancel_requested = True
+            task = self._task
+        if task is not None:
+            task.get_loop().call_soon_threadsafe(task.cancel)
+        return True
+
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancel_requested and self._done.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._done.wait(timeout)
+
+    def mark_done(self) -> None:
+        with self._lock:
+            self._task = None
+            self._done.set()
 
 
 def _has_relevant_active_watchers(current_thread_id: str | None) -> bool:
@@ -92,12 +137,13 @@ def _has_relevant_active_watchers(current_thread_id: str | None) -> bool:
     current CLI thread or is ``None`` (unrouted bucket drains for any
     consumer). Sibling-thread watchers are ignored.
     """
-    if current_thread_id is None:
-        return bool(_active_watchers)
-    return any(
-        origin == current_thread_id or origin is None
-        for origin in _active_watchers.values()
-    )
+    with _watchers_lock:
+        if current_thread_id is None:
+            return bool(_active_watchers)
+        return any(
+            origin == current_thread_id or origin is None
+            for origin in _active_watchers.values()
+        )
 
 
 logger = logging.getLogger(__name__)
@@ -170,7 +216,8 @@ def pre_cancel_watcher(task_id: str) -> None:
     pre-cancel only risks one stale notification, never a crashed tool call).
     """
     try:
-        old = _watcher_by_thread.get(task_id)
+        with _watchers_lock:
+            old = _watcher_by_thread.get(task_id)
         if old is not None and not old.done():
             old.cancel()
     except Exception:
@@ -373,8 +420,8 @@ def spawn_watcher(
     agent_name: str,
     prompt: str = "",
     origin_cli_thread_id: str | None = None,
-) -> asyncio.Task[None]:
-    """Spawn a watcher on the caller's asyncio loop.
+) -> _WatcherHandle:
+    """Spawn a watcher on the persistent runtime loop.
 
     Replacement semantics support ``update_async_task`` which creates a new
     run_id on the same thread_id — we want the new watcher to take over
@@ -385,37 +432,48 @@ def spawn_watcher(
 
     ``origin_cli_thread_id`` tags the resulting notification so the consumer
     only injects it back into the originating CLI session.
-
-    Caller must already be in a running asyncio event loop. Serve mode's
-    ephemeral per-turn loop kills watchers spawned during a turn — that
-    limitation is tracked separately.
     """
-    old_task = _watcher_by_thread.get(thread_id)
-    if old_task is not None and not old_task.done():
-        old_task.cancel()
+    handle = _WatcherHandle()
+    with _watchers_lock:
+        old_handle = _watcher_by_thread.get(thread_id)
+        _watcher_by_thread[thread_id] = handle
+        _active_watchers[handle] = origin_cli_thread_id
+    if old_handle is not None and not old_handle.done():
+        old_handle.cancel()
 
-    task = asyncio.create_task(
-        watch_run_and_notify(
-            client,
-            thread_id,
-            run_id,
-            agent_name,
-            prompt,
-            origin_cli_thread_id=origin_cli_thread_id,
-        )
-    )
-    _watcher_by_thread[thread_id] = task
-    _active_watchers[task] = origin_cli_thread_id
+    async def _run() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        handle.bind(task)
+        try:
+            await watch_run_and_notify(
+                client,
+                thread_id,
+                run_id,
+                agent_name,
+                prompt,
+                origin_cli_thread_id=origin_cli_thread_id,
+            )
+        finally:
+            handle.mark_done()
+            with _watchers_lock:
+                _active_watchers.pop(handle, None)
+                # A replacement may already own this thread_id.
+                if _watcher_by_thread.get(thread_id) is handle:
+                    del _watcher_by_thread[thread_id]
 
-    def _cleanup(t: asyncio.Task[None]) -> None:
-        _active_watchers.pop(t, None)
-        # Only remove if THIS task is still the registered one — could
-        # have been replaced by a newer spawn_watcher call already.
-        if _watcher_by_thread.get(thread_id) is t:
-            del _watcher_by_thread[thread_id]
-
-    task.add_done_callback(_cleanup)
-    return task
+    watcher_coro = _run()
+    try:
+        runtime.spawn(watcher_coro, name=f"async-watcher:{thread_id}")
+    except BaseException:
+        watcher_coro.close()
+        handle.mark_done()
+        with _watchers_lock:
+            _active_watchers.pop(handle, None)
+            if _watcher_by_thread.get(thread_id) is handle:
+                del _watcher_by_thread[thread_id]
+        raise
+    return handle
 
 
 def _drain_one_queue(q: queue.Queue) -> list[AsyncTaskNotification]:

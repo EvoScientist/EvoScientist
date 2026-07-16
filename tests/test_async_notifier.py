@@ -2,6 +2,7 @@
 
 import asyncio
 import queue
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,7 @@ from EvoScientist.cli.async_notifier import (
     format_notification_lines,
 )
 from EvoScientist.gateway import GraphTarget
+from EvoScientist.runtime import AgentRuntime
 from tests.fakes import FakeGraphGateway
 
 
@@ -146,16 +148,87 @@ async def test_spawn_watcher_replaces_existing_for_same_thread():
 
     # Cleanup the new task too
     t2.cancel()
-    try:
-        await t2
-    except asyncio.CancelledError:
-        pass
+    assert await asyncio.to_thread(t2.wait, 5)
 
     # Cancelled watchers don't push notifications
     assert _drain_one_queue_helper(async_notifier._notification_queue) == []
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
     for q in async_notifier._notifications_by_thread.values():
         assert _drain_one_queue_helper(q) == []
+
+
+def test_watcher_survives_turn_and_delivers_on_later_drain(monkeypatch):
+    test_runtime = AgentRuntime()
+    watcher_started = threading.Event()
+    release_watcher: asyncio.Event | None = None
+    delivered: list[list[async_notifier.AsyncTaskNotification]] = []
+
+    async def _stream_until_released(*_args, **_kwargs):
+        nonlocal release_watcher
+        release_watcher = asyncio.Event()
+        watcher_started.set()
+        await release_watcher.wait()
+        if False:
+            yield None
+
+    client = MagicMock()
+    client.runs.join_stream = _stream_until_released
+    client.runs.get = AsyncMock(return_value={"status": "success"})
+    monkeypatch.setattr(async_notifier, "runtime", test_runtime)
+
+    async def _simulated_turn():
+        handle = async_notifier.spawn_watcher(
+            client,
+            "persistent-task",
+            "run-1",
+            "writing-agent",
+            origin_cli_thread_id="cli-thread",
+        )
+        while not watcher_started.is_set():
+            await asyncio.sleep(0)
+        return handle
+
+    async def _release() -> None:
+        assert release_watcher is not None
+        release_watcher.set()
+
+    async def _run_message(_text, notifications) -> None:
+        delivered.append(notifications)
+
+    async def _read_state():
+        return {}
+
+    handle = None
+    try:
+        handle = test_runtime.run_sync(_simulated_turn())
+        assert handle.done() is False
+        assert async_notifier.has_pending_notifications("cli-thread") is False
+
+        test_runtime.run_sync(_release())
+        assert handle.wait(5)
+        assert async_notifier.has_pending_notifications("cli-thread") is True
+
+        test_runtime.run_sync(
+            async_notifier.consume_notifications(
+                _run_message,
+                _read_state,
+                current_thread_id="cli-thread",
+            )
+        )
+    finally:
+        if handle is not None and not handle.done():
+            handle.cancel()
+            handle.wait(5)
+        test_runtime.close()
+        async_notifier.drain_notifications(None)
+        with async_notifier._watchers_lock:
+            async_notifier._watcher_by_thread.clear()
+            async_notifier._active_watchers.clear()
+
+    assert len(delivered) == 1
+    assert [notification.task_id for notification in delivered[0]] == [
+        "persistent-task"
+    ]
 
 
 # ============================================================================

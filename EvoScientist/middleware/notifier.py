@@ -13,10 +13,7 @@ middleware depends only on this port, never on ``EvoScientist.cli``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    import asyncio
+from typing import Any, Protocol
 
 
 class NotifierPort(Protocol):
@@ -43,8 +40,8 @@ class NotifierPort(Protocol):
         agent_name: str,
         prompt: str = "",
         origin_cli_thread_id: str | None = None,
-    ) -> asyncio.Task[None]:
-        """Spawn a run watcher on the caller's asyncio loop."""
+    ) -> object:
+        """Spawn a run watcher on the persistent runtime loop."""
         ...
 
     def enqueue_task_notification(self, notification: Any) -> None:
