@@ -797,6 +797,40 @@ class TestChannelDebounce:
         second = await bus.consume_inbound()
         assert (first.content, second.content) == ("do X", "/stop")
 
+    async def test_command_publishes_even_when_buffer_flush_fails(self):
+        """A failing buffered-prompt flush must not swallow the command —
+        losing /stop exactly when the pipeline misbehaves is the worst case."""
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="do X",
+                message_id="m1",
+            )
+        )
+
+        async def _boom(sender):
+            raise RuntimeError("flush broke")
+
+        ch._process_buffered_messages = _boom
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="/stop",
+                message_id="m2",
+            )
+        )
+
+        published = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        assert published.content == "/stop"
+
     async def test_prompt_after_command_starts_new_debounce_batch(self):
         bus = MessageBus()
         ch = StubChannel()
@@ -1224,6 +1258,39 @@ class TestChannelManagerDispatch:
             await task
         except asyncio.CancelledError:
             pass
+
+        assert [message.content for message in sent] == [
+            "content rejected by platform",
+            "Command output could not be delivered.",
+        ]
+        assert sent[1].failure_notice is None
+
+    async def test_shutdown_drain_sends_failure_notice(self):
+        """The stop_all drain mirrors the dispatch fallback: a payload that
+        fails during shutdown still produces the short failure notice."""
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        sent: list[OutboundMessage] = []
+
+        async def fail_content_then_send_notice(msg):
+            sent.append(msg)
+            return len(sent) > 1
+
+        ch.send = fail_content_then_send_notice
+        mgr.register(ch)
+        ch._running = True
+
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="content rejected by platform",
+                failure_notice="Command output could not be delivered.",
+            )
+        )
+
+        await mgr.stop_all()
 
         assert [message.content for message in sent] == [
             "content rejected by platform",

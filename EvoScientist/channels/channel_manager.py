@@ -743,6 +743,12 @@ class ChannelManager:
                     delivery_failed = True
             if not delivery_failed and (msg.content or msg.media):
                 drained += 1
+            elif delivery_failed:
+                await self._send_failure_notice(
+                    channel,
+                    msg,
+                    timeout=max(1.0, deadline - time.monotonic()),
+                )
         dropped = self.bus.outbound.qsize()
         if drained or dropped:
             logger.info(f"Outbound drain: {drained} sent, {dropped} dropped")
@@ -843,6 +849,41 @@ class ChannelManager:
 
     # ── outbound routing ──
 
+    async def _send_failure_notice(
+        self,
+        channel: Channel,
+        msg: OutboundMessage,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Best-effort short notice when the real payload could not be sent."""
+        if not msg.failure_notice:
+            return
+        fallback = replace(
+            msg,
+            content=msg.failure_notice,
+            media=[],
+            failure_notice=None,
+        )
+        try:
+            coro = channel.send(fallback)
+            if timeout is not None:
+                coro = asyncio.wait_for(coro, timeout=timeout)
+            fallback_ok = await coro
+        except Exception as fallback_error:
+            logger.error(
+                "Error sending delivery failure notice to %s: %s",
+                msg.channel,
+                fallback_error,
+            )
+        else:
+            if not fallback_ok:
+                logger.error(
+                    "Error sending delivery failure notice to %s: "
+                    "send() returned False",
+                    msg.channel,
+                )
+
     async def _dispatch_outbound(self) -> None:
         """Route outbound messages from the bus to the correct channel."""
         logger.info("Outbound dispatcher started")
@@ -898,28 +939,7 @@ class ChannelManager:
                         delivery_failed = True
 
                 if delivery_failed:
-                    if msg.failure_notice:
-                        fallback = replace(
-                            msg,
-                            content=msg.failure_notice,
-                            media=[],
-                            failure_notice=None,
-                        )
-                        try:
-                            fallback_ok = await channel.send(fallback)
-                        except Exception as fallback_error:
-                            logger.error(
-                                "Error sending delivery failure notice to %s: %s",
-                                msg.channel,
-                                fallback_error,
-                            )
-                        else:
-                            if not fallback_ok:
-                                logger.error(
-                                    "Error sending delivery failure notice to %s: "
-                                    "send() returned False",
-                                    msg.channel,
-                                )
+                    await self._send_failure_notice(channel, msg)
                     raise RuntimeError("one or more outbound deliveries failed")
 
                 # Success

@@ -1074,7 +1074,14 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                     await debounce_task
                 except asyncio.CancelledError:
                     pass
-            await self._process_buffered_messages(sender)
+            try:
+                await self._process_buffered_messages(sender)
+            except Exception:
+                _logger.error(
+                    f"{self.name} buffered-prompt flush failed for {sender}; "
+                    "publishing the command anyway",
+                    exc_info=True,
+                )
             await self._bus.publish_inbound(msg)
             return
 
@@ -1104,8 +1111,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             await asyncio.sleep(_w)
             try:
                 await self._process_buffered_messages(_s)
-            except Exception as e:
-                _logger.error(f"{self.name} debounce flush error for {_s}: {e}")
+            except Exception:
+                _logger.error(
+                    f"{self.name} debounce flush error for {_s}", exc_info=True
+                )
 
         self._debounce_tasks[sender] = asyncio.create_task(debounce_callback())
 
