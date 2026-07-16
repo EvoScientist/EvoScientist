@@ -1,5 +1,8 @@
 """Tests for Telegram channel implementation."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from EvoScientist.channels.base import ChannelError
@@ -41,6 +44,47 @@ class TestTelegramChannel:
         config = TelegramConfig(bot_token="test")
         channel = TelegramChannel(config)
         await channel.stop()
+
+    async def test_cleanup_is_idempotent(self):
+        channel = TelegramChannel(TelegramConfig(bot_token="test"))
+        app = SimpleNamespace(
+            updater=SimpleNamespace(running=True, stop=AsyncMock()),
+            running=True,
+            shutdown=AsyncMock(),
+        )
+
+        async def stop_once():
+            if not app.running:
+                raise RuntimeError("This Application is not running!")
+            app.running = False
+
+        app.stop = AsyncMock(side_effect=stop_once)
+        channel._app = app
+
+        await channel._cleanup()
+        await channel._cleanup()
+
+        app.updater.stop.assert_awaited_once()
+        app.stop.assert_awaited_once()
+        app.shutdown.assert_awaited_once()
+        assert channel._app is None
+
+    async def test_cleanup_partially_initialized_application(self):
+        channel = TelegramChannel(TelegramConfig(bot_token="test"))
+        app = SimpleNamespace(
+            updater=SimpleNamespace(running=False, stop=AsyncMock()),
+            running=False,
+            stop=AsyncMock(),
+            shutdown=AsyncMock(),
+        )
+        channel._app = app
+
+        await channel._cleanup()
+
+        app.updater.stop.assert_not_awaited()
+        app.stop.assert_not_awaited()
+        app.shutdown.assert_awaited_once()
+        assert channel._app is None
 
     async def test_send_returns_false_without_app(self):
         from EvoScientist.channels.base import OutboundMessage

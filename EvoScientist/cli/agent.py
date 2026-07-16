@@ -69,6 +69,7 @@ def _load_agent(
     chat_model=None,
     *,
     on_mcp_progress=None,
+    events=None,
 ) -> "CompiledStateGraph":
     """Load the CLI agent with optional persistent checkpointer.
 
@@ -92,4 +93,5 @@ def _load_agent(
         config=config,
         chat_model=chat_model,
         on_mcp_progress=on_mcp_progress,
+        events=events,
     )

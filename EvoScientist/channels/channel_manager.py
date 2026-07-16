@@ -29,6 +29,8 @@ from .plugin import ChannelPlugin
 
 logger = logging.getLogger(__name__)
 
+CHANNEL_STARTUP_PENDING_DETAIL = "starting (bus)"
+
 
 # ═════════════════════════════════════════════════════════════════════
 # Account management (formerly account.py)
@@ -977,6 +979,31 @@ class ChannelManager:
     def running_channels(self) -> list[str]:
         """Return names of currently running channels."""
         return [name for name, ch in self._channels.items() if ch._running]
+
+    def startup_results(self, *, timeout: float = 0.0) -> list[tuple[str, bool, str]]:
+        """Return each channel's initial connection result.
+
+        The optional timeout is shared across all channels, which start
+        concurrently. Channels still connecting when it expires are reported
+        as starting rather than connected.
+        """
+        deadline = time.monotonic() + max(timeout, 0.0)
+        for channel in self._channels.values():
+            remaining = deadline - time.monotonic()
+            if remaining > 0 and not channel._startup_event.is_set():
+                channel._startup_event.wait(remaining)
+
+        results: list[tuple[str, bool, str]] = []
+        for name, channel in self._channels.items():
+            if not channel._startup_event.is_set():
+                results.append((name, False, CHANNEL_STARTUP_PENDING_DETAIL))
+            elif channel._startup_error:
+                results.append((name, False, f"failed: {channel._startup_error}"))
+            elif channel._running:
+                results.append((name, True, "connected (bus)"))
+            else:
+                results.append((name, False, "stopped during startup"))
+        return results
 
     def get_stats(self) -> dict:
         """Return summary stats for all channels."""

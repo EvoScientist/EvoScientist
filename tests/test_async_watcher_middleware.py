@@ -99,7 +99,8 @@ def _make_middleware():
                     "url": "http://x",
                     "graph_id": "writing-agent",
                 }
-            }
+            },
+            notifier=async_notifier,
         )
     return mw, fake_client
 

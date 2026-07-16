@@ -94,12 +94,17 @@ class TelegramChannel(Channel):
         logger.info("Telegram channel started (polling)")
 
     async def _cleanup(self) -> None:
-        if self._app:
-            if self._app.updater and self._app.updater.running:
-                await self._app.updater.stop()
-            await self._app.stop()
-            await self._app.shutdown()
-            logger.info("Telegram channel stopped")
+        app = self._app
+        self._app = None
+        if app is None:
+            return
+
+        if app.updater and app.updater.running:
+            await app.updater.stop()
+        if app.running:
+            await app.stop()
+        await app.shutdown()
+        logger.info("Telegram channel stopped")
 
     # ── Typing indicator (override base) ────────────────────────────
 

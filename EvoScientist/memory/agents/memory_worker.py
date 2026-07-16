@@ -428,6 +428,7 @@ def _memory_worker_middleware(
     enable_observation_memory: bool = True,
 ):
     """Build middleware for memory workers, excluding task execution tools."""
+    from ...middleware.error_normalization import ErrorNormalizationMiddleware
     from ...middleware.memory import create_memory_middleware
 
     memory_controls = MemoryControls(
@@ -439,18 +440,23 @@ def _memory_worker_middleware(
     enable_observation_tool = memory_controls.observation_tool_enabled(
         _memory_worker_observation_target(source_type)
     )
-    return memory_agent_middleware(
-        create_memory_middleware(
-            str(memory_dir),
-            workspace_dir=workspace_dir,
-            source_type=source_type,
-            source_agent=_memory_worker_agent_name(source_type),
-            enable_profile_memory=enable_profile_memory,
-            enable_observation_memory=enable_observation_memory,
-            enable_observation_tool=enable_observation_tool,
+    return [
+        # Outermost — normalize provider-SDK exceptions from the
+        # auxiliary model call before any inner middleware sees them.
+        ErrorNormalizationMiddleware(),
+        *memory_agent_middleware(
+            create_memory_middleware(
+                str(memory_dir),
+                workspace_dir=workspace_dir,
+                source_type=source_type,
+                source_agent=_memory_worker_agent_name(source_type),
+                enable_profile_memory=enable_profile_memory,
+                enable_observation_memory=enable_observation_memory,
+                enable_observation_tool=enable_observation_tool,
+            ),
+            excluded_tools=_MEMORY_WORKER_EXCLUDED_TOOLS,
         ),
-        excluded_tools=_MEMORY_WORKER_EXCLUDED_TOOLS,
-    )
+    ]
 
 
 def _build_memory_worker_agent(

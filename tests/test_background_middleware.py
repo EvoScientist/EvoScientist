@@ -6,13 +6,19 @@ import time
 import pytest
 
 from EvoScientist import background as bg
+from EvoScientist.cli import async_notifier
 from EvoScientist.middleware.background import (
     BackgroundExecutionMiddleware,
+    _make_run_in_background,
     check_process,
     list_processes,
-    run_in_background,
     stop_process,
 )
+
+
+def _run_bg(*, dangerous: bool = False, notifier=async_notifier):
+    """Build the injected ``run_in_background`` tool for direct-invoke tests."""
+    return _make_run_in_background(notifier, dangerous)
 
 
 def _sleep_cmd(seconds: int) -> str:
@@ -56,7 +62,7 @@ def _clean_registry():
 
 
 def test_middleware_registers_four_tools():
-    mw = BackgroundExecutionMiddleware()
+    mw = BackgroundExecutionMiddleware(async_notifier)
     names = {t.name for t in mw.tools}
     assert names == {
         "run_in_background",
@@ -68,7 +74,7 @@ def test_middleware_registers_four_tools():
 
 def test_no_job_in_tool_names():
     """Naming ADR: the word 'job' must not appear in the tool surface."""
-    mw = BackgroundExecutionMiddleware()
+    mw = BackgroundExecutionMiddleware(async_notifier)
     assert not any("job" in t.name.lower() for t in mw.tools)
 
 
@@ -80,7 +86,7 @@ def test_run_rejects_dangerous_command_without_launching(monkeypatch):
         return "should-not-happen"
 
     monkeypatch.setattr(bg, "launch", _spy)
-    out = run_in_background.invoke({"command": "sudo rm -rf /"})
+    out = _run_bg().invoke({"command": "sudo rm -rf /"})
     assert launched["called"] is False
     assert "blocked" in out.lower()
 
@@ -88,7 +94,7 @@ def test_run_rejects_dangerous_command_without_launching(monkeypatch):
 def test_run_launches_valid_command(tmp_path, monkeypatch):
     # Pin the workspace cwd to a temp dir so the launch is isolated.
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    out = run_in_background.invoke({"command": "echo ok", "name": "demo"})
+    out = _run_bg().invoke({"command": "echo ok", "name": "demo"})
     assert "Started background process" in out
     assert "check_process" in out
     assert len(bg._PROCESSES) == 1
@@ -104,24 +110,14 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
         return "pidX"
 
     monkeypatch.setattr(bg, "launch", _spy)
-    run_in_background.invoke({"command": "python /train.py"})
+    _run_bg().invoke({"command": "python /train.py"})
     # virtual absolute path -> workspace-relative, same as execute would produce
     assert captured["command"] == "python ./train.py"
-
-
-def _force_dangerous(monkeypatch, value=True):
-    """Make run_in_background see dangerous mode via the env flag it reads.
-
-    monkeypatch.setenv tracks the change and restores it on teardown, so this
-    cannot leak EVOSCIENTIST_DANGEROUS_MODE into other tests.
-    """
-    monkeypatch.setenv("EVOSCIENTIST_DANGEROUS_MODE", "true" if value else "false")
 
 
 def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
     """In dangerous mode, background commands keep real absolute paths (parity with execute)."""
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _force_dangerous(monkeypatch)
     captured = {}
 
     def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
@@ -130,7 +126,7 @@ def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bg, "launch", _spy)
     # Absolute path + traversal would be BLOCKED in normal mode; allowed here.
-    out = run_in_background.invoke({"command": "cat /etc/hosts && cat ../x"})
+    out = _run_bg(dangerous=True).invoke({"command": "cat /etc/hosts && cat ../x"})
     assert "blocked" not in out.lower()
     assert captured["command"] == "cat /etc/hosts && cat ../x"  # no ./ rewrite
     # Advertised log path is the real path, not the virtual /.bg_processes/.
@@ -141,7 +137,6 @@ def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
 def test_run_dangerous_still_blocks_privileged_command(tmp_path, monkeypatch):
     """Dangerous mode must NOT relax the privileged-command blocklist."""
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _force_dangerous(monkeypatch)
     launched = {"called": False}
 
     def _spy(*args, **kwargs):
@@ -149,7 +144,7 @@ def test_run_dangerous_still_blocks_privileged_command(tmp_path, monkeypatch):
         return "should-not-happen"
 
     monkeypatch.setattr(bg, "launch", _spy)
-    out = run_in_background.invoke({"command": "sudo rm x"})
+    out = _run_bg(dangerous=True).invoke({"command": "sudo rm x"})
     assert launched["called"] is False
     assert "blocked" in out.lower()
 
@@ -159,7 +154,7 @@ def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
     from EvoScientist.cli import async_notifier
 
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    run_in_background.invoke({"command": _true_cmd(), "name": "quick"})
+    _run_bg().invoke({"command": _true_cmd(), "name": "quick"})
     # drain consumes, so accumulate across polls until the watcher's on_exit enqueues.
     notifs = []
     deadline = time.time() + 4.0
@@ -189,7 +184,7 @@ def test_notify_done_routes_to_origin_thread(tmp_path):
 
     pid = bg.launch(_true_cmd(), str(tmp_path))  # no on_exit -> no auto-notify here
     assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
-    _notify_done(bg._PROCESSES[pid], "T-123")
+    _notify_done(bg._PROCESSES[pid], "T-123", async_notifier)
     routed = async_notifier.drain_notifications("T-123")
     assert any(n.task_id == pid and n.origin_cli_thread_id == "T-123" for n in routed)
 
@@ -199,7 +194,7 @@ def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
     from EvoScientist.cli import async_notifier
 
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    run_in_background.invoke({"command": _sleep_cmd(600)})
+    _run_bg().invoke({"command": _sleep_cmd(600)})
     (pid,) = list(bg._PROCESSES.keys())
     stop_process.invoke({"process_id": pid})
     # Wait until the watcher observed the exit — it would have enqueued here if the
@@ -310,7 +305,7 @@ def test_shell_notification_hints_check_process():
 
 def test_check_and_list_route_to_manager(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    run_in_background.invoke({"command": _sleep_cmd(1)})
+    _run_bg().invoke({"command": _sleep_cmd(1)})
     (pid,) = bg._PROCESSES.keys()
     assert pid in check_process.invoke({"process_id": pid})
     assert pid in list_processes.invoke({})

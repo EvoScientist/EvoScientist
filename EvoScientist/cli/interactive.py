@@ -448,7 +448,17 @@ def cmd_interactive(
         on_progress=_on_mcp_progress,
     )
 
-    runtime_gateways = create_runtime_gateways()
+    # One frontend event sink for the whole session — injected into the agent's
+    # middleware (write side) and the local gateway's streaming path (read side)
+    # so both share one owner. It survives agent rebuilds (/model, /new, MCP
+    # reload) because the session, not the agent, holds it.
+    from ..stream.sink import SessionEventSink
+
+    event_sink = SessionEventSink(
+        fallback_display=lambda text, style: console.print(text, style=style)
+    )
+
+    runtime_gateways = create_runtime_gateways(events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
     requested_thread_id = thread_id
 
@@ -486,6 +496,7 @@ def cmd_interactive(
             workspace_dir=state["workspace_dir"],
             checkpointer=checkpointer,
             config=config,
+            events=event_sink,
         )
 
     async def _await_agent_ready() -> "CompiledStateGraph":
@@ -1527,7 +1538,13 @@ def cmd_run(
             raise typer.Exit(1) from e
         else:
             console.print(f"[red]Error: {e}[/red]")
-            raise
+            # This is the process boundary for single-shot text mode.  Letting
+            # provider exceptions escape makes Typer/Rich render the complete
+            # async exception chain after we already printed a concise error;
+            # large OpenAI/httpx chains can keep the CLI busy well after the
+            # resume hint is shown.  Convert the failure to Click's controlled
+            # exit signal while preserving the cause for programmatic callers.
+            raise typer.Exit(1) from e
 
 
 def _wait_for_memory_workers_before_exit(

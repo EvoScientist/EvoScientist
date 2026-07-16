@@ -11,6 +11,7 @@ import logging
 import queue
 import random
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,11 +54,11 @@ from .channel import (
     ChannelMessage,
     _auto_start_channel,
     _channels_is_running,
-    _channels_running_list,
     _channels_stop,
     _message_queue,
     _set_channel_response,
     dispatch_channel_slash_command,
+    get_channel_startup_results,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .history_suggester import HistorySuggester
@@ -90,6 +91,45 @@ def _shorten_path(path: str) -> str:
     from .agent import _shorten_path as _sp
 
     return _sp(path)
+
+
+async def _auto_start_channel_in_worker(
+    agent: Any,
+    thread_id: str,
+    config: Any,
+    *,
+    send_thinking: bool,
+    runtime: Any,
+    stop_requested: threading.Event,
+) -> list[tuple[str, bool, str]]:
+    """Run blocking channel startup without occupying the TUI event loop."""
+
+    def _start() -> list[tuple[str, bool, str]]:
+        try:
+            return _auto_start_channel(
+                agent,
+                thread_id,
+                config,
+                send_thinking=send_thinking,
+                runtime=runtime,
+            )
+        finally:
+            if stop_requested.is_set():
+                _channels_stop(runtime=runtime)
+
+    worker = asyncio.create_task(asyncio.to_thread(_start))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        stop_requested.set()
+        try:
+            await worker
+        except Exception:
+            _channel_logger.debug(
+                "Channel startup worker failed during cancellation",
+                exc_info=True,
+            )
+        raise
 
 
 def _build_welcome_banner(
@@ -220,6 +260,9 @@ async def _sync_tui_command_completion(
     cmd: Command,
 ) -> None:
     """Adopt successful command-side state changes back into the TUI app."""
+    if app._exiting:
+        return
+
     agent_swapped = ctx.agent is not None and ctx.agent is not original_agent
     if agent_swapped:
         from ..EvoScientist import _ensure_config
@@ -294,7 +337,15 @@ def run_textual_interactive(
 
         config = get_effective_config()
 
-    runtime_gateways = create_runtime_gateways()
+    # One frontend event sink for the whole TUI session — injected into the
+    # agent's middleware (write side) and the local gateway's streaming path
+    # (read side). The fallback-notice display is bound to the App's
+    # _append_system once the App exists (on_mount); tool-selection needs no
+    # display hook (its widget is mounted from the stream event).
+    from ..stream.sink import SessionEventSink
+
+    event_sink = SessionEventSink()
+    runtime_gateways = create_runtime_gateways(events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
 
     try:
@@ -438,7 +489,8 @@ def run_textual_interactive(
             self._resumed = resumed
             self._resume_warning = resume_warning
             self._channel_timer: Any = None
-            self._started_channel_types: list[str] = []
+            self._channel_start_results: list[tuple[str, bool, str]] = []
+            self._channel_start_stop = threading.Event()
             self._busy = False
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
@@ -465,6 +517,7 @@ def run_textual_interactive(
 
             self._channel_runtime = ChannelRuntime()
             self._quit_pending: bool = False
+            self._exiting: bool = False
             self._current_model: str | None = model
             self._current_provider: str | None = provider
             self._status_started_at = datetime.now()
@@ -516,6 +569,7 @@ def run_textual_interactive(
             self._agent_loader.start(
                 workspace_dir=workspace,
                 checkpointer=self._checkpointer,
+                events=self._runtime_gateways.graph_gateway.events,
             )
 
         def _mount_mcp_loader_widget(self) -> None:
@@ -794,11 +848,13 @@ def run_textual_interactive(
             yield Static("", id="status")
 
         def on_mount(self) -> None:
-            # Register fallback middleware UI callback so messages appear
-            # as SystemMessage widgets in the chat container.
-            from ..middleware.model_fallback import set_ui_emit
-
-            set_ui_emit(lambda text, style: self._append_system(text, style))
+            # Bind the session sink's fallback-notice display so model-fallback
+            # messages appear as SystemMessage widgets in the chat container.
+            # ``event_sink`` is the concrete SessionEventSink created by the
+            # enclosing factory — the same instance the gateway carries.
+            event_sink.set_fallback_display(
+                lambda text, style: self._append_system(text, style)
+            )
 
             self._render_welcome()
             self._render_status()
@@ -850,7 +906,7 @@ def run_textual_interactive(
                         exc_info=True,
                     )
                     return
-                self._start_channels()
+                await self._start_channels()
 
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
@@ -877,28 +933,46 @@ def run_textual_interactive(
 
         # ── Channel integration ────────────────────────────────
 
-        def _start_channels(self) -> None:
+        async def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
             try:
                 from ..config import load_config
 
-                cfg = load_config()
+                cfg = await asyncio.to_thread(load_config)
                 if cfg and cfg.channel_enabled and not _channels_is_running():
-                    _auto_start_channel(
+                    results = await _auto_start_channel_in_worker(
                         self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
                         send_thinking=self._channel_send_thinking,
                         runtime=self._channel_runtime,
+                        stop_requested=self._channel_start_stop,
                     )
-                    types = [
-                        t.strip() for t in cfg.channel_enabled.split(",") if t.strip()
-                    ]
-                    self._started_channel_types = types
+                    if self._exiting:
+                        return
+                    current_agent = self._agent_loader.agent
+                    if current_agent is not None and _channels_is_running():
+                        self._channel_runtime.bind(
+                            current_agent,
+                            self._conversation_tid,
+                        )
+                    self._channel_start_results = results
                     self._render_welcome()
+            except asyncio.CancelledError:
+                self._channel_start_stop.set()
+                raise
             except Exception as e:
                 _channel_logger.debug(f"Channel auto-start failed: {e}")
-            self._channel_timer = self.set_interval(0.1, self._poll_channel_queue)
+            finally:
+                if (
+                    not self._exiting
+                    and not self._channel_start_stop.is_set()
+                    and self._channel_timer is None
+                ):
+                    self._channel_timer = self.set_interval(
+                        0.1,
+                        self._poll_channel_queue,
+                    )
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
@@ -2864,8 +2938,9 @@ def run_textual_interactive(
                 self._render_status()
             finally:
                 self._busy = False
-                prompt_widget.disabled = False
-                prompt_widget.focus()
+                if not self._exiting:
+                    prompt_widget.disabled = False
+                    prompt_widget.focus()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -2970,13 +3045,13 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
-            from ..middleware.model_fallback import set_ui_emit
-
-            set_ui_emit(None)
+            self._exiting = True
+            self._channel_start_stop.set()
+            event_sink.set_fallback_display(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None
-            self._started_channel_types.clear()
+            self._channel_start_results.clear()
             if _channels_is_running():
                 try:
                     _channels_stop(runtime=self._channel_runtime)
@@ -3105,11 +3180,11 @@ def run_textual_interactive(
         def _render_welcome(self) -> None:
             channels_info: list[tuple[str, bool, str]] | None = None
             try:
-                running = _channels_running_list()
-                started = self._started_channel_types
-                if running or started:
-                    all_types = list(dict.fromkeys(running + started))
-                    channels_info = [(ct, True, "connected (bus)") for ct in all_types]
+                current = get_channel_startup_results()
+                if current:
+                    self._channel_start_results = current
+                if self._channel_start_results:
+                    channels_info = self._channel_start_results
                 else:
                     from ..config import load_config
 

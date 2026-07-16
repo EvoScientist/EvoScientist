@@ -151,6 +151,11 @@ class ModelCommand(Command):
         temp_cfg.model = model_name
         temp_cfg.provider = provider
 
+        # Re-thread the session's frontend event sink so the rebuilt agent's
+        # middleware keeps driving the tool-selection widget / fallback notices
+        # after a /model switch (the sink lives on the gateway, not the agent).
+        events = ctx.graph_gateway.events
+
         try:
             new_chat_model = _build_chat_model(temp_cfg)
             new_agent = _load_agent(
@@ -158,6 +163,7 @@ class ModelCommand(Command):
                 checkpointer=ctx.checkpointer,
                 config=temp_cfg,
                 chat_model=new_chat_model,
+                events=events,
             )
         except Exception as e:
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")

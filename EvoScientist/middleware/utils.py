@@ -20,10 +20,18 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
     OpenAI reasoning can conflict.  Strip these settings so structured
     output calls work reliably.
 
+    DeepSeek enables thinking server-side by default (no client field to
+    clear), and its thinking mode rejects the forced ``tool_choice`` that
+    ``with_structured_output`` sends ("Thinking mode does not support this
+    tool_choice"). For DeepSeek models the copy gets an explicit
+    ``extra_body["thinking"] = {"type": "disabled"}`` request field instead.
+
     Uses ``model_copy()`` to produce a real new instance — ``bind()`` only
     wraps the model in a ``RunnableBinding`` whose kwargs do NOT override
     first-class Pydantic fields like ``thinking`` on ``ChatAnthropic``.
     """
+    from ..llm.errors import _provider_from_model
+
     updates: dict[str, Any] = {}
     model_kwargs = getattr(model, "model_kwargs", {}) or {}
 
@@ -31,6 +39,17 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         updates["thinking"] = None
     if getattr(model, "reasoning", None) or "reasoning" in model_kwargs:
         updates["reasoning"] = None
+
+    if _provider_from_model(model) == "deepseek":
+        from ..llm.deepseek import (
+            DEEPSEEK_THINKING_DISABLED,
+            is_deepseek_thinking_disabled,
+        )
+
+        extra_body = dict(getattr(model, "extra_body", None) or {})
+        if not is_deepseek_thinking_disabled(extra_body):
+            extra_body["thinking"] = dict(DEEPSEEK_THINKING_DISABLED)
+            updates["extra_body"] = extra_body
 
     if not updates:
         return model
