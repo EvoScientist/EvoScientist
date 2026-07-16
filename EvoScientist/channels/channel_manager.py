@@ -29,6 +29,9 @@ from .plugin import ChannelPlugin
 
 logger = logging.getLogger(__name__)
 
+# Best-effort failure notices must never wedge the dispatcher on a hung send.
+_FAILURE_NOTICE_TIMEOUT = 15.0
+
 CHANNEL_STARTUP_PENDING_DETAIL = "starting (bus)"
 
 
@@ -958,7 +961,9 @@ class ChannelManager:
                         delivery_failed = True
 
                 if delivery_failed:
-                    await self._send_failure_notice(channel, msg)
+                    await self._send_failure_notice(
+                        channel, msg, timeout=_FAILURE_NOTICE_TIMEOUT
+                    )
                     self._record_outbound_failure(msg.channel, failure_error)
                     continue
 

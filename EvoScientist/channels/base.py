@@ -22,6 +22,7 @@ from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
 from .debug import TraceMixin, debug_trace_enabled
 from .formatter import UnifiedFormatter
+from .interaction import is_slash_command
 from .plugin import ChannelMeta, ChannelPlugin
 
 _logger = logging.getLogger(__name__)
@@ -1066,7 +1067,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         # Slash commands are control messages, not prompt fragments. Flush any
         # prompt already waiting for this sender, then publish the command as
         # its own message so either arrival order cannot newline-merge them.
-        if msg.content.lstrip().startswith("/") and self._bus:
+        if is_slash_command(msg.content) and self._bus:
             debounce_task = self._debounce_tasks.pop(sender, None)
             if debounce_task is not None:
                 debounce_task.cancel()

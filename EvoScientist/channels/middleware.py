@@ -23,6 +23,7 @@ from typing import Any
 from .base import RawIncoming
 from .bus.events import InboundMessage, OutboundMessage
 from .debug import emit_debug_event_if
+from .interaction import is_slash_command
 
 _logger = logging.getLogger(__name__)
 
@@ -932,7 +933,7 @@ class GroupHistoryMiddleware(InboundMiddleware):
         # Slash commands must remain the leading content so channel command
         # dispatchers can recognize them. Keep buffered chatter for the next
         # normal mentioned message instead of injecting it ahead of a command.
-        if raw.text.lstrip().startswith("/"):
+        if is_slash_command(raw.text):
             return raw
 
         # Mentioned: inject history context

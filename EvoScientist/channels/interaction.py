@@ -41,6 +41,12 @@ OTHER_PROMPT = "Please type your answer:"
 # ── stop / cancel helpers ──────────────────────────────────────────────
 
 
+def is_slash_command(text: str | None) -> bool:
+    """Whether inbound content is a slash command (a control message, not a
+    prompt fragment)."""
+    return (text or "").lstrip().startswith("/")
+
+
 def is_stop_command(content: str | None) -> bool:
     """Whether incoming content is a stop/cancel slash command."""
     return (content or "").strip().lower() in _STOP_COMMANDS

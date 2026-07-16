@@ -33,6 +33,7 @@ from ..channels.interaction import (
     ApprovalPolicy,
     InteractionIO,
     PendingReplyRegistry,
+    is_slash_command,
     is_stop_command,
     resolve_approval,
     resolve_ask_user,
@@ -329,7 +330,7 @@ async def dispatch_channel_slash_command(
         ``cli/interactive.py:1002-1030``.  Headless serve passes
         ``None`` since it cannot hot-swap its polling-loop agent.
     """
-    if not msg.content.strip().startswith("/"):
+    if not is_slash_command(msg.content):
         return False
 
     try:
@@ -394,16 +395,17 @@ async def _dispatch_channel_slash_impl(
     from ..commands.channel_ui import ChannelCommandUI
     from ..commands.manager import manager as cmd_manager
 
+    # The wrapper only forwards slash-prefixed content, so an unresolved
+    # parse is always an unknown command — answer instead of feeding a typo
+    # to the agent.
     parsed = cmd_manager.resolve(msg.content)
     if parsed is None:
-        if msg.content.lstrip().startswith("/"):
-            bad_cmd = msg.content.split(None, 1)[0]
-            _set_channel_response(
-                msg.msg_id,
-                f"Unknown command: {bad_cmd}\nType /help to see available commands.",
-            )
-            return True
-        return False
+        bad_cmd = msg.content.split(None, 1)[0]
+        _set_channel_response(
+            msg.msg_id,
+            f"Unknown command: {bad_cmd}\nType /help to see available commands.",
+        )
+        return True
     cmd, cmd_args = parsed
 
     agent_for_ctx = agent
