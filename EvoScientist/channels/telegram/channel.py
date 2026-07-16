@@ -80,9 +80,7 @@ class TelegramChannel(Channel):
                 | filters.LOCATION
             )
 
-        self._app.add_handler(
-            MessageHandler(media_filter & ~filters.COMMAND, self._on_message)
-        )
+        self._app.add_handler(MessageHandler(media_filter, self._on_message))
 
         await self._app.initialize()
         # Cache bot username for @mention detection in groups
