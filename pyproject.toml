@@ -33,6 +33,7 @@ dependencies = [
     "typer>=0.24",
     "python-dotenv>=1.0",
     "langgraph-cli[inmem]>=0.4",
+    "langgraph-sdk>=0.4",
     "langgraph-checkpoint-sqlite>=3.0",
     "httpx>=0.28",
     "psutil>=6.0",
