@@ -858,7 +858,7 @@ class ChannelManager:
             return
         health.consecutive_failures += 1
         health.total_failures += 1
-        health.last_failure_time = time.monotonic()
+        health.last_failure_time = time.time()
         health.last_failure_error = error
 
     async def _send_failure_notice(
