@@ -23,6 +23,7 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
+from ..runtime import runtime
 from .console import console
 from .diff_format import build_edit_diff
 from .formatter import ToolResultFormatter
@@ -1152,36 +1153,6 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Async-to-sync bridge
-# ---------------------------------------------------------------------------
-
-
-def _create_event_loop() -> asyncio.AbstractEventLoop:
-    """Create and set the event loop for asyncio.
-
-    Returns:
-        The created event loop.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop
-
-
-def _get_event_loop() -> asyncio.AbstractEventLoop:
-    """Get the event loop for asyncio.
-
-    If no event loop is set, a new one is created.
-
-    Returns:
-        The current event loop.
-    """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = _create_event_loop()
-    return loop
-
-
 def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
     """Interactive console Q&A for ask_user events.
 
@@ -1473,9 +1444,7 @@ def _run_streaming(
             # - In TUI mode (Textual), there's already a running event loop;
             #   nest_asyncio is needed to allow run_until_complete inside it.
             # - In serve/CLI mode, the main thread has no running loop;
-            #   use a fresh event loop directly (no nest_asyncio needed or wanted,
-            #   since nest_asyncio.apply() patches globally and breaks the bus
-            #   thread's event loop Task-context detection).
+            #   use the persistent runtime loop.
             try:
                 running_loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -1489,12 +1458,6 @@ def _run_streaming(
 
                 nest_asyncio.apply()
                 loop = running_loop
-            else:
-                # No running loop (serve/CLI) — create a fresh one
-                try:
-                    loop = _get_event_loop()
-                except RuntimeError:
-                    loop = _create_event_loop()
 
             async def _run_with_refresh() -> None:
                 async def _periodic_refresh() -> None:
@@ -1508,6 +1471,11 @@ def _run_streaming(
                 refresh_task = asyncio.ensure_future(_periodic_refresh())
                 try:
                     await _consume()
+                except asyncio.CancelledError:
+                    if running_loop is None:
+                        request_stream_cancel(cancel_scope)
+                        _stopped_response()
+                    raise
                 finally:
                     refresh_task.cancel()
                     try:
@@ -1555,7 +1523,26 @@ def _run_streaming(
                     live.update(final_display)
                     live.refresh()
 
-            loop.run_until_complete(_run_with_refresh())
+            if running_loop is not None:
+                loop.run_until_complete(_run_with_refresh())
+            else:
+                runtime_started = threading.Event()
+                runtime_cleanup_complete = threading.Event()
+
+                async def _run_on_runtime() -> None:
+                    runtime_started.set()
+                    try:
+                        await _run_with_refresh()
+                    finally:
+                        runtime_cleanup_complete.set()
+
+                try:
+                    runtime.run_sync(_run_on_runtime())
+                except KeyboardInterrupt:
+                    request_stream_cancel(cancel_scope)
+                    if runtime_started.is_set():
+                        runtime_cleanup_complete.wait(timeout=2.0)
+                    raise
 
         # Flush any remaining thinking that wasn't sent during streaming.
         if on_thinking and state.thinking_text:
