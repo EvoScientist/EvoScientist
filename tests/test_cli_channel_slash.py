@@ -481,6 +481,43 @@ async def test_command_error_skips_completion_hook_and_reports_error():
     mock_set_resp.assert_called_once_with("msg-1", "Command error: workspace conflict")
 
 
+async def test_command_error_with_flushed_output_suppresses_second_error():
+    """CommandManager already flushes its error text to channel UIs."""
+    from EvoScientist.cli.channel import COMMAND_OUTPUT_ALREADY_SENT
+
+    msg = _make_msg(content="/resume abc")
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+
+    async def _execute(_command, ctx):
+        ctx.command_error = "workspace conflict"
+        ctx.ui.sent_to_channel = True
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["abc"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            side_effect=_execute,
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="old-thread",
+            workspace_dir="/old-workspace",
+            checkpointer=None,
+            append_system=MagicMock(),
+        )
+
+    assert handled is True
+    mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
+
+
 async def test_empty_command_error_still_reports_error():
     """An empty string error is still a command failure sentinel."""
     msg = _make_msg(content="/resume abc")

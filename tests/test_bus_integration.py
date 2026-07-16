@@ -149,6 +149,7 @@ class TestBusInboundConsumer:
         # Nothing must be published for this message.
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(bus.consume_outbound(), timeout=0.5)
+        assert manager._message_counts["fake"]["sent"] == 1
 
         consumer.cancel()
         try:

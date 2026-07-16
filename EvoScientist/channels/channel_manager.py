@@ -17,7 +17,7 @@ import logging
 import pkgutil
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -898,6 +898,28 @@ class ChannelManager:
                         delivery_failed = True
 
                 if delivery_failed:
+                    if msg.failure_notice:
+                        fallback = replace(
+                            msg,
+                            content=msg.failure_notice,
+                            media=[],
+                            failure_notice=None,
+                        )
+                        try:
+                            fallback_ok = await channel.send(fallback)
+                        except Exception as fallback_error:
+                            logger.error(
+                                "Error sending delivery failure notice to %s: %s",
+                                msg.channel,
+                                fallback_error,
+                            )
+                        else:
+                            if not fallback_ok:
+                                logger.error(
+                                    "Error sending delivery failure notice to %s: "
+                                    "send() returned False",
+                                    msg.channel,
+                                )
                     raise RuntimeError("one or more outbound deliveries failed")
 
                 # Success

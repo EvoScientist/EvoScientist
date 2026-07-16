@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_COMMAND_OUTPUT_FAILURE_NOTICE = "Command output could not be delivered."
+
 
 class ChannelCommandUI(CommandUI):
     """CommandUI implementation for messaging channels with output buffering."""
@@ -111,6 +113,7 @@ class ChannelCommandUI(CommandUI):
             content=grouped_text,
             reply_to=self.msg.message_id,
             metadata=self.msg.metadata,
+            failure_notice=_COMMAND_OUTPUT_FAILURE_NOTICE,
         )
 
         if self.msg.bus_ref:
@@ -144,7 +147,6 @@ class ChannelCommandUI(CommandUI):
 
         # Flush any pending system messages first to preserve order
         if self._system_buffer:
-            self.sent_to_channel = True
             asyncio.run_coroutine_threadsafe(self.flush(), loop)
 
         outbound = OutboundMessage(
@@ -153,6 +155,7 @@ class ChannelCommandUI(CommandUI):
             content=f"```\n{text}\n```",
             reply_to=self.msg.message_id,
             metadata=self.msg.metadata,
+            failure_notice=_COMMAND_OUTPUT_FAILURE_NOTICE,
         )
 
         if self.msg.bus_ref:

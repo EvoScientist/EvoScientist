@@ -159,4 +159,8 @@ class TestSentToChannelFlag:
         monkeypatch.setattr("EvoScientist.cli.channel._bus_loop", loop)
         ui.append_system("hello")
         await ui.flush()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
         assert ui.sent_to_channel is True
+        outbound = bus.publish_outbound.await_args.args[0]
+        assert outbound.failure_notice == "Command output could not be delivered."

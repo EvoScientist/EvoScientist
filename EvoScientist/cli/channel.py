@@ -440,8 +440,11 @@ async def _dispatch_channel_slash_impl(
 
     if cmd_executed:
         if ctx.command_error is not None:
-            details = ctx.command_error or "(no details)"
-            _set_channel_response(msg.msg_id, f"Command error: {details}")
+            if ui.sent_to_channel:
+                _set_channel_response(msg.msg_id, COMMAND_OUTPUT_ALREADY_SENT)
+            else:
+                details = ctx.command_error or "(no details)"
+                _set_channel_response(msg.msg_id, f"Command error: {details}")
             return True
 
         if on_cmd_completed is not None:
@@ -1185,6 +1188,10 @@ async def _handle_bus_message(bus, manager, msg) -> None:
                     metadata=msg.metadata,
                 )
             )
+            manager.record_message(msg.channel, "sent")
+        else:
+            # The command UI published its own response before returning the
+            # sentinel, so account for that delivery without sending an ack.
             manager.record_message(msg.channel, "sent")
     except asyncio.CancelledError:
         _pop_channel_response(cm.msg_id, cancel_pending=True)

@@ -1193,6 +1193,44 @@ class TestChannelManagerDispatch:
         assert health.total_failures == 1
         assert health.consecutive_failures == 1
 
+    async def test_dispatch_uses_short_notice_when_command_output_fails(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        sent: list[OutboundMessage] = []
+
+        async def fail_content_then_send_notice(msg):
+            sent.append(msg)
+            return len(sent) > 1
+
+        ch.send = fail_content_then_send_notice
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="content rejected by platform",
+                failure_notice="Command output could not be delivered.",
+            )
+        )
+        await asyncio.wait_for(
+            _wait_for_async(lambda: mgr._health["stub"].total_failures == 1),
+            timeout=1.0,
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert [message.content for message in sent] == [
+            "content rejected by platform",
+            "Command output could not be delivered.",
+        ]
+        assert sent[1].failure_notice is None
+
     async def test_dispatch_send_media_return_false_counts_failure(self):
         """send_media() returning False should mark the delivery as failed."""
 
