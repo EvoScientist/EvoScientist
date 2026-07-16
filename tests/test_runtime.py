@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from EvoScientist.runtime import AgentRuntime, TurnInProgressError
+from EvoScientist.runtime import AgentRuntime
 
 
 def _wait(predicate, *, timeout=5.0, interval=0.005):
@@ -469,92 +469,3 @@ def test_close_from_runtime_thread_raises_without_detaching_runtime(rt):
     assert thread.is_alive()
     assert rt.loop is not None
     assert rt.run_sync(asyncio.sleep(0, result="still-running")) == "still-running"
-
-
-# -- the single turn slot --------------------------------------------------
-
-
-def test_turn_runs_and_releases_slot_on_completion(rt):
-    async def body():
-        await asyncio.sleep(0)
-        return "done"
-
-    fut = rt.turn(body())
-    assert fut.result(5) == "done"
-    _wait(lambda: not rt.turn_active)
-
-    # The slot is free again — a second turn is allowed.
-    assert rt.turn(body()).result(5) == "done"
-    _wait(lambda: not rt.turn_active)
-
-
-def test_turn_raises_while_a_turn_is_active(rt):
-    release = threading.Event()
-
-    async def body():
-        await asyncio.get_running_loop().run_in_executor(None, release.wait)
-
-    fut = rt.turn(body())
-    assert rt.turn_active is True
-
-    with pytest.raises(TurnInProgressError):
-        rt.turn(asyncio.sleep(0))
-
-    release.set()
-    fut.result(5)
-    _wait(lambda: not rt.turn_active)
-
-
-def test_turn_slot_released_on_error(rt):
-    async def boom():
-        raise ValueError("turn-error")
-
-    fut = rt.turn(boom())
-    with pytest.raises(ValueError, match="turn-error"):
-        fut.result(5)
-    _wait(lambda: not rt.turn_active)
-
-    # Slot is free after an error — the next turn proceeds.
-    async def ok():
-        return "ok"
-
-    assert rt.turn(ok()).result(5) == "ok"
-
-
-def test_turn_slot_released_on_cancellation(rt):
-    release = threading.Event()
-
-    async def body():
-        try:
-            await asyncio.get_running_loop().run_in_executor(None, release.wait)
-        finally:
-            release.set()
-
-    fut = rt.turn(body())
-    assert rt.turn_active is True
-
-    assert fut.cancel() is True
-    _wait(lambda: not rt.turn_active)
-    release.set()
-
-
-def test_turn_active_visible_from_another_thread(rt):
-    release = threading.Event()
-
-    async def body():
-        await asyncio.get_running_loop().run_in_executor(None, release.wait)
-
-    fut = rt.turn(body())
-    seen = {}
-
-    def reader():
-        seen["active"] = rt.turn_active
-
-    t = threading.Thread(target=reader)
-    t.start()
-    t.join(5)
-    assert seen["active"] is True
-
-    release.set()
-    fut.result(5)
-    _wait(lambda: not rt.turn_active)

@@ -4,8 +4,8 @@ A single persistent event loop, owned by a dedicated daemon thread
 (``evosci-runtime``), is the one place agent coroutines run in *every* mode.
 Frontends (Textual, prompt_toolkit, the serve poll loop) stay synchronous and
 reach the loop through exactly three primitives — :meth:`AgentRuntime.submit`,
-:meth:`AgentRuntime.run_sync`, :meth:`AgentRuntime.spawn` — plus the single-turn
-:meth:`AgentRuntime.turn` gate. Everything else is ``await``.
+:meth:`AgentRuntime.run_sync`, and :meth:`AgentRuntime.spawn`. Everything else
+is ``await``.
 
 This module owns the runtime loop creation path and the Windows Proactor policy
 application (see :mod:`EvoScientist._winloop` and issue #283).
@@ -46,16 +46,6 @@ class _RuntimeFuture(concurrent.futures.Future[Any]):
         return self._task_settled.wait(timeout)
 
 
-class TurnInProgressError(RuntimeError):
-    """Raised by :meth:`AgentRuntime.turn` when a foreground turn is active.
-
-    "At most one foreground turn per process" is an explicit runtime invariant.
-    Raising rather than queueing is deliberate: every frontend owns a queue with
-    its own deferral policy, and an accidental second concurrent turn fails
-    loudly instead of racing on process-global agent/middleware state.
-    """
-
-
 class AgentRuntime:
     """Owns the process-wide agent event loop and its lifecycle.
 
@@ -80,9 +70,6 @@ class AgentRuntime:
         # mid-flight (asyncio only holds weak refs). Only mutated on the loop
         # thread (in the ``spawn`` closure and the done-callback).
         self._tasks: set[asyncio.Task[Any]] = set()
-        # The single foreground-turn slot.
-        self._turn_lock = threading.Lock()
-        self._turn_active = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -321,47 +308,6 @@ class AgentRuntime:
                 task.get_name(),
                 exc_info=exc,
             )
-
-    # -- the single turn slot ---------------------------------------------
-
-    @property
-    def turn_active(self) -> bool:
-        """Whether a foreground turn currently holds the slot.
-
-        Readable from any thread (e.g. ``_check_channel_queue`` handlers that
-        check-and-defer mid-turn).
-        """
-        return self._turn_active
-
-    def turn(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future:
-        """Run a foreground agent turn, gated by the single turn slot.
-
-        Atomically acquires the process's one turn slot and raises
-        :class:`TurnInProgressError` if a turn is already active. The slot is
-        released in a done-callback, so completion, cancellation, and error all
-        free it.
-        """
-        with self._turn_lock:
-            if self._turn_active:
-                coro.close()
-                raise TurnInProgressError(
-                    "a foreground agent turn is already active; "
-                    "check runtime.turn_active and defer this work"
-                )
-            self._turn_active = True
-        try:
-            future = self.submit(coro)
-        except BaseException:
-            # submit() itself failed — release the slot we just took.
-            with self._turn_lock:
-                self._turn_active = False
-            raise
-        future.add_done_callback(self._release_turn_slot)
-        return future
-
-    def _release_turn_slot(self, _future: concurrent.futures.Future) -> None:
-        with self._turn_lock:
-            self._turn_active = False
 
     # -- shutdown ----------------------------------------------------------
 
