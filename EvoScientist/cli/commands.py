@@ -1578,6 +1578,15 @@ def serve(
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
         _channels_stop(runtime=channel_runtime)
+        # Close QuickJS workers while the runtime loop can still service
+        # them — left to garbage collection, their synchronous close blocks
+        # the interpreter's final GC pass forever (no worker left to reply).
+        from ..middleware.code_interpreter import aclose_code_interpreters
+
+        try:
+            runtime.run_sync(aclose_code_interpreters(), timeout=10.0)
+        except Exception:
+            _serve_logger.warning("QuickJS worker cleanup failed", exc_info=True)
         console.print("[dim]Stopped.[/dim]")
 
 

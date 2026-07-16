@@ -66,7 +66,7 @@ def _run_serve_once(
         def start(self):
             captured["runtime_started"] = True
 
-        def run_sync(self, coro):
+        def run_sync(self, coro, *, timeout=None):
             captured["runtime_run_sync_calls"] = (
                 int(captured.get("runtime_run_sync_calls", 0)) + 1
             )
@@ -146,7 +146,9 @@ def test_serve_workdir_has_highest_priority_and_sets_root_before_ensure(
     expected = str(cli_ws.resolve())
     assert captured["workspace_dir"] == expected
     assert captured["runtime_started"] is True
-    assert captured["runtime_run_sync_calls"] == 1
+    # One call creating the serve thread id, one closing QuickJS workers
+    # during shutdown.
+    assert captured["runtime_run_sync_calls"] == 2
     assert any(step == ("set_workspace_root", expected) for step in order)
     set_idx = next(i for i, step in enumerate(order) if step[0] == "set_workspace_root")
     ensure_idx = next(i for i, step in enumerate(order) if step[0] == "ensure_dirs")
@@ -280,3 +282,21 @@ def test_serve_dangerous_sets_dangerous_mode(monkeypatch, tmp_path):
     )
 
     assert captured["cli_overrides"] == {"dangerous_mode": True}
+
+
+def test_serve_shutdown_closes_quickjs_workers(monkeypatch, tmp_path):
+    """Serve shutdown must close QuickJS workers while the runtime loop is
+    alive — left to GC, their synchronous close blocks the interpreter's
+    final collection forever."""
+    from EvoScientist.middleware import code_interpreter as ci
+
+    closed = {"count": 0}
+
+    async def _fake_aclose():
+        closed["count"] += 1
+
+    monkeypatch.setattr(ci, "aclose_code_interpreters", _fake_aclose)
+
+    _run_serve_once(monkeypatch, _make_config(default_workdir=str(tmp_path)))
+
+    assert closed["count"] == 1
