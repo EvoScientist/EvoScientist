@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from types import SimpleNamespace
 
@@ -61,6 +62,16 @@ def _run_serve_once(
     order: list[tuple[str, str | None]] = []
     captured: dict[str, object] = {}
 
+    class _TestRuntime:
+        def start(self):
+            captured["runtime_started"] = True
+
+        def run_sync(self, coro):
+            captured["runtime_run_sync_calls"] = (
+                int(captured.get("runtime_run_sync_calls", 0)) + 1
+            )
+            return asyncio.run(coro)
+
     def _fake_set_workspace_root(path):
         order.append(("set_workspace_root", str(path)))
 
@@ -93,6 +104,7 @@ def _run_serve_once(
     )
     monkeypatch.setattr(commands, "_channels_stop", _fake_channels_stop)
     monkeypatch.setattr(commands, "_message_queue", _InterruptQueue())
+    monkeypatch.setattr(commands, "runtime", _TestRuntime())
 
     def _fake_get_effective_config(cli_overrides=None):
         captured["cli_overrides"] = dict(cli_overrides or {})
@@ -133,6 +145,8 @@ def test_serve_workdir_has_highest_priority_and_sets_root_before_ensure(
 
     expected = str(cli_ws.resolve())
     assert captured["workspace_dir"] == expected
+    assert captured["runtime_started"] is True
+    assert captured["runtime_run_sync_calls"] == 1
     assert any(step == ("set_workspace_root", expected) for step in order)
     set_idx = next(i for i, step in enumerate(order) if step[0] == "set_workspace_root")
     ensure_idx = next(i for i, step in enumerate(order) if step[0] == "ensure_dirs")

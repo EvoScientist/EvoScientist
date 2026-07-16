@@ -1,6 +1,5 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
-import asyncio
 import logging
 import os
 import queue
@@ -26,6 +25,7 @@ from ..gateway import (
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
+from ..runtime import runtime
 from ..stream.console import console
 from . import async_notifier
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
@@ -1196,30 +1196,12 @@ def _serve_process_message(
     # commands like ``/evoskills`` actually execute in serve mode instead
     # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
     # None because the agent is always loaded before the serve loop polls.
-    # Uses a dedicated event loop (not ``asyncio.run``) so SIGINT handling
-    # installed by ``serve()`` remains authoritative — ``asyncio.run``
-    # swaps ``signal.set_wakeup_fd`` and can leave it dangling on edge
-    # cases, which breaks Ctrl+C between messages.
-    # ``set_event_loop`` is needed because some downstream commands
-    # (e.g. ``/install-mcp``) call ``asyncio.get_event_loop()``, which
-    # raises ``RuntimeError`` on Python 3.12+ when the thread has no
-    # current loop set.  The prior loop (often ``None``) is restored in
-    # the ``finally`` below so subsequent messages start from a clean
-    # slate.  Loop creation lives inside the try so an exception between
-    # creation and ``set_event_loop`` still closes the loop.
+    # Dispatch runs on the persistent runtime loop.
     try:
-        _prev_loop: asyncio.AbstractEventLoop | None
-        try:
-            _prev_loop = asyncio.get_event_loop_policy().get_event_loop()
-        except RuntimeError:
-            _prev_loop = None
-        _slash_loop: asyncio.AbstractEventLoop | None = None
         _slash_handled = False
         _slash_error: Exception | None = None
         try:
-            _slash_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_slash_loop)
-            _slash_handled = _slash_loop.run_until_complete(
+            _slash_handled = runtime.run_sync(
                 dispatch_channel_slash_command(
                     msg,
                     agent=runtime_state.agent,
@@ -1250,10 +1232,6 @@ def _serve_process_message(
         except Exception as exc:
             _slash_error = exc
             _serve_logger.exception("Slash dispatch failed for %s", msg.channel_type)
-        finally:
-            if _slash_loop is not None:
-                _slash_loop.close()
-            asyncio.set_event_loop(_prev_loop)
 
         if _slash_error is not None:
             _set_channel_response(msg.msg_id, f"Command error: {_slash_error}")
@@ -1313,7 +1291,6 @@ def _serve_drain_notifications(
     """Drain the async-task notification queue in headless serve mode.
 
     Mirrors the Rich CLI's ``_check_channel_queue`` notification path.
-    Uses a dedicated event loop (same pattern as serve mode's slash dispatch).
     """
     import asyncio as _aio
 
@@ -1378,15 +1355,10 @@ def _serve_drain_notifications(
             current_thread_id=runtime_state.thread_id,
         )
 
-    _notif_loop: _aio.AbstractEventLoop | None = None
     try:
-        _notif_loop = _aio.new_event_loop()
-        _notif_loop.run_until_complete(_consume())
+        runtime.run_sync(_consume())
     except Exception as exc:
         _serve_logger.warning("Notification drain failed: %s", exc)
-    finally:
-        if _notif_loop is not None:
-            _notif_loop.close()
 
 
 @app.command()
@@ -1429,6 +1401,8 @@ def serve(
     Press Ctrl+C to shut down.
     """
     from ..config import apply_config_to_env, get_effective_config
+
+    runtime.start()
 
     cli_overrides = {}
     if auto_approve:
@@ -1498,7 +1472,7 @@ def serve(
     agent = _load_agent(workspace_dir=ws, config=config)
 
     runtime_gateways = create_runtime_gateways()
-    tid = asyncio.run(
+    tid = runtime.run_sync(
         runtime_gateways.graph_gateway.create_thread(GraphTarget(workspace_dir=ws))
     )
 
@@ -1960,14 +1934,9 @@ def sessions_callback(ctx: typer.Context):
 @sessions_app.command("stats")
 def sessions_stats():
     """Show DB size, thread count, total checkpoints, top heaviest threads."""
-    import asyncio
-
     from ..sessions import db_stats
 
-    try:
-        stats = asyncio.get_event_loop().run_until_complete(db_stats())
-    except RuntimeError:
-        stats = asyncio.new_event_loop().run_until_complete(db_stats())
+    stats = runtime.run_sync(db_stats())
 
     table = Table(title="EvoScientist sessions DB", show_header=True)
     table.add_column("Metric", style="cyan")

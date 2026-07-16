@@ -8,6 +8,7 @@ captured at startup.
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +28,7 @@ from EvoScientist.cli.commands import (
 from EvoScientist.commands.base import ChannelRuntime
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.gateway import RuntimeGateways, ThreadStore
+from EvoScientist.runtime import AgentRuntime
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -554,6 +556,54 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
 
     mock_set_resp.assert_called_once_with("msg-1", "Command error: slash broke")
     mock_run_streaming.assert_not_called()
+
+
+def test_serve_process_message_dispatches_slash_on_runtime_thread():
+    msg = ChannelMessage(
+        msg_id="msg-runtime",
+        content="/evoskills core",
+        sender="channel-user",
+        channel_type="imessage",
+        metadata={},
+        channel_ref=None,
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-runtime",
+    )
+    thread_store = _thread_store()
+    state = _runtime_state(
+        agent=_agent(),
+        thread_id="tid",
+        thread_store=thread_store,
+        runtime_gateways=_runtime_gateways(thread_store),
+    )
+    dispatch_thread: list[str] = []
+    test_runtime = AgentRuntime()
+
+    async def _fake_dispatch(*_args, **_kwargs):
+        dispatch_thread.append(threading.current_thread().name)
+        return True
+
+    try:
+        with (
+            patch("EvoScientist.cli.commands.runtime", test_runtime),
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                side_effect=_fake_dispatch,
+            ),
+        ):
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg,
+                runtime_state=state,
+                model="model",
+                workspace_dir="/tmp",
+                show_thinking=False,
+            )
+    finally:
+        test_runtime.close()
+
+    assert dispatch_thread == ["evosci-runtime"]
 
 
 def test_serve_process_message_uses_runtime_workspace_from_state():
