@@ -110,7 +110,19 @@ class _WatcherHandle:
             self._cancel_requested = True
             task = self._task
         if task is not None:
-            task.get_loop().call_soon_threadsafe(task.cancel)
+            loop = task.get_loop()
+            if loop.is_closed():
+                # A timed-out runtime shutdown can strand a task whose finally
+                # block will never run. Treat it as terminal so it cannot keep
+                # notification drains in their active-watcher grace window.
+                self.mark_done()
+                return True
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                if not loop.is_closed():
+                    raise
+                self.mark_done()
         return True
 
     def done(self) -> bool:
@@ -434,12 +446,6 @@ def spawn_watcher(
     only injects it back into the originating CLI session.
     """
     handle = _WatcherHandle()
-    with _watchers_lock:
-        old_handle = _watcher_by_thread.get(thread_id)
-        _watcher_by_thread[thread_id] = handle
-        _active_watchers[handle] = origin_cli_thread_id
-    if old_handle is not None and not old_handle.done():
-        old_handle.cancel()
 
     async def _run() -> None:
         task = asyncio.current_task()
@@ -455,24 +461,39 @@ def spawn_watcher(
                 origin_cli_thread_id=origin_cli_thread_id,
             )
         finally:
-            handle.mark_done()
             with _watchers_lock:
+                # Keep mark-done and registry cleanup atomic with the
+                # post-spawn registration below. A very short watcher cannot
+                # otherwise finish between the caller's done() check and insert.
+                handle.mark_done()
                 _active_watchers.pop(handle, None)
                 # A replacement may already own this thread_id.
                 if _watcher_by_thread.get(thread_id) is handle:
                     del _watcher_by_thread[thread_id]
 
     watcher_coro = _run()
-    try:
-        runtime.spawn(watcher_coro, name=f"async-watcher:{thread_id}")
-    except BaseException:
-        watcher_coro.close()
-        handle.mark_done()
-        with _watchers_lock:
-            _active_watchers.pop(handle, None)
-            if _watcher_by_thread.get(thread_id) is handle:
+    with _watchers_lock:
+        old_handle = _watcher_by_thread.get(thread_id)
+        if old_handle is not None:
+            if not old_handle.done():
+                old_handle.cancel()
+            _active_watchers.pop(old_handle, None)
+            if _watcher_by_thread.get(thread_id) is old_handle:
                 del _watcher_by_thread[thread_id]
-        raise
+
+        try:
+            runtime.spawn(watcher_coro, name=f"async-watcher:{thread_id}")
+        except BaseException:
+            watcher_coro.close()
+            handle.mark_done()
+            raise
+
+        # runtime.spawn accepted the callback while the runtime lifecycle lock
+        # was held. Register only after that succeeds; _run() takes this same
+        # lock in its finally block, so it cannot finish between this insert and
+        # its cleanup.
+        _watcher_by_thread[thread_id] = handle
+        _active_watchers[handle] = origin_cli_thread_id
     return handle
 
 

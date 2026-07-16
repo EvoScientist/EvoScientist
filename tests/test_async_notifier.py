@@ -157,6 +157,86 @@ async def test_spawn_watcher_replaces_existing_for_same_thread():
         assert _drain_one_queue_helper(q) == []
 
 
+def test_watcher_handle_cancel_tolerates_closed_loop():
+    loop = asyncio.new_event_loop()
+
+    async def finished():
+        return None
+
+    task = loop.create_task(finished())
+    loop.run_until_complete(task)
+    loop.close()
+
+    handle = async_notifier._WatcherHandle()
+    handle.bind(task)
+
+    assert handle.cancel() is True
+    assert handle.done() is True
+    assert handle.cancelled() is True
+
+
+def test_spawn_watcher_replaces_stale_closed_loop_handle(monkeypatch):
+    loop = asyncio.new_event_loop()
+
+    async def finished():
+        return None
+
+    task = loop.create_task(finished())
+    loop.run_until_complete(task)
+    loop.close()
+
+    old_handle = async_notifier._WatcherHandle()
+    old_handle.bind(task)
+    async_notifier._watcher_by_thread["stale-thread"] = old_handle
+    async_notifier._active_watchers[old_handle] = "origin"
+    spawned = []
+
+    class StubRuntime:
+        def spawn(self, coro, *, name=None):
+            spawned.append((coro, name))
+
+    monkeypatch.setattr(async_notifier, "runtime", StubRuntime())
+
+    try:
+        new_handle = async_notifier.spawn_watcher(
+            MagicMock(),
+            "stale-thread",
+            "run-2",
+            "agent",
+            origin_cli_thread_id="origin",
+        )
+
+        assert old_handle.done() is True
+        assert async_notifier._watcher_by_thread["stale-thread"] is new_handle
+        assert async_notifier._active_watchers == {new_handle: "origin"}
+        assert len(spawned) == 1
+    finally:
+        for coro, _name in spawned:
+            coro.close()
+        async_notifier._watcher_by_thread.clear()
+        async_notifier._active_watchers.clear()
+
+
+def test_spawn_watcher_failure_leaves_no_registered_handle(monkeypatch):
+    class FailingRuntime:
+        def spawn(self, _coro, *, name=None):
+            raise RuntimeError("runtime unavailable")
+
+    monkeypatch.setattr(async_notifier, "runtime", FailingRuntime())
+
+    with pytest.raises(RuntimeError, match="runtime unavailable"):
+        async_notifier.spawn_watcher(
+            MagicMock(),
+            "failed-thread",
+            "run-1",
+            "agent",
+            origin_cli_thread_id="origin",
+        )
+
+    assert "failed-thread" not in async_notifier._watcher_by_thread
+    assert async_notifier._active_watchers == {}
+
+
 def test_watcher_survives_turn_and_delivers_on_later_drain(monkeypatch):
     test_runtime = AgentRuntime()
     watcher_started = threading.Event()
