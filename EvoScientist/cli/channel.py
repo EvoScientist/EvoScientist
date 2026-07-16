@@ -18,6 +18,7 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -140,6 +141,289 @@ def _channel_message_session_key(msg: ChannelMessage) -> str:
 
 def _channel_message_cancel_scope(msg: ChannelMessage) -> str:
     return f"channel:{msg.channel_type}:{msg.chat_id}:{msg.msg_id}"
+
+
+_CHANNEL_SEND_SHUTDOWN_TIMEOUT = 5.0
+_CHANNEL_SEND_CANCEL_SETTLE_TIMEOUT = 1.0
+_CHANNEL_SEND_RELAY_ATTR = "_evosci_channel_send_relay"
+_channel_send_relay_init_lock = threading.Lock()
+
+
+def _close_awaitable(awaitable: Awaitable[Any]) -> None:
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+
+
+@dataclass
+class _PendingChannelSend:
+    awaitable: Awaitable[Any]
+    label: str
+    timeout: float
+    warn_on_failure: bool
+
+
+class _OrderedChannelSendRelay:
+    """Run channel callback sends in order without blocking their caller.
+
+    Queue mutation is protected by a regular lock because callbacks arrive from
+    the runtime, CLI, and TUI threads.  One worker per channel chat consumes the
+    queue on the bus loop, so a slow chat does not hold up unrelated chats.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self._lock = threading.Lock()
+        self._queues: dict[str, deque[_PendingChannelSend]] = {}
+        self._workers: dict[str, asyncio.Task[None]] = {}
+        self._accepting = True
+        self._aborting = False
+        self._closed = False
+        self._close_result = True
+
+    def submit(
+        self,
+        session_key: str,
+        awaitable: Awaitable[Any],
+        *,
+        label: str,
+        timeout: float,
+        warn_on_failure: bool = False,
+    ) -> bool:
+        item = _PendingChannelSend(awaitable, label, timeout, warn_on_failure)
+        rejected = False
+        error: BaseException | None = None
+        with self._lock:
+            if (
+                not self._accepting
+                or self._closed
+                or self.loop.is_closed()
+                or not self.loop.is_running()
+            ):
+                rejected = True
+            else:
+                pending = self._queues.setdefault(session_key, deque())
+                pending.append(item)
+                try:
+                    self.loop.call_soon_threadsafe(self._ensure_worker, session_key)
+                except BaseException as exc:
+                    pending.pop()
+                    if not pending:
+                        self._queues.pop(session_key, None)
+                    rejected = True
+                    error = exc
+
+        if rejected:
+            _close_awaitable(awaitable)
+            if error is not None:
+                log = (
+                    _channel_logger.warning
+                    if warn_on_failure
+                    else _channel_logger.debug
+                )
+                log("%s send failed to schedule: %s", label, error)
+            return False
+        return True
+
+    def _ensure_worker(self, session_key: str) -> None:
+        """Start a chat worker. Must run on ``self.loop``."""
+        with self._lock:
+            worker = self._workers.get(session_key)
+            if worker is not None and not worker.done():
+                return
+            if self._aborting or not self._queues.get(session_key):
+                return
+            self._workers[session_key] = self.loop.create_task(
+                self._run_session(session_key),
+                name=f"channel-send:{session_key}",
+            )
+
+    async def _run_session(self, session_key: str) -> None:
+        current = asyncio.current_task()
+        try:
+            while True:
+                with self._lock:
+                    pending = self._queues.get(session_key)
+                    if not pending:
+                        self._queues.pop(session_key, None)
+                        return
+                    item = pending.popleft()
+
+                try:
+                    await asyncio.wait_for(item.awaitable, timeout=item.timeout)
+                except asyncio.CancelledError:
+                    if current is not None and current.cancelling():
+                        raise
+                    _channel_logger.debug("%s send was cancelled", item.label)
+                except Exception as exc:
+                    log = (
+                        _channel_logger.warning
+                        if item.warn_on_failure
+                        else _channel_logger.debug
+                    )
+                    log("%s send failed: %s", item.label, exc)
+        finally:
+            with self._lock:
+                if self._workers.get(session_key) is current:
+                    self._workers.pop(session_key, None)
+                    restart = bool(self._queues.get(session_key)) and not self._aborting
+                    if restart:
+                        self._workers[session_key] = self.loop.create_task(
+                            self._run_session(session_key),
+                            name=f"channel-send:{session_key}",
+                        )
+
+    async def wait_for_session(self, session_key: str) -> None:
+        """Wait until sends already queued for one chat have completed."""
+        while True:
+            self._ensure_worker(session_key)
+            with self._lock:
+                worker = self._workers.get(session_key)
+                has_pending = bool(self._queues.get(session_key))
+            if worker is None:
+                if not has_pending:
+                    return
+                await asyncio.sleep(0)
+                continue
+            await asyncio.shield(worker)
+
+    async def aclose(self, *, timeout: float) -> bool:
+        """Stop accepting sends and drain existing work within ``timeout``."""
+        with self._lock:
+            if self._closed:
+                return self._close_result
+            self._accepting = False
+
+        deadline = self.loop.time() + timeout
+        drained = True
+        while True:
+            with self._lock:
+                keys = list(self._queues)
+            for session_key in keys:
+                self._ensure_worker(session_key)
+            with self._lock:
+                workers = set(self._workers.values())
+                has_pending = any(self._queues.values())
+            if not workers and not has_pending:
+                break
+
+            remaining = deadline - self.loop.time()
+            if remaining <= 0:
+                drained = False
+                break
+            if workers:
+                _done, unfinished = await asyncio.wait(workers, timeout=remaining)
+                if unfinished:
+                    drained = False
+                    break
+            else:
+                await asyncio.sleep(0)
+
+        if not drained:
+            _channel_logger.debug(
+                "Channel send drain exceeded %.1fs; cancelling remaining sends",
+                timeout,
+            )
+            await self._abort()
+
+        with self._lock:
+            self._closed = True
+            self._close_result = drained
+        return drained
+
+    async def _abort(self) -> None:
+        with self._lock:
+            self._aborting = True
+            queued = [item for pending in self._queues.values() for item in pending]
+            self._queues.clear()
+            workers = set(self._workers.values())
+
+        for item in queued:
+            _close_awaitable(item.awaitable)
+        for worker in workers:
+            worker.cancel()
+        if workers:
+            _done, unfinished = await asyncio.wait(
+                workers,
+                timeout=_CHANNEL_SEND_CANCEL_SETTLE_TIMEOUT,
+            )
+            if unfinished:
+                _channel_logger.debug(
+                    "%d channel send task(s) did not settle after cancellation",
+                    len(unfinished),
+                )
+
+
+def _get_channel_send_relay(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    create: bool,
+) -> _OrderedChannelSendRelay | None:
+    with _channel_send_relay_init_lock:
+        relay = getattr(loop, _CHANNEL_SEND_RELAY_ATTR, None)
+        if relay is None and create:
+            relay = _OrderedChannelSendRelay(loop)
+            setattr(loop, _CHANNEL_SEND_RELAY_ATTR, relay)
+        return relay
+
+
+def schedule_channel_send(
+    msg: ChannelMessage,
+    awaitable: Awaitable[Any],
+    *,
+    label: str,
+    timeout: float = 15.0,
+) -> bool:
+    """Queue a channel callback send and return without waiting for network I/O."""
+    loop = _bus_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        _close_awaitable(awaitable)
+        return False
+    relay = _get_channel_send_relay(loop, create=True)
+    assert relay is not None
+    return relay.submit(
+        _channel_message_session_key(msg),
+        awaitable,
+        label=label,
+        timeout=timeout,
+    )
+
+
+async def _wait_for_channel_sends(channel_type: str, chat_id: str) -> None:
+    loop = asyncio.get_running_loop()
+    relay = _get_channel_send_relay(loop, create=False)
+    if relay is not None:
+        await relay.wait_for_session(_channel_session_key(channel_type, chat_id))
+
+
+async def _close_channel_send_relay(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    timeout: float = _CHANNEL_SEND_SHUTDOWN_TIMEOUT,
+) -> bool:
+    # Create-and-close even when no sends have occurred yet. This seals the
+    # loop against a callback racing shutdown after the drain begins.
+    relay = _get_channel_send_relay(loop, create=True)
+    assert relay is not None
+    return await relay.aclose(timeout=timeout)
+
+
+def _drain_channel_send_relay(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    timeout: float = _CHANNEL_SEND_SHUTDOWN_TIMEOUT,
+) -> bool:
+    """Synchronously drain queued sends while the bus loop is still alive."""
+    relay = _get_channel_send_relay(loop, create=True)
+    assert relay is not None
+    try:
+        future = asyncio.run_coroutine_threadsafe(relay.aclose(timeout=timeout), loop)
+        return future.result(
+            timeout=timeout + _CHANNEL_SEND_CANCEL_SETTLE_TIMEOUT + 1.0
+        )
+    except Exception as exc:
+        _channel_logger.debug("Channel send drain failed: %s", exc)
+        return False
 
 
 def _register_channel_request(msg: ChannelMessage) -> None:
@@ -623,8 +907,8 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
     Fire-and-forget: returns ``True`` iff a publish coroutine was scheduled
     on the bus loop; returns ``False`` if no origin is registered, the bus
     isn't running, ``content`` is empty/whitespace, or scheduling itself
-    fails. The publish runs asynchronously — failures inside the coroutine
-    are logged via a done-callback so callers (which are often on event
+    fails. The publish runs asynchronously through the ordered channel relay;
+    failures are logged by its worker so callers (which are often on event
     loops that must not block) don't pay any latency.
     """
     from ..channels.bus.events import OutboundMessage
@@ -656,35 +940,15 @@ def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
         # accurate for forwarded notifications too.
         manager.record_message(origin.channel_type, "sent")
 
-    try:
-        future = asyncio.run_coroutine_threadsafe(_publish_and_record(), loop)
-    except Exception as exc:
-        _channel_logger.warning(
-            "Async notification publish to %s:%s failed to schedule: %s",
-            origin.channel_type,
-            origin.chat_id,
-            exc,
-        )
-        return False
-
-    def _on_publish_done(fut) -> None:
-        """Log any exception raised by the fire-and-forget publish coroutine."""
-        # A cancelled future raises CancelledError from .exception() rather
-        # than returning it (e.g. bus loop torn down mid-publish); treat that
-        # as a benign shutdown, not a failure to log.
-        if fut.cancelled():
-            return
-        exc = fut.exception()
-        if exc is not None:
-            _channel_logger.warning(
-                "Async notification publish to %s:%s failed: %s",
-                origin.channel_type,
-                origin.chat_id,
-                exc,
-            )
-
-    future.add_done_callback(_on_publish_done)
-    return True
+    relay = _get_channel_send_relay(loop, create=True)
+    assert relay is not None
+    return relay.submit(
+        _channel_session_key(origin.channel_type, origin.chat_id),
+        _publish_and_record(),
+        label=f"Async notification publish to {origin.channel_type}:{origin.chat_id}",
+        timeout=15.0,
+        warn_on_failure=True,
+    )
 
 
 def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
@@ -859,6 +1123,8 @@ def _channels_stop(
 
     if channel_type is None:
         # Stop everything
+        if _bus_loop and not _bus_loop.is_closed():
+            _drain_channel_send_relay(_bus_loop)
         if _bus_loop and _manager and not _bus_loop.is_closed():
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -934,6 +1200,7 @@ def _start_channels_bus_mode(
                 # ``start_all`` returns when all channel tasks terminate. This
                 # includes immediate fatal startup failures, so tear down the
                 # dispatcher and health server before closing the bus loop.
+                await _close_channel_send_relay(loop)
                 await mgr.stop_all()
                 consumer.cancel()
                 try:
@@ -1161,6 +1428,10 @@ async def _handle_bus_message(bus, manager, msg) -> None:
                 return
 
         response = _pop_channel_response(cm.msg_id) or "No response"
+        # Status/media callbacks enqueue before the main thread resolves the
+        # response future.  Wait for that chat's queue here so the final answer
+        # cannot overtake its progress events, without blocking the runtime loop.
+        await _wait_for_channel_sends(msg.channel, msg.chat_id)
         await bus.publish_outbound(
             OutboundMessage(
                 channel=msg.channel,

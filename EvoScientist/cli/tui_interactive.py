@@ -2299,19 +2299,16 @@ def run_textual_interactive(
                 )
 
                 # Build channel callbacks (fire-and-forget to avoid blocking UI)
-                def _send_to_channel(coro, label: str) -> None:
-                    loop = _ch_mod._bus_loop
-                    if not loop:
-                        return
-                    future = asyncio.run_coroutine_threadsafe(coro, loop)
-                    future.add_done_callback(
-                        lambda f: (
-                            _channel_logger.debug(
-                                f"{label} send failed: {f.exception()}"
-                            )
-                            if f.exception()
-                            else None
-                        )
+                def _send_to_channel(
+                    coro,
+                    label: str,
+                    timeout: int = 15,
+                ) -> None:
+                    _ch_mod.schedule_channel_send(
+                        msg,
+                        coro,
+                        label=label,
+                        timeout=timeout,
                     )
 
                 def _send_thinking(thinking: str) -> None:
@@ -2348,6 +2345,7 @@ def run_textual_interactive(
                                 metadata=msg.metadata,
                             ),
                             "Media",
+                            timeout=30,
                         )
 
                 def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:

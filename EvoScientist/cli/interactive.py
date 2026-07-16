@@ -906,16 +906,13 @@ def cmd_interactive(
                     _print_separator()
 
                     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-                        """Schedule an async channel send on the bus loop."""
-                        loop = _ch_mod._bus_loop
-                        if not loop:
-                            return
-                        try:
-                            asyncio.run_coroutine_threadsafe(coro, loop).result(
-                                timeout=timeout
-                            )
-                        except Exception as e:
-                            _channel_logger.debug(f"{label} send failed: {e}")
+                        """Queue an ordered async send without blocking the turn."""
+                        _ch_mod.schedule_channel_send(
+                            msg,
+                            coro,
+                            label=label,
+                            timeout=timeout,
+                        )
 
                     def _send_thinking_to_channel(thinking: str) -> None:
                         ch = msg.channel_ref

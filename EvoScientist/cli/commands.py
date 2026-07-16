@@ -52,6 +52,7 @@ from .channel import (
     get_channel_origin,
     publish_to_channel_origin,
     remember_channel_origin,
+    schedule_channel_send,
 )
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
@@ -1119,9 +1120,6 @@ def _serve_process_message(
     via the ``on_cmd_completed`` hook because the command mutates
     ``ctx.thread_id`` / ``ctx.workspace_dir`` directly.
     """
-    import asyncio
-
-    from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
     runtime_gateways = runtime_state.runtime_gateways
@@ -1140,34 +1138,7 @@ def _serve_process_message(
     # -- channel callback helpers (same pattern as interactive.py) --
 
     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-        loop = _bus_loop
-        if not loop or loop.is_closed():
-            close = getattr(coro, "close", None)
-            if callable(close):
-                close()
-            return
-
-        async def _bounded_send() -> None:
-            await asyncio.wait_for(coro, timeout=timeout)
-
-        bounded_send = _bounded_send()
-        try:
-            future = asyncio.run_coroutine_threadsafe(bounded_send, loop)
-        except Exception as e:
-            bounded_send.close()
-            close = getattr(coro, "close", None)
-            if callable(close):
-                close()
-            _serve_logger.debug(f"{label} send failed: {e}")
-            return
-
-        def _send_done(done) -> None:
-            try:
-                done.result()
-            except Exception as e:
-                _serve_logger.debug(f"{label} send failed: {e}")
-
-        future.add_done_callback(_send_done)
+        schedule_channel_send(msg, coro, label=label, timeout=timeout)
 
     def _send_thinking(thinking: str) -> None:
         ch = msg.channel_ref
