@@ -1138,15 +1138,32 @@ def _drain_one_queue_helper(q):
             return items
 
 
+def test_done_handle_does_not_pin_active_watchers():
+    """A handle finished without its cleanup (closed-loop cancel) must not
+    keep the notification drain in the active-watcher grace window."""
+    from EvoScientist.cli import async_notifier as an
+
+    handle = an._WatcherHandle()
+    with an._watchers_lock:
+        an._active_watchers[handle] = "cli-1"
+    try:
+        assert an._has_relevant_active_watchers("cli-1") is True
+        handle.mark_done()
+        assert an._has_relevant_active_watchers("cli-1") is False
+        assert an._has_relevant_active_watchers(None) is False
+    finally:
+        with an._watchers_lock:
+            an._active_watchers.pop(handle, None)
+
+
 def test_active_watchers_grace_filters_by_thread():
     """Verifies _has_relevant_active_watchers ignores sibling-thread watchers
     (otherwise consume_notifications grace period would block thread A by up
     to 3s waiting for thread B's unrelated watchers to finish)."""
 
-    # Sentinel handles — only their identity matters here, not their type
-    handle_a = object()
-    handle_b = object()
-    handle_unrouted = object()
+    handle_a = async_notifier._WatcherHandle()
+    handle_b = async_notifier._WatcherHandle()
+    handle_unrouted = async_notifier._WatcherHandle()
 
     async_notifier._active_watchers[handle_a] = "threadA"
     async_notifier._active_watchers[handle_b] = "threadB"

@@ -19,11 +19,18 @@ import concurrent.futures
 import logging
 import threading
 from collections.abc import Coroutine
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from EvoScientist._winloop import ensure_proactor_event_loop_policy
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _SettlingFuture(Protocol):
+    """A future that can report when its underlying task has fully unwound."""
+
+    def wait_settled(self, timeout: float | None = None) -> bool: ...
 
 
 class _RuntimeFuture(concurrent.futures.Future[Any]):
@@ -133,7 +140,9 @@ class AgentRuntime:
     def submit(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future:
         """Schedule ``coro`` on the runtime loop; return its future.
 
-        Callable from any thread *except* the runtime thread itself.
+        Callable from any thread — scheduling only enqueues. Blocking on the
+        returned future from the runtime thread is the thing that must never
+        happen; ``run_sync`` guards that.
         """
         future = _RuntimeFuture()
 
@@ -252,12 +261,10 @@ class AgentRuntime:
         self._wait_for_future_settlement(future)
 
     def _wait_for_future_settlement(self, future: concurrent.futures.Future) -> None:
-        wait_settled = getattr(future, "wait_settled", None)
-        if callable(wait_settled):
-            wait_settled(self._CANCEL_WAIT)
+        if isinstance(future, _SettlingFuture):
+            future.wait_settled(self._CANCEL_WAIT)
             return
-        # Compatibility fallback for Future-like test doubles and callers that
-        # did not originate from submit().
+        # Plain futures settle when they complete — best-effort bounded wait.
         try:
             future.result(self._CANCEL_WAIT)
         except (Exception, asyncio.CancelledError):

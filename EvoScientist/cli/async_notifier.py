@@ -150,11 +150,14 @@ def _has_relevant_active_watchers(current_thread_id: str | None) -> bool:
     consumer). Sibling-thread watchers are ignored.
     """
     with _watchers_lock:
+        # A handle can be done (e.g. cancelled against a closed loop) while
+        # still registered — its cleanup runs in the watcher's finally, which
+        # may never fire. Done handles must not pin the drain grace window.
         if current_thread_id is None:
-            return bool(_active_watchers)
+            return any(not handle.done() for handle in _active_watchers)
         return any(
-            origin == current_thread_id or origin is None
-            for origin in _active_watchers.values()
+            (origin == current_thread_id or origin is None) and not handle.done()
+            for handle, origin in _active_watchers.items()
         )
 
 
