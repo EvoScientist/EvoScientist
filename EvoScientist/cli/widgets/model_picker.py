@@ -12,8 +12,9 @@ from rich.text import Text
 from textual.binding import Binding, BindingType
 from textual.containers import Container
 from textual.message import Message
-from textual.widget import Widget
 from textual.widgets import Input, Static
+
+from .picker_base import PickerWidgetBase, first_selectable_index, move_selection
 
 if TYPE_CHECKING:
     from textual import events
@@ -81,14 +82,13 @@ def _build_items(
     return items
 
 
-class ModelPickerWidget(Widget):
+class ModelPickerWidget(PickerWidgetBase):
     """Inline model picker -- mounts in chat, keyboard-driven.
 
     Posts ``Picked(name, provider)`` on Enter, ``Cancelled()`` on Esc.
     Type to filter models.
     """
 
-    can_focus = True
     # Required so the Custom Ollama ``Input`` child can hold focus when the
     # user is typing a model name.
     can_focus_children = True
@@ -188,22 +188,19 @@ class ModelPickerWidget(Widget):
         self._mode: Literal["list", "input"] = "list"
         self._custom_input: Input | None = None
 
+    @staticmethod
+    def _is_model(item: dict) -> bool:
+        return item["type"] == "model"
+
     def _first_model_index(self) -> int:
-        for i, item in enumerate(self._items):
-            if item["type"] == "model":
-                return i
-        return 0
+        return first_selectable_index(self._items, self._is_model)
 
     def _move(self, direction: int) -> None:
         if not self._items:
             return
-        i = (self._selected + direction) % len(self._items)
-        steps = 0
-        while self._items[i]["type"] != "model" and steps < len(self._items):
-            i = (i + direction) % len(self._items)
-            steps += 1
-        if self._items[i]["type"] == "model":
-            self._selected = i
+        new = move_selection(self._items, self._selected, direction, self._is_model)
+        if self._is_model(self._items[new]):
+            self._selected = new
             self._update_rows()
 
     def _rebuild(self) -> None:
@@ -251,10 +248,9 @@ class ModelPickerWidget(Widget):
             classes="picker-help",
         )
 
-    def on_mount(self) -> None:
+    def _refresh_view(self) -> None:
         self._update_rows()
         self._update_filter()
-        self.call_later(self.focus)
 
     def _update_filter(self) -> None:
         if self._filter_widget is not None:
@@ -273,8 +269,8 @@ class ModelPickerWidget(Widget):
         for i, (item, widget) in enumerate(
             zip(self._items, self._row_widgets, strict=False)
         ):
-            widget.remove_class("picker-row-selected")
             if item["type"] == "header":
+                widget.remove_class("picker-row-selected")
                 t = Text()
                 t.append("\u2500\u2500 ", style="bold cyan")
                 t.append(item["label"], style="bold cyan")
@@ -289,9 +285,7 @@ class ModelPickerWidget(Widget):
                     t.append(" *", style="bold green")
                 t.append(f"  ({item['provider']})", style="dim italic")
                 widget.update(t)
-                if is_selected:
-                    widget.add_class("picker-row-selected")
-                    widget.scroll_visible()
+                self.apply_row_highlight(widget, is_selected)
 
     def on_key(self, event: events.Key) -> None:
         # In input mode, the Input child owns printable keys + backspace.
@@ -350,11 +344,9 @@ class ModelPickerWidget(Widget):
             return
         self.post_message(self.Cancelled())
 
-    def on_blur(self, event: events.Blur) -> None:
+    def _should_refocus_on_blur(self) -> bool:
         # When the Input child has focus we must NOT steal it back.
-        if self._mode == "input":
-            return
-        self.call_after_refresh(self.focus)
+        return self._mode != "input"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Safety net: Enter fired inside the Input widget rather than
