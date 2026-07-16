@@ -75,7 +75,9 @@ class _SyncRunsClient(Protocol):
 
     def get(self, thread_id: str, run_id: str) -> Run: ...
 
-    def list(self, thread_id: str, *, limit: int, offset: int) -> list[Run]: ...
+    def list(
+        self, thread_id: str, *, limit: int, offset: int, status: str
+    ) -> list[Run]: ...
 
     def cancel_many(self, *, thread_id: str, run_ids: Sequence[str]) -> object: ...
 
@@ -111,7 +113,9 @@ class _AsyncRunsClient(Protocol):
 
     async def get(self, thread_id: str, run_id: str) -> Run: ...
 
-    async def list(self, thread_id: str, *, limit: int, offset: int) -> list[Run]: ...
+    async def list(
+        self, thread_id: str, *, limit: int, offset: int, status: str
+    ) -> list[Run]: ...
 
     async def cancel_many(
         self, *, thread_id: str, run_ids: Sequence[str]
@@ -261,13 +265,9 @@ async def _aget_run_status(
 # threads with a longer history.
 _RUN_CANCEL_PAGE_SIZE = 100
 
-
-def _nonterminal_run_ids(page: list[Run]) -> list[str]:
-    return [
-        run["run_id"]
-        for run in page
-        if run.get("status") not in DEFAULT_BACKGROUND_RUN_TERMINAL_STATUSES
-    ]
+# Statuses worth cancelling; listed server-side so terminal history is
+# never paged through.
+_CANCELABLE_RUN_STATUSES = ("pending", "running")
 
 
 def _cancel_thread_runs(
@@ -276,31 +276,38 @@ def _cancel_thread_runs(
     *,
     name: str,
 ) -> None:
-    """Best-effort cancel of the thread's non-terminal runs.
+    """Best-effort interrupt of the thread's pending/running runs.
 
-    Deleting a thread does not dequeue its runs: the inmem runtime
-    reschedules a run with a missing thread forever and persists it across
-    restarts, so every deletion path must cancel first (issue #358).
-    Pagination covers threads with more runs than one SDK page; a single
-    ``cancel_many`` call keeps mixed batches safe (the server warns on
-    already-terminal runs instead of failing) and is skipped entirely when
-    every run is terminal (the server 404s on an empty cancel set).
+    The server's ``threads.delete`` cascade-removes queued runs from the
+    registry, but it does not interrupt a run that is already executing —
+    cancelling first sends the interrupt control message so in-flight work
+    actually stops (issue #358). It also protects cleanup paths that
+    mutate the registry without going through ``threads.delete``. The bulk
+    cancel is skipped when nothing is cancellable (the server 404s on an
+    empty cancel set), which keeps the common terminal-only path to two
+    cheap filtered GETs.
     """
     try:
         run_ids: list[str] = []
-        offset = 0
-        while True:
-            page = client.runs.list(
-                thread_id, limit=_RUN_CANCEL_PAGE_SIZE, offset=offset
-            )
-            run_ids.extend(_nonterminal_run_ids(page))
-            if len(page) < _RUN_CANCEL_PAGE_SIZE:
-                break
-            offset += _RUN_CANCEL_PAGE_SIZE
+        for status in _CANCELABLE_RUN_STATUSES:
+            offset = 0
+            while True:
+                page = client.runs.list(
+                    thread_id,
+                    limit=_RUN_CANCEL_PAGE_SIZE,
+                    offset=offset,
+                    status=status,
+                )
+                run_ids.extend(run["run_id"] for run in page)
+                if len(page) < _RUN_CANCEL_PAGE_SIZE:
+                    break
+                offset += _RUN_CANCEL_PAGE_SIZE
         if run_ids:
-            client.runs.cancel_many(thread_id=thread_id, run_ids=run_ids)
+            client.runs.cancel_many(
+                thread_id=thread_id, run_ids=list(dict.fromkeys(run_ids))
+            )
     except Exception:
-        logger.debug(
+        logger.warning(
             "Failed to cancel %s runs on thread %s", name, thread_id, exc_info=True
         )
 
@@ -314,19 +321,25 @@ async def _acancel_thread_runs(
     """Async variant of :func:`_cancel_thread_runs`."""
     try:
         run_ids: list[str] = []
-        offset = 0
-        while True:
-            page = await client.runs.list(
-                thread_id, limit=_RUN_CANCEL_PAGE_SIZE, offset=offset
-            )
-            run_ids.extend(_nonterminal_run_ids(page))
-            if len(page) < _RUN_CANCEL_PAGE_SIZE:
-                break
-            offset += _RUN_CANCEL_PAGE_SIZE
+        for status in _CANCELABLE_RUN_STATUSES:
+            offset = 0
+            while True:
+                page = await client.runs.list(
+                    thread_id,
+                    limit=_RUN_CANCEL_PAGE_SIZE,
+                    offset=offset,
+                    status=status,
+                )
+                run_ids.extend(run["run_id"] for run in page)
+                if len(page) < _RUN_CANCEL_PAGE_SIZE:
+                    break
+                offset += _RUN_CANCEL_PAGE_SIZE
         if run_ids:
-            await client.runs.cancel_many(thread_id=thread_id, run_ids=run_ids)
+            await client.runs.cancel_many(
+                thread_id=thread_id, run_ids=list(dict.fromkeys(run_ids))
+            )
     except Exception:
-        logger.debug(
+        logger.warning(
             "Failed to cancel %s runs on thread %s", name, thread_id, exc_info=True
         )
 

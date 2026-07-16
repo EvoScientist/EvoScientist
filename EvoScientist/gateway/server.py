@@ -325,9 +325,9 @@ class LangGraphServerThreadStore(ThreadStore):
         return True
 
     async def delete_thread(self, thread_id: str) -> bool:
-        # Cancel queued runs first: deleting a thread does not dequeue its
-        # runs, and the inmem runtime retries a threadless run forever
-        # (issue #358).
+        # Interrupt live runs first: the server's cascade delete clears
+        # queued runs from the registry but does not stop a run that is
+        # already executing (issue #358).
         await _acancel_thread_runs(self.client, thread_id, name="thread delete")
         try:
             await self.client.threads.delete(thread_id)

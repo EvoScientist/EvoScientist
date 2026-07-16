@@ -310,12 +310,11 @@ def test_delete_thread_bulk_cancels_nonterminal_runs_before_delete():
     events: list[tuple] = []
 
     class _Runs:
-        def list(self, thread_id: str, *, limit: int, offset: int):
-            events.append(("list", thread_id, offset))
-            return [
-                {"run_id": "run-pending", "status": "pending"},
-                {"run_id": "run-done", "status": "success"},
-            ]
+        def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            events.append(("list", thread_id, status, offset))
+            if status == "pending":
+                return [{"run_id": "run-pending", "status": "pending"}]
+            return []
 
         def cancel_many(self, *, thread_id: str, run_ids):
             events.append(("cancel_many", thread_id, list(run_ids)))
@@ -331,7 +330,8 @@ def test_delete_thread_bulk_cancels_nonterminal_runs_before_delete():
     )
 
     assert events == [
-        ("list", "thread-1", 0),
+        ("list", "thread-1", "pending", 0),
+        ("list", "thread-1", "running", 0),
         ("cancel_many", "thread-1", ["run-pending"]),
         ("delete", "thread-1"),
     ]
@@ -341,9 +341,9 @@ def test_delete_thread_skips_cancel_when_all_runs_terminal():
     events: list[tuple] = []
 
     class _Runs:
-        def list(self, thread_id: str, *, limit: int, offset: int):
-            events.append(("list", thread_id, offset))
-            return [{"run_id": "run-done", "status": "success"}]
+        def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            events.append(("list", thread_id, status, offset))
+            return []
 
         def cancel_many(self, **_kwargs):  # pragma: no cover
             raise AssertionError("cancel_many must not be called")
@@ -358,24 +358,29 @@ def test_delete_thread_skips_cancel_when_all_runs_terminal():
         name="test worker",
     )
 
-    assert events == [("list", "thread-1", 0), ("delete", "thread-1")]
+    assert events == [
+        ("list", "thread-1", "pending", 0),
+        ("list", "thread-1", "running", 0),
+        ("delete", "thread-1"),
+    ]
 
 
 def test_cancel_thread_runs_paginates_past_first_page(monkeypatch):
     monkeypatch.setattr(background_runs, "_RUN_CANCEL_PAGE_SIZE", 2)
     cancelled: list[list[str]] = []
     pages = {
-        0: [
-            {"run_id": "r1", "status": "pending"},
-            {"run_id": "r2", "status": "success"},
+        ("pending", 0): [
+            {"run_id": "p1", "status": "pending"},
+            {"run_id": "p2", "status": "pending"},
         ],
-        2: [{"run_id": "r3", "status": "running"}],
+        ("pending", 2): [{"run_id": "p3", "status": "pending"}],
+        ("running", 0): [{"run_id": "r1", "status": "running"}],
     }
 
     class _Runs:
-        def list(self, thread_id: str, *, limit: int, offset: int):
+        def list(self, thread_id: str, *, limit: int, offset: int, status: str):
             assert limit == 2
-            return pages[offset]
+            return pages.get((status, offset), [])
 
         def cancel_many(self, *, thread_id: str, run_ids):
             cancelled.append(list(run_ids))
@@ -386,14 +391,14 @@ def test_cancel_thread_runs_paginates_past_first_page(monkeypatch):
         name="test worker",
     )
 
-    assert cancelled == [["r1", "r3"]]
+    assert cancelled == [["p1", "p2", "p3", "r1"]]
 
 
 def test_delete_thread_still_deletes_when_run_listing_fails():
     deleted: list[str] = []
 
     class _Runs:
-        def list(self, thread_id: str, *, limit: int, offset: int):
+        def list(self, thread_id: str, *, limit: int, offset: int, status: str):
             raise RuntimeError("listing failed")
 
         def cancel_many(self, **_kwargs):  # pragma: no cover
@@ -416,12 +421,11 @@ async def test_adelete_thread_bulk_cancels_nonterminal_runs_before_delete():
     events: list[tuple] = []
 
     class _Runs:
-        async def list(self, thread_id: str, *, limit: int, offset: int):
-            events.append(("list", thread_id, offset))
-            return [
-                {"run_id": "run-running", "status": "running"},
-                {"run_id": "run-done", "status": "error"},
-            ]
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            events.append(("list", thread_id, status, offset))
+            if status == "running":
+                return [{"run_id": "run-running", "status": "running"}]
+            return []
 
         async def cancel_many(self, *, thread_id: str, run_ids):
             events.append(("cancel_many", thread_id, list(run_ids)))
@@ -437,7 +441,8 @@ async def test_adelete_thread_bulk_cancels_nonterminal_runs_before_delete():
     )
 
     assert events == [
-        ("list", "thread-1", 0),
+        ("list", "thread-1", "pending", 0),
+        ("list", "thread-1", "running", 0),
         ("cancel_many", "thread-1", ["run-running"]),
         ("delete", "thread-1"),
     ]
@@ -447,7 +452,7 @@ async def test_adelete_thread_still_deletes_when_run_listing_fails():
     deleted: list[str] = []
 
     class _Runs:
-        async def list(self, thread_id: str, *, limit: int, offset: int):
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
             raise RuntimeError("listing failed")
 
         async def cancel_many(self, **_kwargs):  # pragma: no cover
@@ -473,9 +478,11 @@ def test_launch_cancels_stray_run_before_thread_delete_when_run_creation_fails(
         monkeypatch,
         run_create_error=RuntimeError("run creation failed"),
     )
-    fake_client.runs.list.return_value = [
-        {"run_id": "stray-run", "status": "pending"},
-    ]
+    fake_client.runs.list.side_effect = lambda _thread_id, **kwargs: (
+        [{"run_id": "stray-run", "status": "pending"}]
+        if kwargs.get("status") == "pending"
+        else []
+    )
 
     with pytest.raises(RuntimeError, match="run creation failed"):
         background_runs.launch_background_run(_request())

@@ -1101,11 +1101,10 @@ async def test_langgraph_server_thread_store_cancels_runs_before_delete():
     client = FakeLangGraphClient(threads)
 
     class _FakeRunsClient:
-        async def list(self, thread_id: str, *, limit: int, offset: int):
-            return [
-                {"run_id": "run-pending", "status": "pending"},
-                {"run_id": "run-done", "status": "success"},
-            ]
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "pending":
+                return [{"run_id": "run-pending", "status": "pending"}]
+            return []
 
         async def cancel_many(self, *, thread_id: str, run_ids):
             events.append(("cancel_many", list(run_ids)))
