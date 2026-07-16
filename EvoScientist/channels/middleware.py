@@ -811,8 +811,9 @@ class MentionGatingMiddleware(InboundMiddleware):
                 policy=self.require_mention,
             )
             return None
-        # Strip mentions from group messages
-        if raw.is_group and self._strip_fn:
+        # Platform command suffixes such as ``/stop@botname`` are valid in
+        # private chats too (for example when a group command is forwarded).
+        if self._strip_fn:
             raw = dataclasses.replace(raw, text=self._strip_fn(raw.text))
         return raw
 

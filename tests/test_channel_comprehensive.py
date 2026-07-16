@@ -769,6 +769,66 @@ class TestChannelDebounce:
         assert "part1" in received.content
         assert "part2" in received.content
 
+    async def test_command_flushes_pending_prompt_as_separate_message(self):
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="do X",
+                message_id="m1",
+            )
+        )
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="/stop",
+                message_id="m2",
+            )
+        )
+
+        first = await bus.consume_inbound()
+        second = await bus.consume_inbound()
+        assert (first.content, second.content) == ("do X", "/stop")
+
+    async def test_prompt_after_command_starts_new_debounce_batch(self):
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="/new",
+                message_id="m1",
+            )
+        )
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="summarize this paper",
+                message_id="m2",
+            )
+        )
+        await _flush_debounce(ch, "u1")
+
+        first = await bus.consume_inbound()
+        second = await bus.consume_inbound()
+        assert (first.content, second.content) == (
+            "/new",
+            "summarize this paper",
+        )
+
     async def test_dedup_skips_duplicate(self):
         """Dedup is now handled in _enqueue_raw pipeline, not queue_message."""
 

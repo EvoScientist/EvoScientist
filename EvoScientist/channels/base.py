@@ -1057,6 +1057,27 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Buffer *msg* with debounce, then publish to bus."""
         sender = msg.sender_id
 
+        if self._on_activity:
+            try:
+                self._on_activity(sender, "received")
+            except Exception:
+                pass
+
+        # Slash commands are control messages, not prompt fragments. Flush any
+        # prompt already waiting for this sender, then publish the command as
+        # its own message so either arrival order cannot newline-merge them.
+        if msg.content.lstrip().startswith("/") and self._bus:
+            debounce_task = self._debounce_tasks.pop(sender, None)
+            if debounce_task is not None:
+                debounce_task.cancel()
+                try:
+                    await debounce_task
+                except asyncio.CancelledError:
+                    pass
+            await self._process_buffered_messages(sender)
+            await self._bus.publish_inbound(msg)
+            return
+
         if sender not in self._message_buffers:
             self._message_buffers[sender] = []
             self._message_metadata[sender] = msg.metadata
@@ -1068,12 +1089,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             self._message_ids[sender] = msg.message_id
         if msg.media:
             self._message_media[sender].extend(msg.media)
-
-        if self._on_activity:
-            try:
-                self._on_activity(sender, "received")
-            except Exception:
-                pass
 
         if sender in self._debounce_tasks:
             self._debounce_tasks[sender].cancel()

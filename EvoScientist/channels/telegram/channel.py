@@ -164,6 +164,21 @@ class TelegramChannel(Channel):
     def _get_bot_identifier(self) -> str | None:
         return self._bot_username or None
 
+    @staticmethod
+    def _command_target(text: str) -> str | None:
+        """Return a Telegram command's target username.
+
+        An empty string represents a bare command; ``None`` means the message
+        is not command-shaped.
+        """
+        parts = text.lstrip().split(None, 1)
+        if not parts or not parts[0].startswith("/"):
+            return None
+        command_token = parts[0][1:]
+        if "@" not in command_token:
+            return ""
+        return command_token.rsplit("@", 1)[1].lower()
+
     async def _send_ack_reaction(
         self, chat_id: str, message_id: str, emoji: str = "👀"
     ) -> None:
@@ -205,10 +220,18 @@ class TelegramChannel(Channel):
 
         # Detect group and mention status for centralized gating
         is_group = message.chat.type in ("group", "supergroup")
-        was_mentioned = True  # DM default
-        if is_group and self._bot_username:
+        was_mentioned = not is_group
+        if is_group:
             text_check = (message.text or message.caption or "").lower()
-            was_mentioned = f"@{self._bot_username}" in text_check
+            command_target = self._command_target(text_check)
+            if command_target is not None:
+                # Telegram routes bare group commands to every bot. Commands
+                # explicitly addressed to another bot must remain ignored.
+                was_mentioned = not command_target or (
+                    bool(self._bot_username) and command_target == self._bot_username
+                )
+            elif self._bot_username:
+                was_mentioned = f"@{self._bot_username}" in text_check
 
         content_parts: list[str] = []
         media_paths: list[str] = []

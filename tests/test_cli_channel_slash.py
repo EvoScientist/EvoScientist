@@ -58,23 +58,28 @@ async def test_non_slash_returns_false():
     append.assert_not_called()
 
 
-async def test_unresolved_slash_returns_false():
-    """Unknown slash commands must fall through (matches TUI behavior)."""
+async def test_unresolved_slash_returns_unknown_command_response():
+    """Unknown slash commands must never fall through to the agent."""
     msg = _make_msg(content="/unknown-cmd")
     append = MagicMock()
     with patch(
         "EvoScientist.commands.manager.manager.resolve",
         return_value=None,
     ):
-        handled = await dispatch_channel_slash_command(
-            msg,
-            agent=None,
-            thread_id="t1",
-            workspace_dir=None,
-            checkpointer=None,
-            append_system=append,
-        )
-    assert handled is False
+        with patch("EvoScientist.cli.channel._set_channel_response") as mock_response:
+            handled = await dispatch_channel_slash_command(
+                msg,
+                agent=None,
+                thread_id="t1",
+                workspace_dir=None,
+                checkpointer=None,
+                append_system=append,
+            )
+    assert handled is True
+    mock_response.assert_called_once_with(
+        "msg-1",
+        "Unknown command: /unknown-cmd\nType /help to see available commands.",
+    )
 
 
 async def test_successful_slash_execution_sets_response_and_breadcrumb():

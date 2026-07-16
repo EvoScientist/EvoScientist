@@ -196,6 +196,43 @@ class TestTelegramChannel:
         assert message.is_group is True
         assert message.was_mentioned is True
 
+    async def test_private_command_suffix_is_removed_before_enqueue(self):
+        channel = TelegramChannel(
+            TelegramConfig(bot_token="test", include_attachments=False)
+        )
+        channel._bot_username = "botname"
+        update = self._text_update("/stop@botname")
+
+        await channel._on_message(update, None)
+
+        message = await channel._queue.get()
+        assert message.content == "/stop"
+        assert message.is_group is False
+
+    async def test_bare_group_command_passes_mention_gating(self):
+        channel = TelegramChannel(
+            TelegramConfig(bot_token="test", include_attachments=False)
+        )
+        channel._bot_username = "botname"
+        update = self._text_update("/stop", chat_type="supergroup")
+
+        await channel._on_message(update, None)
+
+        message = await channel._queue.get()
+        assert message.content == "/stop"
+        assert message.was_mentioned is True
+
+    async def test_group_command_for_other_bot_is_ignored(self):
+        channel = TelegramChannel(
+            TelegramConfig(bot_token="test", include_attachments=False)
+        )
+        channel._bot_username = "botname"
+        update = self._text_update("/stop@otherbot", chat_type="supergroup")
+
+        await channel._on_message(update, None)
+
+        assert channel._queue.empty()
+
     async def test_group_command_bypasses_buffered_history(self):
         channel = TelegramChannel(
             TelegramConfig(bot_token="test", include_attachments=False)

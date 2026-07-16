@@ -396,7 +396,13 @@ async def _dispatch_channel_slash_impl(
 
     parsed = cmd_manager.resolve(msg.content)
     if parsed is None:
-        # Unknown slash command — let the agent handle it (matches TUI).
+        if msg.content.lstrip().startswith("/"):
+            bad_cmd = msg.content.split(None, 1)[0]
+            _set_channel_response(
+                msg.msg_id,
+                f"Unknown command: {bad_cmd}\nType /help to see available commands.",
+            )
+            return True
         return False
     cmd, cmd_args = parsed
 
