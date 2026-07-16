@@ -200,6 +200,9 @@ def test_run_sync_keyboardinterrupt_cancels_and_reraises(rt, monkeypatch):
         def cancel(self):
             return self._fut.cancel()
 
+        def wait_settled(self, timeout=None):
+            return self._fut.wait_settled(timeout)
+
     def fake_submit(coro):
         return _KIOnFirstResult(real_submit(coro))
 
@@ -211,21 +214,22 @@ def test_run_sync_keyboardinterrupt_cancels_and_reraises(rt, monkeypatch):
     assert cancelled.wait(5), "underlying task was not cancelled on Ctrl+C"
 
 
-def test_run_sync_timeout_cancels_underlying_task(rt, monkeypatch):
+def test_run_sync_keyboardinterrupt_waits_for_async_cleanup(rt, monkeypatch):
+    """Re-raise only after the cancelled task has finished its ``finally``."""
     started = threading.Event()
-    cancelled = threading.Event()
+    cleanup_done = threading.Event()
 
     async def long_task():
         started.set()
         try:
             await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
+        finally:
+            await asyncio.sleep(0.05)
+            cleanup_done.set()
 
     real_submit = rt.submit
 
-    class _TimeoutOnFirstResult:
+    class _KIOnFirstResult:
         def __init__(self, fut):
             self._fut = fut
             self._raised = False
@@ -233,26 +237,38 @@ def test_run_sync_timeout_cancels_underlying_task(rt, monkeypatch):
         def result(self, timeout=None):
             if not self._raised:
                 self._raised = True
-                # Ensure the task is genuinely running before the timeout.
                 started.wait(5)
-                raise concurrent.futures.TimeoutError
+                raise KeyboardInterrupt
             return self._fut.result(timeout)
 
         def cancel(self):
             return self._fut.cancel()
 
-        def done(self):
-            return self._fut.done()
+        def wait_settled(self, timeout=None):
+            return self._fut.wait_settled(timeout)
 
-    def fake_submit(coro):
-        return _TimeoutOnFirstResult(real_submit(coro))
+    monkeypatch.setattr(rt, "submit", lambda coro: _KIOnFirstResult(real_submit(coro)))
 
-    monkeypatch.setattr(rt, "submit", fake_submit)
+    with pytest.raises(KeyboardInterrupt):
+        rt.run_sync(long_task())
+
+    assert cleanup_done.is_set()
+
+
+def test_run_sync_timeout_cancels_underlying_task_after_cleanup(rt):
+    cleanup_done = threading.Event()
+
+    async def long_task():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)
+            cleanup_done.set()
 
     with pytest.raises(concurrent.futures.TimeoutError):
-        rt.run_sync(long_task(), timeout=1)
+        rt.run_sync(long_task(), timeout=0.01)
 
-    assert cancelled.wait(5), "underlying task was not cancelled on timeout"
+    assert cleanup_done.is_set()
 
 
 # -- spawn -----------------------------------------------------------------
@@ -364,6 +380,80 @@ def test_close_is_idempotent_and_safe_before_start(rt):
     rt.start()
     rt.close(timeout=5.0)
     rt.close(timeout=5.0)  # already closed — no-op
+
+    with pytest.raises(RuntimeError, match="is closed"):
+        rt.start()
+
+
+def test_submit_after_close_is_rejected_and_closes_coroutine(rt):
+    rt.start()
+    rt.close(timeout=5.0)
+
+    class CloseSpy:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    coro = CloseSpy()
+
+    with pytest.raises(RuntimeError, match="is closed"):
+        rt.submit(coro)
+
+    assert coro.closed is True
+
+
+def test_spawn_after_close_is_rejected_and_closes_coroutine(rt):
+    rt.start()
+    rt.close(timeout=5.0)
+
+    class CloseSpy:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    coro = CloseSpy()
+
+    with pytest.raises(RuntimeError, match="is closed"):
+        rt.spawn(coro)
+
+    assert coro.closed is True
+
+
+def test_submit_enqueue_is_atomic_with_close():
+    """close() cannot detach the loop between submit validation and enqueue."""
+    submit_holds_lock = threading.Event()
+    release_submit = threading.Event()
+
+    class PausedRuntime(AgentRuntime):
+        def _ensure_started_locked(self):
+            loop = super()._ensure_started_locked()
+            submit_holds_lock.set()
+            release_submit.wait(5)
+            return loop
+
+    runtime = PausedRuntime()
+    submitted = {}
+    submit_thread = threading.Thread(
+        target=lambda: submitted.setdefault(
+            "future", runtime.submit(asyncio.sleep(0, result="done"))
+        )
+    )
+    submit_thread.start()
+    assert submit_holds_lock.wait(5)
+
+    close_thread = threading.Thread(target=lambda: runtime.close(timeout=5.0))
+    close_thread.start()
+    release_submit.set()
+    submit_thread.join(5)
+    close_thread.join(5)
+
+    assert not submit_thread.is_alive()
+    assert not close_thread.is_alive()
+    future = submitted["future"]
+    assert future.done()
+    assert future.wait_settled(5)
 
 
 def test_close_from_runtime_thread_raises_without_detaching_runtime(rt):

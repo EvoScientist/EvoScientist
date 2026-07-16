@@ -26,6 +26,26 @@ from EvoScientist._winloop import ensure_proactor_event_loop_policy
 logger = logging.getLogger(__name__)
 
 
+class _RuntimeFuture(concurrent.futures.Future[Any]):
+    """Cross-thread future that tracks the underlying asyncio task settling.
+
+    ``asyncio.run_coroutine_threadsafe`` completes its public future as soon as
+    that future is cancelled, before the loop task has run its ``finally``
+    blocks.  Runtime callers need the second event to distinguish those two
+    moments.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._task_settled = threading.Event()
+
+    def mark_settled(self) -> None:
+        self._task_settled.set()
+
+    def wait_settled(self, timeout: float | None = None) -> bool:
+        return self._task_settled.wait(timeout)
+
+
 class TurnInProgressError(RuntimeError):
     """Raised by :meth:`AgentRuntime.turn` when a foreground turn is active.
 
@@ -53,6 +73,9 @@ class AgentRuntime:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._atexit_registered = False
+        # Once a started runtime is closed it is sealed permanently.  A no-op
+        # close before first start remains harmless for fixture/entrypoint code.
+        self._closed = False
         # Strong refs to fire-and-forget tasks so the loop can't GC them
         # mid-flight (asyncio only holds weak refs). Only mutated on the loop
         # thread (in the ``spawn`` closure and the done-callback).
@@ -71,23 +94,32 @@ class AgentRuntime:
         the ``_winloop`` safeguard (issue #283).
         """
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            # Must run before ``new_event_loop`` — swapping the policy after a
-            # loop exists does not change the already-running loop.
-            ensure_proactor_event_loop_policy()
-            loop = asyncio.new_event_loop()
-            self._loop = loop
-            self._thread = threading.Thread(
-                target=self._run_loop,
-                args=(loop,),
-                name="evosci-runtime",
-                daemon=True,
-            )
-            self._thread.start()
-            if not self._atexit_registered:
-                atexit.register(self.close)
-                self._atexit_registered = True
+            self._ensure_started_locked()
+
+    def _ensure_started_locked(self) -> asyncio.AbstractEventLoop:
+        """Return the live loop while ``self._lock`` is held."""
+        if self._closed:
+            raise RuntimeError("evosci-runtime is closed")
+        if self._thread is not None and self._thread.is_alive():
+            assert self._loop is not None
+            return self._loop
+
+        # Must run before ``new_event_loop`` — swapping the policy after a
+        # loop exists does not change the already-running loop.
+        ensure_proactor_event_loop_policy()
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            args=(loop,),
+            name="evosci-runtime",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._atexit_registered:
+            atexit.register(self.close)
+            self._atexit_registered = True
+        return loop
 
     def _run_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
@@ -116,9 +148,78 @@ class AgentRuntime:
 
         Callable from any thread *except* the runtime thread itself.
         """
-        self.start()
-        assert self._loop is not None  # start() guarantees it
-        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = _RuntimeFuture()
+
+        def _create_task() -> None:
+            if future.cancelled():
+                coro.close()
+                future.mark_settled()
+                return
+
+            try:
+                task = asyncio.create_task(coro)
+            except BaseException as exc:
+                coro.close()
+                if not future.cancelled():
+                    try:
+                        future.set_exception(exc)
+                    except concurrent.futures.InvalidStateError:
+                        pass
+                future.mark_settled()
+                return
+
+            def _cancel_task(done: concurrent.futures.Future) -> None:
+                if done.cancelled() and not task.done():
+                    task_loop = task.get_loop()
+                    try:
+                        task_loop.call_soon_threadsafe(task.cancel)
+                    except RuntimeError:
+                        if task_loop.is_closed():
+                            # A timed-out shutdown may have closed around a
+                            # cancellation-resistant task. No further cleanup
+                            # can run once the loop is closed.
+                            future.mark_settled()
+                        else:  # pragma: no cover - defensive loop failure
+                            raise
+
+            def _copy_task_result(done: asyncio.Task[Any]) -> None:
+                try:
+                    result = done.result()
+                except asyncio.CancelledError:
+                    if not future.cancelled():
+                        future.cancel()
+                except BaseException as exc:
+                    if not future.cancelled():
+                        try:
+                            future.set_exception(exc)
+                        except concurrent.futures.InvalidStateError:
+                            pass
+                else:
+                    if not future.cancelled():
+                        try:
+                            future.set_result(result)
+                        except concurrent.futures.InvalidStateError:
+                            pass
+                finally:
+                    future.mark_settled()
+
+            future.add_done_callback(_cancel_task)
+            task.add_done_callback(_copy_task_result)
+            if future.cancelled():
+                task.cancel()
+
+        try:
+            # Keep lifecycle validation, loop capture, and enqueue atomic with
+            # close().  Once this callback is queued, close() queues its drain
+            # after it, so the newly-created task is included in that drain.
+            with self._lock:
+                loop = self._ensure_started_locked()
+                loop.call_soon_threadsafe(_create_task)
+        except BaseException:
+            coro.close()
+            future.mark_settled()
+            raise
+        return future
 
     def run_sync(
         self,
@@ -153,9 +254,23 @@ class AgentRuntime:
         except KeyboardInterrupt:
             self._cancel_and_drain_future(future)
             raise
+        except concurrent.futures.CancelledError:
+            # External cancellation also completes the proxy future before the
+            # asyncio task has necessarily unwound.
+            self._wait_for_future_settlement(future)
+            raise
 
     def _cancel_and_drain_future(self, future: concurrent.futures.Future) -> None:
         future.cancel()
+        self._wait_for_future_settlement(future)
+
+    def _wait_for_future_settlement(self, future: concurrent.futures.Future) -> None:
+        wait_settled = getattr(future, "wait_settled", None)
+        if callable(wait_settled):
+            wait_settled(self._CANCEL_WAIT)
+            return
+        # Compatibility fallback for Future-like test doubles and callers that
+        # did not originate from submit().
         try:
             future.result(self._CANCEL_WAIT)
         except (Exception, asyncio.CancelledError):
@@ -174,16 +289,26 @@ class AgentRuntime:
         for ``async_notifier.spawn_watcher`` and kills the
         fire-and-forget-swallows-errors pattern.
         """
-        self.start()
-        assert self._loop is not None
-        loop = self._loop
 
-        def _create() -> None:
-            task = loop.create_task(coro, name=name)
+        def _create(loop: asyncio.AbstractEventLoop) -> None:
+            try:
+                task = loop.create_task(coro, name=name)
+            except BaseException:
+                coro.close()
+                logger.exception("failed to create spawned task %r", name)
+                return
             self._tasks.add(task)
             task.add_done_callback(self._on_spawn_done)
 
-        loop.call_soon_threadsafe(_create)
+        try:
+            # See submit(): enqueue while holding the lifecycle lock so close()
+            # cannot stop this loop between validation and scheduling.
+            with self._lock:
+                loop = self._ensure_started_locked()
+                loop.call_soon_threadsafe(_create, loop)
+        except BaseException:
+            coro.close()
+            raise
 
     def _on_spawn_done(self, task: asyncio.Task[Any]) -> None:
         self._tasks.discard(task)
@@ -272,6 +397,7 @@ class AgentRuntime:
                     "close() called on the evosci-runtime loop thread; call it "
                     "from another thread so shutdown can join the runtime safely"
                 )
+            self._closed = True
             self._thread = None
             self._loop = None
         if thread.is_alive():
@@ -280,7 +406,12 @@ class AgentRuntime:
                 drain.result(timeout)
             except (Exception, asyncio.CancelledError):
                 logger.exception("error draining evosci-runtime loop during close")
-            loop.call_soon_threadsafe(loop.stop)
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                # The loop may have failed and closed independently while the
+                # drain was timing out.  It is already stopped in that case.
+                pass
             thread.join(timeout)
 
 
