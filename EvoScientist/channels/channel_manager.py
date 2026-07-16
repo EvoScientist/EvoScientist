@@ -849,6 +849,15 @@ class ChannelManager:
 
     # ── outbound routing ──
 
+    def _record_outbound_failure(self, channel_name: str, error: str) -> None:
+        health = self._health.get(channel_name)
+        if health is None:
+            return
+        health.consecutive_failures += 1
+        health.total_failures += 1
+        health.last_failure_time = time.monotonic()
+        health.last_failure_error = error
+
     async def _send_failure_notice(
         self,
         channel: Channel,
@@ -913,13 +922,20 @@ class ChannelManager:
                     msg = processed
 
                 delivery_failed = False
+                failure_error = "one or more outbound deliveries failed"
                 if msg.content:
-                    text_ok = await channel.send(msg)
-                    if not text_ok:
-                        logger.error(
-                            f"Error sending to {msg.channel}: send() returned False"
-                        )
+                    try:
+                        text_ok = await channel.send(msg)
+                    except Exception as e:
+                        logger.error(f"Error sending to {msg.channel}", exc_info=True)
+                        failure_error = str(e)
                         delivery_failed = True
+                    else:
+                        if not text_ok:
+                            logger.error(
+                                f"Error sending to {msg.channel}: send() returned False"
+                            )
+                            delivery_failed = True
 
                 for media_path in msg.media:
                     try:
@@ -935,12 +951,16 @@ class ChannelManager:
                             )
                             delivery_failed = True
                     except Exception as e:
-                        logger.error(f"Error sending media to {msg.channel}: {e}")
+                        logger.error(
+                            f"Error sending media to {msg.channel}", exc_info=True
+                        )
+                        failure_error = str(e)
                         delivery_failed = True
 
                 if delivery_failed:
                     await self._send_failure_notice(channel, msg)
-                    raise RuntimeError("one or more outbound deliveries failed")
+                    self._record_outbound_failure(msg.channel, failure_error)
+                    continue
 
                 # Success
                 health = self._health.get(msg.channel)
@@ -948,13 +968,12 @@ class ChannelManager:
                     health.consecutive_failures = 0
                     health.total_successes += 1
             except Exception as e:
-                logger.error(f"Error sending to {msg.channel}: {e}")
-                health = self._health.get(msg.channel)
-                if health is not None:
-                    health.consecutive_failures += 1
-                    health.total_failures += 1
-                    health.last_failure_time = time.monotonic()
-                    health.last_failure_error = str(e)
+                # Unexpected internal error (pipeline, bookkeeping) — the
+                # transport paths above handle their own failures.
+                logger.error(
+                    f"Outbound dispatch error for {msg.channel}", exc_info=True
+                )
+                self._record_outbound_failure(msg.channel, str(e))
 
     # ── per-account lifecycle ──
 

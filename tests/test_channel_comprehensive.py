@@ -1298,6 +1298,48 @@ class TestChannelManagerDispatch:
         ]
         assert sent[1].failure_notice is None
 
+    async def test_dispatch_sends_notice_when_content_send_raises(self):
+        """A raising send() must reach the failure notice, not the outer
+        handler — exceptions are the common transport failure mode."""
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        sent: list[OutboundMessage] = []
+
+        async def raise_then_send_notice(msg):
+            sent.append(msg)
+            if len(sent) == 1:
+                raise RuntimeError("network down")
+            return True
+
+        ch.send = raise_then_send_notice
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="payload",
+                failure_notice="Command output could not be delivered.",
+            )
+        )
+        await asyncio.wait_for(
+            _wait_for_async(lambda: mgr._health["stub"].total_failures == 1),
+            timeout=1.0,
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert [message.content for message in sent] == [
+            "payload",
+            "Command output could not be delivered.",
+        ]
+        assert mgr._health["stub"].last_failure_error == "network down"
+
     async def test_dispatch_send_media_return_false_counts_failure(self):
         """send_media() returning False should mark the delivery as failed."""
 
