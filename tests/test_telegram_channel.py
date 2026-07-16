@@ -196,6 +196,25 @@ class TestTelegramChannel:
         assert message.is_group is True
         assert message.was_mentioned is True
 
+    async def test_group_command_bypasses_buffered_history(self):
+        channel = TelegramChannel(
+            TelegramConfig(bot_token="test", include_attachments=False)
+        )
+        channel._bot_username = "botname"
+
+        chatter = self._text_update("background chatter", chat_type="supergroup")
+        await channel._on_message(chatter, None)
+        assert channel._queue.empty()
+
+        command = self._text_update("/help@botname", chat_type="supergroup")
+        command.message.message_id = 790
+        await channel._on_message(command, None)
+
+        message = await channel._queue.get()
+        assert message.content == "/help"
+        assert message.is_group is True
+        assert message.was_mentioned is True
+
     async def test_start_command_flows_to_shared_dispatch(self):
         channel = TelegramChannel(
             TelegramConfig(bot_token="test", include_attachments=False)

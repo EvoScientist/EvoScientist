@@ -928,6 +928,12 @@ class GroupHistoryMiddleware(InboundMiddleware):
             # Don't drop here — let MentionGatingMiddleware handle that
             return raw
 
+        # Slash commands must remain the leading content so channel command
+        # dispatchers can recognize them. Keep buffered chatter for the next
+        # normal mentioned message instead of injecting it ahead of a command.
+        if raw.text.lstrip().startswith("/"):
+            return raw
+
         # Mentioned: inject history context
         history_context = self._buffer.format_context(raw.chat_id)
         if history_context:
