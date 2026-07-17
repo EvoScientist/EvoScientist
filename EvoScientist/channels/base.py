@@ -1068,13 +1068,22 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         # prompt already waiting for this sender, then publish the command as
         # its own message so either arrival order cannot newline-merge them.
         if is_slash_command(msg.content) and self._bus:
+            # A flush removes itself from this mapping before awaiting the bus
+            # publish.  Therefore a task still present here has not detached
+            # its buffered payload yet and is safe to cancel; an in-flight,
+            # backpressured publish is deliberately left alone.
             debounce_task = self._debounce_tasks.pop(sender, None)
             if debounce_task is not None:
                 debounce_task.cancel()
                 try:
                     await debounce_task
                 except asyncio.CancelledError:
-                    pass
+                    # Awaiting a cancelled child normally raises here with no
+                    # cancellation pending on this task.  If our caller also
+                    # cancelled queue_message(), preserve that outer signal.
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
+                        raise
             try:
                 await self._process_buffered_messages(sender)
             except Exception:

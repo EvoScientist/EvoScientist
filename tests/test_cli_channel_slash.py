@@ -6,6 +6,8 @@ fed to the LLM as a plain prompt, on every UI surface (Rich CLI, TUI,
 headless ``serve``).
 """
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.cli.channel import (
@@ -150,6 +152,39 @@ async def test_slash_with_flushed_output_suppresses_executed_ack():
             append_system=MagicMock(),
         )
     assert handled is True
+    mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
+
+
+async def test_real_help_command_publishes_help_once():
+    """Exercise the registered /help command rather than a mocked command."""
+    from EvoScientist.cli.channel import COMMAND_OUTPUT_ALREADY_SENT
+
+    bus = SimpleNamespace(publish_outbound=AsyncMock())
+    msg = _make_msg(content="/help")
+    msg.channel_type = "telegram"
+    msg.bus_ref = bus
+
+    with (
+        patch("EvoScientist.cli.channel._bus_loop", asyncio.get_running_loop()),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert handled is True
+    bus.publish_outbound.assert_awaited_once()
+    outbound = bus.publish_outbound.await_args.args[0]
+    assert outbound.channel == "telegram"
+    assert "Available commands:" in outbound.content
+    assert "/help" in outbound.content
     mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
 
 

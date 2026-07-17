@@ -797,6 +797,103 @@ class TestChannelDebounce:
         second = await bus.consume_inbound()
         assert (first.content, second.content) == ("do X", "/stop")
 
+    async def test_command_does_not_cancel_backpressured_prompt_flush(self):
+        """Once a prompt has detached from the debounce buffer and is waiting
+        for queue capacity, a later command must remain behind it without
+        cancelling or losing either message."""
+        bus = MessageBus()
+        bus.inbound = asyncio.Queue(maxsize=1)
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 0
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="stub",
+                sender_id="blocker",
+                chat_id="blocker",
+                content="queue filler",
+            )
+        )
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="do X",
+                message_id="m1",
+            )
+        )
+        flush_task = ch._debounce_tasks["u1"]
+        await asyncio.wait_for(
+            _wait_for_async(
+                lambda: (
+                    "u1" not in ch._message_buffers and "u1" not in ch._debounce_tasks
+                )
+            ),
+            timeout=1.0,
+        )
+        assert not flush_task.done()
+
+        command_task = asyncio.create_task(
+            ch.queue_message(
+                InboundMessage(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="/help",
+                    message_id="m2",
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        assert not command_task.done()
+
+        filler = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        prompt = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        command = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        await asyncio.wait_for(flush_task, timeout=1.0)
+        await asyncio.wait_for(command_task, timeout=1.0)
+
+        assert filler.content == "queue filler"
+        assert (prompt.content, command.content) == ("do X", "/help")
+
+    async def test_command_wait_preserves_outer_cancellation(self):
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        child_cancelling = asyncio.Event()
+        release_child = asyncio.Event()
+
+        async def slow_to_cancel():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                child_cancelling.set()
+                await release_child.wait()
+                raise
+
+        debounce_task = asyncio.create_task(slow_to_cancel())
+        ch._debounce_tasks["u1"] = debounce_task
+        command_task = asyncio.create_task(
+            ch.queue_message(
+                InboundMessage(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="/help",
+                    message_id="m2",
+                )
+            )
+        )
+
+        await asyncio.wait_for(child_cancelling.wait(), timeout=1.0)
+        command_task.cancel()
+        release_child.set()
+        with pytest.raises(asyncio.CancelledError):
+            await command_task
+        assert bus.inbound.empty()
+
     async def test_command_publishes_even_when_buffer_flush_fails(self):
         """A failing buffered-prompt flush must not swallow the command —
         losing /stop exactly when the pipeline misbehaves is the worst case."""
