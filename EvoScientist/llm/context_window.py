@@ -34,6 +34,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "glm-5.2": 1_000_000,
     # Tencent Hunyuan HY3 — 262K context (OpenRouter ``tencent/hy3``).
     "hy3": 262_000,
+    # Moonshot Kimi K3 — 1M context, an exception to the ``kimi-k2`` family
+    # (262K). Matches OpenRouter ``moonshotai/kimi-k3`` via split('/')[-1].
+    "kimi-k3": 1_048_576,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
