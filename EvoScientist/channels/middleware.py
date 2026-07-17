@@ -812,9 +812,12 @@ class MentionGatingMiddleware(InboundMiddleware):
                 policy=self.require_mention,
             )
             return None
-        # Platform command suffixes such as ``/stop@botname`` are valid in
-        # private chats too (for example when a group command is forwarded).
-        if self._strip_fn:
+        # Group messages may carry an ordinary bot mention.  In private chats,
+        # strip only slash-command suffixes such as ``/stop@botname`` (for
+        # example when a group command is forwarded); stripping every private
+        # message would corrupt legitimate @mentions on channels whose mention
+        # pattern is intentionally broad.
+        if self._strip_fn and (raw.is_group or is_slash_command(raw.text)):
             raw = dataclasses.replace(raw, text=self._strip_fn(raw.text))
         return raw
 

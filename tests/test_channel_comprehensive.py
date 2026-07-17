@@ -37,7 +37,7 @@ from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.channels.formatter import convert_markdown
-from EvoScientist.channels.middleware import DedupCache
+from EvoScientist.channels.middleware import DedupCache, MentionGatingMiddleware
 from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
 
 # ═══════════════════════════════════════════════════════════════════
@@ -589,6 +589,36 @@ class TestChannelMentionGating:
             sender_id="u1", chat_id="c1", text="hi", is_group=True, was_mentioned=False
         )
         assert ch._should_process(raw) is True
+
+    async def test_private_plain_text_keeps_mentions_but_command_strips_suffix(self):
+        middleware = MentionGatingMiddleware(
+            require_mention="group",
+            strip_fn=lambda text: text.replace("@botname", ""),
+        )
+
+        plain = await middleware.process_inbound(
+            RawIncoming(
+                sender_id="u1",
+                chat_id="c1",
+                text="please ask @botname about this",
+                is_group=False,
+            ),
+            {},
+        )
+        command = await middleware.process_inbound(
+            RawIncoming(
+                sender_id="u1",
+                chat_id="c1",
+                text="/help@botname",
+                is_group=False,
+            ),
+            {},
+        )
+
+        assert plain is not None
+        assert plain.text == "please ask @botname about this"
+        assert command is not None
+        assert command.text == "/help"
 
 
 class TestChannelBuildInbound:

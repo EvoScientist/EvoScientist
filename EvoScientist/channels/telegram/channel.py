@@ -225,8 +225,9 @@ class TelegramChannel(Channel):
             text_check = (message.text or message.caption or "").lower()
             command_target = self._command_target(text_check)
             if command_target is not None:
-                # Telegram routes bare group commands to every bot. Commands
-                # explicitly addressed to another bot must remain ignored.
+                # A bare command that Telegram delivered to this bot is
+                # actionable. Commands explicitly addressed to another bot
+                # must remain ignored.
                 was_mentioned = not command_target or (
                     bool(self._bot_username) and command_target == self._bot_username
                 )
