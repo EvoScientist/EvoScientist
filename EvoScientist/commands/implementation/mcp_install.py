@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import ClassVar
 
 from ..base import Argument, Command, CommandContext
+
+_logger = logging.getLogger(__name__)
 
 
 class InstallMCPCommand(Command):
@@ -94,20 +97,28 @@ class InstallMCPCommand(Command):
                     with committed_lock:
                         cancel_event.set()
                         already = list(committed)
-                    if already:
-                        ctx.ui.append_system(
-                            f"{match.name} finished installing before the cancel "
-                            "and was applied.",
-                            style="yellow",
+                    # The notice is best-effort cleanup: a raising append_system/
+                    # flush must never shadow the in-flight cancellation.
+                    try:
+                        if already:
+                            ctx.ui.append_system(
+                                f"{match.name} finished installing before the "
+                                "cancel and was applied.",
+                                style="yellow",
+                            )
+                        else:
+                            ctx.ui.append_system(
+                                f"Cancelled before {match.name} was applied. "
+                                "Nothing will be written; any in-flight download "
+                                "finishes in the background and is safe to retry.",
+                                style="yellow",
+                            )
+                        await ctx.ui.flush()
+                    except Exception:
+                        _logger.debug(
+                            "Failed to emit /install-mcp cancellation notice",
+                            exc_info=True,
                         )
-                    else:
-                        ctx.ui.append_system(
-                            f"Cancelled before {match.name} was applied. Nothing "
-                            "will be written; any in-flight download finishes in "
-                            "the background and is safe to retry.",
-                            style="yellow",
-                        )
-                    await ctx.ui.flush()
                     raise
                 for text, style in messages:
                     ctx.ui.append_system(text, style=style)
@@ -181,25 +192,33 @@ class InstallMCPCommand(Command):
             with committed_lock:
                 done = list(committed)
             not_done = [name for name in requested if name not in done]
-            if not done:
-                ctx.ui.append_system(
-                    "Cancelled before any server was installed. Nothing will be "
-                    "written; any in-flight download finishes in the background "
-                    "and is safe to retry.",
-                    style="yellow",
-                )
-            else:
-                ctx.ui.append_system(
-                    f"Cancelled partway. Installed before the cancel: "
-                    f"{', '.join(done)}.",
-                    style="yellow",
-                )
-                if not_done:
+            # The notice is best-effort cleanup: a raising append_system/flush
+            # must never shadow the in-flight cancellation.
+            try:
+                if not done:
                     ctx.ui.append_system(
-                        f"Not installed: {', '.join(not_done)}.",
-                        style="dim",
+                        "Cancelled before any server was installed. Nothing will "
+                        "be written; any in-flight download finishes in the "
+                        "background and is safe to retry.",
+                        style="yellow",
                     )
-            await ctx.ui.flush()
+                else:
+                    ctx.ui.append_system(
+                        f"Cancelled partway. Installed before the cancel: "
+                        f"{', '.join(done)}.",
+                        style="yellow",
+                    )
+                    if not_done:
+                        ctx.ui.append_system(
+                            f"Not installed: {', '.join(not_done)}.",
+                            style="dim",
+                        )
+                await ctx.ui.flush()
+            except Exception:
+                _logger.debug(
+                    "Failed to emit /install-mcp cancellation notice",
+                    exc_info=True,
+                )
             raise
         for text, style in messages:
             ctx.ui.append_system(text, style=style)

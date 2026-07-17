@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
+
+_logger = logging.getLogger(__name__)
 
 
 def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
@@ -176,13 +179,20 @@ class ModelCommand(Command):
         except asyncio.CancelledError:
             # The commit happens only after this await returns, so a cancel here
             # leaves the session on the original model. Any in-flight build
-            # finishes in the background and is discarded.
-            ctx.ui.append_system(
-                f"Cancelled the switch to {model_name}. No changes were applied; "
-                "the session stays on the current model.",
-                style="yellow",
-            )
-            await ctx.ui.flush()
+            # finishes in the background and is discarded. The user-facing notice
+            # is best-effort cleanup: a raising append_system/flush must never
+            # shadow the in-flight cancellation.
+            try:
+                ctx.ui.append_system(
+                    f"Cancelled the switch to {model_name}. No changes were "
+                    "applied; the session stays on the current model.",
+                    style="yellow",
+                )
+                await ctx.ui.flush()
+            except Exception:
+                _logger.debug(
+                    "Failed to emit /model cancellation notice", exc_info=True
+                )
             raise
         except Exception as e:
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")

@@ -59,6 +59,16 @@ async def test_cancel_gate_discards_uncommitted_install(tmp_path):
 
     cfg_patch, dir_patch, cfg_file = _temp_config(tmp_path)
 
+    real_install = registry.install_mcp_server
+    worker_done = threading.Event()
+
+    def tracked_install(*args, **kwargs):
+        worker_done.clear()
+        try:
+            return real_install(*args, **kwargs)
+        finally:
+            worker_done.set()
+
     with (
         cfg_patch,
         dir_patch,
@@ -66,6 +76,7 @@ async def test_cancel_gate_discards_uncommitted_install(tmp_path):
         patch.object(registry, "find_server_by_name", return_value=entry),
         patch.object(registry, "get_installed_names", return_value=set()),
         patch.object(registry, "install_cli_tool", fake_install_cli_tool),
+        patch.object(registry, "install_mcp_server", tracked_install),
         patch.object(registry, "_resolve_command_path", side_effect=lambda c: c),
     ):
         task = asyncio.create_task(InstallMCPCommand().execute(ctx, ["slow-srv"]))
@@ -77,7 +88,10 @@ async def test_cancel_gate_discards_uncommitted_install(tmp_path):
         # Let the worker run to completion; the gate must still discard.
         release.set()
         assert await asyncio.to_thread(fetch_done.wait, 2)
-        await asyncio.sleep(0)
+        # fetch_done fires inside the fetch, before install_mcp_server reaches
+        # its commit gate; wait for the whole call to return before the temp
+        # config patch unwinds so an abandoned write can never reach real config.
+        assert await asyncio.to_thread(worker_done.wait, 2)
 
     assert not cfg_file.exists() or cfg_file.read_text().strip() == ""
     msgs = " ".join(_messages(ui)).lower()
@@ -94,6 +108,7 @@ async def test_late_cancel_reports_completed(tmp_path):
 
     committed = threading.Event()
     release = threading.Event()
+    worker_done = threading.Event()
 
     real_add = client.add_mcp_server
 
@@ -109,7 +124,10 @@ async def test_late_cancel_reports_completed(tmp_path):
         ok = commit_gate(srv.name, _write) if commit_gate is not None else _write()
         committed.set()
         release.wait(2)
-        return ok
+        try:
+            return ok
+        finally:
+            worker_done.set()
 
     cfg_patch, dir_patch, cfg_file = _temp_config(tmp_path)
 
@@ -127,7 +145,9 @@ async def test_late_cancel_reports_completed(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await task
         release.set()
-        await asyncio.sleep(0)
+        # Wait for the abandoned worker to return before the temp config patch
+        # unwinds, so no late frame can touch real config after teardown.
+        assert await asyncio.to_thread(worker_done.wait, 2)
 
     assert "fast-srv" in cfg_file.read_text()
     msgs = " ".join(_messages(ui)).lower()
@@ -144,6 +164,7 @@ async def test_write_failure_records_no_ledger_entry(tmp_path):
 
     gate_ran = threading.Event()
     release = threading.Event()
+    worker_done = threading.Event()
 
     def fake_install(srv, *, print_fn=None, cancel_event=None, commit_gate=None):
         def _write() -> bool:
@@ -153,7 +174,10 @@ async def test_write_failure_records_no_ledger_entry(tmp_path):
         ok = commit_gate(srv.name, _write) if commit_gate is not None else _write()
         gate_ran.set()
         release.wait(2)
-        return ok
+        try:
+            return ok
+        finally:
+            worker_done.set()
 
     cfg_patch, dir_patch, cfg_file = _temp_config(tmp_path)
 
@@ -171,7 +195,9 @@ async def test_write_failure_records_no_ledger_entry(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await task
         release.set()
-        await asyncio.sleep(0)
+        # Wait for the abandoned worker to return before the temp config patch
+        # unwinds, so no late frame can touch real config after teardown.
+        assert await asyncio.to_thread(worker_done.wait, 2)
 
     assert not cfg_file.exists() or cfg_file.read_text().strip() == ""
     msgs = " ".join(_messages(ui)).lower()
@@ -201,12 +227,23 @@ async def test_multi_server_cancel_prints_ledger(tmp_path):
     ui.wait_for_mcp_browse = AsyncMock(return_value=[srv1, srv2])
     cfg_patch, dir_patch, cfg_file = _temp_config(tmp_path)
 
+    real_install = registry.install_mcp_server
+    worker_done = threading.Event()
+
+    def tracked_install(*args, **kwargs):
+        worker_done.clear()
+        try:
+            return real_install(*args, **kwargs)
+        finally:
+            worker_done.set()
+
     with (
         cfg_patch,
         dir_patch,
         patch.object(registry, "fetch_marketplace_index", return_value=[srv1, srv2]),
         patch.object(registry, "get_installed_names", return_value=set()),
         patch.object(registry, "install_cli_tool", fake_install_cli_tool),
+        patch.object(registry, "install_mcp_server", tracked_install),
         patch.object(registry, "_resolve_command_path", side_effect=lambda c: c),
     ):
         task = asyncio.create_task(InstallMCPCommand().execute(ctx, []))
@@ -217,7 +254,10 @@ async def test_multi_server_cancel_prints_ledger(tmp_path):
             await task
         release2.set()
         assert await asyncio.to_thread(fetch2_done.wait, 2)
-        await asyncio.sleep(0)
+        # fetch2_done fires inside srv2's fetch, before its commit gate; wait for
+        # srv2's install_mcp_server to return before the temp config patch unwinds
+        # so an abandoned write can never reach real config.
+        assert await asyncio.to_thread(worker_done.wait, 2)
 
     written = cfg_file.read_text()
     assert "srv1" in written

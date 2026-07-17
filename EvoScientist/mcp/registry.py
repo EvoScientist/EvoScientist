@@ -616,10 +616,22 @@ def install_mcp_servers(
     """Install multiple MCP servers, returning the count of successes.
 
     *cancel_event* is checked between servers so a cancel stops the loop before
-    touching any further server, and is threaded into each per-server install so
-    the commit of an in-flight server is discarded too. *commit_gate* records
-    each committed server name for the caller.
+    starting any further server. When no *commit_gate* is supplied, a default
+    gate derived from *cancel_event* is threaded into each per-server install so
+    the commit of an in-flight server whose blocking work finishes after the
+    cancel is discarded too — a caller that passes only the event stays safe.
+    *commit_gate*, when supplied, owns that discard decision and records each
+    committed server name for the caller.
     """
+    if commit_gate is None and cancel_event is not None:
+        # Without an explicit gate, honour cancellation at the commit boundary:
+        # skip the write once the event is set so a server that finished its
+        # unpreemptable work mid-cancel is not committed.
+        event = cancel_event
+
+        def commit_gate(name: str, write: Callable[[], bool]) -> bool:
+            return not event.is_set() and write()
+
     count = 0
     for entry in entries:
         if cancel_event is not None and cancel_event.is_set():
