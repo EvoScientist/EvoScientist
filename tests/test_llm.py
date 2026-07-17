@@ -450,6 +450,212 @@ class TestThirdPartyRouting:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
 
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_moonshot_thinking_disable_exempts_kimi_k3(self, mock_init, monkeypatch):
+        """Native Moonshot: K3 must not receive the K2.x thinking-disable field.
+
+        Moonshot's K3 guide forbids the K2.x `thinking` parameter (K3 is
+        always-thinking); other Moonshot models keep the disable that guards
+        against multi-turn error 20015.
+        """
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MOONSHOT_API_KEY", "ms-key")
+
+        get_chat_model("kimi-k3", provider="moonshot")
+        extra_body = mock_init.call_args[1].get("extra_body") or {}
+        assert "thinking" not in extra_body
+
+        get_chat_model("kimi-k2.6", provider="moonshot")
+        extra_body = mock_init.call_args[1]["extra_body"]
+        assert extra_body["thinking"] == {"type": "disabled"}
+
+    # --- OpenRouter upstream 429 retry ---
+
+    def test_openrouter_429_added_to_retryable_status_codes(self, monkeypatch):
+        """Upstream 429s must become retryable on the real SDK client.
+
+        The openrouter SDK hardcodes per-operation retryable statuses to
+        ["5XX"], so a launch-day "temporarily rate-limited upstream" 429
+        (Retry-After: 1) fails the run outright instead of being retried.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        model = get_chat_model("moonshotai/kimi-k3", provider="openrouter")
+
+        retry_config = model.client.sdk_configuration.retry_config
+        assert retry_config.status_codes_override == ["429", "5XX"]
+
+    def test_openrouter_429_override_not_injected_when_retries_disabled(
+        self, monkeypatch
+    ):
+        """max_retries=0 leaves the SDK retry config UNSET — no 429 override.
+
+        Note this only asserts our override is absent; the SDK still applies
+        its own per-operation default (backoff on 5XX) when the config is
+        UNSET, so retries as such are not fully disabled at the SDK level.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        model = get_chat_model("x-ai/grok-4.3", provider="openrouter", max_retries=0)
+
+        retry_config = model.client.sdk_configuration.retry_config
+        assert getattr(retry_config, "status_codes_override", None) is None
+
+    def test_openrouter_429_retried_on_the_wire(self, monkeypatch):
+        """End-to-end: a 429 with Retry-After is retried and the retry succeeds."""
+        import httpx
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        model = get_chat_model("moonshotai/kimi-k3", provider="openrouter")
+
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "1"},
+                    json={"error": {"message": "Provider returned error", "code": 429}},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "gen-1",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "moonshotai/kimi-k3",
+                    "system_fingerprint": "fp-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        model.client.sdk_configuration.client = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+
+        result = model.invoke("hi")
+
+        assert calls["n"] == 2
+        assert result.content == "ok"
+
+    # --- OpenRouter structured output vs mandatory reasoning ---
+
+    @staticmethod
+    def _capture_structured_request(model, structured, response_message):
+        """Invoke a structured-output runnable against a capturing transport."""
+        import json
+
+        import httpx
+
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "gen-1",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "m",
+                    "system_fingerprint": "fp-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": response_message,
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        model.client.sdk_configuration.client = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+        result = structured.invoke("pick tools")
+        return captured, result
+
+    def test_openrouter_structured_output_json_schema_for_mandatory_model(
+        self, monkeypatch
+    ):
+        """with_structured_output must not force tool_choice on kimi-k3.
+
+        Moonshot rejects a forced tool choice with HTTP 400 "tool_choice
+        'specified' is incompatible with thinking enabled", and kimi-k3's
+        thinking cannot be disabled — so the default function_calling method
+        400s every structured-output call (LLMToolSelectorMiddleware included).
+        The json_schema method (response_format) is supported and needs none.
+        """
+        from pydantic import BaseModel
+
+        class ToolSelection(BaseModel):
+            tools: list[str]
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        # The dated canonical_slug is routable too and must be equally covered.
+        for model_name in ("moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"):
+            model = get_chat_model(model_name, provider="openrouter")
+            structured = model.with_structured_output(ToolSelection)
+
+            captured, result = self._capture_structured_request(
+                model,
+                structured,
+                {"role": "assistant", "content": '{"tools": ["tavily_search"]}'},
+            )
+
+            assert "tool_choice" not in captured, model_name
+            assert captured["response_format"]["type"] == "json_schema", model_name
+            assert result == ToolSelection(tools=["tavily_search"])
+
+    def test_openrouter_structured_output_default_for_other_models(self, monkeypatch):
+        """Non-Moonshot models keep the function_calling default.
+
+        Includes always-thinking models like grok-4.5 — the forced tool_choice
+        restriction is Moonshot-specific, so the json_schema rerouting must
+        stay limited to _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS.
+        """
+        from pydantic import BaseModel
+
+        class ToolSelection(BaseModel):
+            tools: list[str]
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5"):
+            model = get_chat_model(model_name, provider="openrouter")
+            structured = model.with_structured_output(ToolSelection)
+
+            captured, result = self._capture_structured_request(
+                model,
+                structured,
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "ToolSelection",
+                                "arguments": '{"tools": ["tavily_search"]}',
+                            },
+                        }
+                    ],
+                },
+            )
+
+            assert captured.get("tool_choice"), model_name
+            assert "response_format" not in captured, model_name
+            assert result == ToolSelection(tools=["tavily_search"])
+
     # --- OpenRouter app attribution (issue #339) ---
 
     _APP_ATTR_ENV = (
