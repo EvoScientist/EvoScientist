@@ -812,12 +812,21 @@ class MentionGatingMiddleware(InboundMiddleware):
                 policy=self.require_mention,
             )
             return None
-        # Group messages may carry an ordinary bot mention.  In private chats,
-        # strip only slash-command suffixes such as ``/stop@botname`` (for
-        # example when a group command is forwarded); stripping every private
-        # message would corrupt legitimate @mentions on channels whose mention
-        # pattern is intentionally broad.
-        if self._strip_fn and (raw.is_group or is_slash_command(raw.text)):
+        # A slash command's platform target belongs only to its first token;
+        # preserve mentions in its arguments. Ordinary group messages may
+        # still carry a bot mention elsewhere and use the full-message strip.
+        if self._strip_fn and is_slash_command(raw.text):
+            text = raw.text
+            token_start = len(text) - len(text.lstrip())
+            token_end = token_start
+            while token_end < len(text) and not text[token_end].isspace():
+                token_end += 1
+            stripped_token = self._strip_fn(text[token_start:token_end])
+            raw = dataclasses.replace(
+                raw,
+                text=text[:token_start] + stripped_token + text[token_end:],
+            )
+        elif self._strip_fn and raw.is_group:
             raw = dataclasses.replace(raw, text=self._strip_fn(raw.text))
         return raw
 

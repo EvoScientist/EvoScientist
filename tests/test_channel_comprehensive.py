@@ -614,11 +614,22 @@ class TestChannelMentionGating:
             ),
             {},
         )
+        command_with_mention_argument = await middleware.process_inbound(
+            RawIncoming(
+                sender_id="u1",
+                chat_id="c1",
+                text="  /help@botname ask @botname for status",
+                is_group=False,
+            ),
+            {},
+        )
 
         assert plain is not None
         assert plain.text == "please ask @botname about this"
         assert command is not None
         assert command.text == "/help"
+        assert command_with_mention_argument is not None
+        assert command_with_mention_argument.text == "  /help ask @botname for status"
 
 
 class TestChannelBuildInbound:
