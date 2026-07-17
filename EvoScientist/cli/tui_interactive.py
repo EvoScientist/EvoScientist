@@ -316,6 +316,159 @@ def _stopped_response_after_narration(
     return display_current, display_stopped, full_stopped
 
 
+# (kind, payload, item_index): kind is "header"/"sep"/"item"; payload is the
+# category name for headers or the candidate for items; item_index is the
+# candidate's position in the source list (-1 for non-item rows).
+_CompletionRow = tuple[str, Any, int]
+
+
+def _build_completion_rows(items: list[Any]) -> list[_CompletionRow]:
+    """Flatten completion candidates into render rows with category headers."""
+    rows: list[_CompletionRow] = []
+    last_cat = ""
+    for i, candidate in enumerate(items):
+        cat = getattr(candidate, "category", "")
+        if cat and cat != last_cat:
+            if last_cat:
+                rows.append(("sep", "", -1))
+            rows.append(("header", cat, -1))
+            last_cat = cat
+        rows.append(("item", candidate, i))
+    return rows
+
+
+def _window_completion_rows(
+    rows: list[_CompletionRow],
+    selected: int,
+    max_rows: int,
+) -> tuple[list[_CompletionRow], int, int]:
+    """Slice *rows* to a window of at most *max_rows* total display lines.
+
+    The window always contains the selected item (top of the list when
+    nothing is selected) and reserves one line per overflow indicator.
+    Returns ``(visible_rows, hidden_items_above, hidden_items_below)``.
+    """
+    max_rows = max(max_rows, 5)
+    if len(rows) <= max_rows:
+        return list(rows), 0, 0
+
+    sel_row = 0
+    if selected >= 0:
+        for r, (kind, _payload, idx) in enumerate(rows):
+            if kind == "item" and idx == selected:
+                sel_row = r
+                break
+
+    # Center the selection; centering keeps it clear of the indicator
+    # lines that replace the window's edge rows when content is clipped.
+    start = min(max(sel_row - max_rows // 2, 0), len(rows) - max_rows)
+    end = start + max_rows
+    content_start = start + (1 if start > 0 else 0)
+    content_end = end - (1 if end < len(rows) else 0)
+
+    above = sum(1 for kind, _p, _i in rows[:content_start] if kind == "item")
+    below = sum(1 for kind, _p, _i in rows[content_end:] if kind == "item")
+    return rows[content_start:content_end], above, below
+
+
+def _render_completion_text(items: list[Any], selected: int, max_rows: int) -> Text:
+    """Render the completion popup content bounded to *max_rows* lines."""
+    rows = _build_completion_rows(items)
+    visible, above, below = _window_completion_rows(rows, selected, max_rows)
+
+    # Blank separator lines are cosmetic — drop them at the window edges.
+    while visible and visible[0][0] == "sep":
+        visible = visible[1:]
+    while visible and visible[-1][0] == "sep":
+        visible = visible[:-1]
+
+    lines: list[Text] = []
+    if above:
+        lines.append(Text(f"   ↑ {above} more", style="dim italic"))
+    for kind, payload, idx in visible:
+        if kind == "sep":
+            lines.append(Text())
+        elif kind == "header":
+            lines.append(Text(f" {payload}", style="bold #6b7280"))
+        elif idx == selected:
+            lines.append(
+                Text.assemble(
+                    ("  ▸ ", "bold"),
+                    (f"{payload.text:<28}", "bold"),
+                    (payload.description, "bold"),
+                )
+            )
+        else:
+            lines.append(
+                Text.assemble(
+                    ("    ", "#888888"),
+                    (f"{payload.text:<28}", "#888888"),
+                    (payload.description, "#888888"),
+                )
+            )
+    if below:
+        lines.append(Text(f"   ↓ {below} more", style="dim italic"))
+    return Text("\n").join(lines)
+
+
+# Hard cap on popup lines so the popup never dwarfs the chat area
+# (mainstream CLI behavior); matches the pre-#354 max-height.
+_COMPLETION_MAX_VISIBLE_ROWS = 15
+# Rows kept free for the input row, status bar and a slice of chat. On
+# terminals shorter than ~17 rows the 5-row floor wins over this
+# reservation — a smaller popup would be unusable.
+_COMPLETION_RESERVED_ROWS = 12
+
+
+def _completion_row_budget(height: int) -> int:
+    """Popup line budget for a terminal of *height* rows."""
+    if height <= 0:
+        return _COMPLETION_MAX_VISIBLE_ROWS
+    return max(5, min(height - _COMPLETION_RESERVED_ROWS, _COMPLETION_MAX_VISIBLE_ROWS))
+
+
+# Textual converts rich Text to Content and drops rich no_wrap/overflow
+# attributes, so line cropping must be enforced here in CSS.
+_COMPLETIONS_CSS = """
+#completions {
+    display: none;
+    height: auto;
+    background: #1e1f26;
+    padding: 0 1;
+    border-bottom: solid #0284c7;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+"""
+
+
+def _normalize_chat_scroll(container: Any) -> None:
+    """Repair the chat scroll state after the popup resized the viewport.
+
+    Textual's compositor recomputes ``scroll_y`` for anchored containers
+    bypassing the validator, so when the popup hides and the content fits
+    again, ``scroll_y`` can go negative — the scrollbar then renders as if
+    scrolled to the bottom while the content sits at the top (issue #301
+    family). Runs after refresh so sizes are current.
+    """
+    # force=True: with the content fitting, the scrollbar is hidden and
+    # allow_vertical_scroll is False — an unforced scroll_home would
+    # silently no-op and leave the negative scroll_y in place.
+    if container.is_anchored:
+        if container.max_scroll_y <= 0:
+            container.anchor(False)
+            container.scroll_home(animate=False, immediate=True, force=True)
+    elif container.scroll_y < 0:
+        container.scroll_home(animate=False, immediate=True, force=True)
+    # Resync the scrollbar thumb: watch_scroll_y skips the update while
+    # the scrollbar is hidden (or when the compositor wrote scroll_y via
+    # set_reactive), so a stale position survives until the scrollbar
+    # reappears — rendering as "scrolled to bottom" at the top.
+    scrollbar = getattr(container, "vertical_scrollbar", None)
+    if scrollbar is not None and scrollbar.position != container.scroll_y:
+        scrollbar.position = container.scroll_y
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -384,7 +537,8 @@ def run_textual_interactive(
         def supports_interactive(self) -> bool:
             return True
 
-        CSS = """
+        CSS = (
+            """
         Screen {
             layout: vertical;
             background: #16161a;
@@ -436,14 +590,9 @@ def run_textual_interactive(
             padding: 0 2;
             color: #9ca3af;
         }
-        #completions {
-            display: none;
-            height: auto;
-            max-height: 15;
-            background: #1e1f26;
-            padding: 0 1;
-            border-bottom: solid #0284c7;
-        }
+        """
+            + _COMPLETIONS_CSS
+            + """
         #status {
             height: 1;
             min-height: 1;
@@ -452,6 +601,7 @@ def run_textual_interactive(
             padding: 0 1;
         }
         """
+        )
         BINDINGS: ClassVar[list[Binding]] = [
             Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
             Binding("ctrl+v", "paste_clipboard", "Paste", show=False),
@@ -501,6 +651,7 @@ def run_textual_interactive(
             ] = []  # queued messages to send after current turn
             self._comp_items: list = []
             self._comp_index: int = -1
+            self._comp_last_height: int = 0
             self._comp_base: str = ""
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
@@ -912,6 +1063,17 @@ def run_textual_interactive(
             self._background_tasks.add(ch_task)
             ch_task.add_done_callback(self._background_tasks.discard)
 
+        def on_resize(self, event: Any) -> None:
+            """Re-window the completion popup for the new terminal height."""
+            try:
+                comp_widget = self.query_one("#completions", Static)
+            except Exception:
+                return
+            if comp_widget.display and self._comp_items:
+                # Deferred: this handler can run before the base App
+                # handler updates self.size with the new dimensions.
+                self.call_after_refresh(self._render_completions)
+
         # ── Update check ──────────────────────────────────────
 
         async def _check_for_updates(self) -> None:
@@ -1149,7 +1311,9 @@ def run_textual_interactive(
             go negative and pushes the welcome banner out of view (issue #301).
             """
             container.anchor(False)
-            container.scroll_home(animate=False, immediate=True)
+            # force=True: with content fitting, the scrollbar is hidden and
+            # allow_vertical_scroll is False — unforced scroll_home no-ops.
+            container.scroll_home(animate=False, immediate=True, force=True)
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -2858,30 +3022,36 @@ def run_textual_interactive(
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
-            self.query_one("#completions", Static).display = False
+            self._comp_last_height = 0
+            comp_widget = self.query_one("#completions", Static)
+            was_visible = comp_widget.display
+            comp_widget.display = False
+            # Called on every ordinary input change — only a popup that was
+            # actually visible changed the chat viewport.
+            if was_visible:
+                self.call_after_refresh(self._normalize_chat_after_popup)
+
+        def _completion_max_rows(self) -> int:
+            return _completion_row_budget(int(getattr(self.size, "height", 0) or 0))
 
         def _render_completions(self) -> None:
-            comp_text = Text()
-            last_cat = ""
-            for i, candidate in enumerate(self._comp_items):
-                cmd, desc = candidate.text, candidate.description
-                cat = getattr(candidate, "category", "")
-                if cat and cat != last_cat:
-                    if last_cat:
-                        comp_text.append("\n")
-                    comp_text.append(f" {cat}\n", style="bold #6b7280")
-                    last_cat = cat
-                if i == self._comp_index:
-                    comp_text.append("  \u25b8 ", style="bold")
-                    comp_text.append(f"{cmd:<28}", style="bold")
-                    comp_text.append(desc, style="bold")
-                else:
-                    comp_text.append("    ", style="#888888")
-                    comp_text.append(f"{cmd:<28}", style="#888888")
-                    comp_text.append(desc, style="#888888")
-                if i < len(self._comp_items) - 1:
-                    comp_text.append("\n")
+            comp_text = _render_completion_text(
+                self._comp_items, self._comp_index, self._completion_max_rows()
+            )
             self.query_one("#completions", Static).update(comp_text)
+            # Selection-only navigation keeps the height — skip the (cheap
+            # but per-keystroke) normalize unless the viewport can change.
+            n_lines = len(comp_text.plain.splitlines()) if comp_text.plain else 0
+            if n_lines != self._comp_last_height:
+                self._comp_last_height = n_lines
+                self.call_after_refresh(self._normalize_chat_after_popup)
+
+        def _normalize_chat_after_popup(self) -> None:
+            try:
+                container = self.query_one("#chat", VerticalScroll)
+            except Exception:
+                return
+            _normalize_chat_scroll(container)
 
         # ── Slash commands ─────────────────────────────────────
 
