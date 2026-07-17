@@ -687,6 +687,7 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
+        ToolHistoryRepairMiddleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -759,6 +760,7 @@ def _get_default_middleware(
         # middlewares) and normalizes them into a non-dataclass
         # envelope wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
+        ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(events=events),
