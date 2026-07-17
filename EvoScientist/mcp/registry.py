@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -487,6 +488,7 @@ def install_mcp_server(
     entry: MCPServerEntry,
     *,
     print_fn: Callable[[str, str], None] | None = None,
+    commit_gate: Callable[[str, Callable[[], bool]], bool] | None = None,
 ) -> bool:
     """Install a single MCP server to the user config.
 
@@ -495,12 +497,21 @@ def install_mcp_server(
     2. ``pip_package``: installs via pip/uv
     3. Calls ``add_mcp_server()`` to persist to ``mcp.yaml``
 
+    The slow fetch/probe work (pip install) runs first; the config write is the
+    commit boundary, guarded by *commit_gate* so a cancelled install leaves
+    the config untouched even though the in-flight download ran to completion.
+
     Args:
         entry: Server definition to install.
         print_fn: Output callback ``(text, style)`` for status messages.
+        commit_gate: Called with ``entry.name`` and a ``write`` callable
+            that performs the config write and returns success. The gate runs
+            the write and records its ledger under one lock, so a concurrent
+            cancellation lands before the write (nothing applied) or after a
+            recorded success; a failed write records nothing.
 
     Returns:
-        True on success.
+        True on success, False on failure or discarded-on-cancel.
     """
     from .client import add_mcp_server
 
@@ -536,30 +547,43 @@ def install_mcp_server(
             print_fn(f"  Failed: {pip_install_hint()} {entry.pip_package}", "red")
             return False
 
-    # Add to mcp.yaml
-    try:
-        if entry.url and entry.transport != "stdio":
-            add_mcp_server(
-                entry.name,
-                entry.transport,
-                url=entry.url,
-                headers=entry.headers,
-            )
-        else:
-            resolved_cmd = (
-                _resolve_command_path(entry.command) if entry.command else entry.command
-            )
-            add_mcp_server(
-                entry.name,
-                entry.transport,
-                command=resolved_cmd,
-                args=entry.args,
-                env=entry.env,
-            )
+    def _write_config() -> bool:
+        """Perform the config write (the commit boundary). Returns success."""
+        try:
+            if entry.url and entry.transport != "stdio":
+                add_mcp_server(
+                    entry.name,
+                    entry.transport,
+                    url=entry.url,
+                    headers=entry.headers,
+                )
+            else:
+                resolved_cmd = (
+                    _resolve_command_path(entry.command)
+                    if entry.command
+                    else entry.command
+                )
+                add_mcp_server(
+                    entry.name,
+                    entry.transport,
+                    command=resolved_cmd,
+                    args=entry.args,
+                    env=entry.env,
+                )
+        except Exception as exc:
+            print_fn(f"  Failed to add {entry.name}: {exc}", "red")
+            return False
         return True
-    except Exception as exc:
-        print_fn(f"  Failed to add {entry.name}: {exc}", "red")
-        return False
+
+    # Commit gate: the slow fetch/probe work above may have run to completion
+    # in a worker thread that could not be preempted. The gate performs the
+    # config write and records the ledger atomically, so a cancellation lands
+    # either before the write (nothing applied) or after a recorded success —
+    # and a failed write leaves no ledger entry.
+    if commit_gate is not None:
+        return commit_gate(entry.name, _write_config)
+
+    return _write_config()
 
 
 def find_server_by_name(
@@ -586,11 +610,25 @@ def install_mcp_servers(
     entries: list[MCPServerEntry],
     *,
     print_fn: Callable[[str, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    commit_gate: Callable[[str, Callable[[], bool]], bool] | None = None,
 ) -> int:
-    """Install multiple MCP servers, returning the count of successes."""
+    """Install multiple MCP servers, returning the count of successes.
+
+    *cancel_event* is checked between servers so a cancel stops the loop before
+    touching any further server, and is threaded into each per-server install so
+    the commit of an in-flight server is discarded too. *commit_gate* records
+    each committed server name for the caller.
+    """
     count = 0
     for entry in entries:
-        if install_mcp_server(entry, print_fn=print_fn):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        if install_mcp_server(
+            entry,
+            print_fn=print_fn,
+            commit_gate=commit_gate,
+        ):
             if print_fn:
                 print_fn(f"Configured: {entry.name}", "green")
             count += 1

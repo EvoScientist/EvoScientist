@@ -173,6 +173,17 @@ class ModelCommand(Command):
 
         try:
             new_chat_model, new_agent = await asyncio.to_thread(_build_replacement)
+        except asyncio.CancelledError:
+            # The commit happens only after this await returns, so a cancel here
+            # leaves the session on the original model. Any in-flight build
+            # finishes in the background and is discarded.
+            ctx.ui.append_system(
+                f"Cancelled the switch to {model_name}. No changes were applied; "
+                "the session stays on the current model.",
+                style="yellow",
+            )
+            await ctx.ui.flush()
+            raise
         except Exception as e:
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
             return

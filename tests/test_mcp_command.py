@@ -122,9 +122,11 @@ async def test_install_mcp_runs_package_install_off_event_loop_thread():
     entry = SimpleNamespace(name="slow-server")
     install_threads: list[str] = []
 
-    def _install(_entry, *, print_fn):
+    def _install(_entry, *, print_fn, cancel_event=None, commit_gate=None):
         install_threads.append(threading.current_thread().name)
         print_fn("Installing dependency...", "dim")
+        if commit_gate is not None and not commit_gate(_entry.name, lambda: True):
+            return False
         return True
 
     ctx = CommandContext(agent=None, thread_id="tid", ui=ui)

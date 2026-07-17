@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import ClassVar
 
 from ..base import Argument, Command, CommandContext
@@ -22,6 +23,7 @@ class InstallMCPCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         import asyncio
+        import threading
 
         from ...mcp.registry import (
             fetch_marketplace_index,
@@ -57,15 +59,56 @@ class InstallMCPCommand(Command):
                     )
                     return
 
+                cancel_event = threading.Event()
+                committed: list[str] = []
+                committed_lock = threading.Lock()
+
+                def _commit_gate(name: str, write: Callable[[], bool]) -> bool:
+                    # The write and its ledger record happen under one lock, so
+                    # a cancellation lands before the write (nothing applied) or
+                    # after a recorded success; a failed write records nothing.
+                    with committed_lock:
+                        if cancel_event.is_set():
+                            return False
+                        if not write():
+                            return False
+                        committed.append(name)
+                        return True
+
                 def _install_one():
                     messages: list[tuple[str, str]] = []
 
                     def _collect(text: str, style: str = "") -> None:
                         messages.append((text, style))
 
-                    return install_mcp_server(match, print_fn=_collect), messages
+                    ok = install_mcp_server(
+                        match,
+                        print_fn=_collect,
+                        commit_gate=_commit_gate,
+                    )
+                    return ok, messages
 
-                installed_ok, messages = await asyncio.to_thread(_install_one)
+                try:
+                    installed_ok, messages = await asyncio.to_thread(_install_one)
+                except asyncio.CancelledError:
+                    with committed_lock:
+                        cancel_event.set()
+                        already = list(committed)
+                    if already:
+                        ctx.ui.append_system(
+                            f"{match.name} finished installing before the cancel "
+                            "and was applied.",
+                            style="yellow",
+                        )
+                    else:
+                        ctx.ui.append_system(
+                            f"Cancelled before {match.name} was applied. Nothing "
+                            "will be written; any in-flight download finishes in "
+                            "the background and is safe to retry.",
+                            style="yellow",
+                        )
+                    await ctx.ui.flush()
+                    raise
                 for text, style in messages:
                     ctx.ui.append_system(text, style=style)
                 if installed_ok:
@@ -103,16 +146,61 @@ class InstallMCPCommand(Command):
             ctx.ui.append_system("No servers selected.", style="dim")
             return
 
+        requested = [entry.name for entry in selected_entries]
+        cancel_event = threading.Event()
+        committed: list[str] = []
+        committed_lock = threading.Lock()
+
+        def _commit_gate(name: str, write: Callable[[], bool]) -> bool:
+            with committed_lock:
+                if cancel_event.is_set():
+                    return False
+                if not write():
+                    return False
+                committed.append(name)
+                return True
+
         def _install_selected():
             messages: list[tuple[str, str]] = []
 
             def _collect(text: str, style: str = "") -> None:
                 messages.append((text, style))
 
-            count = install_mcp_servers(selected_entries, print_fn=_collect)
+            count = install_mcp_servers(
+                selected_entries,
+                print_fn=_collect,
+                cancel_event=cancel_event,
+                commit_gate=_commit_gate,
+            )
             return count, messages
 
-        count, messages = await asyncio.to_thread(_install_selected)
+        try:
+            count, messages = await asyncio.to_thread(_install_selected)
+        except asyncio.CancelledError:
+            cancel_event.set()
+            with committed_lock:
+                done = list(committed)
+            not_done = [name for name in requested if name not in done]
+            if not done:
+                ctx.ui.append_system(
+                    "Cancelled before any server was installed. Nothing will be "
+                    "written; any in-flight download finishes in the background "
+                    "and is safe to retry.",
+                    style="yellow",
+                )
+            else:
+                ctx.ui.append_system(
+                    f"Cancelled partway. Installed before the cancel: "
+                    f"{', '.join(done)}.",
+                    style="yellow",
+                )
+                if not_done:
+                    ctx.ui.append_system(
+                        f"Not installed: {', '.join(not_done)}.",
+                        style="dim",
+                    )
+            await ctx.ui.flush()
+            raise
         for text, style in messages:
             ctx.ui.append_system(text, style=style)
         if count:
