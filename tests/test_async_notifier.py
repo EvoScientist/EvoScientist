@@ -20,6 +20,14 @@ from EvoScientist.runtime import AgentRuntime
 from tests.fakes import FakeGraphGateway
 
 
+async def _watch_and_enqueue(*args, **kwargs):
+    """Direct-call shim: production enqueues via the watcher task's finally."""
+    notification = await async_notifier.watch_run_and_notify(*args, **kwargs)
+    if notification is not None:
+        async_notifier._enqueue(notification)
+    return notification
+
+
 def test_notification_dataclass_fields():
     n = async_notifier.AsyncTaskNotification(
         task_id="tid-1",
@@ -83,7 +91,7 @@ async def test_watcher_pushes_notification_on_stream_end():
     # runs.get is used to fetch terminal status when stream ends
     client.runs.get = AsyncMock(return_value={"status": "success"})
 
-    await async_notifier.watch_run_and_notify(client, "thr-1", "run-1", "writing-agent")
+    await _watch_and_enqueue(client, "thr-1", "run-1", "writing-agent")
 
     notifs = _drain_queue(async_notifier._notification_queue)
     assert len(notifs) == 1
@@ -104,7 +112,7 @@ async def test_watcher_pushes_error_status_on_stream_exception():
         return_value={"status": "error", "error": "network broken"}
     )
 
-    await async_notifier.watch_run_and_notify(client, "thr-4", "run-4", "agentZ")
+    await _watch_and_enqueue(client, "thr-4", "run-4", "agentZ")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "error"
@@ -877,7 +885,7 @@ async def test_watcher_reports_error_on_in_band_error_event():
         return_value={"status": "success"}
     )  # would mislead — should NOT be consulted
 
-    await async_notifier.watch_run_and_notify(client, "thrE", "rE", "agentE")
+    await _watch_and_enqueue(client, "thrE", "rE", "agentE")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "error"
@@ -897,7 +905,7 @@ async def test_watcher_clean_exit_with_runs_get_success_is_success():
     client.runs.join_stream = fake_stream
     client.runs.get = AsyncMock(return_value={"status": "success"})
 
-    await async_notifier.watch_run_and_notify(client, "thrS", "rS", "agentS")
+    await _watch_and_enqueue(client, "thrS", "rS", "agentS")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
@@ -925,7 +933,7 @@ async def test_watcher_clean_exit_with_runs_get_error_is_race_safe():
     client.runs.join_stream = fake_stream
     client.runs.get = AsyncMock(return_value={"status": "error"})
 
-    await async_notifier.watch_run_and_notify(client, "thrS", "rS", "agentS")
+    await _watch_and_enqueue(client, "thrS", "rS", "agentS")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
@@ -953,9 +961,7 @@ async def test_watcher_clean_exit_with_runs_get_running_drops_notification():
     client.runs.join_stream = fake_stream
     client.runs.get = AsyncMock(return_value={"status": "running"})
 
-    await async_notifier.watch_run_and_notify(
-        client, "thr-bug", "rB", "data-analysis-agent"
-    )
+    await _watch_and_enqueue(client, "thr-bug", "rB", "data-analysis-agent")
 
     # No notification should have been enqueued anywhere.
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
@@ -987,7 +993,7 @@ async def test_watcher_unknown_status_treated_as_non_terminal():
         side_effect=[{"status": "queued"}, {"status": "success"}]
     )
 
-    await async_notifier.watch_run_and_notify(client, "thrU", "rU", "agentU")
+    await _watch_and_enqueue(client, "thrU", "rU", "agentU")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
@@ -1014,7 +1020,7 @@ async def test_watcher_runs_get_persistent_failure_drops_notification(monkeypatc
 
     monkeypatch.setattr(async_notifier.asyncio, "sleep", _no_sleep)
 
-    await async_notifier.watch_run_and_notify(client, "thrG", "rG", "agentG")
+    await _watch_and_enqueue(client, "thrG", "rG", "agentG")
 
     # No notification — watcher exhausted the reconnect budget. Check every
     # queue routing could send to so a future routing change can't make this
@@ -1048,7 +1054,7 @@ async def test_watcher_runs_get_transient_failure_recovers(monkeypatch):
 
     monkeypatch.setattr(async_notifier.asyncio, "sleep", _no_sleep)
 
-    await async_notifier.watch_run_and_notify(client, "thrT", "rT", "agentT")
+    await _watch_and_enqueue(client, "thrT", "rT", "agentT")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
@@ -1070,7 +1076,7 @@ async def test_watcher_re_joins_stream_until_terminal_status():
         side_effect=[{"status": "running"}, {"status": "success"}]
     )
 
-    await async_notifier.watch_run_and_notify(client, "thrR", "rR", "agentR")
+    await _watch_and_enqueue(client, "thrR", "rR", "agentR")
 
     notif = async_notifier._notification_queue.get_nowait()
     assert notif.status == "success"
@@ -1120,7 +1126,7 @@ async def test_watcher_skips_notification_on_stream_fail_with_nonterminal_status
     client.runs.join_stream = fake_stream
     client.runs.get = AsyncMock(return_value={"status": "pending"})
 
-    await async_notifier.watch_run_and_notify(client, "thrP", "rP", "agentP")
+    await _watch_and_enqueue(client, "thrP", "rP", "agentP")
 
     # No notification should have been enqueued in any queue.
     assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
@@ -1136,6 +1142,50 @@ def _drain_one_queue_helper(q):
             items.append(q.get_nowait())
         except queue.Empty:
             return items
+
+
+async def test_replaced_watcher_never_enqueues_stale_result(monkeypatch):
+    """Even when a doomed watcher finishes despite cancellation (its resume
+    was queued before the cancel), the stale terminal notification must be
+    dropped — only the replacement watcher's result may land."""
+    from EvoScientist.runtime import AgentRuntime
+
+    rt = AgentRuntime()
+    monkeypatch.setattr(async_notifier, "runtime", rt)
+    started = threading.Event()
+
+    async def _watch_stub(
+        client, thread_id, run_id, agent_name, prompt="", origin_cli_thread_id=None
+    ):
+        if run_id == "run-old":
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass  # resume-beats-cancel: finish normally with a result
+        return async_notifier.AsyncTaskNotification(
+            task_id=thread_id,
+            agent_name=agent_name,
+            status="success",
+            received_at="now",
+            prompt=run_id,
+            origin_cli_thread_id=origin_cli_thread_id,
+        )
+
+    monkeypatch.setattr(async_notifier, "watch_run_and_notify", _watch_stub)
+    try:
+        old = async_notifier.spawn_watcher(None, "tid-1", "run-old", "agent")
+        assert started.wait(2.0)
+        new_handle = async_notifier.spawn_watcher(None, "tid-1", "run-new", "agent")
+        assert old.wait(2.0)
+        assert new_handle.wait(2.0)
+    finally:
+        rt.close()
+
+    drained: list[str] = []
+    while not async_notifier._unrouted_queue.empty():
+        drained.append(async_notifier._unrouted_queue.get_nowait().prompt)
+    assert drained == ["run-new"]
 
 
 def test_done_handle_does_not_pin_active_watchers():

@@ -128,6 +128,10 @@ class _WatcherHandle:
     def done(self) -> bool:
         return self._done.is_set()
 
+    def cancel_requested(self) -> bool:
+        with self._lock:
+            return self._cancel_requested
+
     def cancelled(self) -> bool:
         with self._lock:
             return self._cancel_requested and self._done.is_set()
@@ -286,7 +290,7 @@ async def watch_run_and_notify(
     agent_name: str,
     prompt: str = "",
     origin_cli_thread_id: str | None = None,
-) -> None:
+) -> AsyncTaskNotification | None:
     """Subscribe to a run's event stream; enqueue notification when it terminates.
 
     Status detection strategy (priority order):
@@ -408,7 +412,7 @@ async def watch_run_and_notify(
         # Loop exhausted without a break — should be unreachable because the
         # re-join branch returns explicitly when attempts are exhausted, but
         # guard against future refactors.
-        return
+        return None
 
     notification = AsyncTaskNotification(
         task_id=thread_id,
@@ -418,14 +422,7 @@ async def watch_run_and_notify(
         prompt=prompt,
         origin_cli_thread_id=origin_cli_thread_id,
     )
-    _enqueue(notification)
-    logger.info(
-        "Enqueued async notification: task=%s agent=%s status=%s origin_thread=%s",
-        thread_id,
-        agent_name,
-        status,
-        origin_cli_thread_id or "<unrouted>",
-    )
+    return notification
 
 
 def spawn_watcher(
@@ -454,8 +451,9 @@ def spawn_watcher(
         task = asyncio.current_task()
         assert task is not None
         handle.bind(task)
+        notification: AsyncTaskNotification | None = None
         try:
-            await watch_run_and_notify(
+            notification = await watch_run_and_notify(
                 client,
                 thread_id,
                 run_id,
@@ -465,6 +463,27 @@ def spawn_watcher(
             )
         finally:
             with _watchers_lock:
+                # Enqueue under the same lock that replacement/pre-cancel use
+                # to record kill intent: either this run genuinely finished
+                # first (notification lands) or the watcher was already being
+                # replaced/cancelled (stale result is dropped).
+                if notification is not None and not handle.cancel_requested():
+                    _enqueue(notification)
+                    logger.info(
+                        "Enqueued async notification: task=%s agent=%s "
+                        "status=%s origin_thread=%s",
+                        thread_id,
+                        agent_name,
+                        notification.status,
+                        origin_cli_thread_id or "<unrouted>",
+                    )
+                elif notification is not None:
+                    logger.info(
+                        "Dropped stale notification for replaced watcher: "
+                        "task=%s status=%s",
+                        thread_id,
+                        notification.status,
+                    )
                 # Keep mark-done and registry cleanup atomic with the
                 # post-spawn registration below. A very short watcher cannot
                 # otherwise finish between the caller's done() check and insert.

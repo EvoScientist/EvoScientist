@@ -110,9 +110,16 @@ class AgentRuntime:
             daemon=True,
         )
         self._thread.start()
+        # call_soon_threadsafe is valid before run_forever begins; the
+        # callback only executes once the loop is actually running, so this
+        # blocks start() until the loop can serve work.
+        ready = threading.Event()
+        loop.call_soon_threadsafe(ready.set)
         if not self._atexit_registered:
             atexit.register(self.close)
             self._atexit_registered = True
+        if not ready.wait(5.0):
+            raise RuntimeError("evosci-runtime loop failed to start")
         return loop
 
     def _run_loop(self, loop: asyncio.AbstractEventLoop) -> None:
