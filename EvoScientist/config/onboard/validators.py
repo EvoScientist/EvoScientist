@@ -322,7 +322,13 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
 
 
 def validate_requesty_key(api_key: str) -> tuple[bool, str]:
-    """Validate a Requesty API key via the authenticated /v1/models endpoint.
+    """Validate a Requesty API key via a minimal authenticated request.
+
+    Unlike OpenRouter, Requesty's ``/v1/models`` endpoint returns HTTP 200
+    (the public model catalog) even for a missing or invalid key, so it
+    cannot be used to check a key. Instead we issue a minimal authenticated
+    ``/v1/chat/completions`` request (``max_tokens=1``): a valid key returns
+    200, while an invalid key returns 403 ("Invalid authorization token").
 
     Returns:
         Tuple of (is_valid, message).
@@ -333,9 +339,17 @@ def validate_requesty_key(api_key: str) -> tuple[bool, str]:
     try:
         import httpx
 
-        resp = httpx.get(
-            "https://router.requesty.ai/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"},
+        resp = httpx.post(
+            "https://router.requesty.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
             timeout=10,
         )
         if resp.status_code == 200:

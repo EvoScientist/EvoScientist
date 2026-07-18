@@ -142,6 +142,15 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
+    # Requesty (aggregator — OpenAI-compatible router, provider/model IDs).
+    # Listed before OpenRouter so that for model names shared with OpenRouter
+    # or a native provider, Requesty does not override them (the dict below is
+    # last-entry-wins); Requesty is selected explicitly via get_models_for_provider.
+    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4-6", "requesty"),
+    ("claude-opus-4.8", "anthropic/claude-opus-4-8", "requesty"),
+    ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
+    ("grok-4.3", "xai/grok-4.3", "requesty"),
+    ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
@@ -169,13 +178,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
-    # Requesty (aggregator — OpenAI-compatible router, provider/model IDs)
-    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4-6", "requesty"),
-    ("claude-opus-4.8", "anthropic/claude-opus-4-8", "requesty"),
-    ("gpt-4o-mini", "openai/gpt-4o-mini", "requesty"),
-    ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
-    ("grok-4.3", "xai/grok-4.3", "requesty"),
-    ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
     ("glm-5.2", "glm-5.2", "zhipu-code"),
     ("glm-5.1", "glm-5.1", "zhipu-code"),
@@ -267,9 +269,17 @@ def _env_flag_disabled(name: str) -> bool:
     return value is not None and value.strip().lower() in _FALSEY_ENV_VALUES
 
 
-def _supports_openrouter_anthropic_prompt_cache(provider: str, model_id: str) -> bool:
-    """Return whether EvoScientist should declare OpenRouter Claude caching."""
-    return provider == "openrouter" and model_id.startswith(
+def _supports_openrouter_anthropic_prompt_cache(
+    provider: str | None, model_id: str
+) -> bool:
+    """Return whether EvoScientist should declare Claude caching for a router.
+
+    Both OpenRouter and Requesty are OpenAI-compatible routers that forward an
+    Anthropic-style ``cache_control`` declaration through to Claude models
+    addressed as ``anthropic/...``. Implicit caching is handled upstream for
+    most providers, but Claude prompt caching needs the explicit declaration.
+    """
+    return provider in ("openrouter", "requesty") and model_id.startswith(
         ("anthropic/", "~anthropic/")
     )
 
@@ -294,16 +304,25 @@ def _has_cache_control_override(kwargs: dict[str, Any]) -> bool:
 
 
 def _apply_openrouter_anthropic_prompt_cache(
-    provider: str,
+    provider: str | None,
     model_id: str,
     kwargs: dict[str, Any],
 ) -> None:
-    """Declare OpenRouter Claude prompt caching unless explicitly disabled.
+    """Declare router Claude prompt caching unless explicitly disabled.
 
-    OpenRouter already handles implicit caching for most providers, but Claude
-    prompt caching needs Anthropic-style cache-control declaration.
+    OpenRouter and Requesty both handle implicit caching for most providers,
+    but Claude prompt caching needs an Anthropic-style cache-control
+    declaration. Each router honours its own opt-out env flag
+    (``EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE`` /
+    ``EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE``).
     """
-    if _env_flag_disabled("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"):
+    if provider is None:
+        return
+    disable_flag = {
+        "openrouter": "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "requesty": "EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE",
+    }.get(provider)
+    if disable_flag is not None and _env_flag_disabled(disable_flag):
         return
     if not _supports_openrouter_anthropic_prompt_cache(provider, model_id):
         return
@@ -535,7 +554,10 @@ def get_chat_model(
             kwargs["base_url"] = base_url
 
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
-    _apply_openrouter_anthropic_prompt_cache(provider, model_id, kwargs)
+    # OpenAI-routed routers (e.g. Requesty) reassign ``provider`` to "openai"
+    # above, so use the original provider name to detect router-level caching.
+    _cache_provider = _original_provider or provider
+    _apply_openrouter_anthropic_prompt_cache(_cache_provider, model_id, kwargs)
 
     # User-level override for the OpenAI Responses API vs Chat Completions.
     # When "false", force Chat Completions and drop reasoning (which triggers

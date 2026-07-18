@@ -412,6 +412,52 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "rq-key-123"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_requesty_anthropic_prompt_cache_enabled_by_default(
+        self, mock_init, monkeypatch
+    ):
+        """Requesty Anthropic prompt caching should be opt-out."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("REQUESTY_API_KEY", "rq-key")
+        monkeypatch.delenv(
+            "EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE", raising=False
+        )
+
+        get_chat_model("anthropic/claude-sonnet-4-6", provider="requesty")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://router.requesty.ai/v1"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_requesty_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
+        """The opt-out flag should skip caching for Requesty Claude models."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("REQUESTY_API_KEY", "rq-key")
+        monkeypatch.setenv("EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE", "false")
+
+        get_chat_model("anthropic/claude-sonnet-4-6", provider="requesty")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_requesty_prompt_cache_skips_non_anthropic(self, mock_init, monkeypatch):
+        """Requesty caching should not touch non-Anthropic models."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("REQUESTY_API_KEY", "rq-key")
+        monkeypatch.delenv(
+            "EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE", raising=False
+        )
+
+        get_chat_model("openai/gpt-4o-mini", provider="requesty")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_uses_native_provider(self, mock_init, monkeypatch):
         """OpenRouter should use native 'openrouter' provider via init_chat_model."""
         mock_init.return_value = "mock_model"
