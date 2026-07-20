@@ -469,6 +469,60 @@ def test_close_cancels_and_settles_pending_work(runtime):
     assert not runtime.is_running
 
 
+def test_close_waits_for_default_executor_work():
+    runtime = AsyncRuntime()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def blocking_job() -> None:
+        started.set()
+        time.sleep(0.1)
+        finished.set()
+
+    runtime.spawn(
+        lambda: asyncio.to_thread(blocking_job),
+        name="executor-job",
+    )
+    assert started.wait(2)
+
+    runtime.close(timeout=2)
+
+    assert finished.is_set()
+    assert runtime._thread is not None
+    assert not runtime._thread.is_alive()
+
+
+def test_close_timeout_never_reports_success_while_executor_is_active():
+    runtime = AsyncRuntime()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_job() -> None:
+        started.set()
+        release.wait()
+        finished.set()
+
+    runtime.spawn(
+        lambda: asyncio.to_thread(blocking_job),
+        name="blocked-executor-job",
+    )
+    assert started.wait(2)
+
+    with pytest.raises(TimeoutError, match="did not settle"):
+        runtime.close(timeout=0.05)
+
+    assert not finished.is_set()
+    assert runtime._thread is not None
+    assert runtime._thread.is_alive()
+
+    release.set()
+    runtime.close(timeout=2)
+
+    assert finished.is_set()
+    assert not runtime._thread.is_alive()
+
+
 def test_close_is_idempotent_and_close_before_start_seals_runtime():
     runtime = AsyncRuntime()
     runtime.close()

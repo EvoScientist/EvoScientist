@@ -433,14 +433,21 @@ class AsyncRuntime:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        await asyncio.get_running_loop().shutdown_asyncgens()
+        loop = asyncio.get_running_loop()
+        await loop.shutdown_asyncgens()
+        # Cancelling a task awaiting ``to_thread`` / ``run_in_executor`` does
+        # not stop its underlying callable.  Do not report a clean runtime
+        # shutdown until the owned loop's default executor is actually idle.
+        await loop.shutdown_default_executor()
 
     def close(self, *, timeout: float = 5.0) -> None:
         """Seal intake, settle pending tasks, stop the loop, and join its thread.
 
         Shutdown is bounded by ``timeout``. Executor work cannot be preempted by
-        asyncio cancellation; a task that refuses to settle produces
-        :class:`TimeoutError` after the loop is stopped.
+        asyncio cancellation; if it outlives the deadline this call raises
+        :class:`TimeoutError` and the sealed runtime finishes shutting down in
+        the background. A later ``close()`` waits for that shutdown and only
+        succeeds after the executor is idle and the loop thread has stopped.
         """
         if timeout < 0:
             raise ValueError("timeout must not be negative")
@@ -497,29 +504,40 @@ class AsyncRuntime:
 
         drain_timed_out = False
         drain_error: BaseException | None = None
-        try:
-            if drain is not None:
-                try:
-                    drain.result(max(0.0, deadline - time.monotonic()))
-                except concurrent.futures.TimeoutError:
-                    drain_timed_out = True
-                    drain.cancel()
-                except BaseException as exc:
-                    drain_error = exc
-        finally:
+        if drain is not None:
             try:
-                loop.call_soon_threadsafe(loop.stop)
-            except RuntimeError:
-                pass
-            thread.join(max(0.0, deadline - time.monotonic()))
+                drain.result(max(0.0, deadline - time.monotonic()))
+            except concurrent.futures.TimeoutError:
+                drain_timed_out = True
+
+                def stop_after_drain(
+                    _done: concurrent.futures.Future[None],
+                ) -> None:
+                    try:
+                        loop.call_soon_threadsafe(loop.stop)
+                    except RuntimeError:
+                        pass
+
+                # Keep the loop alive while executor work finishes. This
+                # callback completes the already-sealed shutdown afterward.
+                drain.add_done_callback(stop_after_drain)
+            except BaseException as exc:
+                drain_error = exc
+
+        if drain_timed_out:
+            raise TimeoutError(
+                f"{self._thread_name} tasks did not settle within {timeout:.1f}s"
+            )
+
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            pass
+        thread.join(max(0.0, deadline - time.monotonic()))
 
         if thread.is_alive():
             raise TimeoutError(
                 f"{self._thread_name} did not stop within {timeout:.1f}s"
-            )
-        if drain_timed_out:
-            raise TimeoutError(
-                f"{self._thread_name} tasks did not settle within {timeout:.1f}s"
             )
         if drain_error is not None:
             raise drain_error
