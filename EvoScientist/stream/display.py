@@ -6,6 +6,7 @@ Also provides the shared console and formatter globals.
 """
 
 import asyncio
+import concurrent.futures
 import inspect
 import logging
 import os
@@ -23,7 +24,7 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
-from ..runtime import AsyncRuntime
+from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
 from .diff_format import build_edit_diff
 from .formatter import ToolResultFormatter
@@ -124,6 +125,11 @@ _stream_cancel_lock = threading.Lock()
 _stream_cancel_events: dict[str, threading.Event] = {
     _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
 }
+# The flag remains useful for cancellation requested before a stream starts and
+# at synchronous HITL boundaries.  Active Rich streams additionally register
+# their owned-runtime handle so a request can interrupt a blocked ``__anext__``
+# immediately instead of waiting for the model to emit another event.
+_stream_cancel_handles: dict[str, set[RuntimeHandle[Any]]] = {}
 # Backward-compat alias used by older tests and direct imports.
 _stream_cancel_event = _stream_cancel_events[_DEFAULT_STREAM_CANCEL_SCOPE]
 
@@ -147,11 +153,51 @@ def _get_stream_cancel_event(
 
 
 def request_stream_cancel(cancel_scope: str | None = None) -> bool:
-    """Signal a specific in-flight stream to terminate."""
-    event = _get_stream_cancel_event(cancel_scope, create=True)
-    already_requested = event.is_set()
-    event.set()
+    """Signal a stream and directly cancel any active owned coroutine."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        event = _stream_cancel_events.get(scope_key)
+        if event is None:
+            event = threading.Event()
+            _stream_cancel_events[scope_key] = event
+        already_requested = event.is_set()
+        event.set()
+        handles = tuple(_stream_cancel_handles.get(scope_key, ()))
+
+    # Future.cancel() is thread-safe.  Do it outside the registry lock because
+    # cancellation callbacks may settle quickly and unregister the handle.
+    for handle in handles:
+        handle.cancel()
     return not already_requested
+
+
+def _register_stream_cancel_handle(
+    cancel_scope: str | None,
+    handle: RuntimeHandle[Any],
+) -> None:
+    """Register an active owned task, honoring a pre-start stop request."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        handles = _stream_cancel_handles.setdefault(scope_key, set())
+        handles.add(handle)
+        event = _stream_cancel_events.get(scope_key)
+        cancel_now = event is not None and event.is_set()
+    if cancel_now:
+        handle.cancel()
+
+
+def _unregister_stream_cancel_handle(
+    cancel_scope: str | None,
+    handle: RuntimeHandle[Any],
+) -> None:
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        handles = _stream_cancel_handles.get(scope_key)
+        if handles is None:
+            return
+        handles.discard(handle)
+        if not handles:
+            _stream_cancel_handles.pop(scope_key, None)
 
 
 def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
@@ -1345,108 +1391,114 @@ def _run_streaming(
 
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
-        async for event in gateway.stream_events(
+        event_stream = gateway.stream_events(
             RunRequest(
                 message=message,
                 thread_id=thread_id,
                 metadata=metadata,
                 target=_graph_target_for_local_agent(agent, metadata),
             )
-        ):
-            if is_stream_cancel_requested(cancel_scope):
-                _stopped_response()
-                return
-            event_type = state.handle_event(event)
+        )
+        try:
+            async for event in event_stream:
+                if is_stream_cancel_requested(cancel_scope):
+                    _stopped_response()
+                    return
+                event_type = state.handle_event(event)
 
-            # Relay thinking to channel when transitioning away from
-            # thinking phase.  Uses content comparison so that replayed
-            # thinking after resume is skipped, but genuinely new
-            # thinking is still delivered.
-            if (
-                on_thinking
-                and event_type != "thinking"
-                and state.thinking_text
-                and len(state.thinking_text) >= _MIN_THINKING_LEN
-            ):
-                current = state.thinking_text.rstrip()
-                if current != _sent_thinking_text:
-                    on_thinking(current)
-                    _sent_thinking_text = current
+                # Relay thinking to channel when transitioning away from
+                # thinking phase.  Uses content comparison so that replayed
+                # thinking after resume is skipped, but genuinely new
+                # thinking is still delivered.
+                if (
+                    on_thinking
+                    and event_type != "thinking"
+                    and state.thinking_text
+                    and len(state.thinking_text) >= _MIN_THINKING_LEN
+                ):
+                    current = state.thinking_text.rstrip()
+                    if current != _sent_thinking_text:
+                        on_thinking(current)
+                        _sent_thinking_text = current
 
-            # Send todo list to channel on first write_todos tool_call
-            if (
-                on_todo
-                and not _todo_sent
-                and event_type == "tool_call"
-                and event.get("name") == "write_todos"
-                and state.todo_items
-            ):
-                on_todo(state.todo_items)
-                _todo_sent = True
+                # Send todo list to channel on first write_todos tool_call
+                if (
+                    on_todo
+                    and not _todo_sent
+                    and event_type == "tool_call"
+                    and event.get("name") == "write_todos"
+                    and state.todo_items
+                ):
+                    on_todo(state.todo_items)
+                    _todo_sent = True
 
-            # Send media file to channel when write_file succeeds
-            if (
-                on_file_write
-                and event_type == "tool_result"
-                and event.get("name") == "write_file"
-                and event.get("success")
-            ):
-                wf_path = ""
-                for tc in reversed(state.tool_calls):
-                    if tc.get("name") == "write_file":
-                        p = tc.get("args", {}).get("path", "")
-                        if p and p not in _media_sent:
-                            wf_path = p
-                            break
-                if wf_path:
-                    ext = os.path.splitext(wf_path)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = str(resolve_virtual_path(wf_path))
-                        if os.path.isfile(real_path):
-                            _media_sent.add(wf_path)
-                            on_file_write(real_path)
+                # Send media file to channel when write_file succeeds
+                if (
+                    on_file_write
+                    and event_type == "tool_result"
+                    and event.get("name") == "write_file"
+                    and event.get("success")
+                ):
+                    wf_path = ""
+                    for tc in reversed(state.tool_calls):
+                        if tc.get("name") == "write_file":
+                            p = tc.get("args", {}).get("path", "")
+                            if p and p not in _media_sent:
+                                wf_path = p
+                                break
+                    if wf_path:
+                        ext = os.path.splitext(wf_path)[1].lower()
+                        if ext in _MEDIA_EXTENSIONS:
+                            real_path = str(resolve_virtual_path(wf_path))
+                            if os.path.isfile(real_path):
+                                _media_sent.add(wf_path)
+                                on_file_write(real_path)
 
-            # Send media file to channel when read_file returns an image
-            if (
-                on_file_write
-                and event_type == "tool_result"
-                and event.get("name") == "read_file"
-                and event.get("success")
-            ):
-                rf_path = ""
-                for tc in reversed(state.tool_calls):
-                    if tc.get("name") == "read_file":
-                        p = tc.get("args", {}).get("file_path", "") or tc.get(
-                            "args", {}
-                        ).get("path", "")
-                        if p and p not in _media_sent:
-                            rf_path = p
-                            break
-                if rf_path:
-                    ext = os.path.splitext(rf_path)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = rf_path
-                        if not os.path.isfile(real_path):
-                            real_path = str(resolve_virtual_path(rf_path))
-                        if os.path.isfile(real_path):
-                            _media_sent.add(rf_path)
-                            on_file_write(real_path)
+                # Send media file to channel when read_file returns an image
+                if (
+                    on_file_write
+                    and event_type == "tool_result"
+                    and event.get("name") == "read_file"
+                    and event.get("success")
+                ):
+                    rf_path = ""
+                    for tc in reversed(state.tool_calls):
+                        if tc.get("name") == "read_file":
+                            p = tc.get("args", {}).get("file_path", "") or tc.get(
+                                "args", {}
+                            ).get("path", "")
+                            if p and p not in _media_sent:
+                                rf_path = p
+                                break
+                    if rf_path:
+                        ext = os.path.splitext(rf_path)[1].lower()
+                        if ext in _MEDIA_EXTENSIONS:
+                            real_path = rf_path
+                            if not os.path.isfile(real_path):
+                                real_path = str(resolve_virtual_path(rf_path))
+                            if os.path.isfile(real_path):
+                                _media_sent.add(rf_path)
+                                on_file_write(real_path)
 
-            if on_stream_event is not None:
-                callback_result = on_stream_event(event_type, state)
-                if inspect.isawaitable(callback_result):
-                    await callback_result
+                if on_stream_event is not None:
+                    callback_result = on_stream_event(event_type, state)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
 
-            live.update(
-                create_streaming_display(
-                    **state.get_display_args(),
-                    show_thinking=show_thinking,
-                    response_markdown=state.get_response_markdown(),
-                    status_footer=(
-                        status_footer_builder() if status_footer_builder else None
-                    ),
+                live.update(
+                    create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=(
+                            status_footer_builder() if status_footer_builder else None
+                        ),
+                    )
                 )
-            )
+        finally:
+            aclose = getattr(event_stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     try:
         if is_stream_cancel_requested(cancel_scope):
@@ -1526,7 +1578,22 @@ def _run_streaming(
                     live.update(final_display)
                     live.refresh()
 
-            runtime.run_sync(_run_with_refresh)
+            stream_handle: RuntimeHandle[None] | None = None
+
+            def _register(handle: RuntimeHandle[None]) -> None:
+                nonlocal stream_handle
+                stream_handle = handle
+                _register_stream_cancel_handle(cancel_scope, handle)
+
+            try:
+                runtime.run_sync(_run_with_refresh, on_submitted=_register)
+            except concurrent.futures.CancelledError:
+                if not is_stream_cancel_requested(cancel_scope):
+                    raise
+                _stopped_response()
+            finally:
+                if stream_handle is not None:
+                    _unregister_stream_cancel_handle(cancel_scope, stream_handle)
 
         # Flush any remaining thinking that wasn't sent during streaming.
         if on_thinking and state.thinking_text:

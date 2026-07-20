@@ -325,11 +325,14 @@ class AsyncRuntime:
         factory: AsyncFactory[T],
         *,
         timeout: float | None = None,
+        on_submitted: Callable[[RuntimeHandle[T]], None] | None = None,
     ) -> T:
         """Run async work from sync code, blocking for its result.
 
         Any thread already running an event loop must use :meth:`run_async`;
         blocking it would freeze that frontend even if it is not the owned loop.
+        ``on_submitted`` may retain the handle for cross-thread cancellation;
+        it runs after submission and before this method starts blocking.
         """
         try:
             asyncio.get_running_loop()
@@ -342,6 +345,13 @@ class AsyncRuntime:
             )
 
         handle = self.submit(factory)
+        if on_submitted is not None:
+            try:
+                on_submitted(handle)
+            except BaseException:
+                handle.cancel()
+                self._wait_for_cancellation(handle)
+                raise
         try:
             return handle.result(timeout)
         except BaseException:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +21,7 @@ def _clean_cancel_event():
         display_mod._stream_cancel_events[display_mod._DEFAULT_STREAM_CANCEL_SCOPE] = (
             display_mod._stream_cancel_event
         )
+        display_mod._stream_cancel_handles.clear()
     yield
     with display_mod._stream_cancel_lock:
         display_mod._stream_cancel_event.clear()
@@ -26,6 +29,7 @@ def _clean_cancel_event():
         display_mod._stream_cancel_events[display_mod._DEFAULT_STREAM_CANCEL_SCOPE] = (
             display_mod._stream_cancel_event
         )
+        display_mod._stream_cancel_handles.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +66,49 @@ def test_consume_breaks_on_cancel_event():
     # the generator before exit.
     assert len(seen_events) <= 5
     assert "[Stopped.]" in result
+
+
+def test_cancel_interrupts_stalled_stream_and_closes_it_in_consumer_task():
+    """Cancellation must not wait for a stalled gateway to yield again."""
+    cancel_scope = "scope:stalled"
+    stream_started = threading.Event()
+    stream_closed = threading.Event()
+    tasks: dict[str, asyncio.Task[object] | None] = {}
+    result: dict[str, str] = {}
+
+    async def _stalled_stream(_request):
+        tasks["consumer"] = asyncio.current_task()
+        stream_started.set()
+        try:
+            await asyncio.Event().wait()
+            if False:
+                yield {}
+        finally:
+            tasks["closer"] = asyncio.current_task()
+            stream_closed.set()
+
+    def _run() -> None:
+        result["response"] = display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            cancel_scope=cancel_scope,
+            gateway=FakeGraphGateway(stream=_stalled_stream),
+        )
+
+    worker = threading.Thread(target=_run)
+    worker.start()
+    assert stream_started.wait(2)
+
+    display_mod.request_stream_cancel(cancel_scope)
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert stream_closed.is_set()
+    assert tasks["closer"] is tasks["consumer"]
+    assert result["response"] == "[Stopped.]"
 
 
 # ---------------------------------------------------------------------------
