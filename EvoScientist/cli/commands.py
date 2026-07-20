@@ -26,6 +26,7 @@ from ..gateway import (
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
+from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import async_notifier
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
@@ -65,6 +66,23 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from ..config import EvoScientistConfig
+
+
+_ASYNC_RUNTIME_META_KEY = "evoscientist.async_runtime"
+
+
+def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
+    """Return the application-scoped runtime owned by this CLI invocation."""
+    root = ctx.find_root()
+    runtime = root.meta.get(_ASYNC_RUNTIME_META_KEY)
+    if runtime is None:
+        runtime = AsyncRuntime()
+        root.meta[_ASYNC_RUNTIME_META_KEY] = runtime
+        root.call_on_close(runtime.close)
+    if not isinstance(runtime, AsyncRuntime):  # pragma: no cover - defensive
+        raise RuntimeError("CLI async runtime context is invalid")
+    return runtime
+
 
 # =============================================================================
 # Onboard command
@@ -1954,20 +1972,16 @@ def sessions_callback(ctx: typer.Context):
     so the bare command is informative rather than silent.
     """
     if ctx.invoked_subcommand is None:
-        sessions_stats()
+        sessions_stats(ctx)
 
 
 @sessions_app.command("stats")
-def sessions_stats():
+def sessions_stats(ctx: typer.Context):
     """Show DB size, thread count, total checkpoints, top heaviest threads."""
-    import asyncio
-
     from ..sessions import db_stats
 
-    try:
-        stats = asyncio.get_event_loop().run_until_complete(db_stats())
-    except RuntimeError:
-        stats = asyncio.new_event_loop().run_until_complete(db_stats())
+    runtime = _get_cli_async_runtime(ctx)
+    stats = runtime.run_sync(db_stats)
 
     table = Table(title="EvoScientist sessions DB", show_header=True)
     table.add_column("Metric", style="cyan")
