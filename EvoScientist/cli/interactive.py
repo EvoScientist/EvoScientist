@@ -1432,6 +1432,7 @@ def cmd_interactive(
                             status_footer_builder=_stream_status_footer,
                             gateway=runtime_gateways.graph_gateway,
                             runtime=async_runtime,
+                            recover_on_cancel=True,
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1466,6 +1467,17 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
+                try:
+                    from ..middleware.code_interpreter import (
+                        aclose_code_interpreters,
+                    )
+
+                    await aclose_code_interpreters()
+                except Exception:
+                    _channel_logger.debug(
+                        "code interpreter cleanup failed",
+                        exc_info=True,
+                    )
                 # Best-effort: guard so a DB lookup failure here can't
                 # shadow the original exception exiting _async_main_loop.
                 current_tid = state.get("thread_id")

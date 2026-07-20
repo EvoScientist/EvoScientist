@@ -116,3 +116,44 @@ async def test_async_streaming_cancellation_stops_and_joins_worker(monkeypatch):
 
     assert finished.is_set()
     discard_stream_cancel(scope)
+
+
+async def test_async_streaming_can_recover_foreground_task_after_cancel(monkeypatch):
+    from EvoScientist.stream.display import (
+        discard_stream_cancel,
+        is_stream_cancel_requested,
+    )
+
+    scope = "test:async-renderer-recover"
+    started = threading.Event()
+
+    def fake_run_streaming(**kwargs):
+        started.set()
+        while not is_stream_cancel_requested(scope):
+            time.sleep(0.001)
+        return "[Stopped.]"
+
+    cleanup_called = False
+
+    async def fake_cleanup() -> None:
+        nonlocal cleanup_called
+        cleanup_called = True
+
+    monkeypatch.setattr(
+        "EvoScientist.cli.tui_runtime.run_streaming", fake_run_streaming
+    )
+    monkeypatch.setattr(
+        "EvoScientist.middleware.code_interpreter.aclose_code_interpreters",
+        fake_cleanup,
+    )
+
+    task = asyncio.create_task(
+        run_streaming_async(cancel_scope=scope, recover_on_cancel=True)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+
+    assert await task == "[Stopped.]"
+    assert cleanup_called
+    assert not task.cancelled()
+    discard_stream_cancel(scope)

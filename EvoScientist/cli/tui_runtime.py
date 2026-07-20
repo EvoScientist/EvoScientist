@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..runtime import AsyncRuntime
 
 DEFAULT_UI_BACKEND = "cli"
+STREAM_CANCEL_SETTLE_TIMEOUT = 5.0
 # "webui" launches the browser front-end instead of an in-terminal UI; it is
 # intercepted earlier (cli/commands.py:_main_callback) and never reaches the
 # streaming backends, but is listed here so normalize/resolve preserve it
@@ -135,12 +136,16 @@ def run_streaming(
         raise
 
 
-async def run_streaming_async(**kwargs: Any) -> str:
+async def run_streaming_async(
+    *,
+    recover_on_cancel: bool = False,
+    **kwargs: Any,
+) -> str:
     """Run the synchronous Rich renderer without blocking a frontend loop.
 
-    Cancellation requests the matching stream scope and then waits for the
-    worker to unwind, preventing an abandoned terminal renderer from
-    continuing after its owning frontend task exits.
+    Cancellation requests the matching stream scope and gives the worker a
+    bounded interval to unwind.  Foreground interactive turns may opt into
+    recovering the frontend task after cleanup so Ctrl+C returns to the prompt.
     """
     from ..stream.display import request_stream_cancel
 
@@ -150,7 +155,24 @@ async def run_streaming_async(**kwargs: Any) -> str:
     except asyncio.CancelledError:
         request_stream_cancel(kwargs.get("cancel_scope"))
         try:
-            await asyncio.shield(worker)
+            response = await asyncio.wait_for(
+                asyncio.shield(worker),
+                timeout=STREAM_CANCEL_SETTLE_TIMEOUT,
+            )
+        except TimeoutError:
+            # The owned task was directly cancelled by request_stream_cancel;
+            # reaching this bound means its cleanup is non-cooperative.  Do not
+            # leave the frontend waiting indefinitely or pretend it recovered.
+            raise asyncio.CancelledError from None
         except Exception:
-            pass
+            response = ""
+
+        from ..middleware.code_interpreter import aclose_code_interpreters
+
+        await aclose_code_interpreters()
+        if recover_on_cancel:
+            current = asyncio.current_task()
+            if current is not None and current.uncancel() > 0:
+                raise
+            return response
         raise
