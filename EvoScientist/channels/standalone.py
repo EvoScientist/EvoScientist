@@ -151,7 +151,7 @@ async def _async_main(
         await channel.stop()
         await manager.stop_health()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(
             sig,

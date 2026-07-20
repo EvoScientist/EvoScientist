@@ -1367,7 +1367,7 @@ def run_textual_interactive(
             Returns the ``ApprovalWidget.Decided`` message, or ``None`` on
             timeout / cancellation.
             """
-            self._approval_future = asyncio.get_event_loop().create_future()
+            self._approval_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._approval_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1413,7 +1413,7 @@ def run_textual_interactive(
 
             Returns the selected thread_id, or ``None`` on cancel/timeout.
             """
-            self._picker_future = asyncio.get_event_loop().create_future()
+            self._picker_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._picker_future, timeout=120)
             except (TimeoutError, asyncio.CancelledError):
@@ -1441,7 +1441,7 @@ def run_textual_interactive(
 
             Returns list of install sources, or None on cancel/timeout.
             """
-            self._browser_future = asyncio.get_event_loop().create_future()
+            self._browser_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._browser_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1468,7 +1468,7 @@ def run_textual_interactive(
 
         async def _wait_for_mcp_browse(self, browser_widget) -> list | None:
             """Wait for user to complete MCP server browsing."""
-            self._mcp_browser_future = asyncio.get_event_loop().create_future()
+            self._mcp_browser_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._mcp_browser_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1496,7 +1496,7 @@ def run_textual_interactive(
 
             Returns ``(name, provider)`` or ``None`` on cancel/timeout.
             """
-            self._model_picker_future = asyncio.get_event_loop().create_future()
+            self._model_picker_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._model_picker_future, timeout=120)
             except (TimeoutError, asyncio.CancelledError):

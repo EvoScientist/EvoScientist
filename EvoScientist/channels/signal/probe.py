@@ -22,7 +22,7 @@ async def validate_signal(
         return False, "phone_number is required"
 
     # Check signal-cli binary
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _check():
         try:
