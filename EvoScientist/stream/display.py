@@ -12,8 +12,9 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -22,6 +23,7 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
+from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
 from ..runtime import AsyncRuntime, RuntimeHandle
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
 
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+_T = TypeVar("_T")
 
 
 def _graph_target_for_local_agent(
@@ -168,6 +171,11 @@ def request_stream_cancel(cancel_scope: str | None = None) -> bool:
     # cancellation callbacks may settle quickly and unregister the handle.
     for handle in handles:
         handle.cancel()
+    # Sync tools may remain active in an executor after their awaiting graph
+    # task is cancelled, so stop their owned subprocesses explicitly.
+    from ..backends import cancel_active_shell_processes
+
+    cancel_active_shell_processes(event)
     return not already_requested
 
 
@@ -210,6 +218,25 @@ def clear_stream_cancel(cancel_scope: str | None = None) -> None:
     event = _get_stream_cancel_event(cancel_scope)
     if event is not None:
         event.clear()
+
+
+@contextmanager
+def bind_stream_cancel(cancel_scope: str | None = None) -> Iterator[None]:
+    """Bind a stream's stop event for cancellation-aware blocking tools."""
+    event = _get_stream_cancel_event(cancel_scope, create=True)
+    assert event is not None
+    with bind_cancel_event(event):
+        yield
+
+
+async def iter_with_stream_cancel(
+    events: AsyncIterator[_T],
+    cancel_scope: str | None = None,
+) -> AsyncIterator[_T]:
+    """Iterate graph events with the matching blocking-tool cancel context."""
+    with bind_stream_cancel(cancel_scope):
+        async for event in events:
+            yield event
 
 
 def discard_stream_cancel(cancel_scope: str | None = None) -> None:
@@ -1530,7 +1557,8 @@ def _run_streaming(
 
                 refresh_task = asyncio.ensure_future(_periodic_refresh())
                 try:
-                    await _consume()
+                    with bind_stream_cancel(cancel_scope):
+                        await _consume()
                 finally:
                     refresh_task.cancel()
                     try:

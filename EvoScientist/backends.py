@@ -4,7 +4,11 @@ import os
 import posixpath
 import re
 import shlex
+import signal
+import subprocess
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -22,6 +26,7 @@ from deepagents.backends.protocol import (
 )
 
 from . import paths
+from .cancellation import current_cancel_event
 
 # Reproduced here to dodge a circular import from .EvoScientist (the canonical
 # SKILLS_DIR constant).
@@ -66,6 +71,69 @@ BLOCKED_COMMANDS = [
     "shutdown",
     "reboot",
 ]
+
+
+_active_shell_processes_lock = threading.Lock()
+_active_shell_processes: dict[threading.Event, set[subprocess.Popen[str]]] = {}
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Force-stop a shell and its descendants without waiting for reaping."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            # CREATE_NEW_PROCESS_GROUP alone does not make terminate() recursive.
+            # taskkill is the native way to stop the complete descendant tree.
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def cancel_active_shell_processes(event: threading.Event) -> None:
+    """Terminate every active shell command associated with *event*."""
+    with _active_shell_processes_lock:
+        processes = tuple(_active_shell_processes.get(event, ()))
+    for process in processes:
+        _terminate_process_tree(process)
+
+
+def _register_shell_process(
+    event: threading.Event | None,
+    process: subprocess.Popen[str],
+) -> None:
+    if event is None:
+        return
+    with _active_shell_processes_lock:
+        _active_shell_processes.setdefault(event, set()).add(process)
+        cancel_now = event.is_set()
+    if cancel_now:
+        _terminate_process_tree(process)
+
+
+def _unregister_shell_process(
+    event: threading.Event | None,
+    process: subprocess.Popen[str],
+) -> None:
+    if event is None:
+        return
+    with _active_shell_processes_lock:
+        processes = _active_shell_processes.get(event)
+        if processes is None:
+            return
+        processes.discard(process)
+        if not processes:
+            _active_shell_processes.pop(event, None)
 
 
 def _shell_token_spans(command: str) -> list[dict[str, object]]:
@@ -1237,7 +1305,8 @@ class CustomSandboxBackend(LocalShellBackend):
         - Access to paths outside workspace
         - Dangerous system commands
 
-        Then delegates to LocalShellBackend.execute() for actual execution.
+        The validated command is handed to the owned process runner so
+        cancelling an agent turn can terminate the complete process tree.
         """
         command, error = prepare_sandbox_command(
             command, self.cwd, virtual_mode=self.virtual_mode, dangerous=self._dangerous
@@ -1245,8 +1314,126 @@ class CustomSandboxBackend(LocalShellBackend):
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)
 
-        # Delegate to parent for subprocess execution
-        response = super().execute(command, timeout=timeout)
+        return self._execute_prepared_command(command, timeout=timeout)
+
+    def _execute_prepared_command(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+    ) -> ExecuteResponse:
+        """Execute an already validated command in an owned process group."""
+
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if effective_timeout <= 0:
+            msg = f"timeout must be positive, got {effective_timeout}"
+            raise ValueError(msg)
+
+        cancel_event = current_cancel_event()
+        if cancel_event is not None and cancel_event.is_set():
+            return ExecuteResponse(
+                output="Command cancelled before execution.",
+                exit_code=130,
+                truncated=False,
+            )
+
+        process: subprocess.Popen[str] | None = None
+        timed_out = False
+        try:
+            process_options: dict[str, object] = {}
+            if os.name == "nt":
+                process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                process_options["start_new_session"] = True
+
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                env=self._env,
+                cwd=str(self.cwd),
+                **process_options,
+            )
+            _register_shell_process(cancel_event, process)
+            deadline = time.monotonic() + effective_timeout
+
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    _terminate_process_tree(process)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    _terminate_process_tree(process)
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=max(0.01, min(0.1, remaining)) if not timed_out else 1.0
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    if timed_out:
+                        _terminate_process_tree(process)
+                    continue
+
+            if timed_out:
+                if timeout is not None:
+                    timeout_output = (
+                        "Error: Command timed out after "
+                        f"{effective_timeout} seconds (custom timeout). The command "
+                        "may be stuck or require more time."
+                    )
+                else:
+                    timeout_output = (
+                        f"Error: Command timed out after {effective_timeout} seconds. "
+                        "For long-running commands, re-run using the timeout parameter."
+                    )
+                response = ExecuteResponse(
+                    output=timeout_output,
+                    exit_code=124,
+                    truncated=False,
+                )
+            elif cancel_event is not None and cancel_event.is_set():
+                response = ExecuteResponse(
+                    output="Command cancelled.",
+                    exit_code=130,
+                    truncated=False,
+                )
+            else:
+                output_parts = []
+                if stdout:
+                    output_parts.append(stdout)
+                if stderr:
+                    stderr_lines = stderr.strip().split("\n")
+                    output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
+                output = "\n".join(output_parts) if output_parts else "<no output>"
+
+                truncated = False
+                if len(output) > self._max_output_bytes:
+                    output = output[: self._max_output_bytes]
+                    output += (
+                        f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+                    )
+                    truncated = True
+                if process.returncode != 0:
+                    output = f"{output.rstrip()}\n\nExit code: {process.returncode}"
+                response = ExecuteResponse(
+                    output=output,
+                    exit_code=process.returncode,
+                    truncated=truncated,
+                )
+        except Exception as exc:
+            if process is not None:
+                _terminate_process_tree(process)
+            response = ExecuteResponse(
+                output=f"Error executing command ({type(exc).__name__}): {exc}",
+                exit_code=1,
+                truncated=False,
+            )
+        finally:
+            if process is not None:
+                _unregister_shell_process(cancel_event, process)
 
         # Enhance timeout errors with actionable recovery guidance
         if response.exit_code == 124:

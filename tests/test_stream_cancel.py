@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
+from EvoScientist.backends import CustomSandboxBackend
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeGraphGateway
 
@@ -109,6 +112,47 @@ def test_cancel_interrupts_stalled_stream_and_closes_it_in_consumer_task():
     assert stream_closed.is_set()
     assert tasks["closer"] is tasks["consumer"]
     assert result["response"] == "[Stopped.]"
+
+
+def test_cancel_terminates_active_shell_process_tree(tmp_path):
+    """A cancelled turn must not leave delayed shell side effects running."""
+    cancel_scope = "scope:shell"
+    backend = CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True)
+    started = tmp_path / "started.txt"
+    forbidden = tmp_path / "forbidden.txt"
+    result: dict[str, object] = {}
+
+    if sys.platform == "win32":
+        command = (
+            "echo started> started.txt & "
+            "ping -n 11 127.0.0.1 > nul & "
+            "echo late> forbidden.txt"
+        )
+    else:
+        command = "printf started > started.txt; sleep 10; printf late > forbidden.txt"
+
+    async def _events():
+        result["response"] = await asyncio.to_thread(backend.execute, command)
+        if False:
+            yield {}
+
+    async def _consume() -> None:
+        async for _ in display_mod.iter_with_stream_cancel(_events(), cancel_scope):
+            pass
+
+    worker = threading.Thread(target=lambda: asyncio.run(_consume()))
+    worker.start()
+    deadline = time.monotonic() + 3
+    while not started.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert started.read_text() == "started"
+
+    display_mod.request_stream_cancel(cancel_scope)
+    worker.join(3)
+
+    assert not worker.is_alive()
+    assert result["response"].exit_code == 130
+    assert not forbidden.exists()
 
 
 # ---------------------------------------------------------------------------

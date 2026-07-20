@@ -1140,7 +1140,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = f"mkdir -p {tmp_workspace}/test-sanitized && echo ok"
 
@@ -1161,7 +1163,9 @@ class TestExecuteCwdSanitization:
             captured["timeout"] = timeout
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = (
             "ssh -p 2222 -i key host "
@@ -1183,7 +1187,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         workspace = tmp_path / "ws"
         workspace.mkdir()
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
@@ -1213,7 +1219,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute("ssh -N host", timeout=30)
@@ -1256,7 +1264,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "ssh host 'echo $(cat /etc/passwd)'"
 
@@ -1274,7 +1284,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute(
@@ -1297,7 +1309,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute("ssh host 'pwd' > /tmp/out", timeout=30)
@@ -1314,7 +1328,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "echo __EVOSCI_SSH_REMOTE_0__ && ssh host 'ls /home'"
 
@@ -1356,7 +1372,9 @@ class TestExecuteCwdSanitization:
             captured["timeout"] = timeout
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "ssh host 'ls /home/username/project'"
 
@@ -1390,7 +1408,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute(f"{ssh_path} host ls /home/username/project", timeout=30)
@@ -1407,7 +1427,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "cat /data/file.txt && ssh host 'ls /home/username/project'"
 

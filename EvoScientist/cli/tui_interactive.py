@@ -1558,6 +1558,7 @@ def run_textual_interactive(
             """
             from ..stream.display import (
                 is_stream_cancel_requested,
+                iter_with_stream_cancel,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1784,16 +1785,21 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     _anchor_engaged = False
-                    async for event in graph_gateway.stream_events(
-                        RunRequest(
-                            message=_stream_input,
-                            thread_id=thread_id_override or self._conversation_tid,
-                            metadata=metadata,
-                            target=GraphTarget(
-                                local_graph=agent,
-                                workspace_dir=self._workspace_dir,
-                            ),
-                        )
+                    async for event in iter_with_stream_cancel(
+                        graph_gateway.stream_events(
+                            RunRequest(
+                                message=_stream_input,
+                                thread_id=(
+                                    thread_id_override or self._conversation_tid
+                                ),
+                                metadata=metadata,
+                                target=GraphTarget(
+                                    local_graph=agent,
+                                    workspace_dir=self._workspace_dir,
+                                ),
+                            )
+                        ),
+                        cancel_scope,
                     ):
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
@@ -2384,6 +2390,11 @@ def run_textual_interactive(
             cancelled = False
             response = ""
             try:
+                # Foreground turns share the legacy default scope. Reset it at
+                # the turn boundary; scoped channel stop requests remain armed.
+                from ..stream.display import clear_stream_cancel
+
+                clear_stream_cancel()
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
@@ -3254,6 +3265,9 @@ def run_textual_interactive(
                     self._queued_messages.clear()
                     self._render_queue_indicator()
                 if self._run_task is not None and not self._run_task.done():
+                    from ..stream.display import request_stream_cancel
+
+                    request_stream_cancel()
                     self._run_task.cancel()
                 else:
                     # Edge case: busy but no task — force reset
