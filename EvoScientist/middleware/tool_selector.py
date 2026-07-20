@@ -194,21 +194,15 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return self._build_selector(request).wrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception as exc:
+        except Exception:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
-            from ..llm.errors import ProviderStreamError
-            from .error_normalization import _is_provider_error
-
-            if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
-                # Auth / quota / connection failures on the selector's
-                # own model. Falling back to "use all tools" would hit
-                # the same provider anyway (same client, likely same
-                # credentials). Surface it instead so the user sees
-                # the real cause.
-                raise
-            # Structured-output shape / config failure — gracefully
-            # degrade to using all tools.
+            # The selector is an optimization, so every selector-only failure
+            # degrades to all tools. This includes provider failures: the
+            # downstream model-fallback middleware may replace the request's
+            # primary model, but it cannot replace this selector's fixed
+            # auxiliary model. Re-raising here would make a healthy fallback
+            # retry the same failed selector and never reach the model call.
             logger.debug("Tool selector failed, using all tools", exc_info=True)
             _end_selection()
             return handler(request)
@@ -249,15 +243,8 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await self._build_selector(request).awrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception as exc:
+        except Exception:
             if _handler_called:
-                raise
-            from ..llm.errors import ProviderStreamError
-            from .error_normalization import _is_provider_error
-
-            if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
-                # See sync path — surface provider errors, degrade only
-                # on shape / config failures.
                 raise
             logger.debug("Tool selector failed, using all tools", exc_info=True)
             _end_selection()

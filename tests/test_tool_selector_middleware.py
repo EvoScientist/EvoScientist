@@ -1,7 +1,7 @@
 """Tests for LLMToolSelectorMiddleware integration and the event-sink handoff."""
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest
@@ -228,6 +228,33 @@ def test_selector_failure_reports_ended_without_selection():
     assert ("started", 10) in sink.calls
     assert not any(c[0] == "selection" for c in sink.calls)
     assert sink.calls[-1] == ("ended",)
+
+
+@pytest.mark.asyncio
+async def test_selector_provider_failure_allows_downstream_model_fallback():
+    """A failed fixed selector model must not block a healthy request fallback."""
+    from EvoScientist.llm.errors import ProviderStreamError
+
+    mock_selector = MagicMock()
+    mock_selector.awrap_model_call = AsyncMock(
+        side_effect=ProviderStreamError(
+            provider="openrouter",
+            class_qualname="openrouter.ProviderError",
+            message="primary unavailable",
+        )
+    )
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=MagicMock(return_value=mock_selector),
+        threshold=5,
+    )
+    request = _request([_tool(f"t{i}") for i in range(10)])
+    response = MagicMock()
+    handler = AsyncMock(return_value=response)
+
+    result = await cond.awrap_model_call(request, handler)
+
+    assert result is response
+    handler.assert_awaited_once_with(request)
 
 
 def test_selector_failure_ends_before_sync_fallback_handler():
