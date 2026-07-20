@@ -91,6 +91,7 @@ def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
 
 @app.command()
 def onboard(
+    ctx: typer.Context,
     skip_validation: bool = typer.Option(
         False, "--skip-validation", help="Skip API key validation during setup"
     ),
@@ -219,7 +220,11 @@ def onboard(
             strict=non_interactive,
         )
 
-    _run_onboard_cli(skip_validation=skip_validation, prompter=prompter)
+    _run_onboard_cli(
+        skip_validation=skip_validation,
+        prompter=prompter,
+        runtime=_get_cli_async_runtime(ctx),
+    )
 
 
 # =============================================================================
@@ -261,11 +266,21 @@ def _run_onboard_cli(**kwargs: Any) -> None:
         raise typer.Exit(code=1) from exc
 
 
-def _configure_section(section: str, skip_validation: bool = False) -> None:
+def _configure_section(
+    section: str,
+    skip_validation: bool = False,
+    *,
+    runtime: AsyncRuntime | None = None,
+) -> None:
     """Run a single onboarding section, reusing the wizard's step logic."""
+    kwargs: dict[str, Any] = {
+        "skip_validation": skip_validation,
+        "only_sections": {section},
+    }
+    if runtime is not None:
+        kwargs["runtime"] = runtime
     _run_onboard_cli(
-        skip_validation=skip_validation,
-        only_sections={section},
+        **kwargs,
     )
 
 
@@ -343,9 +358,9 @@ def configure_latex():
 
 
 @configure_app.command("channels")
-def configure_channels():
+def configure_channels(ctx: typer.Context):
     """Re-run channels selection and per-channel configuration."""
-    _configure_section("channels")
+    _configure_section("channels", runtime=_get_cli_async_runtime(ctx))
 
 
 # =============================================================================
@@ -354,24 +369,17 @@ def configure_channels():
 
 
 @channel_app.command("setup")
-def channel_setup():
+def channel_setup(ctx: typer.Context):
     """Interactive channel configuration wizard.
 
     Guides you through selecting and configuring messaging channels
     (Telegram, Discord, or iMessage).
     """
-    import asyncio
-
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
     from ..config import load_config, save_config
     from ..config.onboard.channels import _step_channels
 
     config = load_config()
-    updates = _step_channels(config)
+    updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
     if updates:
         for key, value in updates.items():
             setattr(config, key, value)
