@@ -23,41 +23,50 @@ same runtime without blocking their frontend.
 - Shutdown seals intake, cancels and drains owned tasks, finalizes async
   generators, stops the loop, and joins its thread.
 
+## Ownership map
+
+| Owner | Lifetime | Boundary |
+| --- | --- | --- |
+| CLI `AsyncRuntime` | Created once by the CLI callback and closed after the selected mode exits | Application work submitted by synchronous commands, serve workers, MCP discovery, and Rich streaming |
+| Scoped `AsyncRuntime` | Created and closed by a bounded API only when no application owner was supplied | Library/onboarding calls that need a synchronous facade and return no loop-bound resources |
+| Prompt-toolkit and Textual frontend loops | Created at their synchronous UI entry points and closed when the frontend exits | Input, widgets, signals, and UI tasks; synchronous Rich rendering is offloaded before it submits work to `AsyncRuntime` |
+| Channel bus loop | Created by `_start_channels_bus_mode` and closed after channel manager and inbound-consumer shutdown | Channel transports and outbound delivery; cross-thread callers explicitly schedule onto this loop |
+| Feishu SDK loop | Created in the vendor WebSocket thread | Required by `lark-oapi`, which stores and drives its own loop |
+| Standalone channel/WeChat command loops | Created with `asyncio.run` at process or command entry points | Top-level execution only; never used as nested bridges |
+
+The application runtime is therefore shared, not universal. Framework and
+transport loops remain separate where thread affinity or lifecycle ownership
+requires it.
+
 ## Bridge inventory
 
 | Area | Current role | Treatment |
 | --- | --- | --- |
 | `cli/commands.py` session statistics | Bounded database query from a synchronous command | Migrated to the CLI-owned runtime |
 | `config/onboard/channels.py` login and credential probes | Bounded network calls returning plain data | Migrated to the CLI-owned runtime; direct callers get a runtime scoped to the channel step |
-| `mcp/client.py` synchronous tool loading | Uses `asyncio.run` and globally patches a running caller loop | Migrate next only after confirming the returned tool proxies do not retain loop-bound sessions, or keep their sessions owned by the runtime |
-| `middleware/model_fallback.py` synchronous fallback | Runs async fallback policy from synchronous middleware | Inject runtime through agent construction or separate the synchronous policy; do not add a singleton |
-| `channels/base.py` synchronous inbound conversion | Schedules on a known channel loop, otherwise creates a temporary loop | Preserve known-loop scheduling; replace the temporary fallback when channel runtime ownership is available at the adapter boundary |
-| `stream/display.py`, CLI single-shot, and Rich interactive paths | Rendering, refresh tasks, signals, and nested UI entry points | High risk; migrate after the bounded sites and test cancellation, terminal restoration, and interrupt behavior together |
-| `cli/commands.py` serve slash dispatch and notification drain | Temporary loops inside a signal-sensitive synchronous poll loop | High risk; serve is a consumer, not the runtime architecture. Address after its loop/resource ownership is explicit |
+| `mcp/client.py` synchronous tool loading | Discovers tool adapters on the supplied runtime; direct callers receive a scoped runtime | Migrated after confirming discovery does not retain a client session or discovery-loop resource |
+| `middleware/model_fallback.py` synchronous fallback | Traverses the fallback policy synchronously | Migrated without an async bridge; async middleware retains its native async traversal |
+| `channels/base.py` synchronous inbound conversion | Uses the supplied runtime; async callers await the native async method | Migrated; running-loop callers are rejected by the sync facade instead of being deadlocked |
+| `stream/display.py`, CLI single-shot, and Rich interactive paths | Rich owns synchronous terminal rendering while stream I/O runs on the application runtime | Migrated; frontend callers offload rendering, propagate cancellation, and wait for renderer cleanup |
+| `cli/commands.py` serve slash dispatch and notification drain | Serve workers share the CLI-owned runtime | Migrated without making serve the runtime owner |
 | `cli/channel.py` and `commands/channel_ui.py` | Dedicated channel-bus loop plus cross-thread scheduling onto that loop | Intentional owner/bridge. Keep until a channel lifecycle redesign can preserve transport affinity and shutdown ordering |
 | `cli/tui_interactive.py` | Textual owns the frontend loop | Intentional owner. Use `run_async` for application work, but do not move Textual's loop under `AsyncRuntime` |
 | `channels/standalone.py` and standalone WeChat login | Top-level async process/command entry points | `asyncio.run` is legitimate here; no nested bridge to remove |
 | `channels/feishu/channel.py` | SDK-specific thread and loop required by the vendor client | Preserve until that adapter is redesigned and tested against the SDK lifecycle |
-| Probe/RPC calls to `get_event_loop().run_in_executor()` or `.create_future()` from async functions | Operations on the already-running owner loop | Not sync/async bridges. They can independently move to `get_running_loop()` or `asyncio.to_thread()` |
+| Probe/RPC executor and future creation inside async functions | Operations on the already-running owner loop | Use `get_running_loop()`; these are not sync/async bridges |
 
 `asyncio.run_coroutine_threadsafe` is not automatically a defect: it is the
 correct primitive when code deliberately targets an already-owned foreign
 loop, such as the channel bus. The defect is hidden or accidental ownership,
 especially temporary loops and global re-entrancy patches.
 
-## Migration order
+## Remaining design boundary
 
-1. Continue with bounded operations that return plain values and own no
-   background resources.
-2. Handle MCP loading after establishing the lifetime of returned tool
-   clients and subprocesses.
-3. Inject runtime ownership into synchronous middleware and channel adapter
-   boundaries.
-4. Migrate display, Rich, single-shot, and serve paths with scenario tests for
-   signals, cancellation, terminal cleanup, and channel coexistence.
-5. Revisit whether the channel bus remains a separate explicit owner. A
-   separate loop is acceptable if its ownership and shutdown contract remain
-   deliberate.
+The channel bus remains a separate explicit owner. Folding it into the
+application runtime would be a channel lifecycle redesign, not bridge cleanup:
+transport affinity, startup reporting, outbound ordering, health services, and
+shutdown would all need to move together. Keeping that owner is consistent
+with the contract as long as all crossings target it explicitly.
 
 New code should not introduce `nest_asyncio`, a temporary
 `run_until_complete`, or a nested `asyncio.run`. Any exception should identify
