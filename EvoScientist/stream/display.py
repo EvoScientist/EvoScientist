@@ -23,6 +23,7 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
+from ..runtime import AsyncRuntime
 from .console import console
 from .diff_format import build_edit_diff
 from .formatter import ToolResultFormatter
@@ -1152,36 +1153,6 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Async-to-sync bridge
-# ---------------------------------------------------------------------------
-
-
-def _create_event_loop() -> asyncio.AbstractEventLoop:
-    """Create and set the event loop for asyncio.
-
-    Returns:
-        The created event loop.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop
-
-
-def _get_event_loop() -> asyncio.AbstractEventLoop:
-    """Get the event loop for asyncio.
-
-    If no event loop is set, a new one is created.
-
-    Returns:
-        The current event loop.
-    """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = _create_event_loop()
-    return loop
-
-
 def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
     """Interactive console Q&A for ask_user events.
 
@@ -1298,6 +1269,7 @@ def _run_streaming(
     cancel_scope: str | None = None,
     *,
     gateway: GraphGateway,
+    runtime: AsyncRuntime | None = None,
     _state: StreamState | None = None,
     _hitl_depth: int = 0,
     _media_sent: set[str] | None = None,
@@ -1329,6 +1301,31 @@ def _run_streaming(
     Returns:
         The final response text.
     """
+    if runtime is None:
+        with AsyncRuntime(thread_name="evosci-stream-runtime") as owned_runtime:
+            return _run_streaming(
+                agent=agent,
+                message=message,
+                thread_id=thread_id,
+                show_thinking=show_thinking,
+                interactive=interactive,
+                on_thinking=on_thinking,
+                on_todo=on_todo,
+                on_file_write=on_file_write,
+                on_stream_event=on_stream_event,
+                status_footer_builder=status_footer_builder,
+                metadata=metadata,
+                hitl_prompt_fn=hitl_prompt_fn,
+                ask_user_prompt_fn=ask_user_prompt_fn,
+                cancel_scope=cancel_scope,
+                gateway=gateway,
+                runtime=owned_runtime,
+                _state=_state,
+                _hitl_depth=_hitl_depth,
+                _media_sent=_media_sent,
+                _sent_thinking_text=_sent_thinking_text,
+            )
+
     # Scope-less callers keep the legacy single-event semantics. Scoped
     # callers use unique per-request scopes, so pre-start `/stop` must
     # remain armed until this run consumes it.
@@ -1469,32 +1466,6 @@ def _run_streaming(
                     ),
                 )
             )
-            # Determine how to run the async streaming coroutine.
-            # - In TUI mode (Textual), there's already a running event loop;
-            #   nest_asyncio is needed to allow run_until_complete inside it.
-            # - In serve/CLI mode, the main thread has no running loop;
-            #   use a fresh event loop directly (no nest_asyncio needed or wanted,
-            #   since nest_asyncio.apply() patches globally and breaks the bus
-            #   thread's event loop Task-context detection).
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-
-            if running_loop is not None:
-                # Already inside a running loop (TUI) — must use nest_asyncio.
-                # NOTE: nest_asyncio.apply() is global and irreversible within
-                # the process; avoid mixing TUI and serve modes in one process.
-                import nest_asyncio  # type: ignore[import-untyped]
-
-                nest_asyncio.apply()
-                loop = running_loop
-            else:
-                # No running loop (serve/CLI) — create a fresh one
-                try:
-                    loop = _get_event_loop()
-                except RuntimeError:
-                    loop = _create_event_loop()
 
             async def _run_with_refresh() -> None:
                 async def _periodic_refresh() -> None:
@@ -1555,7 +1526,7 @@ def _run_streaming(
                     live.update(final_display)
                     live.refresh()
 
-            loop.run_until_complete(_run_with_refresh())
+            runtime.run_sync(_run_with_refresh)
 
         # Flush any remaining thinking that wasn't sent during streaming.
         if on_thinking and state.thinking_text:
@@ -1594,6 +1565,7 @@ def _run_streaming(
                 ask_user_prompt_fn=ask_user_prompt_fn,
                 cancel_scope=cancel_scope,
                 gateway=gateway,
+                runtime=runtime,
                 _state=state,
                 _hitl_depth=_hitl_depth + 1,
                 _media_sent=_media_sent,
@@ -1633,6 +1605,7 @@ def _run_streaming(
                     ask_user_prompt_fn=ask_user_prompt_fn,
                     cancel_scope=cancel_scope,
                     gateway=gateway,
+                    runtime=runtime,
                     _state=state,
                     _hitl_depth=_hitl_depth + 1,
                     _media_sent=_media_sent,

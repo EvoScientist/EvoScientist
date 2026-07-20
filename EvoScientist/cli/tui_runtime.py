@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..gateway import GraphGateway
 from ..stream.console import console
 from .tui_backends import RichStreamingBackend, StreamingTUIBackend
+
+if TYPE_CHECKING:
+    from ..runtime import AsyncRuntime
 
 DEFAULT_UI_BACKEND = "cli"
 # "webui" launches the browser front-end instead of an in-terminal UI; it is
@@ -81,6 +85,7 @@ def run_streaming(
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
     cancel_scope: str | None = None,
     gateway: GraphGateway,
+    runtime: AsyncRuntime | None = None,
 ) -> str:
     """Run streaming with the selected backend."""
     backend = get_backend(ui_backend, warn_fallback=True)
@@ -101,6 +106,7 @@ def run_streaming(
             ask_user_prompt_fn=ask_user_prompt_fn,
             cancel_scope=cancel_scope,
             gateway=gateway,
+            runtime=runtime,
         )
     except RuntimeError:
         requested = normalize_ui_backend(ui_backend)
@@ -124,5 +130,27 @@ def run_streaming(
                 ask_user_prompt_fn=ask_user_prompt_fn,
                 cancel_scope=cancel_scope,
                 gateway=gateway,
+                runtime=runtime,
             )
+        raise
+
+
+async def run_streaming_async(**kwargs: Any) -> str:
+    """Run the synchronous Rich renderer without blocking a frontend loop.
+
+    Cancellation requests the matching stream scope and then waits for the
+    worker to unwind, preventing an abandoned terminal renderer from
+    continuing after its owning frontend task exits.
+    """
+    from ..stream.display import request_stream_cancel
+
+    worker = asyncio.create_task(asyncio.to_thread(run_streaming, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        request_stream_cancel(kwargs.get("cancel_scope"))
+        try:
+            await asyncio.shield(worker)
+        except Exception:
+            pass
         raise

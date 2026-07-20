@@ -1,11 +1,17 @@
 """Tests for UI backend runtime selection."""
 
+import asyncio
+import threading
+import time
 from dataclasses import dataclass
+
+import pytest
 
 from EvoScientist.cli.tui_runtime import (
     normalize_ui_backend,
     resolve_ui_backend,
     run_streaming,
+    run_streaming_async,
 )
 from tests.fakes import FakeGraphGateway
 
@@ -77,3 +83,36 @@ def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
         gateway=FakeGraphGateway(),
     )
     assert result == "fallback-ok"
+
+
+async def test_async_streaming_cancellation_stops_and_joins_worker(monkeypatch):
+    from EvoScientist.stream.display import (
+        discard_stream_cancel,
+        is_stream_cancel_requested,
+    )
+
+    scope = "test:async-renderer-cancel"
+    started = threading.Event()
+    finished = threading.Event()
+
+    def fake_run_streaming(**kwargs):
+        assert kwargs["cancel_scope"] == scope
+        started.set()
+        while not is_stream_cancel_requested(scope):
+            time.sleep(0.001)
+        finished.set()
+        return "stopped"
+
+    monkeypatch.setattr(
+        "EvoScientist.cli.tui_runtime.run_streaming", fake_run_streaming
+    )
+
+    task = asyncio.create_task(run_streaming_async(cancel_scope=scope))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished.is_set()
+    discard_stream_cancel(scope)

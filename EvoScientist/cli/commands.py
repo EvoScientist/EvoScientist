@@ -1298,6 +1298,7 @@ def _serve_process_message(
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
                 gateway=runtime_gateways.graph_gateway,
+                runtime=runtime_state.async_runtime,
             )
         except Exception as e:
             response = f"Error: {e}"
@@ -1352,6 +1353,7 @@ def _serve_drain_notifications(
                 interactive=True,
                 metadata=meta,
                 gateway=runtime_state.runtime_gateways.graph_gateway,
+                runtime=runtime_state.async_runtime,
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
@@ -2396,16 +2398,31 @@ def _main_callback(
                             # matching the text path (cmd_run does this itself).
                             _wait_for_memory_workers_before_exit()
                     else:
-                        cmd_run(
-                            agent,
-                            prompt,
-                            thread_id=tid,
-                            show_thinking=show_thinking,
-                            workspace_dir=workspace_dir,
-                            model=config.model,
-                            ui_backend=config.ui_backend,
-                            runtime_gateways=runtime_gateways,
+                        stream_worker = asyncio.create_task(
+                            asyncio.to_thread(
+                                cmd_run,
+                                agent,
+                                prompt,
+                                thread_id=tid,
+                                show_thinking=show_thinking,
+                                workspace_dir=workspace_dir,
+                                model=config.model,
+                                ui_backend=config.ui_backend,
+                                runtime_gateways=runtime_gateways,
+                                async_runtime=async_runtime,
+                            )
                         )
+                        try:
+                            await asyncio.shield(stream_worker)
+                        except asyncio.CancelledError:
+                            from ..stream.display import request_stream_cancel
+
+                            request_stream_cancel()
+                            try:
+                                await asyncio.shield(stream_worker)
+                            except Exception:
+                                pass
+                            raise
                 finally:
                     # Model failures can bypass middleware ``after_agent``
                     # hooks. Close any remaining QuickJS workers while this

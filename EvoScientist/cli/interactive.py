@@ -83,7 +83,7 @@ from .status_bar import (
     make_usage_status_snapshot,
 )
 from .tui_interactive import run_textual_interactive
-from .tui_runtime import resolve_ui_backend, run_streaming
+from .tui_runtime import resolve_ui_backend, run_streaming, run_streaming_async
 
 _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
 _MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
@@ -1053,7 +1053,7 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             msg.content, reset_streaming_text=True
                         )
-                        response = run_streaming(
+                        response = await run_streaming_async(
                             ui_backend=state["ui_backend"],
                             agent=ready_agent,
                             message=msg.content,
@@ -1070,6 +1070,7 @@ def cmd_interactive(
                             status_footer_builder=_stream_status_footer,
                             cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
                             gateway=runtime_gateways.graph_gateway,
+                            runtime=async_runtime,
                         )
                     except Exception as e:
                         response = f"Error: {e}"
@@ -1111,7 +1112,7 @@ def cmd_interactive(
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
                 ready_agent = await _await_agent_ready()
-                response = run_streaming(
+                response = await run_streaming_async(
                     ui_backend=state["ui_backend"],
                     agent=ready_agent,
                     message=text,
@@ -1127,6 +1128,7 @@ def cmd_interactive(
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
                     gateway=runtime_gateways.graph_gateway,
+                    runtime=async_runtime,
                 )
                 _notif_tid = target_thread_id or state["thread_id"]
                 if _ch_mod.publish_to_channel_origin(_notif_tid, response):
@@ -1418,7 +1420,7 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        run_streaming(
+                        await run_streaming_async(
                             ui_backend=state["ui_backend"],
                             agent=ready_agent,
                             message=message_to_send,
@@ -1429,6 +1431,7 @@ def cmd_interactive(
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
                             gateway=runtime_gateways.graph_gateway,
+                            runtime=async_runtime,
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1500,6 +1503,7 @@ def cmd_run(
     ui_backend: str = "cli",
     *,
     runtime_gateways: RuntimeGateways,
+    async_runtime: "AsyncRuntime | None" = None,
 ) -> None:
     """Single-shot execution with streaming display.
 
@@ -1533,6 +1537,7 @@ def cmd_run(
             interactive=False,
             metadata=meta,
             gateway=runtime_gateways.graph_gateway,
+            runtime=async_runtime,
         )
         _wait_for_memory_workers_before_exit()
     except Exception as e:
