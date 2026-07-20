@@ -1,6 +1,5 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
-import asyncio
 import logging
 import os
 import queue
@@ -901,6 +900,7 @@ class ServeRuntimeState:
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
     runtime_gateways: RuntimeGateways
+    async_runtime: AsyncRuntime | None = None
     resume_warning_thread_id: str | None = None
 
     def set_agent(
@@ -991,11 +991,13 @@ async def _apply_serve_resume_state(
                 "the effective configuration."
             )
         try:
-            new_agent = await asyncio.to_thread(
-                _load_agent,
-                workspace_dir=new_workspace,
-                config=effective_config,
-            )
+            load_kwargs: dict[str, Any] = {
+                "workspace_dir": new_workspace,
+                "config": effective_config,
+            }
+            if runtime_state.async_runtime is not None:
+                load_kwargs["runtime"] = runtime_state.async_runtime
+            new_agent = await asyncio.to_thread(_load_agent, **load_kwargs)
             await _sync_background_agent_server_workspace(
                 effective_config,
                 workspace_dir=new_workspace,
@@ -1222,31 +1224,17 @@ def _serve_process_message(
     # commands like ``/evoskills`` actually execute in serve mode instead
     # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
     # None because the agent is always loaded before the serve loop polls.
-    # Uses a dedicated event loop (not ``asyncio.run``) so SIGINT handling
-    # installed by ``serve()`` remains authoritative — ``asyncio.run``
-    # swaps ``signal.set_wakeup_fd`` and can leave it dangling on edge
-    # cases, which breaks Ctrl+C between messages.
-    # ``set_event_loop`` is needed because some downstream commands
-    # (e.g. ``/install-mcp``) call ``asyncio.get_event_loop()``, which
-    # raises ``RuntimeError`` on Python 3.12+ when the thread has no
-    # current loop set.  The prior loop (often ``None``) is restored in
-    # the ``finally`` below so subsequent messages start from a clean
-    # slate.  Loop creation lives inside the try so an exception between
-    # creation and ``set_event_loop`` still closes the loop.
+    # Slash commands run on the application-owned runtime. The main thread
+    # remains the signal owner while command coroutines share one stable loop.
     try:
-        _prev_loop: asyncio.AbstractEventLoop | None
-        try:
-            _prev_loop = asyncio.get_event_loop_policy().get_event_loop()
-        except RuntimeError:
-            _prev_loop = None
-        _slash_loop: asyncio.AbstractEventLoop | None = None
         _slash_handled = False
         _slash_error: Exception | None = None
         try:
-            _slash_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_slash_loop)
-            _slash_handled = _slash_loop.run_until_complete(
-                dispatch_channel_slash_command(
+            async_runtime = runtime_state.async_runtime
+            if async_runtime is None:
+                raise RuntimeError("Serve async runtime is unavailable")
+            _slash_handled = async_runtime.run_sync(
+                lambda: dispatch_channel_slash_command(
                     msg,
                     agent=runtime_state.agent,
                     thread_id=runtime_state.thread_id,
@@ -1271,15 +1259,12 @@ def _serve_process_message(
                     ),
                     channel_runtime=channel_runtime,
                     graph_gateway=runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
             )
         except Exception as exc:
             _slash_error = exc
             _serve_logger.exception("Slash dispatch failed for %s", msg.channel_type)
-        finally:
-            if _slash_loop is not None:
-                _slash_loop.close()
-            asyncio.set_event_loop(_prev_loop)
 
         if _slash_error is not None:
             _set_channel_response(msg.msg_id, f"Command error: {_slash_error}")
@@ -1404,19 +1389,18 @@ def _serve_drain_notifications(
             current_thread_id=runtime_state.thread_id,
         )
 
-    _notif_loop: _aio.AbstractEventLoop | None = None
     try:
-        _notif_loop = _aio.new_event_loop()
-        _notif_loop.run_until_complete(_consume())
+        async_runtime = runtime_state.async_runtime
+        if async_runtime is None:
+            raise RuntimeError("Serve async runtime is unavailable")
+        async_runtime.run_sync(_consume)
     except Exception as exc:
         _serve_logger.warning("Notification drain failed: %s", exc)
-    finally:
-        if _notif_loop is not None:
-            _notif_loop.close()
 
 
 @app.command()
 def serve(
+    ctx: typer.Context,
     no_thinking: bool = typer.Option(
         False, "--no-thinking", help="Disable thinking relay to channels"
     ),
@@ -1471,6 +1455,7 @@ def serve(
         cli_overrides["log_level"] = "DEBUG"
         cli_overrides["channel_debug_tracing"] = True
     config = get_effective_config(cli_overrides)
+    async_runtime = _get_cli_async_runtime(ctx)
     if debug:
         os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
         os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
@@ -1521,11 +1506,13 @@ def serve(
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
     console.print("[dim]Loading agent...[/dim]")
-    agent = _load_agent(workspace_dir=ws, config=config)
+    agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
 
     runtime_gateways = create_runtime_gateways()
-    tid = asyncio.run(
-        runtime_gateways.graph_gateway.create_thread(GraphTarget(workspace_dir=ws))
+    tid = async_runtime.run_sync(
+        lambda: runtime_gateways.graph_gateway.create_thread(
+            GraphTarget(workspace_dir=ws)
+        )
     )
 
     # Mutable runtime shared with _serve_process_message so channel slash
@@ -1537,6 +1524,7 @@ def serve(
         workspace_dir=ws,
         config=config,
         runtime_gateways=runtime_gateways,
+        async_runtime=async_runtime,
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
@@ -2130,6 +2118,8 @@ def _main_callback(
     if ctx.invoked_subcommand is not None:
         return
 
+    async_runtime = _get_cli_async_runtime(ctx)
+
     # Load and apply configuration
     from ..config import apply_config_to_env, get_effective_config
 
@@ -2372,10 +2362,12 @@ def _main_callback(
                 else:
                     tid = await graph_gateway.create_thread()
                 console.print("[dim]Loading agent...[/dim]")
-                agent = _load_agent(
+                agent = await asyncio.to_thread(
+                    _load_agent,
                     workspace_dir=workspace_dir,
                     checkpointer=checkpointer,
                     config=config,
+                    runtime=async_runtime,
                 )
                 try:
                     if effective_output_format == "stream-json":
@@ -2429,10 +2421,7 @@ def _main_callback(
                     except Exception:
                         pass
 
-        import nest_asyncio
-
-        nest_asyncio.apply()
-        asyncio.get_event_loop().run_until_complete(_single_shot())
+        async_runtime.run_sync(_single_shot)
     else:
         from .interactive import cmd_interactive
 
@@ -2449,6 +2438,7 @@ def _main_callback(
             thread_id=thread_id,
             ui_backend=config.ui_backend,
             config=config,
+            async_runtime=async_runtime,
         )
 
 

@@ -78,6 +78,9 @@ from .status_bar import (
     make_usage_status_snapshot,
 )
 
+if TYPE_CHECKING:
+    from ..runtime import AsyncRuntime
+
 _channel_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -483,6 +486,7 @@ def run_textual_interactive(
     load_agent: Callable[..., Any],
     create_session_workspace: Callable[[str | None], str],
     config: Any | None = None,
+    async_runtime: AsyncRuntime | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop."""
     if config is None:
@@ -2547,6 +2551,7 @@ def run_textual_interactive(
                     on_cmd_completed=self._on_channel_cmd_completed,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
                 if _slash_handled:
                     # A channel-issued /new or /resume rotates the thread in
@@ -3091,6 +3096,7 @@ def run_textual_interactive(
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
 
                 if await cmd_manager.execute(command, ctx):
@@ -3623,12 +3629,4 @@ def run_textual_interactive(
                 except Exception:
                     _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
-    import nest_asyncio  # type: ignore[import-untyped]
-
-    nest_asyncio.apply()
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(_amain())
+    asyncio.run(_amain())

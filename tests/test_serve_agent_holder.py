@@ -27,6 +27,7 @@ from EvoScientist.cli.commands import (
 from EvoScientist.commands.base import ChannelRuntime
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.gateway import RuntimeGateways, ThreadStore
+from EvoScientist.runtime import AsyncRuntime
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -536,6 +537,7 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
     )
 
     with (
+        AsyncRuntime(thread_name="test-serve-runtime") as async_runtime,
         patch(
             "EvoScientist.cli.commands.dispatch_channel_slash_command",
             new=AsyncMock(side_effect=RuntimeError("slash broke")),
@@ -543,6 +545,7 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
         patch("EvoScientist.cli.commands._set_channel_response") as mock_set_resp,
         patch("EvoScientist.cli.tui_runtime.run_streaming") as mock_run_streaming,
     ):
+        state.async_runtime = async_runtime
         _register_channel_request(msg)
         _serve_process_message(
             msg,
@@ -588,6 +591,7 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
         return {}
 
     with (
+        AsyncRuntime(thread_name="test-serve-runtime") as async_runtime,
         patch(
             "EvoScientist.cli.commands.dispatch_channel_slash_command",
             new=AsyncMock(side_effect=_fake_dispatch),
@@ -598,6 +602,7 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
         ),
         patch("EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"),
     ):
+        state.async_runtime = async_runtime
         _register_channel_request(msg)
         _serve_process_message(
             msg,

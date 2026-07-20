@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from EvoScientist.cli import commands
 from EvoScientist.config import MemoryObservationWriter
+from EvoScientist.runtime import AsyncRuntime
 
 
 def _make_config(
@@ -67,8 +68,11 @@ def _run_serve_once(
     def _fake_ensure_dirs():
         order.append(("ensure_dirs", None))
 
-    def _fake_load_agent(workspace_dir=None, checkpointer=None, config=None):
+    def _fake_load_agent(
+        workspace_dir=None, checkpointer=None, config=None, *, runtime=None
+    ):
         captured["workspace_dir"] = workspace_dir
+        captured["async_runtime"] = runtime
         return object()
 
     def _fake_start_channels_bus_mode(cfg, agent, thread_id, *, send_thinking=None):
@@ -106,15 +110,18 @@ def _run_serve_once(
     if cwd is not None:
         monkeypatch.setattr(commands.os, "getcwd", lambda: cwd)
 
-    commands.serve(
-        no_thinking=no_thinking,
-        workdir=workdir,
-        debug=debug,
-        auto_approve=auto_approve,
-        auto_mode=auto_mode,
-        ask_user=ask_user,
-        dangerous=dangerous,
-    )
+    with AsyncRuntime(thread_name="test-serve-runtime") as runtime:
+        monkeypatch.setattr(commands, "_get_cli_async_runtime", lambda _ctx: runtime)
+        commands.serve(
+            object(),
+            no_thinking=no_thinking,
+            workdir=workdir,
+            debug=debug,
+            auto_approve=auto_approve,
+            auto_mode=auto_mode,
+            ask_user=ask_user,
+            dangerous=dangerous,
+        )
     return order, captured
 
 

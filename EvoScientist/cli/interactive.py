@@ -97,6 +97,8 @@ _background_tasks: set[asyncio.Task] = set()
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..runtime import AsyncRuntime
+
 
 @dataclass(frozen=True, slots=True)
 class _StartupSession:
@@ -340,6 +342,7 @@ def cmd_interactive(
     thread_id: str | None = None,
     ui_backend: str = "cli",
     config=None,
+    async_runtime: "AsyncRuntime | None" = None,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -358,15 +361,15 @@ def cmd_interactive(
         thread_id: Optional thread ID to resume a previous session
         ui_backend: UI backend ('cli' or 'tui')
     """
-    import nest_asyncio
-
-    nest_asyncio.apply()
-
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         from functools import partial
 
-        load_agent = partial(_load_agent, config=config)
+        load_agent = partial(
+            _load_agent,
+            config=config,
+            runtime=async_runtime,
+        )
         run_textual_interactive(
             show_thinking=show_thinking,
             channel_send_thinking=channel_send_thinking,
@@ -380,6 +383,7 @@ def cmd_interactive(
             load_agent=load_agent,
             create_session_workspace=_create_session_workspace,
             config=config,
+            async_runtime=async_runtime,
         )
         return
 
@@ -497,6 +501,7 @@ def cmd_interactive(
             checkpointer=checkpointer,
             config=config,
             events=event_sink,
+            runtime=async_runtime,
         )
 
     async def _await_agent_ready() -> "CompiledStateGraph":
@@ -1029,6 +1034,7 @@ def cmd_interactive(
                         on_cmd_completed=_on_channel_cmd_completed,
                         channel_runtime=channel_runtime,
                         graph_gateway=runtime_gateways.graph_gateway,
+                        async_runtime=async_runtime,
                     )
                     if _slash_handled:
                         # A channel-issued /new or /resume rotates the thread
@@ -1329,6 +1335,7 @@ def cmd_interactive(
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                                 channel_runtime=channel_runtime,
                                 graph_gateway=runtime_gateways.graph_gateway,
+                                async_runtime=async_runtime,
                             )
                             await cmd_manager.execute(user_input, ctx)
 
