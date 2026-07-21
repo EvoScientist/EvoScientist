@@ -30,6 +30,7 @@ from .patches import (
     _is_ccproxy_codex,
     _patch_ccproxy_system_to_developer,
     _patch_openai_compat_content,
+    _patch_openrouter_sse_stream_leak,
     _patch_openrouter_strip_responses_reasoning,
     _patch_openrouter_structured_output,
 )
@@ -666,6 +667,7 @@ def get_chat_model(
             kwargs.setdefault("app_categories", _app_categories)
         _patch_openrouter_strip_responses_reasoning()
         _patch_openrouter_structured_output()
+        _patch_openrouter_sse_stream_leak()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:

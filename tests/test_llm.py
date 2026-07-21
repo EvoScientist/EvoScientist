@@ -2483,6 +2483,255 @@ class TestPatchOpenrouterStripResponsesReasoning:
             self._restore(patches, mod, orig, orig_flag)
 
 
+class TestPatchOpenrouterSseStreamLeak:
+    """The OpenRouter SDK abandons ``response.aiter_bytes()`` when its SSE
+    parser returns at the ``[DONE]`` sentinel; the suspended generator is later
+    finalized by GC on a thread with no asyncgen hook, which is what produces
+    the ``Exception ignored in:`` wall at CLI exit (#372).
+    """
+
+    SSE_BODY = (
+        b'data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}\n\n'
+        b"data: [DONE]\n\n"
+        b'data: {"id":"2","choices":[{"delta":{"content":"never"}}]}\n\n'
+    )
+
+    def _apply(self):
+        import openrouter.utils.eventstreaming as mod
+
+        import EvoScientist.llm.patches as patches
+
+        orig = mod.stream_events_async
+        orig_flag = patches._openrouter_sse_leak_patched
+        patches._openrouter_sse_leak_patched = False
+        patches._patch_openrouter_sse_stream_leak()
+        return patches, mod, orig, orig_flag
+
+    @staticmethod
+    def _restore(patches, mod, orig, orig_flag):
+        mod.stream_events_async = orig
+        patches._openrouter_sse_leak_patched = orig_flag
+
+    @staticmethod
+    async def _drain(mod, response):
+        events = []
+        async for event in mod.stream_events_async(
+            response, lambda raw: raw, "[DONE]", data_required=True
+        ):
+            events.append(event)
+        return events
+
+    async def test_byte_iterator_is_closed_after_sentinel(self):
+        import httpx
+
+        patches, mod, orig, orig_flag = self._apply()
+        closed = []
+
+        async def handler(request):
+            return httpx.Response(200, content=self.SSE_BODY)
+
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                async with client.stream("GET", "http://t/x") as response:
+                    real_aiter_bytes = response.aiter_bytes
+
+                    def tracking(*args, **kwargs):
+                        iterator = real_aiter_bytes(*args, **kwargs)
+                        closed.append(iterator)
+                        return iterator
+
+                    response.aiter_bytes = tracking
+                    await self._drain(mod, response)
+
+            assert closed, "SDK never asked for a byte iterator"
+            # An exhausted-or-closed async generator has no frame left.
+            assert all(it.ag_frame is None for it in closed)
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    async def test_events_before_sentinel_still_delivered(self):
+        import httpx
+
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+
+            async def handler(request):
+                return httpx.Response(200, content=self.SSE_BODY)
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                async with client.stream("GET", "http://t/x") as response:
+                    events = await self._drain(mod, response)
+
+            assert len(events) == 1
+            assert "hi" in events[0]
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    async def test_preexisting_aiter_bytes_override_is_restored(self):
+        import httpx
+
+        patches, mod, orig, orig_flag = self._apply()
+        try:
+
+            async def handler(request):
+                return httpx.Response(200, content=self.SSE_BODY)
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                async with client.stream("GET", "http://t/x") as response:
+                    override = response.aiter_bytes
+                    response.aiter_bytes = override  # instance-level override
+                    await self._drain(mod, response)
+                    assert response.__dict__.get("aiter_bytes") is override
+
+                async with client.stream("GET", "http://t/y") as response:
+                    await self._drain(mod, response)  # no pre-existing override
+                    assert "aiter_bytes" not in response.__dict__
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+    async def test_early_abandonment_closes_parser_and_response(self):
+        import httpx
+        import openrouter.utils.eventstreaming as mod
+
+        import EvoScientist.llm.patches as patches
+
+        # Spy on the SDK parser factory so the test holds the `inner`
+        # generator the patch wraps — the leak on the abandonment path.
+        sdk_orig = mod.stream_events_async
+        orig_flag = patches._openrouter_sse_leak_patched
+        inners = []
+
+        def spy(response, decoder, sentinel=None, data_required=True):
+            gen = sdk_orig(response, decoder, sentinel, data_required=data_required)
+            inners.append(gen)
+            return gen
+
+        mod.stream_events_async = spy
+        patches._openrouter_sse_leak_patched = False
+        patches._patch_openrouter_sse_stream_leak()
+        try:
+
+            async def handler(request):
+                return httpx.Response(200, content=self.SSE_BODY)
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                async with client.stream("GET", "http://t/x") as response:
+                    gen = mod.stream_events_async(
+                        response, lambda raw: raw, "[DONE]", data_required=True
+                    )
+                    async for _event in gen:
+                        break  # abandon mid-stream, before the sentinel
+                    await gen.aclose()
+
+                    # The parser generator must not be left suspended for GC;
+                    # its finally also closed the response.
+                    assert inners, "spy never saw the SDK parser generator"
+                    assert all(g.ag_frame is None for g in inners)
+                    assert response.is_closed
+        finally:
+            mod.stream_events_async = sdk_orig
+            patches._openrouter_sse_leak_patched = orig_flag
+
+    async def test_cancelled_cleanup_still_closes_iterators_and_reraises(self):
+        import asyncio
+
+        import httpx
+        import openrouter.utils.eventstreaming as mod
+
+        import EvoScientist.llm.patches as patches
+
+        # A parser whose aclose() raises CancelledError, standing in for a
+        # task cancellation landing mid-cleanup: later closables must still
+        # be closed and the cancellation re-raised, not swallowed.
+        sdk_orig = mod.stream_events_async
+        orig_flag = patches._openrouter_sse_leak_patched
+
+        def cancelling_parser(response, decoder, sentinel=None, data_required=True):
+            async def gen():
+                byte_iter = response.aiter_bytes()
+                try:
+                    async for _chunk in byte_iter:
+                        yield "event"
+                finally:
+                    raise asyncio.CancelledError()
+
+            return gen()
+
+        mod.stream_events_async = cancelling_parser
+        patches._openrouter_sse_leak_patched = False
+        patches._patch_openrouter_sse_stream_leak()
+        seen = []
+        try:
+
+            async def handler(request):
+                return httpx.Response(200, content=self.SSE_BODY)
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                async with client.stream("GET", "http://t/x") as response:
+                    real_aiter_bytes = response.aiter_bytes
+
+                    def tracking(*args, **kwargs):
+                        iterator = real_aiter_bytes(*args, **kwargs)
+                        seen.append(iterator)
+                        return iterator
+
+                    response.aiter_bytes = tracking
+                    gen = mod.stream_events_async(
+                        response, lambda raw: raw, "[DONE]", data_required=True
+                    )
+                    async for _event in gen:
+                        break
+                    with pytest.raises(asyncio.CancelledError):
+                        await gen.aclose()
+
+                    # Cancellation re-raised, yet the byte iterator was still
+                    # closed and the pre-existing override restored.
+                    assert seen, "parser never asked for a byte iterator"
+                    assert all(it.ag_frame is None for it in seen)
+                    assert response.__dict__.get("aiter_bytes") is tracking
+        finally:
+            mod.stream_events_async = sdk_orig
+            patches._openrouter_sse_leak_patched = orig_flag
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_get_chat_model_wires_patch(self, mock_init, monkeypatch):
+        import openrouter.utils.eventstreaming as mod
+
+        import EvoScientist.llm.patches as patches
+
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        # Reset the flag and pin the current function so the re-application
+        # this test triggers is undone on teardown.
+        monkeypatch.setattr(patches, "_openrouter_sse_leak_patched", False)
+        monkeypatch.setattr(mod, "stream_events_async", mod.stream_events_async)
+
+        get_chat_model("x-ai/grok-4.3", provider="openrouter")
+
+        assert patches._openrouter_sse_leak_patched is True
+
+    def test_patch_is_idempotent(self):
+        import openrouter.utils.eventstreaming as mod
+
+        patches, _mod, orig, orig_flag = self._apply()
+        try:
+            after_first = mod.stream_events_async
+            patches._patch_openrouter_sse_stream_leak()
+            assert mod.stream_events_async is after_first
+        finally:
+            self._restore(patches, mod, orig, orig_flag)
+
+
 # =============================================================================
 # Test _apply_auto_config
 # =============================================================================

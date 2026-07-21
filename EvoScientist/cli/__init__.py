@@ -79,6 +79,11 @@ def main():
     warnings.filterwarnings(
         "ignore", message=".*type is unknown and inference may fail.*"
     )
+    # v3 streaming is a deliberate choice (#268), so its beta notice is noise.
+    # Matched by message, not category, to keep other beta warnings visible.
+    warnings.filterwarnings(
+        "ignore", message=".*v3 streaming protocol on Pregel is experimental.*"
+    )
     from ..config import load_config
     from .commands import _configure_logging
 
