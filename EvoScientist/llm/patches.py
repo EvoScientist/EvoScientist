@@ -956,12 +956,9 @@ def _patch_openrouter_sse_stream_leak() -> None:
 
         _orig = _mod.stream_events_async
 
-        def _patched(
-            response: Any,
-            decoder: Any,
-            sentinel: Any = None,
-            data_required: bool = True,
-        ) -> AsyncIterator[Any]:
+        # Only `response` is consumed here; everything else passes through so
+        # a regenerated SDK signature cannot turn this patch into a TypeError.
+        def _patched(response: Any, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             import asyncio
 
             # The SDK builds its byte iterator internally, so intercept the
@@ -976,7 +973,7 @@ def _patch_openrouter_sse_stream_leak() -> None:
                 return iterator
 
             response.aiter_bytes = _tracking_aiter_bytes
-            inner = _orig(response, decoder, sentinel, data_required=data_required)
+            inner = _orig(response, *args, **kwargs)
 
             async def _closing() -> AsyncIterator[Any]:
                 try:
