@@ -23,6 +23,15 @@ def _tool_call(tool_call_id):
     return {"id": tool_call_id, "name": "execute", "args": {}}
 
 
+def _invalid_tool_call(tool_call_id):
+    return {
+        "id": tool_call_id,
+        "name": "execute",
+        "args": "{not valid json",
+        "error": "could not parse args",
+    }
+
+
 def test_synthesizes_results_for_interrupted_tool_calls():
     messages = [
         HumanMessage("run tools"),
@@ -92,3 +101,73 @@ async def test_awrap_model_call_repairs_request():
     repaired = handler.call_args.args[0].messages
     assert isinstance(repaired[1], ToolMessage)
     assert repaired[1].tool_call_id == "interrupted"
+
+
+def test_synthesizes_results_for_invalid_tool_calls():
+    messages = [
+        HumanMessage("run tools"),
+        AIMessage(
+            content="",
+            tool_calls=[_tool_call("good")],
+            invalid_tool_calls=[_invalid_tool_call("bad")],
+        ),
+        HumanMessage("continue"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert [type(message) for message in repaired] == [
+        HumanMessage,
+        AIMessage,
+        ToolMessage,
+        ToolMessage,
+        HumanMessage,
+    ]
+    assert [message.tool_call_id for message in repaired[2:4]] == ["good", "bad"]
+    assert all(message.status == "error" for message in repaired[2:4])
+
+
+def test_preserves_tool_call_name_in_synthesized_result():
+    messages = [
+        HumanMessage("run tool"),
+        AIMessage(content="", tool_calls=[_tool_call("one")]),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert repaired[-1].name == "execute"
+
+
+def test_warning_deduplicates_across_calls(caplog):
+    messages = [
+        HumanMessage("run tools"),
+        AIMessage(content="", tool_calls=[_tool_call("one")]),
+    ]
+    warned: set[str] = set()
+
+    with caplog.at_level("WARNING"):
+        repair_tool_history(messages, warned=warned)
+        first_warnings = len(caplog.records)
+        repair_tool_history(messages, warned=warned)
+        second_warnings = len(caplog.records)
+
+    assert first_warnings == 1
+    assert second_warnings == 1
+    assert warned == {"one"}
+
+
+def test_middleware_warns_once_per_thread(caplog):
+    middleware = ToolHistoryRepairMiddleware()
+    request = _request(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("interrupted")]),
+            HumanMessage("continue"),
+        ]
+    )
+    handler = MagicMock(return_value="ok")
+
+    with caplog.at_level("WARNING"):
+        middleware.wrap_model_call(request, handler)
+        middleware.wrap_model_call(request, handler)
+
+    assert len(caplog.records) == 1
