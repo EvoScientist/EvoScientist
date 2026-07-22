@@ -17,7 +17,7 @@ import logging
 import pkgutil
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,9 @@ from .middleware import OutboundMiddlewareBase
 from .plugin import ChannelPlugin
 
 logger = logging.getLogger(__name__)
+
+# Best-effort failure notices must never wedge the dispatcher on a hung send.
+_FAILURE_NOTICE_TIMEOUT = 15.0
 
 CHANNEL_STARTUP_PENDING_DETAIL = "starting (bus)"
 
@@ -743,6 +746,12 @@ class ChannelManager:
                     delivery_failed = True
             if not delivery_failed and (msg.content or msg.media):
                 drained += 1
+            elif delivery_failed:
+                await self._send_failure_notice(
+                    channel,
+                    msg,
+                    timeout=max(1.0, deadline - time.monotonic()),
+                )
         dropped = self.bus.outbound.qsize()
         if drained or dropped:
             logger.info(f"Outbound drain: {drained} sent, {dropped} dropped")
@@ -843,6 +852,50 @@ class ChannelManager:
 
     # ── outbound routing ──
 
+    def _record_outbound_failure(self, channel_name: str, error: str) -> None:
+        health = self._health.get(channel_name)
+        if health is None:
+            return
+        health.consecutive_failures += 1
+        health.total_failures += 1
+        health.last_failure_time = time.time()
+        health.last_failure_error = error
+
+    async def _send_failure_notice(
+        self,
+        channel: Channel,
+        msg: OutboundMessage,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Best-effort short notice when the real payload could not be sent."""
+        if not msg.failure_notice:
+            return
+        fallback = replace(
+            msg,
+            content=msg.failure_notice,
+            media=[],
+            failure_notice=None,
+        )
+        try:
+            coro = channel.send(fallback)
+            if timeout is not None:
+                coro = asyncio.wait_for(coro, timeout=timeout)
+            fallback_ok = await coro
+        except Exception as fallback_error:
+            logger.error(
+                "Error sending delivery failure notice to %s: %s",
+                msg.channel,
+                fallback_error,
+            )
+        else:
+            if not fallback_ok:
+                logger.error(
+                    "Error sending delivery failure notice to %s: "
+                    "send() returned False",
+                    msg.channel,
+                )
+
     async def _dispatch_outbound(self) -> None:
         """Route outbound messages from the bus to the correct channel."""
         logger.info("Outbound dispatcher started")
@@ -872,13 +925,20 @@ class ChannelManager:
                     msg = processed
 
                 delivery_failed = False
+                failure_error = "one or more outbound deliveries failed"
                 if msg.content:
-                    text_ok = await channel.send(msg)
-                    if not text_ok:
-                        logger.error(
-                            f"Error sending to {msg.channel}: send() returned False"
-                        )
+                    try:
+                        text_ok = await channel.send(msg)
+                    except Exception as e:
+                        logger.error(f"Error sending to {msg.channel}", exc_info=True)
+                        failure_error = str(e)
                         delivery_failed = True
+                    else:
+                        if not text_ok:
+                            logger.error(
+                                f"Error sending to {msg.channel}: send() returned False"
+                            )
+                            delivery_failed = True
 
                 for media_path in msg.media:
                     try:
@@ -894,11 +954,18 @@ class ChannelManager:
                             )
                             delivery_failed = True
                     except Exception as e:
-                        logger.error(f"Error sending media to {msg.channel}: {e}")
+                        logger.error(
+                            f"Error sending media to {msg.channel}", exc_info=True
+                        )
+                        failure_error = str(e)
                         delivery_failed = True
 
                 if delivery_failed:
-                    raise RuntimeError("one or more outbound deliveries failed")
+                    await self._send_failure_notice(
+                        channel, msg, timeout=_FAILURE_NOTICE_TIMEOUT
+                    )
+                    self._record_outbound_failure(msg.channel, failure_error)
+                    continue
 
                 # Success
                 health = self._health.get(msg.channel)
@@ -906,13 +973,12 @@ class ChannelManager:
                     health.consecutive_failures = 0
                     health.total_successes += 1
             except Exception as e:
-                logger.error(f"Error sending to {msg.channel}: {e}")
-                health = self._health.get(msg.channel)
-                if health is not None:
-                    health.consecutive_failures += 1
-                    health.total_failures += 1
-                    health.last_failure_time = time.monotonic()
-                    health.last_failure_error = str(e)
+                # Unexpected internal error (pipeline, bookkeeping) — the
+                # transport paths above handle their own failures.
+                logger.error(
+                    f"Outbound dispatch error for {msg.channel}", exc_info=True
+                )
+                self._record_outbound_failure(msg.channel, str(e))
 
     # ── per-account lifecycle ──
 

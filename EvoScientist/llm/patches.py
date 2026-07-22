@@ -880,6 +880,52 @@ def _patch_openrouter_strip_responses_reasoning() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Patch (lazy, OpenRouter only): default structured output to json_schema for
+# Moonshot's always-thinking models (kimi-k3).
+#
+# Moonshot rejects a forced tool choice while thinking is enabled with HTTP 400:
+#   "tool_choice 'specified' is incompatible with thinking enabled"
+# and kimi-k3's thinking cannot be disabled, so the function_calling default of
+# ChatOpenRouter.with_structured_output fails every structured-output call
+# (LLMToolSelectorMiddleware included). These endpoints support
+# response_format json_schema, which needs no tool_choice — route them there.
+# Moonshot-specific: other mandatory-reasoning models keep function_calling.
+# Gated on the instance's model_name, so copies behave correctly and other
+# models keep the function_calling default.
+# ---------------------------------------------------------------------------
+_openrouter_structured_output_patched = False
+
+
+def _patch_openrouter_structured_output() -> None:
+    global _openrouter_structured_output_patched
+    if _openrouter_structured_output_patched:
+        return
+    try:
+        from langchain_openrouter import ChatOpenRouter
+
+        _orig = ChatOpenRouter.with_structured_output
+
+        def _patched(
+            self: Any,
+            schema: Any = None,
+            *,
+            method: str = "function_calling",
+            **kwargs: Any,
+        ) -> Any:
+            if method == "function_calling":
+                from .models import _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS
+
+                if self.model_name in _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS:
+                    method = "json_schema"
+            return _orig(self, schema, method=method, **kwargs)
+
+        ChatOpenRouter.with_structured_output = _patched
+        _openrouter_structured_output_patched = True
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Patch: forward CLI's live (model, model_provider) into deepagents'
 # start_async_task / update_async_task tool calls so the deployed graph
 # (running in a separate ``langgraph dev`` subprocess) re-resolves the

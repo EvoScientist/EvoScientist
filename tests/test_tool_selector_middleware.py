@@ -67,9 +67,19 @@ def _mock_model():
 
 # Helper: patches needed to call create_tool_selector_middleware without LLM
 def _factory_patches():
+    # ``disable_thinking`` / ``disable_streaming`` are patched at the destination
+    # namespace with ``create=True`` because the factory imports them lazily.
+    # ``disable_streaming`` returns a MagicMock whose ``.model_copy`` returns
+    # itself so the tag/callback update in the factory is a safe no-op for tests
+    # that don't care about the tag wiring.
     return (
         patch(
             "EvoScientist.middleware.tool_selector.disable_thinking",
+            return_value=MagicMock(),
+            create=True,
+        ),
+        patch(
+            "EvoScientist.middleware.tool_selector.disable_streaming",
             return_value=MagicMock(),
             create=True,
         ),
@@ -87,8 +97,8 @@ def _factory_patches():
 
 
 def test_create_tool_selector_returns_single_middleware():
-    p1, p2, p3 = _factory_patches()
-    with p1, p2, p3:
+    p1, p2, p3, p4 = _factory_patches()
+    with p1, p2, p3, p4:
         result = create_tool_selector_middleware()
         assert isinstance(result, list)
         assert len(result) == 1
@@ -96,8 +106,8 @@ def test_create_tool_selector_returns_single_middleware():
 
 
 def test_create_tool_selector_always_include():
-    p1, p2, p3 = _factory_patches()
-    with p1, p2, p3 as mock_cls:
+    p1, p2, p3, p4 = _factory_patches()
+    with p1, p2, p3, p4 as mock_cls:
         result = create_tool_selector_middleware(threshold=0)
         request = _request(
             [
@@ -118,8 +128,8 @@ def test_create_tool_selector_always_include():
 
 
 def test_custom_threshold():
-    p1, p2, p3 = _factory_patches()
-    with p1, p2, p3:
+    p1, p2, p3, p4 = _factory_patches()
+    with p1, p2, p3, p4:
         result = create_tool_selector_middleware(threshold=5)
         assert result[0]._threshold == 5
 
@@ -476,6 +486,204 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     te_idx = type_names.index("ToolErrorHandlerMiddleware")
     mem_idx = type_names.index("EvoMemoryMiddleware")
     assert te_idx < ts_idx < mem_idx
+
+
+# ---------------------------------------------------------------------------
+# disable_streaming — kills per-chunk selector emissions
+# ---------------------------------------------------------------------------
+
+
+def test_disable_streaming_sets_disable_streaming_field():
+    """Helper must set ``disable_streaming=True`` (BaseChatModel's official
+    hard-disable field checked by ``_streaming_disabled()``), not the
+    model's own ``streaming`` field.
+    """
+    from EvoScientist.middleware.utils import disable_streaming
+
+    model = MagicMock()
+    copied = MagicMock()
+    model.model_copy.return_value = copied
+
+    result = disable_streaming(model)
+
+    model.model_copy.assert_called_once_with(update={"disable_streaming": True})
+    assert result is copied
+
+
+def test_disable_streaming_defeats_upstream_streaming_dispatch():
+    """End-to-end mechanism test: a model copy produced by
+    ``disable_streaming`` causes langchain's own ``_streaming_disabled``
+    to return True.
+
+    ``_streaming_disabled`` is the single check consulted by
+    ``_should_stream`` / ``_should_use_protocol_streaming`` before
+    dispatching to ``_stream`` / ``_astream``. If our field-setting fails
+    or a future langchain version changes the check key, this test fails
+    before the selector floods anything in production — strictly better
+    than a runtime canary.
+    """
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from EvoScientist.middleware.utils import disable_streaming
+
+    class _FakeModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "fake"
+
+        def _generate(
+            self,
+            messages,
+            stop=None,
+            run_manager=None,
+            **kwargs,
+        ) -> ChatResult:
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+    model = _FakeModel()
+    assert model._streaming_disabled() is False
+
+    disabled = disable_streaming(model)
+
+    assert disabled._streaming_disabled() is True
+    # Original caller instance untouched.
+    assert model._streaming_disabled() is False
+
+
+def test_create_tool_selector_wires_nostream_and_flood_detector_on_model():
+    """Factory chains ``disable_thinking`` → ``disable_streaming`` →
+    ``model_copy`` with the ``nostream`` tag and ``_FLOOD_DETECTOR``
+    callback, then passes the resulting model to
+    ``LLMToolSelectorMiddleware``.
+
+    Model-field wiring (over subclassing or invoke-config injection):
+    ``chat_models.py:746-750`` reads ``self.tags`` / ``self.callbacks``
+    into every ``CallbackManager.configure``, so the tag reaches
+    ``on_chat_model_start`` and langgraph's ``pregel/_messages.py:141``
+    check skips the messages emission. Callbacks propagate the same way
+    so ``_FLOOD_DETECTOR`` fires on every selector call regardless of
+    whether the tag is honored downstream.
+    """
+    from EvoScientist.middleware.tool_selector import _FLOOD_DETECTOR
+
+    thinking_out = MagicMock(name="disable_thinking_output")
+    streaming_out = MagicMock(name="disable_streaming_output")
+    # Simulate a base model with pre-existing tags + callbacks so we can
+    # verify the factory APPENDS rather than replaces. If the factory used
+    # replace semantics, "pre_existing_tag" would be missing from the update.
+    streaming_out.tags = ["pre_existing_tag"]
+    _pre_existing_cb = MagicMock(name="pre_existing_callback")
+    streaming_out.callbacks = [_pre_existing_cb]
+    tagged_out = MagicMock(name="tagged_output")
+    streaming_out.model_copy.return_value = tagged_out
+
+    # Patch at the SOURCE module (utils) not the destination (tool_selector)
+    # because the factory does ``from .utils import ...`` lazily inside its
+    # body — patching the tool_selector namespace would be shadowed by that
+    # local import binding.
+    with (
+        patch(
+            "EvoScientist.middleware.utils.disable_thinking",
+            return_value=thinking_out,
+        ) as mock_dt,
+        patch(
+            "EvoScientist.middleware.utils.disable_streaming",
+            return_value=streaming_out,
+        ) as mock_ds,
+        patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()),
+        patch(
+            "langchain.agents.middleware.LLMToolSelectorMiddleware",
+            return_value=MagicMock(),
+        ) as mock_selector,
+    ):
+        result = create_tool_selector_middleware(threshold=0)
+        # selector_factory is lazy — trigger it via wrap_model_call so the
+        # LLMToolSelectorMiddleware constructor actually fires and we can
+        # observe what model was passed.
+        result[0].wrap_model_call(_request([_tool("t")]), MagicMock())
+
+    from langgraph.constants import TAG_NOSTREAM
+
+    mock_dt.assert_called_once()
+    mock_ds.assert_called_once_with(thinking_out)
+    # model_copy applied on the disable_streaming output with the nostream
+    # tag + flood-detector callback APPENDED to whatever the base model
+    # already carried. Tag string is pulled from langgraph's own constants
+    # — the import above is a build-time canary against langgraph renaming
+    # or removing it.
+    streaming_out.model_copy.assert_called_once()
+    update_kwarg = streaming_out.model_copy.call_args.kwargs["update"]
+    assert TAG_NOSTREAM in update_kwarg["tags"]
+    assert _FLOOD_DETECTOR in update_kwarg["callbacks"]
+    # Append (not replace): pre-existing tags/callbacks survive.
+    assert "pre_existing_tag" in update_kwarg["tags"]
+    assert _pre_existing_cb in update_kwarg["callbacks"]
+    # The tagged model is what reaches LLMToolSelectorMiddleware.
+    assert mock_selector.call_args.kwargs["model"] is tagged_out
+
+
+# ---------------------------------------------------------------------------
+# _SelectorFloodDetector — self-reports the provider quirk
+# ---------------------------------------------------------------------------
+
+
+def test_flood_detector_warns_above_threshold(caplog):
+    """Detector emits a WARNING with the count + names when tool_calls
+    length hits THRESHOLD. Proves the workaround self-reports so we can
+    tell if the provider quirk is still recurring in production."""
+    import logging as _logging
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from EvoScientist.middleware.tool_selector import _SelectorFloodDetector
+
+    detector = _SelectorFloodDetector()
+    tool_calls = [
+        {"name": "ToolSelectionResponse", "args": {}, "id": f"id_{i}"}
+        for i in range(_SelectorFloodDetector.THRESHOLD)
+    ]
+    msg = AIMessage(content="", tool_calls=tool_calls)
+    result = LLMResult(generations=[[ChatGeneration(message=msg)]])
+
+    with caplog.at_level(
+        _logging.WARNING, logger="EvoScientist.middleware.tool_selector"
+    ):
+        detector.on_llm_end(result)
+
+    assert any("tool_selector.flood" in rec.message for rec in caplog.records)
+    assert any("ToolSelectionResponse" in rec.message for rec in caplog.records)
+
+
+def test_flood_detector_silent_below_threshold(caplog):
+    """Normal selector output (single tool_call) does not emit a warning
+    — no noise on the fast path."""
+    import logging as _logging
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from EvoScientist.middleware.tool_selector import _SelectorFloodDetector
+
+    detector = _SelectorFloodDetector()
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "ToolSelectionResponse", "args": {"tools": ["x"]}, "id": "id"}
+        ],
+    )
+    result = LLMResult(generations=[[ChatGeneration(message=msg)]])
+
+    with caplog.at_level(
+        _logging.WARNING, logger="EvoScientist.middleware.tool_selector"
+    ):
+        detector.on_llm_end(result)
+
+    assert not any("tool_selector.flood" in rec.message for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------

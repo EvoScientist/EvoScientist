@@ -33,6 +33,7 @@ from ..channels.interaction import (
     ApprovalPolicy,
     InteractionIO,
     PendingReplyRegistry,
+    is_slash_command,
     is_stop_command,
     resolve_approval,
     resolve_ask_user,
@@ -73,6 +74,9 @@ _message_queue: queue.Queue[ChannelMessage] = queue.Queue()
 # Pending responses:
 # main → bus (msg_id → {"future": Future[str], "loop": loop, "response": str|None})
 _pending_responses: dict[str, dict] = {}
+# Sentinel response: the command's output already reached the channel via the
+# command UI, so the bus consumer must not deliver a second message.
+COMMAND_OUTPUT_ALREADY_SENT = "__evosci-command-output-already-sent__"
 _response_lock = threading.Lock()
 
 _RESPONSE_TIMEOUT = 600.0
@@ -326,7 +330,7 @@ async def dispatch_channel_slash_command(
         ``cli/interactive.py:1002-1030``.  Headless serve passes
         ``None`` since it cannot hot-swap its polling-loop agent.
     """
-    if not msg.content.strip().startswith("/"):
+    if not is_slash_command(msg.content):
         return False
 
     try:
@@ -391,10 +395,17 @@ async def _dispatch_channel_slash_impl(
     from ..commands.channel_ui import ChannelCommandUI
     from ..commands.manager import manager as cmd_manager
 
+    # The wrapper only forwards slash-prefixed content, so an unresolved
+    # parse is always an unknown command — answer instead of feeding a typo
+    # to the agent.
     parsed = cmd_manager.resolve(msg.content)
     if parsed is None:
-        # Unknown slash command — let the agent handle it (matches TUI).
-        return False
+        bad_cmd = msg.content.split(None, 1)[0]
+        _set_channel_response(
+            msg.msg_id,
+            f"Unknown command: {bad_cmd}\nType /help to see available commands.",
+        )
+        return True
     cmd, cmd_args = parsed
 
     agent_for_ctx = agent
@@ -431,8 +442,11 @@ async def _dispatch_channel_slash_impl(
 
     if cmd_executed:
         if ctx.command_error is not None:
-            details = ctx.command_error or "(no details)"
-            _set_channel_response(msg.msg_id, f"Command error: {details}")
+            if ui.sent_to_channel:
+                _set_channel_response(msg.msg_id, COMMAND_OUTPUT_ALREADY_SENT)
+            else:
+                details = ctx.command_error or "(no details)"
+                _set_channel_response(msg.msg_id, f"Command error: {details}")
             return True
 
         if on_cmd_completed is not None:
@@ -452,7 +466,12 @@ async def _dispatch_channel_slash_impl(
             f"[{msg.channel_type}: Executed command from {msg.sender}]",
             "dim",
         )
-        _set_channel_response(msg.msg_id, f"Command executed: {msg.content}")
+        if ui.sent_to_channel:
+            # The user already saw the command's own output — a second
+            # "Command executed" message is just noise.
+            _set_channel_response(msg.msg_id, COMMAND_OUTPUT_ALREADY_SENT)
+        else:
+            _set_channel_response(msg.msg_id, f"Command executed: {msg.content}")
         return True
 
     # ``cmd_manager.execute`` returned False (empty / unparseable input).
@@ -1161,16 +1180,21 @@ async def _handle_bus_message(bus, manager, msg) -> None:
                 return
 
         response = _pop_channel_response(cm.msg_id) or "No response"
-        await bus.publish_outbound(
-            OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=response,
-                reply_to=msg.message_id or None,
-                metadata=msg.metadata,
+        if response != COMMAND_OUTPUT_ALREADY_SENT:
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=response,
+                    reply_to=msg.message_id or None,
+                    metadata=msg.metadata,
+                )
             )
-        )
-        manager.record_message(msg.channel, "sent")
+            manager.record_message(msg.channel, "sent")
+        else:
+            # The command UI published its own response before returning the
+            # sentinel, so account for that delivery without sending an ack.
+            manager.record_message(msg.channel, "sent")
     except asyncio.CancelledError:
         _pop_channel_response(cm.msg_id, cancel_pending=True)
         if _channel_request_state(cm.msg_id) != "active":

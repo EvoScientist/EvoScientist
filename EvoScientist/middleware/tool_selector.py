@@ -28,8 +28,10 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
+from langgraph.constants import TAG_NOSTREAM
 
 from .events import NO_OP_SINK, MiddlewareEventSink
 
@@ -47,6 +49,53 @@ DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
         "search_observations",
     }
 )
+
+
+class _SelectorFloodDetector(BaseCallbackHandler):
+    """Log a WARNING when the selector's model returns an AIMessage with
+    an unexpectedly large ``tool_calls`` list — signal of the provider-side
+    duplicate-tool_call quirk that motivated the hidden-tag fix.
+
+    Normal selector output is one tool_call to ``ToolSelectionResponse``.
+    Anything above :attr:`THRESHOLD` is the pathology we're workarounding.
+    Runs regardless of any filtering tag on the model (callbacks fire on
+    every invocation; the ``nostream`` tag only stops langgraph's messages
+    handler from emitting downstream). Ensures the workaround self-reports
+    so we notice if the provider quirk persists / worsens / gets fixed
+    upstream.
+    """
+
+    THRESHOLD = 5
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        try:
+            for gen_list in response.generations:
+                for gen in gen_list:
+                    msg = getattr(gen, "message", None)
+                    tool_calls = getattr(msg, "tool_calls", None) or []
+                    if len(tool_calls) < self.THRESHOLD:
+                        continue
+                    names = {
+                        (
+                            tc.get("name")
+                            if isinstance(tc, dict)
+                            else getattr(tc, "name", "?")
+                        )
+                        for tc in tool_calls
+                    }
+                    logger.warning(
+                        "tool_selector.flood n_tool_calls=%d names=%s",
+                        len(tool_calls),
+                        names,
+                    )
+        except Exception:
+            # Observability must never crash the model call. Log at DEBUG so
+            # a real bug (e.g. langchain changing the response shape) is
+            # recoverable from the trace, while normal operation stays quiet.
+            logger.debug("flood detector traversal failed", exc_info=True)
+
+
+_FLOOD_DETECTOR = _SelectorFloodDetector()
 
 
 def _tool_name(tool: BaseTool | dict[str, Any]) -> str | None:
@@ -248,13 +297,33 @@ def create_tool_selector_middleware(
     """
     from langchain.agents.middleware import LLMToolSelectorMiddleware
 
-    from .utils import disable_thinking
+    from .utils import disable_streaming, disable_thinking
 
     if model is None:
         from EvoScientist.EvoScientist import _ensure_chat_model
 
         model = _ensure_chat_model()
-    safe_model = disable_thinking(model)
+
+    # Model-field wiring: the ``nostream`` tag reaches langgraph's messages
+    # callback (``pregel/_messages.py:141``), which skips registering the
+    # selector's chat-model call so no ``messages/*`` frame is ever emitted
+    # for it - WebUI's action panel never sees the (potentially thousands
+    # of duplicate) ``ToolSelectionResponse`` tool_calls the provider may
+    # produce. ``_FLOOD_DETECTOR`` self-reports when the provider quirk
+    # fires. Both propagate via ``CallbackManager.configure`` reading
+    # ``self.tags`` / ``self.callbacks`` at ``chat_models.py:746-750`` on
+    # every ``invoke`` / ``ainvoke``.
+    #
+    # Append (rather than replace) so any tags/callbacks the main-agent
+    # model may carry are preserved - relevant if a future factory adds
+    # e.g. langsmith tracing tags to the base model.
+    base = disable_streaming(disable_thinking(model))
+    safe_model = base.model_copy(
+        update={
+            "tags": [*(base.tags or []), TAG_NOSTREAM],
+            "callbacks": [*(base.callbacks or []), _FLOOD_DETECTOR],
+        }
+    )
 
     system_prompt = (
         "You are selecting tools for a scientific research agent. "

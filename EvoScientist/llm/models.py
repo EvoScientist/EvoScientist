@@ -31,6 +31,7 @@ from .patches import (
     _patch_ccproxy_system_to_developer,
     _patch_openai_compat_content,
     _patch_openrouter_strip_responses_reasoning,
+    _patch_openrouter_structured_output,
 )
 
 _MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
@@ -137,6 +138,13 @@ _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 # capped to this many below. https://openrouter.ai/docs/app-attribution
 _OPENROUTER_MAX_CATEGORIES_PER_REQUEST = 2
 
+# Moonshot rejects a forced tool choice while thinking is enabled, and kimi-k3
+# cannot disable thinking — structured output must use json_schema there.
+# Moonshot-specific: do NOT widen to other mandatory-reasoning models.
+_OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS = frozenset(
+    {"moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"}
+)
+
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
@@ -227,6 +235,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "openrouter"),
     ("gemini-3.1-pro", "google/gemini-3.1-pro-preview", "openrouter"),
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
+    ("kimi-k3", "moonshotai/kimi-k3", "openrouter"),
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
@@ -291,6 +300,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-r1", "deepseek-reasoner", "deepseek"),
     ("deepseek-v3", "deepseek-chat", "deepseek"),
     # Moonshot (OpenAI-compatible)
+    ("kimi-k3", "kimi-k3", "moonshot"),
     ("kimi-k2.6", "kimi-k2.6", "moonshot"),
     ("kimi-k2.5", "kimi-k2.5", "moonshot"),
     ("kimi-k2-thinking", "kimi-k2-thinking", "moonshot"),
@@ -376,6 +386,22 @@ def _apply_openrouter_anthropic_prompt_cache(
     if _has_cache_control_override(kwargs):
         return
     kwargs.setdefault("model_kwargs", {})["cache_control"] = {"type": "ephemeral"}
+
+
+def _enable_openrouter_429_retry(chat_model: Any) -> None:
+    """Add 429 to the OpenRouter SDK's retryable status codes (default ["5XX"]).
+
+    Upstream rate limits ("temporarily rate-limited upstream", whose
+    Retry-After the SDK backoff already honors) otherwise fail the run outright.
+    """
+    sdk_config = getattr(getattr(chat_model, "client", None), "sdk_configuration", None)
+    retry_config: Any = getattr(sdk_config, "retry_config", None)
+    # Skip the UNSET sentinel (max_retries=0) and explicit caller overrides.
+    if not hasattr(retry_config, "status_codes_override"):
+        return
+    if retry_config.status_codes_override:
+        return
+    retry_config.status_codes_override = ["429", "5XX"]
 
 
 def _apply_auto_config(
@@ -566,10 +592,12 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
-        # Moonshot: disable thinking for all models to prevent LangChain from dropping
-        # reasoning_content, which causes multi-turn conversation errors (error 20015).
-        # Even native thinking models like kimi-k2-thinking operate in non-thinking mode.
-        if provider == "moonshot":
+        # Moonshot: disable thinking for pre-K3 models to prevent LangChain from
+        # dropping reasoning_content, which causes multi-turn conversation errors
+        # (error 20015). Even native thinking models like kimi-k2-thinking operate
+        # in non-thinking mode. kimi-k3+ is exempt: always-thinking, and
+        # Moonshot's K3 guide forbids the K2.x `thinking` parameter for it.
+        if provider == "moonshot" and not model_id.startswith("kimi-k3"):
             kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
         provider = "openai"
 
@@ -585,6 +613,9 @@ def get_chat_model(
         # passback (OpenRouter's `/responses` beta is stateless, store=false —
         # "Item with id 'rs_...' not found"); the patch strips them on passback,
         # so enabling `summary` is safe. See langchain-ai/langchain#37777.
+        # Note: mandatory-reasoning endpoints (kimi-k3, grok-4.5, …) reject
+        # effort "none" with HTTP 400 — that error is surfaced to the user
+        # as-is; pick a real effort (low+) for those models.
         effort = _resolve_reasoning_effort("high")
         kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
         # App attribution (issue #339): identify EvoScientist to OpenRouter so
@@ -634,6 +665,7 @@ def get_chat_model(
         if _app_categories:
             kwargs.setdefault("app_categories", _app_categories)
         _patch_openrouter_strip_responses_reasoning()
+        _patch_openrouter_structured_output()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
     elif provider in _ANTHROPIC_ROUTED_PROVIDERS:
@@ -718,6 +750,9 @@ def get_chat_model(
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)
+
+    if provider == "openrouter":
+        _enable_openrouter_429_retry(chat_model)
 
     apply_known_context_window(chat_model)
 

@@ -23,6 +23,7 @@ from typing import Any
 from .base import RawIncoming
 from .bus.events import InboundMessage, OutboundMessage
 from .debug import emit_debug_event_if
+from .interaction import is_slash_command
 
 _logger = logging.getLogger(__name__)
 
@@ -811,8 +812,21 @@ class MentionGatingMiddleware(InboundMiddleware):
                 policy=self.require_mention,
             )
             return None
-        # Strip mentions from group messages
-        if raw.is_group and self._strip_fn:
+        # A slash command's platform target belongs only to its first token;
+        # preserve mentions in its arguments. Ordinary group messages may
+        # still carry a bot mention elsewhere and use the full-message strip.
+        if self._strip_fn and is_slash_command(raw.text):
+            text = raw.text
+            token_start = len(text) - len(text.lstrip())
+            token_end = token_start
+            while token_end < len(text) and not text[token_end].isspace():
+                token_end += 1
+            stripped_token = self._strip_fn(text[token_start:token_end])
+            raw = dataclasses.replace(
+                raw,
+                text=text[:token_start] + stripped_token + text[token_end:],
+            )
+        elif self._strip_fn and raw.is_group:
             raw = dataclasses.replace(raw, text=self._strip_fn(raw.text))
         return raw
 
@@ -926,6 +940,12 @@ class GroupHistoryMiddleware(InboundMiddleware):
                 ),
             )
             # Don't drop here — let MentionGatingMiddleware handle that
+            return raw
+
+        # Slash commands must remain the leading content so channel command
+        # dispatchers can recognize them. Keep buffered chatter for the next
+        # normal mentioned message instead of injecting it ahead of a command.
+        if is_slash_command(raw.text):
             return raw
 
         # Mentioned: inject history context

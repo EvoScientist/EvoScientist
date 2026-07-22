@@ -110,6 +110,53 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
+    async def test_already_sent_sentinel_suppresses_reply(self):
+        """A command whose output already reached the channel must not get a
+        second "Command executed" style reply from the consumer."""
+        from EvoScientist.cli.channel import (
+            COMMAND_OUTPUT_ALREADY_SENT,
+            _bus_inbound_consumer,
+            _message_queue,
+            _set_channel_response,
+        )
+
+        _drain_queue(_message_queue)
+
+        bus = MessageBus()
+        manager = ChannelManager(bus)
+        ch = FakeChannel()
+        manager.register(ch)
+
+        consumer = asyncio.create_task(_bus_inbound_consumer(bus, manager))
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="fake",
+                sender_id="user1",
+                chat_id="chat1",
+                content="/help",
+            )
+        )
+
+        for _ in range(20):
+            if not _message_queue.empty():
+                break
+            await asyncio.sleep(0.05)
+
+        msg = _message_queue.get_nowait()
+        _set_channel_response(msg.msg_id, COMMAND_OUTPUT_ALREADY_SENT)
+
+        # Nothing must be published for this message.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(bus.consume_outbound(), timeout=0.5)
+        assert manager._message_counts["fake"]["sent"] == 1
+
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+
     async def test_no_response_fallback(self):
         """Empty response is replaced with 'No response' fallback."""
         from EvoScientist.cli.channel import (

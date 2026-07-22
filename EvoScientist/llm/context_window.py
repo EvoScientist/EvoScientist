@@ -48,6 +48,9 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("gpt-5.5", 1_050_000),
     # Google Gemini 3.x family — flash, flash-lite, pro (1.05M). Excludes 2.5.
     ("gemini-3", 1_050_000),
+    # Moonshot Kimi K3 — 1M context; covers bare ``kimi-k3`` (native Moonshot),
+    # OpenRouter ``moonshotai/kimi-k3``, and dated slugs like ``kimi-k3-20260715``.
+    ("kimi-k3", 1_048_576),
     # Moonshot Kimi K2 family — k2.5, k2.6, k2-thinking, k2-thinking-turbo
     ("kimi-k2", 262_000),
     # Zhipu GLM-5 family — base, 5.1, 5-turbo, 5v-turbo, etc.

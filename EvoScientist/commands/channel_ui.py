@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_COMMAND_OUTPUT_FAILURE_NOTICE = "Command output could not be delivered."
+
 
 class ChannelCommandUI(CommandUI):
     """CommandUI implementation for messaging channels with output buffering."""
@@ -37,6 +39,10 @@ class ChannelCommandUI(CommandUI):
         self.handle_session_resume_callback = handle_session_resume_callback
         self.graph_gateway = graph_gateway
         self._system_buffer: list[str] = []
+        # Whether any output was delivered (or scheduled for delivery) to the
+        # channel. The slash dispatcher consults this to decide between a
+        # bare completion ack and staying silent.
+        self.sent_to_channel: bool = False
 
     def _queue_system(
         self,
@@ -107,6 +113,7 @@ class ChannelCommandUI(CommandUI):
             content=grouped_text,
             reply_to=self.msg.message_id,
             metadata=self.msg.metadata,
+            failure_notice=_COMMAND_OUTPUT_FAILURE_NOTICE,
         )
 
         if self.msg.bus_ref:
@@ -114,6 +121,7 @@ class ChannelCommandUI(CommandUI):
         else:
             coro = self.msg.channel_ref.send(outbound)
 
+        self.sent_to_channel = True
         asyncio.run_coroutine_threadsafe(coro, loop)
 
     def mount_renderable(self, renderable: Any) -> None:
@@ -147,6 +155,7 @@ class ChannelCommandUI(CommandUI):
             content=f"```\n{text}\n```",
             reply_to=self.msg.message_id,
             metadata=self.msg.metadata,
+            failure_notice=_COMMAND_OUTPUT_FAILURE_NOTICE,
         )
 
         if self.msg.bus_ref:
@@ -154,6 +163,7 @@ class ChannelCommandUI(CommandUI):
         else:
             coro = self.msg.channel_ref.send(outbound)
 
+        self.sent_to_channel = True
         asyncio.run_coroutine_threadsafe(coro, loop)
 
     async def wait_for_thread_pick(

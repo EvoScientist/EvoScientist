@@ -22,6 +22,7 @@ from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
 from .debug import TraceMixin, debug_trace_enabled
 from .formatter import UnifiedFormatter
+from .interaction import is_slash_command
 from .plugin import ChannelMeta, ChannelPlugin
 
 _logger = logging.getLogger(__name__)
@@ -1057,6 +1058,43 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Buffer *msg* with debounce, then publish to bus."""
         sender = msg.sender_id
 
+        if self._on_activity:
+            try:
+                self._on_activity(sender, "received")
+            except Exception:
+                pass
+
+        # Slash commands are control messages, not prompt fragments. Flush any
+        # prompt already waiting for this sender, then publish the command as
+        # its own message so either arrival order cannot newline-merge them.
+        if is_slash_command(msg.content) and self._bus:
+            # A flush removes itself from this mapping before awaiting the bus
+            # publish.  Therefore a task still present here has not detached
+            # its buffered payload yet and is safe to cancel; an in-flight,
+            # backpressured publish is deliberately left alone.
+            debounce_task = self._debounce_tasks.pop(sender, None)
+            if debounce_task is not None:
+                debounce_task.cancel()
+                try:
+                    await debounce_task
+                except asyncio.CancelledError:
+                    # Awaiting a cancelled child normally raises here with no
+                    # cancellation pending on this task.  If our caller also
+                    # cancelled queue_message(), preserve that outer signal.
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
+                        raise
+            try:
+                await self._process_buffered_messages(sender)
+            except Exception:
+                _logger.error(
+                    f"{self.name} buffered-prompt flush failed for {sender}; "
+                    "publishing the command anyway",
+                    exc_info=True,
+                )
+            await self._bus.publish_inbound(msg)
+            return
+
         if sender not in self._message_buffers:
             self._message_buffers[sender] = []
             self._message_metadata[sender] = msg.metadata
@@ -1068,12 +1106,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             self._message_ids[sender] = msg.message_id
         if msg.media:
             self._message_media[sender].extend(msg.media)
-
-        if self._on_activity:
-            try:
-                self._on_activity(sender, "received")
-            except Exception:
-                pass
 
         if sender in self._debounce_tasks:
             self._debounce_tasks[sender].cancel()
@@ -1089,8 +1121,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             await asyncio.sleep(_w)
             try:
                 await self._process_buffered_messages(_s)
-            except Exception as e:
-                _logger.error(f"{self.name} debounce flush error for {_s}: {e}")
+            except Exception:
+                _logger.error(
+                    f"{self.name} debounce flush error for {_s}", exc_info=True
+                )
 
         self._debounce_tasks[sender] = asyncio.create_task(debounce_callback())
 
