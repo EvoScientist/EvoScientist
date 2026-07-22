@@ -29,9 +29,15 @@ Design
 If deepagents ever lands a payload-passthrough of its own, delete this file
 and rebind ``EvoAsyncSubAgentMiddleware`` → ``AsyncSubAgentMiddleware`` in
 one commit; the state-schema shape on the container graph doesn't change.
-"""
 
-from __future__ import annotations
+Do NOT add ``from __future__ import annotations`` to this module. langchain's
+``StructuredTool._injected_args_keys`` uses ``inspect.signature(fn)`` (raw
+annotations, not ``get_type_hints``) to decide which parameters are injected
+runtime args. With PEP 563 in effect ``runtime: ToolRuntime`` becomes the
+string ``"ToolRuntime"``, fails the ``issubclass(type_, _DirectlyInjectedToolArg)``
+check, and gets stripped from tool_input at parse time — the coroutine is
+then called without ``runtime`` and raises ``TypeError``.
+"""
 
 import logging
 from datetime import UTC, datetime
