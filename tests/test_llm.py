@@ -381,6 +381,13 @@ class TestSlashModelIdFallback:
 # =============================================================================
 
 
+def _sdk_retry_supports_status_codes_override() -> bool:
+    """openrouter>=0.11 only; the 429 override degrades to a no-op below that."""
+    from openrouter.utils.retries import RetryConfig
+
+    return "status_codes_override" in getattr(RetryConfig, "__annotations__", {})
+
+
 class TestThirdPartyRouting:
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_siliconflow_routes_through_openai(self, mock_init, monkeypatch):
@@ -471,6 +478,11 @@ class TestThirdPartyRouting:
 
     # --- OpenRouter upstream 429 retry ---
 
+    @pytest.mark.skipif(
+        not _sdk_retry_supports_status_codes_override(),
+        reason="openrouter<0.11 RetryConfig lacks status_codes_override; "
+        "the 429 override no-ops there by design (models.py hasattr guard)",
+    )
     def test_openrouter_429_added_to_retryable_status_codes(self, monkeypatch):
         """Upstream 429s must become retryable on the real SDK client.
 
@@ -501,6 +513,11 @@ class TestThirdPartyRouting:
         retry_config = model.client.sdk_configuration.retry_config
         assert getattr(retry_config, "status_codes_override", None) is None
 
+    @pytest.mark.skipif(
+        not _sdk_retry_supports_status_codes_override(),
+        reason="openrouter<0.11 RetryConfig lacks status_codes_override; "
+        "the 429 override no-ops there by design (models.py hasattr guard)",
+    )
     def test_openrouter_429_retried_on_the_wire(self, monkeypatch):
         """End-to-end: a 429 with Retry-After is retried and the retry succeeds."""
         import httpx

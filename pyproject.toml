@@ -25,6 +25,8 @@ dependencies = [
     "langchain-google-genai>=4.2",
     "langchain-ollama>=1.1",
     "langchain-openrouter>=0.2.5",
+    # 0.11.0+ SSE regressions: teardown noise + mid-turn ReadTimeout
+    "openrouter>=0.10.8,<0.11.0",
     "tavily-python>=0.7",
     "pyyaml>=6.0",
     "rich>=15.0",
