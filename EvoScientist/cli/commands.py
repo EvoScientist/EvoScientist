@@ -53,6 +53,7 @@ from .channel import (
     publish_to_channel_origin,
     remember_channel_origin,
 )
+from .channel_sends import PendingChannelSends
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
     _mcp_edit_server_fields,
@@ -1146,8 +1147,6 @@ def _serve_process_message(
     via the ``on_cmd_completed`` hook because the command mutates
     ``ctx.thread_id`` / ``ctx.workspace_dir`` directly.
     """
-    import asyncio
-
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
@@ -1166,33 +1165,10 @@ def _serve_process_message(
 
     # -- channel callback helpers (same pattern as interactive.py) --
 
-    pending_channel_sends: list[tuple[Any, str, int]] = []
+    pending_channel_sends = PendingChannelSends(_bus_loop, _serve_logger)
 
     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-        loop = _bus_loop
-        if not loop:
-            close = getattr(coro, "close", None)
-            if close is not None:
-                close()
-            return
-        try:
-            pending_channel_sends.append(
-                (asyncio.run_coroutine_threadsafe(coro, loop), label, timeout)
-            )
-        except Exception as e:
-            close = getattr(coro, "close", None)
-            if close is not None:
-                close()
-            _serve_logger.debug(f"{label} send failed: {e}")
-
-    def _settle_channel_sends() -> None:
-        """Preserve send ordering without blocking the owned runtime loop."""
-        for send, label, timeout in pending_channel_sends:
-            try:
-                send.result(timeout=timeout)
-            except Exception as e:
-                send.cancel()
-                _serve_logger.debug(f"{label} send failed: {e}")
+        pending_channel_sends.submit(coro, label, timeout)
 
     def _send_thinking(thinking: str) -> None:
         ch = msg.channel_ref
@@ -1320,7 +1296,7 @@ def _serve_process_message(
             response = f"Error: {e}"
             console.print(f"[red]Serve error: {e}[/red]")
 
-        _settle_channel_sends()
+        pending_channel_sends.settle()
         _set_channel_response(msg.msg_id, response)
         console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
     finally:

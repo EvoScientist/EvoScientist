@@ -64,6 +64,7 @@ from .channel import (
     _set_channel_response,
     dispatch_channel_slash_command,
 )
+from .channel_sends import PendingChannelSends
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .rich_command_ui import RichCLICommandUI
 from .status_bar import (
@@ -958,17 +959,12 @@ def cmd_interactive(
                     console.print(rx)
                     _print_separator()
 
+                    pending_channel_sends = PendingChannelSends(
+                        _ch_mod._bus_loop, _channel_logger
+                    )
+
                     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-                        """Schedule an async channel send on the bus loop."""
-                        loop = _ch_mod._bus_loop
-                        if not loop:
-                            return
-                        try:
-                            asyncio.run_coroutine_threadsafe(coro, loop).result(
-                                timeout=timeout
-                            )
-                        except Exception as e:
-                            _channel_logger.debug(f"{label} send failed: {e}")
+                        pending_channel_sends.submit(coro, label, timeout)
 
                     def _send_thinking_to_channel(thinking: str) -> None:
                         ch = msg.channel_ref
@@ -1124,6 +1120,7 @@ def cmd_interactive(
                         response = f"Error: {e}"
                         console.print(f"[red]Channel error: {e}[/red]")
 
+                    await pending_channel_sends.settle_async()
                     _set_channel_response(msg.msg_id, response)
                     await _refresh_status_snapshot(reset_streaming_text=True)
 
