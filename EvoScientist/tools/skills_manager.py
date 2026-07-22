@@ -118,7 +118,7 @@ class SkillInfo:
     byline: str = ""  # WebUI gallery byline
     capability_tags: list[str] = field(default_factory=list)  # WebUI chips
     avatar_hint: str = ""  # WebUI icon hint
-    default_dispatch: str = ""  # "sync" | "panel" (expert skills only)
+    default_dispatch: str = ""  # "sync" | "panel" | "async" (expert skills only)
     # SKILL.md body (post-frontmatter). Populated by ``_parse_skill_md`` so
     # the expert-container factory doesn't have to re-read the file on every
     # main-agent construction. Empty for skills built by hand or when the
@@ -415,7 +415,9 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
         avatar_hint = frontmatter.get("avatar_hint") or ""
         raw_dispatch = frontmatter.get("default_dispatch")
-        default_dispatch = raw_dispatch if raw_dispatch in ("sync", "panel") else ""
+        default_dispatch = (
+            raw_dispatch if raw_dispatch in ("sync", "panel", "async") else ""
+        )
         # ``.get("name", parent.name)`` only defaults on missing key; a
         # present-but-empty ``name:`` yields None, which would flow into
         # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``

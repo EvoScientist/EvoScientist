@@ -1063,6 +1063,25 @@ role: This should be ignored
             for r in caplog.records
         )
 
+    def test_valid_async_default_dispatch(self, tmp_path):
+        """``default_dispatch: async`` is a recognized value (agent-teams v2 dispatch mode)."""
+        skill_dir = tmp_path / "async-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: async-skill
+description: uses async dispatch
+type: expert
+role: Some role
+default_dispatch: async
+---
+
+# Body
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.default_dispatch == "async"
+
     def test_invalid_default_dispatch_falls_back_to_empty(self, tmp_path):
         skill_dir = tmp_path / "bad-dispatch"
         skill_dir.mkdir()
