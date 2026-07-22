@@ -6,11 +6,13 @@ import asyncio
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from EvoScientist.backends import CustomSandboxBackend
+from EvoScientist.runtime import AsyncRuntime
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeGraphGateway
 
@@ -112,6 +114,108 @@ def test_cancel_interrupts_stalled_stream_and_closes_it_in_consumer_task():
     assert stream_closed.is_set()
     assert tasks["closer"] is tasks["consumer"]
     assert result["response"] == "[Stopped.]"
+
+
+def test_cancel_interrupts_owned_questionary_prompt():
+    """A terminal prompt must settle instead of outliving the frontend turn."""
+    cancel_scope = "scope:questionary"
+    started = threading.Event()
+    closed = threading.Event()
+    result: dict[str, object] = {}
+
+    class _BlockingQuestion:
+        async def ask_async(self):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    def _run(runtime: AsyncRuntime) -> None:
+        try:
+            display_mod._run_owned_questionary_prompt(
+                _BlockingQuestion(),
+                runtime=runtime,
+                cancel_scope=cancel_scope,
+            )
+        except display_mod._StreamPromptCancelled:
+            result["cancelled"] = True
+
+    with AsyncRuntime(thread_name="test-questionary-runtime") as runtime:
+        worker = threading.Thread(target=_run, args=(runtime,))
+        worker.start()
+        assert started.wait(2)
+
+        display_mod.request_stream_cancel(cancel_scope)
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert closed.is_set()
+    assert result == {"cancelled": True}
+
+
+def test_cancel_unwinds_hitl_prompt_and_renderer(monkeypatch):
+    """The real Rich HITL branch must release its prompt before returning."""
+    cancel_scope = "scope:hitl-questionary"
+    started = threading.Event()
+    closed = threading.Event()
+    result: dict[str, str] = {}
+
+    class _BlockingQuestion:
+        async def ask_async(self):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        def ask(self):  # pragma: no cover - the owned path must use ask_async
+            raise AssertionError("blocking questionary.ask() was used")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "questionary",
+        SimpleNamespace(select=lambda *_args, **_kwargs: _BlockingQuestion()),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.load_config",
+        lambda: SimpleNamespace(auto_approve=False, shell_allow_list=""),
+    )
+
+    async def _empty_stream(_request):
+        if False:
+            yield {}
+
+    state = display_mod.StreamState()
+    state.response_text = "Partial answer"
+    state.pending_interrupt = {
+        "action_requests": [{"name": "execute", "args": {"command": "echo hi"}}]
+    }
+
+    def _run(runtime: AsyncRuntime) -> None:
+        result["response"] = display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            cancel_scope=cancel_scope,
+            _state=state,
+            gateway=FakeGraphGateway(stream=_empty_stream),
+            runtime=runtime,
+        )
+
+    with AsyncRuntime(thread_name="test-hitl-runtime") as runtime:
+        worker = threading.Thread(target=_run, args=(runtime,))
+        worker.start()
+        assert started.wait(2)
+
+        display_mod.request_stream_cancel(cancel_scope)
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert closed.is_set()
+    assert result["response"] == "Partial answer\n[Stopped.]"
 
 
 def test_cancel_terminates_active_shell_process_tree(tmp_path):

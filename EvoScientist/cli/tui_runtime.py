@@ -23,6 +23,41 @@ SUPPORTED_UI_BACKENDS = ("cli", "tui", "webui")
 _LEGACY_BACKEND_MAP = {"textual": "tui", "rich": "cli"}
 
 
+class StreamCancellationTimeout(RuntimeError):
+    """A blocking renderer did not settle after its turn was cancelled."""
+
+
+def _consume_late_worker_result(worker: asyncio.Task[Any]) -> None:
+    """Retrieve a detached worker result so eventual failure is not unhandled."""
+    try:
+        worker.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+async def settle_cancelled_worker(
+    worker: asyncio.Task[Any],
+    *,
+    on_cancel: Callable[[], Any],
+) -> Any:
+    """Request cooperative cancellation and wait a bounded time for settlement."""
+    on_cancel()
+    done, _ = await asyncio.wait(
+        {worker},
+        timeout=STREAM_CANCEL_SETTLE_TIMEOUT,
+    )
+    if not done:
+        worker.add_done_callback(_consume_late_worker_result)
+        raise StreamCancellationTimeout(
+            "The active turn did not stop within "
+            f"{STREAM_CANCEL_SETTLE_TIMEOUT:g} seconds after cancellation."
+        )
+    try:
+        return worker.result()
+    except Exception:
+        return ""
+
+
 def normalize_ui_backend(value: str | None) -> str:
     """Normalize user-provided backend name with a safe default."""
     if not value:
@@ -153,23 +188,15 @@ async def run_streaming_async(
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
-        request_stream_cancel(kwargs.get("cancel_scope"))
         try:
-            response = await asyncio.wait_for(
-                asyncio.shield(worker),
-                timeout=STREAM_CANCEL_SETTLE_TIMEOUT,
+            response = await settle_cancelled_worker(
+                worker,
+                on_cancel=lambda: request_stream_cancel(kwargs.get("cancel_scope")),
             )
-        except TimeoutError:
-            # The owned task was directly cancelled by request_stream_cancel;
-            # reaching this bound means its cleanup is non-cooperative.  Do not
-            # leave the frontend waiting indefinitely or pretend it recovered.
-            raise asyncio.CancelledError from None
-        except Exception:
-            response = ""
+        finally:
+            from ..middleware.code_interpreter import aclose_code_interpreters
 
-        from ..middleware.code_interpreter import aclose_code_interpreters
-
-        await aclose_code_interpreters()
+            await aclose_code_interpreters()
         if recover_on_cancel:
             current = asyncio.current_task()
             if current is not None and current.uncancel() > 0:

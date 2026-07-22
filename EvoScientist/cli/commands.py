@@ -2437,12 +2437,12 @@ def _main_callback(
                             await asyncio.shield(stream_worker)
                         except asyncio.CancelledError:
                             from ..stream.display import request_stream_cancel
+                            from .tui_runtime import settle_cancelled_worker
 
-                            request_stream_cancel()
-                            try:
-                                await asyncio.shield(stream_worker)
-                            except Exception:
-                                pass
+                            await settle_cancelled_worker(
+                                stream_worker,
+                                on_cancel=request_stream_cancel,
+                            )
                             raise
                 finally:
                     # Model failures can bypass middleware ``after_agent``

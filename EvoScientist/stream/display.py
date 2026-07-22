@@ -54,6 +54,11 @@ if TYPE_CHECKING:
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
 _T = TypeVar("_T")
+_QuestionRunner = Callable[[Any], Any]
+
+
+class _StreamPromptCancelled(Exception):
+    """Internal control flow for an owned terminal prompt cancellation."""
 
 
 def _graph_target_for_local_agent(
@@ -209,6 +214,31 @@ def _unregister_stream_cancel_handle(
         handles.discard(handle)
         if not handles:
             _stream_cancel_handles.pop(scope_key, None)
+
+
+def _run_owned_questionary_prompt(
+    question: Any,
+    *,
+    runtime: AsyncRuntime,
+    cancel_scope: str | None,
+) -> Any:
+    """Run a terminal prompt as owned async work so stop can cancel it."""
+    prompt_handle: RuntimeHandle[Any] | None = None
+
+    def _register(handle: RuntimeHandle[Any]) -> None:
+        nonlocal prompt_handle
+        prompt_handle = handle
+        _register_stream_cancel_handle(cancel_scope, handle)
+
+    try:
+        return runtime.run_sync(question.ask_async, on_submitted=_register)
+    except concurrent.futures.CancelledError as exc:
+        if is_stream_cancel_requested(cancel_scope):
+            raise _StreamPromptCancelled from exc
+        raise
+    finally:
+        if prompt_handle is not None:
+            _unregister_stream_cancel_handle(cancel_scope, prompt_handle)
 
 
 def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
@@ -1103,6 +1133,8 @@ def _matches_shell_allow_list(command: str, allow_list: list[str]) -> bool:
 def _resolve_hitl_approval(
     interrupt_data: dict,
     prompt_fn: Callable[[list], list[dict] | None] | None = None,
+    *,
+    question_runner: _QuestionRunner | None = None,
 ) -> list[dict] | None:
     """Resolve HITL approval for an interrupt.
 
@@ -1159,10 +1191,17 @@ def _resolve_hitl_approval(
     if prompt_fn is not None:
         return prompt_fn(action_requests)
 
-    return _prompt_hitl_approval(action_requests)
+    return _prompt_hitl_approval(
+        action_requests,
+        question_runner=question_runner,
+    )
 
 
-def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
+def _prompt_hitl_approval(
+    action_requests: list,
+    *,
+    question_runner: _QuestionRunner | None = None,
+) -> list[dict] | None:
     """Display approval prompt and get user decision.
 
     Returns list of decisions if approved, None if rejected.
@@ -1207,11 +1246,14 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     auto_label = "Approve all (session)"
 
     try:
-        selected = questionary.select(
+        question = questionary.select(
             "Approval required",
             choices=[approve_label, reject_label, auto_label],
             style=_PICKER_STYLE,
-        ).ask()
+        )
+        selected = (
+            question_runner(question) if question_runner is not None else question.ask()
+        )
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]  Rejected.[/dim]")
         return None
@@ -1229,7 +1271,11 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     return None
 
 
-def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
+def _resolve_ask_user_prompt(
+    ask_user_data: dict,
+    *,
+    question_runner: _QuestionRunner | None = None,
+) -> dict:
     """Interactive console Q&A for ask_user events.
 
     Presents multiple-choice questions with arrow-key navigation via
@@ -1282,11 +1328,16 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                 other_label = "Other (type your answer)"
                 choice_labels.append(other_label)
 
-                selected = questionary.select(
+                question = questionary.select(
                     prompt_text,
                     choices=choice_labels,
                     style=_PICKER_STYLE,
-                ).ask()
+                )
+                selected = (
+                    question_runner(question)
+                    if question_runner is not None
+                    else question.ask()
+                )
 
                 if selected is None:  # Ctrl+C
                     raise KeyboardInterrupt
@@ -1297,22 +1348,32 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                     continue
 
                 if selected == other_label:
-                    selected = questionary.text(
+                    question = questionary.text(
                         "Your answer:",
                         validate=_make_validator(required),
                         style=_PICKER_STYLE,
-                    ).ask()
+                    )
+                    selected = (
+                        question_runner(question)
+                        if question_runner is not None
+                        else question.ask()
+                    )
                     if selected is None:
                         raise KeyboardInterrupt
 
                 answers.append(selected)
 
             else:
-                answer = questionary.text(
+                question = questionary.text(
                     prompt_text,
                     validate=_make_validator(required),
                     style=_PICKER_STYLE,
-                ).ask()
+                )
+                answer = (
+                    question_runner(question)
+                    if question_runner is not None
+                    else question.ask()
+                )
 
                 if answer is None:  # Ctrl+C
                     raise KeyboardInterrupt
@@ -1640,7 +1701,17 @@ def _run_streaming(
             if ask_user_prompt_fn is not None:
                 result = ask_user_prompt_fn(state.pending_ask_user)
             else:
-                result = _resolve_ask_user_prompt(state.pending_ask_user)
+                try:
+                    result = _resolve_ask_user_prompt(
+                        state.pending_ask_user,
+                        question_runner=lambda question: _run_owned_questionary_prompt(
+                            question,
+                            runtime=runtime,
+                            cancel_scope=cancel_scope,
+                        ),
+                    )
+                except _StreamPromptCancelled:
+                    return _stopped_response()
             from langgraph.types import Command  # type: ignore[import-untyped]
 
             state.pending_ask_user = None
@@ -1674,10 +1745,22 @@ def _run_streaming(
         if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
             if is_stream_cancel_requested(cancel_scope):
                 return _stopped_response()
-            decisions = _resolve_hitl_approval(
-                state.pending_interrupt,
-                prompt_fn=hitl_prompt_fn,
-            )
+            try:
+                decisions = _resolve_hitl_approval(
+                    state.pending_interrupt,
+                    prompt_fn=hitl_prompt_fn,
+                    question_runner=(
+                        None
+                        if hitl_prompt_fn is not None
+                        else lambda question: _run_owned_questionary_prompt(
+                            question,
+                            runtime=runtime,
+                            cancel_scope=cancel_scope,
+                        )
+                    ),
+                )
+            except _StreamPromptCancelled:
+                return _stopped_response()
             if is_stream_cancel_requested(cancel_scope):
                 return _stopped_response()
             if decisions is not None:

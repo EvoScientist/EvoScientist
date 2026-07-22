@@ -85,7 +85,12 @@ from .status_bar import (
     make_usage_status_snapshot,
 )
 from .tui_interactive import run_textual_interactive
-from .tui_runtime import resolve_ui_backend, run_streaming, run_streaming_async
+from .tui_runtime import (
+    StreamCancellationTimeout,
+    resolve_ui_backend,
+    run_streaming,
+    run_streaming_async,
+)
 
 _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
 _MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
@@ -1487,6 +1492,14 @@ def cmd_interactive(
                     except EOFError:
                         # Handle Ctrl+D
                         console.print()
+                        state["running"] = False
+                        break
+                    except StreamCancellationTimeout as e:
+                        console.print(f"[red]{escape(str(e))}[/red]")
+                        console.print(
+                            "[dim]Exiting because the active turn could not be "
+                            "stopped safely.[/dim]"
+                        )
                         state["running"] = False
                         break
                     except Exception as e:
