@@ -542,6 +542,7 @@ def _route_async_specs_through_evo_middleware(
         as ``create_deep_agent(subagents=...)`` — the async-auto-compose
         branch is skipped for empty async lists.
     """
+    from .middleware.async_watcher import AsyncWatcherMiddleware
     from .middleware.expert_async_subagent import EvoAsyncSubAgentMiddleware
     from .subagents.expert_container_async import build_expert_async_subagent_specs
 
@@ -549,10 +550,38 @@ def _route_async_specs_through_evo_middleware(
 
     async_specs = [s for s in subs if "graph_id" in s]
     sync_subs = [s for s in subs if "graph_id" not in s]
-    async_specs.extend(build_expert_async_subagent_specs(cfg=cfg))
+    expert_specs = build_expert_async_subagent_specs(cfg=cfg)
+    async_specs.extend(expert_specs)
 
     if async_specs:
         base_middleware.append(EvoAsyncSubAgentMiddleware(async_subagents=async_specs))
+
+    # Extend AsyncWatcherMiddleware's client cache with expert specs so
+    # start_async_task launches for experts spawn a completion watcher —
+    # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
+    # expert name, no notification is enqueued, and the main agent never
+    # learns the task finished. ``_maybe_swap_async_subagents`` above only
+    # populates the watcher with YAML-defined async subagents (writing-agent,
+    # data-analysis-agent, scheduler); this hook folds in the experts too.
+    if expert_specs:
+        watcher = next(
+            (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
+            None,
+        )
+        if watcher is not None:
+            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
+        else:
+            # No YAML async subagents were registered, so ``_maybe_swap`` did
+            # not install the watcher. Install it now so experts still get
+            # completion notifications.
+            from .cli import async_notifier
+
+            base_middleware.append(
+                AsyncWatcherMiddleware(
+                    {s["name"]: s for s in expert_specs},
+                    notifier=async_notifier,
+                )
+            )
     return sync_subs
 
 

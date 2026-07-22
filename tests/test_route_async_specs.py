@@ -214,11 +214,24 @@ class TestRouteAsyncSpecs:
             result = _route_async_specs_through_evo_middleware(
                 subs, middleware, cfg=cfg
             )
-        # sync-a stays; middleware got the expert spec.
+        # sync-a stays; middleware got the expert spec, and an
+        # AsyncWatcherMiddleware was installed so expert launches spawn
+        # completion watchers (previously the watcher's client cache had no
+        # entry for the expert name, KeyErrored on `get_async`, and silently
+        # dropped the notification).
+        from EvoScientist.middleware.async_watcher import AsyncWatcherMiddleware
+
         assert [s["name"] for s in result] == ["sync-a"]
-        assert len(middleware) == 1
-        mw = middleware[0]
-        assert isinstance(mw, EvoAsyncSubAgentMiddleware)
+        assert len(middleware) == 2
+        evo_mw = next(
+            m for m in middleware if isinstance(m, EvoAsyncSubAgentMiddleware)
+        )
+        watcher_mw = next(
+            m for m in middleware if isinstance(m, AsyncWatcherMiddleware)
+        )
         # The middleware's start tool schema advertises literature-review.
-        start = next(t for t in mw.tools if t.name == "start_async_task")
+        start = next(t for t in evo_mw.tools if t.name == "start_async_task")
         assert "literature-review" in start.description
+        # The watcher's client cache knows how to construct a client for the
+        # expert so the completion nudge can spawn.
+        assert "literature-review" in watcher_mw._clients._agents
