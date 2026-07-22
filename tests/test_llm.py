@@ -2515,9 +2515,7 @@ class TestPatchOpenrouterSseStreamLeak:
     @staticmethod
     async def _drain(mod, response):
         events = []
-        async for event in mod.stream_events_async(
-            response, lambda raw: raw, "[DONE]", data_required=True
-        ):
+        async for event in mod.stream_events_async(response, lambda raw: raw, "[DONE]"):
             events.append(event)
         return events
 
@@ -2560,14 +2558,24 @@ class TestPatchOpenrouterSseStreamLeak:
             async def handler(request):
                 return httpx.Response(200, content=self.SSE_BODY)
 
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(handler)
-            ) as client:
-                async with client.stream("GET", "http://t/x") as response:
-                    events = await self._drain(mod, response)
+            async def collect(parser):
+                events = []
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler)
+                ) as client:
+                    async with client.stream("GET", "http://t/x") as response:
+                        async for event in parser(response, lambda raw: raw, "[DONE]"):
+                            events.append(event)
+                return events
 
-            assert len(events) == 1
-            assert "hi" in events[0]
+            # The patch must not lose, reorder, or alter what the SDK
+            # delivers — assert against the unpatched parser's output rather
+            # than a hardcoded count, which varies across SDK versions.
+            baseline = await collect(orig)
+            patched = await collect(mod.stream_events_async)
+
+            assert patched == baseline
+            assert any("hi" in event for event in patched)
         finally:
             self._restore(patches, mod, orig, orig_flag)
 
@@ -2607,8 +2615,8 @@ class TestPatchOpenrouterSseStreamLeak:
         orig_flag = patches._openrouter_sse_leak_patched
         inners = []
 
-        def spy(response, decoder, sentinel=None, data_required=True):
-            gen = sdk_orig(response, decoder, sentinel, data_required=data_required)
+        def spy(response, *args, **kwargs):
+            gen = sdk_orig(response, *args, **kwargs)
             inners.append(gen)
             return gen
 
@@ -2624,9 +2632,7 @@ class TestPatchOpenrouterSseStreamLeak:
                 transport=httpx.MockTransport(handler)
             ) as client:
                 async with client.stream("GET", "http://t/x") as response:
-                    gen = mod.stream_events_async(
-                        response, lambda raw: raw, "[DONE]", data_required=True
-                    )
+                    gen = mod.stream_events_async(response, lambda raw: raw, "[DONE]")
                     async for _event in gen:
                         break  # abandon mid-stream, before the sentinel
                     await gen.aclose()
@@ -2654,7 +2660,7 @@ class TestPatchOpenrouterSseStreamLeak:
         sdk_orig = mod.stream_events_async
         orig_flag = patches._openrouter_sse_leak_patched
 
-        def cancelling_parser(response, decoder, sentinel=None, data_required=True):
+        def cancelling_parser(response, *args, **kwargs):
             async def gen():
                 byte_iter = response.aiter_bytes()
                 try:
@@ -2686,9 +2692,7 @@ class TestPatchOpenrouterSseStreamLeak:
                         return iterator
 
                     response.aiter_bytes = tracking
-                    gen = mod.stream_events_async(
-                        response, lambda raw: raw, "[DONE]", data_required=True
-                    )
+                    gen = mod.stream_events_async(response, lambda raw: raw, "[DONE]")
                     async for _event in gen:
                         break
                     with pytest.raises(asyncio.CancelledError):
