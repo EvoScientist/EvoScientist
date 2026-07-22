@@ -200,7 +200,7 @@ def build_expert_subagent_specs(
     *,
     include_system: bool = True,
 ) -> list[dict[str, Any]]:
-    """Build spec dicts for every installed expert skill.
+    """Build spec dicts for every installed sync-dispatched expert skill.
 
     Thin wrapper over ``list_expert_skills()`` + ``build_expert_subagent_spec``.
     Called by the main-agent construction path (``_build_base_kwargs``) to
@@ -210,11 +210,20 @@ def build_expert_subagent_specs(
     personaless expert advertised in the ``task`` tool schema would let the
     orchestrator dispatch to a blank system prompt, a worse failure mode
     than the expert being absent.
+
+    Experts declared with ``default_dispatch: async`` are excluded — those
+    are folded via ``build_expert_async_subagent_specs`` in
+    ``expert_container_async.py`` and reached through
+    ``EvoAsyncSubAgentMiddleware.start_async_task`` instead of the sync
+    ``task`` tool. A skill that appears in both lists would produce two
+    competing tool schemas for the same subagent name.
     """
     from ..tools.skills_manager import list_expert_skills
 
     specs: list[dict[str, Any]] = []
     for info in list_expert_skills(include_system=include_system):
+        if info.default_dispatch == "async":
+            continue
         if not _body_of(info).strip():
             _logger.warning(
                 "Expert skill %r: SKILL.md body is empty; skipping registration.",

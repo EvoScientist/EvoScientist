@@ -126,6 +126,51 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         return await handler(request.override(system_message=new_system))
 
 
+def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
+    """Build ``AsyncSubAgent``-shaped specs for every ``default_dispatch: async`` expert.
+
+    Each spec is a dict pointing at the shared ``expert-container-async`` graph
+    with ``is_expert=True``. The main agent's
+    ``EvoAsyncSubAgentMiddleware.start_async_task`` uses ``is_expert`` to
+    require a ``payload`` including ``skill_name``.
+
+    Returns an empty list when ``cfg.enable_async_subagents`` is not set, or
+    when the langgraph dev subprocess isn't reachable. Both are the same
+    conditions used by ``_maybe_swap_async_subagents`` to gate the existing
+    ``writing-agent`` / ``data-analysis-agent`` / ``scheduler`` async
+    subagents — keeps behaviour consistent across sync-fallback situations.
+    """
+    from ..config import get_effective_config
+
+    cfg = cfg if cfg is not None else get_effective_config()
+    if not getattr(cfg, "enable_async_subagents", False):
+        return []
+    # Same reachability guard used for standard async subagents in
+    # ``_maybe_swap_async_subagents``.
+    from ..langgraph_dev.manager import is_async_subagents_available
+
+    if not is_async_subagents_available():
+        return []
+
+    from ..tools.skills_manager import list_expert_skills
+
+    port = int(getattr(cfg, "langgraph_dev_port", 6174))
+    specs: list[dict[str, Any]] = []
+    for skill in list_expert_skills(include_system=True):
+        if skill.default_dispatch != "async":
+            continue
+        specs.append(
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "graph_id": "expert-container-async",
+                "url": f"http://localhost:{port}",
+                "is_expert": True,
+            }
+        )
+    return specs
+
+
 def build_expert_container_async_graph() -> Any:
     """Build the async expert container graph.
 

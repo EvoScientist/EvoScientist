@@ -519,6 +519,43 @@ def _maybe_swap_async_subagents(
     return out
 
 
+def _route_async_specs_through_evo_middleware(
+    subs: list, base_middleware: list, *, cfg=None
+) -> list:
+    """Move ``AsyncSubAgent`` specs from ``subs`` into ``EvoAsyncSubAgentMiddleware``.
+
+    Deepagents' ``create_deep_agent`` auto-composes the vanilla
+    ``AsyncSubAgentMiddleware`` when it sees ``graph_id``-carrying entries
+    in ``subagents=``. We need our payload-aware subclass to handle those
+    (see ``EvoScientist/middleware/expert_async_subagent.py`` for the
+    upstream-workaround rationale). To prevent the auto-composition and
+    route all async dispatch through our subclass, we strip AsyncSubAgent
+    specs from ``subs`` here and hand them to our middleware.
+
+    Also folds in ``AsyncSubAgent`` specs for installed
+    ``default_dispatch: async`` expert skills — all pointing at the shared
+    ``expert-container-async`` graph, marked ``is_expert=True`` so the
+    middleware requires a payload with ``skill_name``.
+
+    Returns:
+        ``subs`` with ``graph_id``-carrying entries removed. Safe to pass
+        as ``create_deep_agent(subagents=...)`` — the async-auto-compose
+        branch is skipped for empty async lists.
+    """
+    from .middleware.expert_async_subagent import EvoAsyncSubAgentMiddleware
+    from .subagents.expert_container_async import build_expert_async_subagent_specs
+
+    cfg = cfg if cfg is not None else _ensure_config()
+
+    async_specs = [s for s in subs if "graph_id" in s]
+    sync_subs = [s for s in subs if "graph_id" not in s]
+    async_specs.extend(build_expert_async_subagent_specs(cfg=cfg))
+
+    if async_specs:
+        base_middleware.append(EvoAsyncSubAgentMiddleware(async_subagents=async_specs))
+    return sync_subs
+
+
 def _build_base_kwargs(
     base_backend, base_middleware, *, cfg=None, chat_model=None, workspace_dir=None
 ):
@@ -547,6 +584,10 @@ def _build_base_kwargs(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
     )
     subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    # Route AsyncSubAgent specs (both standard and expert) through
+    # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
+    # replaces upstream's non-parameterisable one.
+    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
     return {
         "name": "EvoScientist",
         "model": chat_model if chat_model is not None else _ensure_chat_model(),
@@ -630,6 +671,10 @@ def load_mcp_and_build_kwargs(
     # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
     # since async sub-agents are remote graphs that load their own tools).
     subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    # Mirror the base path: route AsyncSubAgent specs through
+    # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
+    # is the one composed into the main agent.
+    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
 
     return {
         "name": "EvoScientist",
