@@ -230,8 +230,31 @@ def test_selector_failure_reports_ended_without_selection():
     assert sink.calls[-1] == ("ended",)
 
 
+def test_selector_failure_warns_once_per_middleware_instance(caplog):
+    """Repeated degradation stays visible without warning on every request."""
+    mock_selector = MagicMock()
+    mock_selector.wrap_model_call.side_effect = RuntimeError("revoked credentials")
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=MagicMock(return_value=mock_selector),
+        threshold=5,
+    )
+    request = _request([_tool(f"t{i}") for i in range(10)])
+
+    caplog.set_level("WARNING", logger="EvoScientist.middleware.tool_selector")
+    cond.wrap_model_call(request, MagicMock())
+    cond.wrap_model_call(request, MagicMock())
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "tool_selector.fallback" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "RuntimeError" in warnings[0].getMessage()
+
+
 @pytest.mark.asyncio
-async def test_selector_provider_failure_allows_downstream_model_fallback():
+async def test_selector_provider_failure_allows_downstream_model_fallback(caplog):
     """A failed fixed selector model must not block a healthy request fallback."""
     from EvoScientist.llm.errors import ProviderStreamError
 
@@ -251,10 +274,14 @@ async def test_selector_provider_failure_allows_downstream_model_fallback():
     response = MagicMock()
     handler = AsyncMock(return_value=response)
 
+    caplog.set_level("WARNING", logger="EvoScientist.middleware.tool_selector")
     result = await cond.awrap_model_call(request, handler)
 
     assert result is response
     handler.assert_awaited_once_with(request)
+    assert any(
+        "tool_selector.fallback" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_selector_failure_ends_before_sync_fallback_handler():

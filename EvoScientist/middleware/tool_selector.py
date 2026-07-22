@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
@@ -146,6 +147,8 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         # Agent tools are fixed after graph construction, so the filtered
         # always-include set is stable for this middleware instance.
         self._selector: AgentMiddleware | None = None
+        self._fallback_warning_emitted = False
+        self._fallback_warning_lock = threading.Lock()
 
     def _build_selector(self, request: ModelRequest) -> AgentMiddleware:
         if self._selector is None:
@@ -156,6 +159,19 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
     @staticmethod
     def _selected_names(request: ModelRequest) -> list[str]:
         return [name for tool in request.tools if (name := _tool_name(tool))]
+
+    def _report_selector_failure(self, exc: Exception) -> None:
+        """Expose selector degradation once without flooding normal logs."""
+        with self._fallback_warning_lock:
+            emit_warning = not self._fallback_warning_emitted
+            self._fallback_warning_emitted = True
+        if emit_warning:
+            logger.warning(
+                "tool_selector.fallback error_type=%s using_all_tools=true; "
+                "details and subsequent failures are logged at DEBUG",
+                type(exc).__name__,
+            )
+        logger.debug("Tool selector failed, using all tools", exc_info=True)
 
     def wrap_model_call(
         self,
@@ -194,7 +210,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return self._build_selector(request).wrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception:
+        except Exception as exc:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
             # The selector is an optimization, so every selector-only failure
@@ -203,7 +219,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             # primary model, but it cannot replace this selector's fixed
             # auxiliary model. Re-raising here would make a healthy fallback
             # retry the same failed selector and never reach the model call.
-            logger.debug("Tool selector failed, using all tools", exc_info=True)
+            self._report_selector_failure(exc)
             _end_selection()
             return handler(request)
         finally:
@@ -243,10 +259,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await self._build_selector(request).awrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception:
+        except Exception as exc:
             if _handler_called:
                 raise
-            logger.debug("Tool selector failed, using all tools", exc_info=True)
+            self._report_selector_failure(exc)
             _end_selection()
             return await handler(request)
         finally:
