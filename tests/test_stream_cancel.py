@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from EvoScientist.backends import CustomSandboxBackend
+from EvoScientist.cancellation import current_cancel_event
 from EvoScientist.runtime import AsyncRuntime
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeGraphGateway
@@ -257,6 +258,29 @@ def test_cancel_terminates_active_shell_process_tree(tmp_path):
     assert not worker.is_alive()
     assert result["response"].exit_code == 130
     assert not forbidden.exists()
+
+
+async def test_stream_cancel_binding_can_close_in_different_task_context():
+    """No ContextVar token may survive across an async-generator yield."""
+    closed = False
+
+    async def _events():
+        nonlocal closed
+        try:
+            yield {"type": "text", "content": "one"}
+            await asyncio.Event().wait()
+        finally:
+            closed = True
+
+    wrapped = display_mod.iter_with_stream_cancel(_events(), "scope:cross-context")
+    async for _ in wrapped:
+        break
+
+    assert current_cancel_event() is None
+    await asyncio.create_task(wrapped.aclose())
+
+    assert closed is True
+    assert current_cancel_event() is None
 
 
 # ---------------------------------------------------------------------------

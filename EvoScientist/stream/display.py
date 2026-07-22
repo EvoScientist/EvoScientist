@@ -267,9 +267,24 @@ async def iter_with_stream_cancel(
     cancel_scope: str | None = None,
 ) -> AsyncIterator[_T]:
     """Iterate graph events with the matching blocking-tool cancel context."""
-    with bind_stream_cancel(cancel_scope):
-        async for event in events:
+    iterator = aiter(events)
+    try:
+        while True:
+            try:
+                # ContextVar tokens cannot safely straddle ``yield``: async
+                # generator finalization may run in a different task/context.
+                # The cancellation binding is only needed while requesting the
+                # next graph event, which includes any nested tool execution.
+                with bind_stream_cancel(cancel_scope):
+                    event = await anext(iterator)
+            except StopAsyncIteration:
+                return
             yield event
+    finally:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            with bind_stream_cancel(cancel_scope):
+                await aclose()
 
 
 def discard_stream_cancel(cancel_scope: str | None = None) -> None:
