@@ -62,6 +62,7 @@ def _runtime_state(
     config: EvoScientistConfig | None = None,
     thread_store: ThreadStore | None = None,
     runtime_gateways: RuntimeGateways | None = None,
+    async_runtime: AsyncRuntime | None = None,
 ) -> ServeRuntimeState:
     store = thread_store or _thread_store()
     return ServeRuntimeState(
@@ -70,7 +71,20 @@ def _runtime_state(
         workspace_dir=workspace_dir,
         config=config,
         runtime_gateways=runtime_gateways or _runtime_gateways(store),
+        async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
     )
+
+
+def test_serve_runtime_state_requires_owned_runtime():
+    """Message processing cannot be constructed without its runtime owner."""
+    with pytest.raises(TypeError, match="async_runtime"):
+        ServeRuntimeState(
+            agent=_agent(),
+            thread_id="tid",
+            workspace_dir=None,
+            config=None,
+            runtime_gateways=_runtime_gateways(),
+        )
 
 
 async def test_hook_updates_runtime_state_on_agent_swap():
@@ -206,7 +220,11 @@ async def test_hook_updates_workspace_dir_on_resume():
         await hook(ctx, old_agent, cmd)
 
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/restored-ws")
-    load_agent.assert_called_once_with(workspace_dir="/restored-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/restored-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     assert state.workspace_dir == "/restored-ws"
     assert state.agent is reloaded_agent
 
@@ -369,7 +387,11 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         await cb("new-tid", "/new-ws")
 
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/new-ws")
-    load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/new-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     assert call_order == ["load", "sync"]
     assert state.thread_id == "new-tid"
     assert state.workspace_dir == "/new-ws"
@@ -446,7 +468,11 @@ async def test_serve_resume_callback_preserves_state_when_sync_fails():
     ):
         await cb("new-tid", "/new-ws")
 
-    load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/new-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     set_active.assert_called_once_with("/old-ws")
     assert state.agent is old_agent
     assert state.resume_warning_thread_id is None
@@ -483,7 +509,11 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
     ):
         await cb("new-tid", "/new-ws")
 
-    load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/new-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     set_active.assert_called_once_with("/old-ws")
     sync_server.assert_not_awaited()
     assert state.resume_warning_thread_id is None

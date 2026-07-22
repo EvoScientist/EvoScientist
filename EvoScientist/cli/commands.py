@@ -900,7 +900,7 @@ class ServeRuntimeState:
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
     runtime_gateways: RuntimeGateways
-    async_runtime: AsyncRuntime | None = None
+    async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
 
     def set_agent(
@@ -991,13 +991,12 @@ async def _apply_serve_resume_state(
                 "the effective configuration."
             )
         try:
-            load_kwargs: dict[str, Any] = {
-                "workspace_dir": new_workspace,
-                "config": effective_config,
-            }
-            if runtime_state.async_runtime is not None:
-                load_kwargs["runtime"] = runtime_state.async_runtime
-            new_agent = await asyncio.to_thread(_load_agent, **load_kwargs)
+            new_agent = await asyncio.to_thread(
+                _load_agent,
+                workspace_dir=new_workspace,
+                config=effective_config,
+                runtime=runtime_state.async_runtime,
+            )
             await _sync_background_agent_server_workspace(
                 effective_config,
                 workspace_dir=new_workspace,
@@ -1250,8 +1249,6 @@ def _serve_process_message(
         _slash_error: Exception | None = None
         try:
             async_runtime = runtime_state.async_runtime
-            if async_runtime is None:
-                raise RuntimeError("Serve async runtime is unavailable")
             _slash_handled = async_runtime.run_sync(
                 lambda: dispatch_channel_slash_command(
                     msg,
@@ -1412,10 +1409,7 @@ def _serve_drain_notifications(
         )
 
     try:
-        async_runtime = runtime_state.async_runtime
-        if async_runtime is None:
-            raise RuntimeError("Serve async runtime is unavailable")
-        async_runtime.run_sync(_consume)
+        runtime_state.async_runtime.run_sync(_consume)
     except Exception as exc:
         _serve_logger.warning("Notification drain failed: %s", exc)
 
