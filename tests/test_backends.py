@@ -1125,6 +1125,20 @@ class TestSandboxId:
 # === execute() literal cwd sanitization ===
 
 
+class TestExecuteValidation:
+    @pytest.mark.parametrize("command", ["", None, 123])
+    def test_execute_rejects_empty_or_non_string_commands(self, command, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        response = backend.execute(command)
+
+        assert response == backends.ExecuteResponse(
+            output="Error: Command must be a non-empty string.",
+            exit_code=1,
+            truncated=False,
+        )
+
+
 class TestExecuteCwdSanitization:
     def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
         """``prepare_sandbox_command`` must rewrite a literal workspace-root

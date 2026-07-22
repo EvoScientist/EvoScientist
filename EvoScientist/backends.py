@@ -1308,6 +1308,17 @@ class CustomSandboxBackend(LocalShellBackend):
         The validated command is handed to the owned process runner so
         cancelling an agent turn can terminate the complete process tree.
         """
+        # Preserve LocalShellBackend's public validation contract.  This
+        # override cannot delegate execution to the base implementation because
+        # it must retain the Popen handle for cancellation, so validate before
+        # command preparation and process launch instead.
+        if not command or not isinstance(command, str):
+            return ExecuteResponse(
+                output="Error: Command must be a non-empty string.",
+                exit_code=1,
+                truncated=False,
+            )
+
         command, error = prepare_sandbox_command(
             command, self.cwd, virtual_mode=self.virtual_mode, dangerous=self._dangerous
         )
