@@ -71,7 +71,11 @@ class RuntimeHandle(concurrent.futures.Future[T], Generic[T]):
 
     async def wait_settled_async(self) -> None:
         """Wait for task settlement without blocking the caller's loop."""
-        await asyncio.wrap_future(self._settled)
+        # ``wrap_future`` propagates cancellation back to the concurrent
+        # future.  Settlement is a shared, one-way runtime signal rather than
+        # work owned by any individual waiter, so a cancelled waiter must not
+        # cancel or falsely complete it for everyone else.
+        await asyncio.shield(asyncio.wrap_future(self._settled))
 
     def _mark_settled(self) -> None:
         # The lock makes the check-and-set atomic during forced shutdown.

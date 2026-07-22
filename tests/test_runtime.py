@@ -211,6 +211,32 @@ def test_handle_distinguishes_public_cancellation_from_task_settlement(runtime):
     assert handle.wait_settled(5)
 
 
+async def test_cancelling_async_waiter_does_not_cancel_settlement_signal(runtime):
+    started = threading.Event()
+    release = threading.Event()
+
+    async def blocked() -> None:
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.005)
+
+    handle = runtime.submit(blocked)
+    assert await asyncio.to_thread(started.wait, 5)
+
+    waiter = asyncio.create_task(handle.wait_settled_async())
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert not handle.settled
+    assert handle.wait_settled(0) is False
+
+    release.set()
+    assert handle.result(5) is None
+    assert handle.wait_settled(5)
+
+
 def test_cancelling_before_task_creation_never_invokes_factory(runtime):
     loop_blocked = threading.Event()
     release_loop = threading.Event()
