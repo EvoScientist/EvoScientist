@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from ..runtime import AsyncRuntime
+from ..runtime import AsyncRuntime, AsyncRuntimeError
 
 logger = logging.getLogger(__name__)
 
@@ -884,6 +884,11 @@ def load_mcp_tools(
         server_tools = runtime.run_sync(
             lambda: _load_tools(config, on_progress=on_progress)
         )
+    except AsyncRuntimeError:
+        # A bridge lifecycle/call-site error is not an MCP availability
+        # failure.  In particular, hiding a running-loop violation here makes
+        # callers cache an empty tool set for the rest of the process.
+        raise
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}

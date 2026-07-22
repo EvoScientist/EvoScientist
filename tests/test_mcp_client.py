@@ -23,7 +23,7 @@ from EvoScientist.mcp.client import (
     parse_mcp_edit_args,
     remove_mcp_server,
 )
-from EvoScientist.runtime import AsyncRuntime
+from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 
 # ---- _interpolate_env ----
 
@@ -331,6 +331,14 @@ class TestOwnedRuntimeLoading:
             thread.name == "evosci-mcp-runtime" and thread.is_alive()
             for thread in threading.enumerate()
         )
+
+    async def test_direct_caller_does_not_hide_running_loop_violation(self):
+        config = {"server": {"transport": "http", "url": "http://example.test"}}
+
+        with pytest.raises(
+            AsyncRuntimeError, match="cannot block a running event loop"
+        ):
+            load_mcp_tools(config)
 
 
 class TestFilterTools:
