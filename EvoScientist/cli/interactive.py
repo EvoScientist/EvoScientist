@@ -4,7 +4,9 @@ import asyncio
 import logging
 import queue
 import random
+import signal
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -328,6 +330,47 @@ async def _resolve_startup_session(
 # =============================================================================
 # Interactive & single-shot modes
 # =============================================================================
+
+
+async def _run_rich_cli_streaming_turn(**kwargs: Any) -> str:
+    """Run one Rich CLI turn with a fresh, turn-local SIGINT policy.
+
+    ``asyncio.run`` installs a SIGINT handler whose interrupt count lasts for
+    the lifetime of the runner.  The Rich CLI intentionally recovers after a
+    cancelled turn, so relying on that handler makes Ctrl+C on a later turn
+    look like the runner's second interrupt and raises ``KeyboardInterrupt``.
+
+    While a model turn is active, route the first Ctrl+C to a child task
+    instead.  Restoring the runner's handler after every turn keeps Ctrl+C at
+    the prompt unchanged and resets the force-quit boundary for the next turn.
+    A second Ctrl+C before the current turn settles remains a force quit.
+    """
+    stream_task = asyncio.create_task(
+        run_streaming_async(**kwargs, recover_on_cancel=True)
+    )
+
+    # Interactive CLI execution belongs on the main thread, but retaining the
+    # ordinary await makes this helper safe in embedded/test environments where
+    # Python does not permit installing process signal handlers.
+    if threading.current_thread() is not threading.main_thread():
+        return await stream_task
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    interrupted = False
+
+    def _cancel_turn(signum: int, frame: Any) -> None:
+        nonlocal interrupted
+        if interrupted or stream_task.done():
+            signal.default_int_handler(signum, frame)
+            return
+        interrupted = True
+        stream_task.cancel()
+
+    signal.signal(signal.SIGINT, _cancel_turn)
+    try:
+        return await stream_task
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 def cmd_interactive(
@@ -1420,7 +1463,7 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        await run_streaming_async(
+                        await _run_rich_cli_streaming_turn(
                             ui_backend=state["ui_backend"],
                             agent=ready_agent,
                             message=message_to_send,
@@ -1432,7 +1475,6 @@ def cmd_interactive(
                             status_footer_builder=_stream_status_footer,
                             gateway=runtime_gateways.graph_gateway,
                             runtime=async_runtime,
-                            recover_on_cancel=True,
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
