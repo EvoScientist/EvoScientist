@@ -8,6 +8,8 @@ captured at startup.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -614,3 +616,78 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
 
     assert captured["slash_workspace"] == "/restored-workspace"
     assert captured["meta_workspace"] == "/restored-workspace"
+
+
+def test_serve_channel_send_does_not_block_owned_runtime_loop():
+    """Channel I/O is scheduled on the bus loop and settled before the reply."""
+    from EvoScientist.cli import channel as channel_mod
+
+    events: list[str] = []
+    callback_elapsed: list[float] = []
+
+    class _ChannelRef:
+        send_thinking = True
+
+        async def send_thinking_message(self, **_kwargs):
+            events.append("send-started")
+            await asyncio.sleep(0.05)
+            events.append("send-finished")
+
+    msg = ChannelMessage(
+        msg_id="msg-nonblocking-send",
+        content="hello",
+        sender="channel-user",
+        channel_type="telegram",
+        metadata={},
+        channel_ref=_ChannelRef(),
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-send",
+    )
+    state = _runtime_state(agent=_agent(), thread_id="tid")
+
+    def _fake_run_streaming(**kwargs):
+        async def _invoke_callback() -> None:
+            started = time.monotonic()
+            kwargs["on_thinking"]("x" * 250)
+            callback_elapsed.append(time.monotonic() - started)
+            events.append("callback-returned")
+
+        kwargs["runtime"].run_sync(_invoke_callback)
+        return "ok"
+
+    def _capture_response(_msg_id: str, _response: str) -> None:
+        events.append("response-set")
+
+    with AsyncRuntime(thread_name="test-serve-send-runtime") as runtime:
+        runtime.submit(lambda: asyncio.sleep(0)).result(timeout=1)
+        state.async_runtime = runtime
+        assert runtime._loop is not None
+
+        with (
+            patch.object(channel_mod, "_bus_loop", runtime._loop),
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming",
+                side_effect=_fake_run_streaming,
+            ),
+            patch(
+                "EvoScientist.cli.commands._set_channel_response",
+                side_effect=_capture_response,
+            ),
+        ):
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg,
+                runtime_state=state,
+                model="model",
+                workspace_dir="/tmp",
+                show_thinking=True,
+            )
+
+    assert callback_elapsed[0] < 0.5
+    assert events.index("callback-returned") < events.index("send-started")
+    assert events.index("send-finished") < events.index("response-set")

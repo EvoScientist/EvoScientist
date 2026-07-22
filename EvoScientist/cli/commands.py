@@ -1167,14 +1167,33 @@ def _serve_process_message(
 
     # -- channel callback helpers (same pattern as interactive.py) --
 
+    pending_channel_sends: list[tuple[Any, str, int]] = []
+
     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
         loop = _bus_loop
         if not loop:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
             return
         try:
-            asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
+            pending_channel_sends.append(
+                (asyncio.run_coroutine_threadsafe(coro, loop), label, timeout)
+            )
         except Exception as e:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
             _serve_logger.debug(f"{label} send failed: {e}")
+
+    def _settle_channel_sends() -> None:
+        """Preserve send ordering without blocking the owned runtime loop."""
+        for send, label, timeout in pending_channel_sends:
+            try:
+                send.result(timeout=timeout)
+            except Exception as e:
+                send.cancel()
+                _serve_logger.debug(f"{label} send failed: {e}")
 
     def _send_thinking(thinking: str) -> None:
         ch = msg.channel_ref
@@ -1304,6 +1323,7 @@ def _serve_process_message(
             response = f"Error: {e}"
             console.print(f"[red]Serve error: {e}[/red]")
 
+        _settle_channel_sends()
         _set_channel_response(msg.msg_id, response)
         console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
     finally:
