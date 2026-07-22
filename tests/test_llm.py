@@ -381,6 +381,13 @@ class TestSlashModelIdFallback:
 # =============================================================================
 
 
+def _sdk_retry_supports_status_codes_override() -> bool:
+    """openrouter>=0.11 only; the 429 override degrades to a no-op below that."""
+    from openrouter.utils.retries import RetryConfig
+
+    return "status_codes_override" in getattr(RetryConfig, "__annotations__", {})
+
+
 class TestThirdPartyRouting:
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_siliconflow_routes_through_openai(self, mock_init, monkeypatch):
@@ -471,6 +478,11 @@ class TestThirdPartyRouting:
 
     # --- OpenRouter upstream 429 retry ---
 
+    @pytest.mark.skipif(
+        not _sdk_retry_supports_status_codes_override(),
+        reason="openrouter<0.11 RetryConfig lacks status_codes_override; "
+        "the 429 override no-ops there by design (models.py hasattr guard)",
+    )
     def test_openrouter_429_added_to_retryable_status_codes(self, monkeypatch):
         """Upstream 429s must become retryable on the real SDK client.
 
@@ -501,6 +513,11 @@ class TestThirdPartyRouting:
         retry_config = model.client.sdk_configuration.retry_config
         assert getattr(retry_config, "status_codes_override", None) is None
 
+    @pytest.mark.skipif(
+        not _sdk_retry_supports_status_codes_override(),
+        reason="openrouter<0.11 RetryConfig lacks status_codes_override; "
+        "the 429 override no-ops there by design (models.py hasattr guard)",
+    )
     def test_openrouter_429_retried_on_the_wire(self, monkeypatch):
         """End-to-end: a 429 with Retry-After is retried and the retry succeeds."""
         import httpx
@@ -2479,259 +2496,6 @@ class TestPatchOpenrouterStripResponsesReasoning:
             )
             result = mod._convert_message_to_dict(msg)
             assert result["reasoning_details"] == ["opaque"]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-
-class TestPatchOpenrouterSseStreamLeak:
-    """The OpenRouter SDK abandons ``response.aiter_bytes()`` when its SSE
-    parser returns at the ``[DONE]`` sentinel; the suspended generator is later
-    finalized by GC on a thread with no asyncgen hook, which is what produces
-    the ``Exception ignored in:`` wall at CLI exit (#372).
-    """
-
-    SSE_BODY = (
-        b'data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}\n\n'
-        b"data: [DONE]\n\n"
-        b'data: {"id":"2","choices":[{"delta":{"content":"never"}}]}\n\n'
-    )
-
-    def _apply(self):
-        import openrouter.utils.eventstreaming as mod
-
-        import EvoScientist.llm.patches as patches
-
-        orig = mod.stream_events_async
-        orig_flag = patches._openrouter_sse_leak_patched
-        patches._openrouter_sse_leak_patched = False
-        patches._patch_openrouter_sse_stream_leak()
-        return patches, mod, orig, orig_flag
-
-    @staticmethod
-    def _restore(patches, mod, orig, orig_flag):
-        mod.stream_events_async = orig
-        patches._openrouter_sse_leak_patched = orig_flag
-
-    @staticmethod
-    async def _drain(mod, response):
-        events = []
-        async for event in mod.stream_events_async(response, lambda raw: raw, "[DONE]"):
-            events.append(event)
-        return events
-
-    async def test_byte_iterator_is_closed_after_sentinel(self):
-        import httpx
-
-        patches, mod, orig, orig_flag = self._apply()
-        closed = []
-
-        async def handler(request):
-            return httpx.Response(200, content=self.SSE_BODY)
-
-        try:
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(handler)
-            ) as client:
-                async with client.stream("GET", "http://t/x") as response:
-                    real_aiter_bytes = response.aiter_bytes
-
-                    def tracking(*args, **kwargs):
-                        iterator = real_aiter_bytes(*args, **kwargs)
-                        closed.append(iterator)
-                        return iterator
-
-                    response.aiter_bytes = tracking
-                    await self._drain(mod, response)
-
-            assert closed, "SDK never asked for a byte iterator"
-            # An exhausted-or-closed async generator has no frame left.
-            assert all(it.ag_frame is None for it in closed)
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    async def test_events_before_sentinel_still_delivered(self):
-        import httpx
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-
-            async def handler(request):
-                return httpx.Response(200, content=self.SSE_BODY)
-
-            async def collect(parser):
-                events = []
-                async with httpx.AsyncClient(
-                    transport=httpx.MockTransport(handler)
-                ) as client:
-                    async with client.stream("GET", "http://t/x") as response:
-                        async for event in parser(response, lambda raw: raw, "[DONE]"):
-                            events.append(event)
-                return events
-
-            # The patch must not lose, reorder, or alter what the SDK
-            # delivers — assert against the unpatched parser's output rather
-            # than a hardcoded count, which varies across SDK versions.
-            baseline = await collect(orig)
-            patched = await collect(mod.stream_events_async)
-
-            assert patched == baseline
-            assert any("hi" in event for event in patched)
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    async def test_preexisting_aiter_bytes_override_is_restored(self):
-        import httpx
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-
-            async def handler(request):
-                return httpx.Response(200, content=self.SSE_BODY)
-
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(handler)
-            ) as client:
-                async with client.stream("GET", "http://t/x") as response:
-                    override = response.aiter_bytes
-                    response.aiter_bytes = override  # instance-level override
-                    await self._drain(mod, response)
-                    assert response.__dict__.get("aiter_bytes") is override
-
-                async with client.stream("GET", "http://t/y") as response:
-                    await self._drain(mod, response)  # no pre-existing override
-                    assert "aiter_bytes" not in response.__dict__
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    async def test_early_abandonment_closes_parser_and_response(self):
-        import httpx
-        import openrouter.utils.eventstreaming as mod
-
-        import EvoScientist.llm.patches as patches
-
-        # Spy on the SDK parser factory so the test holds the `inner`
-        # generator the patch wraps — the leak on the abandonment path.
-        sdk_orig = mod.stream_events_async
-        orig_flag = patches._openrouter_sse_leak_patched
-        inners = []
-
-        def spy(response, *args, **kwargs):
-            gen = sdk_orig(response, *args, **kwargs)
-            inners.append(gen)
-            return gen
-
-        mod.stream_events_async = spy
-        patches._openrouter_sse_leak_patched = False
-        patches._patch_openrouter_sse_stream_leak()
-        try:
-
-            async def handler(request):
-                return httpx.Response(200, content=self.SSE_BODY)
-
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(handler)
-            ) as client:
-                async with client.stream("GET", "http://t/x") as response:
-                    gen = mod.stream_events_async(response, lambda raw: raw, "[DONE]")
-                    async for _event in gen:
-                        break  # abandon mid-stream, before the sentinel
-                    await gen.aclose()
-
-                    # The parser generator must not be left suspended for GC;
-                    # its finally also closed the response.
-                    assert inners, "spy never saw the SDK parser generator"
-                    assert all(g.ag_frame is None for g in inners)
-                    assert response.is_closed
-        finally:
-            mod.stream_events_async = sdk_orig
-            patches._openrouter_sse_leak_patched = orig_flag
-
-    async def test_cancelled_cleanup_still_closes_iterators_and_reraises(self):
-        import asyncio
-
-        import httpx
-        import openrouter.utils.eventstreaming as mod
-
-        import EvoScientist.llm.patches as patches
-
-        # A parser whose aclose() raises CancelledError, standing in for a
-        # task cancellation landing mid-cleanup: later closables must still
-        # be closed and the cancellation re-raised, not swallowed.
-        sdk_orig = mod.stream_events_async
-        orig_flag = patches._openrouter_sse_leak_patched
-
-        def cancelling_parser(response, *args, **kwargs):
-            async def gen():
-                byte_iter = response.aiter_bytes()
-                try:
-                    async for _chunk in byte_iter:
-                        yield "event"
-                finally:
-                    raise asyncio.CancelledError()
-
-            return gen()
-
-        mod.stream_events_async = cancelling_parser
-        patches._openrouter_sse_leak_patched = False
-        patches._patch_openrouter_sse_stream_leak()
-        seen = []
-        try:
-
-            async def handler(request):
-                return httpx.Response(200, content=self.SSE_BODY)
-
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(handler)
-            ) as client:
-                async with client.stream("GET", "http://t/x") as response:
-                    real_aiter_bytes = response.aiter_bytes
-
-                    def tracking(*args, **kwargs):
-                        iterator = real_aiter_bytes(*args, **kwargs)
-                        seen.append(iterator)
-                        return iterator
-
-                    response.aiter_bytes = tracking
-                    gen = mod.stream_events_async(response, lambda raw: raw, "[DONE]")
-                    async for _event in gen:
-                        break
-                    with pytest.raises(asyncio.CancelledError):
-                        await gen.aclose()
-
-                    # Cancellation re-raised, yet the byte iterator was still
-                    # closed and the pre-existing override restored.
-                    assert seen, "parser never asked for a byte iterator"
-                    assert all(it.ag_frame is None for it in seen)
-                    assert response.__dict__.get("aiter_bytes") is tracking
-        finally:
-            mod.stream_events_async = sdk_orig
-            patches._openrouter_sse_leak_patched = orig_flag
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_get_chat_model_wires_patch(self, mock_init, monkeypatch):
-        import openrouter.utils.eventstreaming as mod
-
-        import EvoScientist.llm.patches as patches
-
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-        # Reset the flag and pin the current function so the re-application
-        # this test triggers is undone on teardown.
-        monkeypatch.setattr(patches, "_openrouter_sse_leak_patched", False)
-        monkeypatch.setattr(mod, "stream_events_async", mod.stream_events_async)
-
-        get_chat_model("x-ai/grok-4.3", provider="openrouter")
-
-        assert patches._openrouter_sse_leak_patched is True
-
-    def test_patch_is_idempotent(self):
-        import openrouter.utils.eventstreaming as mod
-
-        patches, _mod, orig, orig_flag = self._apply()
-        try:
-            after_first = mod.stream_events_async
-            patches._patch_openrouter_sse_stream_leak()
-            assert mod.stream_events_async is after_first
         finally:
             self._restore(patches, mod, orig, orig_flag)
 

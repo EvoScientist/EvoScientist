@@ -14,8 +14,6 @@ Patches:
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
-    - _patch_openrouter_sse_stream_leak: close the response byte iterator the
-      OpenRouter SDK leaves suspended at the [DONE] sentinel
 
 Utilities:
     - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
@@ -923,93 +921,6 @@ def _patch_openrouter_structured_output() -> None:
 
         ChatOpenRouter.with_structured_output = _patched
         _openrouter_structured_output_patched = True
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Patch (lazy, OpenRouter only): close the SSE response byte iterator that the
-# OpenRouter SDK abandons.
-#
-# `openrouter.utils.eventstreaming.stream_events_async` returns out of
-# `async for chunk in response.aiter_bytes()` when it hits the `[DONE]`
-# sentinel.  Its `finally` closes the *response* but never that `aiter_bytes()`
-# async generator, which stays suspended until GC.  `sys.set_asyncgen_hooks()`
-# is per-thread, so once the GC pass lands on a non-asyncio thread (executor /
-# quickjs worker) there is no finalizer hook and CPython falls back to a
-# synchronous `close()`; httpcore's cleanup awaits an anyio lock, which cannot
-# run there.  Every CLI run then ends in a wall of `Exception ignored in:`
-# tracebacks (`async generator ignored GeneratorExit`, `no running event
-# loop`).  Closing the iterator keeps teardown inside the running loop.
-# The SDK is Speakeasy-generated ("DO NOT EDIT"), so this stays local; it is a
-# no-op once upstream closes the iterator itself.  EvoScientist issue #372.
-# ---------------------------------------------------------------------------
-_openrouter_sse_leak_patched = False
-
-
-def _patch_openrouter_sse_stream_leak() -> None:
-    global _openrouter_sse_leak_patched
-    if _openrouter_sse_leak_patched:
-        return
-    try:
-        import openrouter.utils.eventstreaming as _mod
-
-        _orig = _mod.stream_events_async
-
-        # Only `response` is consumed here; everything else passes through so
-        # a regenerated SDK signature cannot turn this patch into a TypeError.
-        def _patched(response: Any, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            import asyncio
-
-            # The SDK builds its byte iterator internally, so intercept the
-            # factory on this response to get a handle on what it abandons.
-            iterators: list[Any] = []
-            had_override = "aiter_bytes" in response.__dict__
-            _orig_aiter_bytes = response.aiter_bytes
-
-            def _tracking_aiter_bytes(*args: Any, **kwargs: Any) -> Any:
-                iterator = _orig_aiter_bytes(*args, **kwargs)
-                iterators.append(iterator)
-                return iterator
-
-            response.aiter_bytes = _tracking_aiter_bytes
-            inner = _orig(response, *args, **kwargs)
-
-            async def _closing() -> AsyncIterator[Any]:
-                try:
-                    async for event in inner:
-                        yield event
-                finally:
-                    if had_override:
-                        response.aiter_bytes = _orig_aiter_bytes
-                    else:
-                        try:
-                            del response.aiter_bytes
-                        except AttributeError:
-                            pass
-                    # Close the parser generator first (its finally closes the
-                    # response), then the byte iterators it consumed — covers
-                    # mid-stream abandonment, not just the [DONE] path.  A
-                    # cancellation mid-cleanup is stashed so every aclose still
-                    # runs, then re-raised.
-                    cancelled: BaseException | None = None
-                    for closable in [inner, *iterators]:
-                        aclose = getattr(closable, "aclose", None)
-                        if aclose is None:
-                            continue
-                        try:
-                            await aclose()
-                        except asyncio.CancelledError as exc:
-                            cancelled = exc
-                        except Exception:
-                            pass
-                    if cancelled is not None:
-                        raise cancelled
-
-            return _closing()
-
-        _mod.stream_events_async = _patched
-        _openrouter_sse_leak_patched = True
     except Exception:
         pass
 
