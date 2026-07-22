@@ -2,7 +2,21 @@
 
 Reads ``configurable.active_teams: list[str]`` on every model call and
 appends a system-prompt cue biasing the main agent to consult the
-user-invited expert(s) via ``task({subagent_type: ...})``.
+user-invited expert(s).
+
+The cue is dispatch-aware: for each active expert the middleware looks up
+its ``default_dispatch`` (via ``list_expert_skills()``) and emits the
+tool-shape cue that matches how the expert actually runs:
+
+- ``sync`` / ``panel`` / unset -> ``task({subagent_type: 'X', ...})``.
+- ``async`` -> ``start_async_task(subagent_type: 'X', payload: {skill_name:
+  'X', output_path: '...'})``, plus a reminder that ``check_async_task``
+  returns the status/result later.
+
+Without the dispatch-aware branch, an ``async`` expert like
+``literature-review`` gets told to use ``task()``, which routes it back
+through the sync ``SubAgentMiddleware`` rather than the async graph the
+container registers for it.
 
 Backend-stateless team binding: WebUI sends ``active_teams`` on every
 ``stream.submit()`` for as long as the invited expert is active; this
@@ -40,24 +54,39 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 
+# Per-expert cue shapes. Composed inside ``_TEMPLATE_SINGLE`` /
+# ``_TEMPLATE_MULTI`` at render time so the wrapping tags stay in sync
+# with the count of active experts.
+_SYNC_CUE = (
+    "Consult it via `task({{subagent_type: '{expert}', description: '...'}})`. "
+    "It runs synchronously and returns its result to the same turn."
+)
+
+_ASYNC_CUE = (
+    "Consult it via `start_async_task(description: '...', "
+    "subagent_type: '{expert}', payload: {{skill_name: '{expert}', "
+    "output_path: './artifacts/{expert}/<slug>.md'}})`. It runs in the "
+    "background and returns a task_id immediately; the result artifact is "
+    "written to ``output_path``. Use ``check_async_task`` to poll status "
+    "when the user asks."
+)
+
 _TEMPLATE_SINGLE = (
     "<active_expert>\n"
     "The user has invited the expert `{expert}` to this thread. "
-    "Consult it via `task({{subagent_type: '{expert}', ...}})` for "
-    "requests within its scope. It stays available for the whole session "
-    "until the user dismisses it.\n"
+    "{cue} "
+    "It stays available for the whole session until the user dismisses it.\n"
     "</active_expert>"
 )
 
-_TEMPLATE_MULTI = (
+_TEMPLATE_MULTI_HEADER = (
     "<active_experts>\n"
-    "The user has invited the following experts to this thread: "
-    "{experts}. Consult any of them via "
-    "`task({{subagent_type: '<expert_name>', ...}})` based on which fits "
-    "the current request. Do not consult an expert if the request is "
-    "clearly outside its scope.\n"
-    "</active_experts>"
+    "The user has invited the following experts to this thread: {experts}. "
+    "Consult the right one for the current request; do not consult an expert "
+    "if the request is clearly outside its scope. Per-expert dispatch:\n"
 )
+
+_TEMPLATE_MULTI_FOOTER = "</active_experts>"
 
 
 def _read_active_teams() -> list[str]:
@@ -85,16 +114,56 @@ def _read_active_teams() -> list[str]:
     return [t for t in raw if isinstance(t, str) and t]
 
 
+def _dispatch_by_name() -> dict[str, str]:
+    """Return ``{skill_name: default_dispatch}`` for every installed expert.
+
+    Fresh filesystem read every call so a ``skill_manager install <expert>``
+    is visible on the next turn without an agent rebuild. Cheap at current
+    scale (a handful of skills, cached bodies).
+
+    On import failure returns an empty dict — the middleware then falls
+    back to the sync cue for every expert, matching pre-async behaviour.
+    """
+    try:
+        from ..tools.skills_manager import list_expert_skills
+    except Exception:
+        return {}
+    try:
+        return {
+            s.name: s.default_dispatch for s in list_expert_skills(include_system=True)
+        }
+    except Exception:
+        return {}
+
+
+def _cue_shape_for(dispatch: str, expert: str) -> str:
+    """Return the ``task()`` / ``start_async_task(...)`` cue for one expert."""
+    if dispatch == "async":
+        return _ASYNC_CUE.format(expert=expert)
+    return _SYNC_CUE.format(expert=expert)
+
+
 class ActiveTeamMiddleware(AgentMiddleware):
     """Bias delegation toward the user's active expert(s) on every turn."""
 
     name = "active_team"
 
     def _cue_for(self, experts: list[str]) -> str:
+        dispatch_map = _dispatch_by_name()
         if len(experts) == 1:
-            return _TEMPLATE_SINGLE.format(expert=experts[0])
+            expert = experts[0]
+            cue = _cue_shape_for(dispatch_map.get(expert, ""), expert)
+            return _TEMPLATE_SINGLE.format(expert=expert, cue=cue)
         experts_str = ", ".join(f"`{e}`" for e in experts)
-        return _TEMPLATE_MULTI.format(experts=experts_str)
+        per_expert_lines = "\n".join(
+            f"- `{e}`: {_cue_shape_for(dispatch_map.get(e, ''), e)}" for e in experts
+        )
+        return (
+            _TEMPLATE_MULTI_HEADER.format(experts=experts_str)
+            + per_expert_lines
+            + "\n"
+            + _TEMPLATE_MULTI_FOOTER
+        )
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Append the active-expert cue to the request's system message."""

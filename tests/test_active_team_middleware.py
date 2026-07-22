@@ -145,7 +145,9 @@ def test_middleware_appends_multi_expert_cue(mock_get_config):
     assert "<active_experts>" in text
     assert "`idea-brainstorm`" in text
     assert "`literature-review`" in text
-    assert "Consult any of them" in text
+    # Multi-cue: header names both experts, then per-expert dispatch lines follow.
+    assert "The user has invited the following experts" in text
+    assert "Per-expert dispatch" in text
     assert "base system" in text
 
 
@@ -159,6 +161,87 @@ def test_middleware_appends_cue_for_unknown_expert_names(mock_get_config):
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "`nonexistent-expert`" in text
+    # Unknown name defaults to sync cue.
+    assert "task(" in text
+
+
+@patch("EvoScientist.tools.skills_manager.list_expert_skills")
+@patch("langgraph.config.get_config")
+def test_middleware_uses_start_async_task_cue_for_async_dispatch(
+    mock_get_config, mock_list_experts
+):
+    """An expert declared ``default_dispatch: async`` gets the async cue."""
+    from unittest.mock import MagicMock
+
+    mock_get_config.return_value = {
+        "configurable": {"active_teams": ["literature-review"]},
+    }
+    info = MagicMock(default_dispatch="async")
+    # ``name`` on MagicMock has to be set via attribute assignment; passing
+    # ``name=`` to the constructor names the mock instance itself.
+    info.name = "literature-review"
+    mock_list_experts.return_value = [info]
+
+    middleware = ActiveTeamMiddleware()
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "<active_expert>" in text
+    assert "start_async_task(" in text
+    assert "subagent_type: 'literature-review'" in text
+    assert "payload" in text
+    assert "skill_name: 'literature-review'" in text
+    assert "output_path" in text
+    assert "check_async_task" in text
+    # Sync cue must NOT be advertised for async experts.
+    assert "Consult it via `task(" not in text
+
+
+@patch("EvoScientist.tools.skills_manager.list_expert_skills")
+@patch("langgraph.config.get_config")
+def test_middleware_uses_task_cue_for_sync_dispatch(mock_get_config, mock_list_experts):
+    """Sync-dispatched experts get the ``task()`` cue."""
+    from unittest.mock import MagicMock
+
+    mock_get_config.return_value = {
+        "configurable": {"active_teams": ["idea-brainstorm"]},
+    }
+    info = MagicMock(default_dispatch="sync")
+    info.name = "idea-brainstorm"
+    mock_list_experts.return_value = [info]
+
+    middleware = ActiveTeamMiddleware()
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "Consult it via `task(" in text
+    assert "runs synchronously" in text
+    # No async-specific fragments for a sync expert.
+    assert "start_async_task(" not in text
+    assert "output_path" not in text
+
+
+@patch("EvoScientist.tools.skills_manager.list_expert_skills")
+@patch("langgraph.config.get_config")
+def test_middleware_multi_mixed_dispatch(mock_get_config, mock_list_experts):
+    """When both sync and async experts are active, each gets its own cue."""
+    from unittest.mock import MagicMock
+
+    mock_get_config.return_value = {
+        "configurable": {"active_teams": ["idea-brainstorm", "literature-review"]},
+    }
+    sync = MagicMock(default_dispatch="sync")
+    sync.name = "idea-brainstorm"
+    async_ = MagicMock(default_dispatch="async")
+    async_.name = "literature-review"
+    mock_list_experts.return_value = [sync, async_]
+
+    middleware = ActiveTeamMiddleware()
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    # Both cue shapes appear once each in the per-expert block.
+    assert text.count("`task(") == 1
+    assert text.count("start_async_task(") == 1
+    assert "`idea-brainstorm`:" in text
+    assert "`literature-review`:" in text
 
 
 @patch("langgraph.config.get_config", side_effect=RuntimeError("outside context"))
