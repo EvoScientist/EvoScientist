@@ -78,6 +78,14 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         skill can't be loaded. Never raises — errors are surfaced through
         the LLM's system prompt so it can return a well-formed error
         envelope rather than crash the graph mid-turn.
+
+        Appends a "Runtime context" block that surfaces ``output_path`` (and
+        ``skill_name`` for symmetry) at the tail of the prompt. The SKILL.md
+        body treats these as injected state, but the LLM has no direct state
+        access — only what this middleware writes into the system message.
+        Without the tail block, the model invents a path (observed on
+        2026-07-22: requested ``./artifacts/literature-review/<slug>.md``,
+        got ``/efficient_attention_review.md``).
         """
         skill_name = state.get("skill_name")
         if not skill_name:
@@ -101,11 +109,40 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
                 "with status='error' explaining the skill is missing."
             )
 
-        # Compose: role prepend (if present) + body.
+        output_path = state.get("output_path")
+        # Only wrong-type is a hard error here. Whether ``output_path`` is
+        # REQUIRED for this run is the SKILL.md body's contract to enforce
+        # (see literature-review's Precondition section for an example) —
+        # inline-output or skill-defaulted-path experts must not fail just
+        # because the payload omitted it.
+        if output_path is not None and not isinstance(output_path, str):
+            return (
+                f"ERROR: Expert skill '{skill_name}' received a non-string "
+                f"``output_path`` in state ({type(output_path).__name__}). "
+                "This is a wiring bug in whichever middleware invoked "
+                "``start_async_task``. Return an error envelope naming the "
+                "malformed field and halt."
+            )
+
+        # Compose: role prepend (if present) + body + runtime-context tail.
         body = match.body or ""
-        if match.role:
-            return f"You are {match.role}.\n\n{body}".rstrip() + "\n"
-        return body if body.endswith("\n") else body + "\n"
+        head = f"You are {match.role}.\n\n" if match.role else ""
+        runtime_lines = [f"- ``skill_name``: ``{skill_name}``"]
+        if output_path:
+            runtime_lines.append(f"- ``output_path``: ``{output_path}``")
+        runtime_block = (
+            "\n---\n\n"
+            "## Runtime context (injected by the container)\n\n"
+            + "\n".join(runtime_lines)
+            + "\n"
+        )
+        if output_path:
+            runtime_block += (
+                "\nWrite your final artifact to ``output_path`` verbatim — do "
+                "not rename, relocate, or shorten it. If you cannot honour "
+                "it, return an error envelope explaining why.\n"
+            )
+        return (head + body).rstrip() + runtime_block
 
     def wrap_model_call(
         self,
