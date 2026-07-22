@@ -1567,9 +1567,22 @@ def serve(
     import threading
 
     shutdown_event = threading.Event()
+    no_active_cancel_scope = object()
+    active_cancel_scope: str | None | object = no_active_cancel_scope
 
     def _handle_shutdown(signum: int, _frame: Any) -> None:
         shutdown_event.set()
+        # Cancelling the owned asyncio task is not enough when it is awaiting a
+        # blocking execute call: the executor thread and its isolated process
+        # group keep running until the matching stream event is set.  Request
+        # scope cancellation before KeyboardInterrupt unwinds message cleanup
+        # (which discards that scope).  SIGTERM also needs this to unblock the
+        # synchronous serve call so the poll loop can observe shutdown_event.
+        scope = active_cancel_scope
+        if scope is not no_active_cancel_scope:
+            from ..stream.display import request_stream_cancel
+
+            request_stream_cancel(cast(str | None, scope))
         # Fall back to Python's default SIGINT behavior (raises
         # KeyboardInterrupt) so blocking I/O inside ``run_streaming``
         # is still interrupted.  For SIGTERM there's no default that
@@ -1589,6 +1602,7 @@ def serve(
             if shutdown_event.is_set():
                 break
             if msg is not None:
+                active_cancel_scope = _channel_message_cancel_scope(msg)
                 try:
                     _serve_process_message(
                         msg,
@@ -1604,15 +1618,22 @@ def serve(
                 except KeyboardInterrupt:
                     shutdown_event.set()
                     break
+                finally:
+                    active_cancel_scope = no_active_cancel_scope
 
             # Poll notification queue when idle (no channel message was pending).
             if async_notifier.has_pending_notifications(runtime_state.thread_id):
-                _serve_drain_notifications(
-                    runtime_state=runtime_state,
-                    model=config.model,
-                    workspace_dir=ws,
-                    show_thinking=effective_channel_thinking,
-                )
+                # Notification turns use the default stream cancellation scope.
+                active_cancel_scope = None
+                try:
+                    _serve_drain_notifications(
+                        runtime_state=runtime_state,
+                        model=config.model,
+                        workspace_dir=ws,
+                        show_thinking=effective_channel_thinking,
+                    )
+                finally:
+                    active_cancel_scope = no_active_cancel_scope
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:

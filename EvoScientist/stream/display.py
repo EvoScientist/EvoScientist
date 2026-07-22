@@ -124,7 +124,10 @@ formatter = ToolResultFormatter()
 # per-message scope so `/stop` only affects that message's run; scope-less
 # callers retain the legacy process-wide default event.
 _DEFAULT_STREAM_CANCEL_SCOPE = "__default__"
-_stream_cancel_lock = threading.Lock()
+# Serve signal handlers may request cancellation while the main thread is in a
+# scoped cancellation lookup.  Re-entrancy prevents the Python signal callback
+# from deadlocking if it interrupts one of these short registry sections.
+_stream_cancel_lock = threading.RLock()
 _stream_cancel_events: dict[str, threading.Event] = {
     _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
 }
