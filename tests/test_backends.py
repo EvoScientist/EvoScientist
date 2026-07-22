@@ -3,6 +3,7 @@
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1549,6 +1550,21 @@ class TestExecuteTimeout:
 
         execute_accepts_timeout.cache_clear()
         assert execute_accepts_timeout(CustomSandboxBackend) is True
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process-group regression",
+    )
+    def test_timeout_kills_descendants_after_shell_leader_exits(self, tmp_workspace):
+        """A dead shell leader must not hide descendants retaining its pipes."""
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        started = time.monotonic()
+        response = backend.execute("sleep 2 &", timeout=0.1)
+        elapsed = time.monotonic() - started
+
+        assert response.exit_code == 124
+        assert elapsed < 1
 
 
 # === '..' traversal false-positive fix ===

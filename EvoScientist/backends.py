@@ -79,8 +79,6 @@ _active_shell_processes: dict[threading.Event, set[subprocess.Popen[str]]] = {}
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Force-stop a shell and its descendants without waiting for reaping."""
-    if process.poll() is not None:
-        return
     try:
         if os.name == "nt":
             # CREATE_NEW_PROCESS_GROUP alone does not make terminate() recursive.
