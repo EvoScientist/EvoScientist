@@ -250,7 +250,7 @@ def test_cancel_terminates_active_shell_process_tree(tmp_path):
     deadline = time.monotonic() + 3
     while not started.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert started.read_text() == "started"
+    assert started.read_text().strip() == "started"
 
     display_mod.request_stream_cancel(cancel_scope)
     worker.join(3)
