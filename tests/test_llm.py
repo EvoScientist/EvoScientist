@@ -2579,3 +2579,86 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["use_responses_api"] is True
+
+
+# =============================================================================
+# Test validate_requesty_key
+# =============================================================================
+
+
+class TestValidateRequestyKey:
+    """The Requesty key validator probes the router's auth layer.
+
+    Validation targets a deliberately nonexistent sentinel model
+    (``requesty/auth-preflight``) so key checks don't depend on any real
+    model staying available: the router resolves auth *before* the model,
+    so a valid key returns 404 (model-not-found) while a bad key returns
+    401/403. All HTTP calls are mocked — no network in unit tests.
+    """
+
+    def test_empty_key_skipped(self):
+        """No key provided is skipped, not an error."""
+        from EvoScientist.config.onboard.validators import validate_requesty_key
+
+        is_valid, msg = validate_requesty_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    def test_uses_sentinel_model_not_a_real_one(self):
+        """The probe targets a nonexistent sentinel model, not a real model."""
+        from EvoScientist.config.onboard.validators import validate_requesty_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = 404
+            validate_requesty_key("rq-key")
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["model"] == "requesty/auth-preflight"
+        assert payload["max_tokens"] == 1
+
+    def test_model_not_found_means_auth_passed(self):
+        """404 (model not found) means auth was accepted → key is valid."""
+        from EvoScientist.config.onboard.validators import validate_requesty_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = 404
+            is_valid, msg = validate_requesty_key("rq-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+
+    def test_success_means_valid(self):
+        """200 (accepted) also means the key is valid."""
+        from EvoScientist.config.onboard.validators import validate_requesty_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            is_valid, msg = validate_requesty_key("rq-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_rejected_means_invalid(self, status):
+        """401/403 mean the key was rejected by the auth layer."""
+        from EvoScientist.config.onboard.validators import validate_requesty_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = status
+            is_valid, msg = validate_requesty_key("bad-key")
+
+        assert is_valid is False
+        assert msg == "Invalid API key"
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_transient_status_is_inconclusive(self, status):
+        """Rate-limit / 5xx leave key validity unknown, not rejected."""
+        from EvoScientist.config.onboard.validators import validate_requesty_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = status
+            is_valid, msg = validate_requesty_key("rq-key")
+
+        assert is_valid is False
+        assert "inconclusive" in msg.lower()
+        assert str(status) in msg
