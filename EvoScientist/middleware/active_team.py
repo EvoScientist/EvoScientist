@@ -68,7 +68,12 @@ _ASYNC_CUE = (
     "output_path: './artifacts/{expert}/<slug>.md'}})`. It runs in the "
     "background and returns a task_id immediately; the result artifact is "
     "written to ``output_path``. Use ``check_async_task`` to poll status "
-    "when the user asks."
+    "when the user asks. On ``status: 'success'`` the ``result`` field "
+    "contains a JSON envelope with ``output_path``, a one-paragraph "
+    "``summary``, and a skill-defined ``metadata`` block (fields vary by "
+    "expert — e.g. ``word_count`` / ``section_count`` / ``citations_used`` "
+    "for surveys). Render ``summary`` and ``metadata`` directly to the "
+    "user — do not re-read the artifact to build a synopsis."
 )
 
 _TEMPLATE_SINGLE = (
