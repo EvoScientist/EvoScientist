@@ -2672,7 +2672,11 @@ class TestAutoConfig:
         assert call_kwargs["base_url"] == "http://127.0.0.1:8000/codex/v1"
         assert call_kwargs["api_key"] == "ccproxy-oauth"
         # ccproxy uses the Responses API, so reasoning configuration is valid.
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert call_kwargs["reasoning"] == {
+            "effort": "high",
+            "summary": "auto",
+            "context": "all_turns",
+        }
         # Proxy mode: Responses API (bypasses format chain), streaming ON
         assert call_kwargs["use_responses_api"] is True
         assert "streaming" not in call_kwargs
@@ -2729,6 +2733,7 @@ class TestAutoConfig:
         assert headers["User-Agent"].startswith("codex_cli_rs/0.144.1")
         mock_installed_version.assert_called_once_with()
         assert mock_init.call_args[1]["reasoning"]["effort"] == "xhigh"
+        assert mock_init.call_args[1]["reasoning"]["context"] == "all_turns"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_ccproxy_codex_client_version_env(self, mock_init, monkeypatch):
@@ -2801,6 +2806,26 @@ class TestAutoConfig:
         assert headers["originator"] == "codex_vscode"
         assert headers["version"] == "9.9.9"
         assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_reasoning_context_respects_caller(
+        self, mock_init, monkeypatch
+    ):
+        """Caller-supplied reasoning.context is not overridden."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        get_chat_model(
+            "gpt-5.5",
+            provider="openai",
+            reasoning={"effort": "low", "context": "previous_response_id"},
+        )
+
+        assert mock_init.call_args[1]["reasoning"] == {
+            "effort": "low",
+            "context": "previous_response_id",
+        }
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_ccproxy_codex_none_headers(self, mock_init, monkeypatch):

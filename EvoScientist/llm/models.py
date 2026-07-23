@@ -702,6 +702,11 @@ def get_chat_model(
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
     _apply_openrouter_anthropic_prompt_cache(provider, model_id, kwargs)
 
+    if _is_openai_proxy:
+        reasoning = kwargs.setdefault("reasoning", {})
+        if isinstance(reasoning, dict):
+            reasoning.setdefault("context", "all_turns")
+
     _uses_native_deepseek = provider == "deepseek" or (
         provider == "openai"
         and _original_provider == "custom-openai"

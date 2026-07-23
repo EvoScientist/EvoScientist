@@ -679,6 +679,12 @@ def start_langgraph_dev(
     # what the parent had inherited from its own environment.
     sub_env = os.environ.copy()
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
+    langgraph_db = workspace_dir / ".langgraph_api" / "langgraph_dev.db"
+    sub_env.setdefault(
+        "DATABASE_URI",
+        f"sqlite:///{langgraph_db.as_posix()}",
+    )
+    sub_env.setdefault("REDIS_URI", "redis://localhost:6379")
     sub_env["PYTHONIOENCODING"] = "utf-8"
     sub_env["PYTHONUTF8"] = "1"
 
