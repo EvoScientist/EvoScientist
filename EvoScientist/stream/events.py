@@ -255,6 +255,62 @@ class _V3EventProcessor:
             return events
         if method == "input.requested":
             return self._process_input_requested(event.get("params"))
+        if method == "custom":
+            return self._process_custom_event(_event_data(event))
+        return []
+
+    def _process_custom_event(self, data: object) -> list[dict[str, Any]]:
+        """Translate a ``custom`` stream payload into UI events.
+
+        Currently handles the ``subagent`` lifecycle emitted by
+        ``langchain_quickjs`` for in-eval ``task()`` fan-out: ``start`` /
+        ``complete`` / ``error`` become ``panel_dispatch_start`` /
+        ``panel_dispatch_complete`` / ``panel_dispatch_error`` UI events.
+        Unrecognised event types are ignored so future producers can extend
+        the custom channel without breaking existing consumers.
+        """
+        payload = _as_raw_map(data)
+        if payload is None or payload.get("type") != "subagent":
+            return []
+        phase = payload.get("phase")
+        eval_id = payload.get("eval_id")
+        dispatch_id = payload.get("id")
+        if not isinstance(dispatch_id, str):
+            return []
+        eval_id_str = eval_id if isinstance(eval_id, str) else ""
+        if phase == "start":
+            subagent_type = payload.get("subagent_type")
+            label = payload.get("label")
+            description = payload.get("description")
+            return [
+                self.emitter.panel_dispatch_start(
+                    eval_id=eval_id_str,
+                    dispatch_id=dispatch_id,
+                    subagent_type=subagent_type
+                    if isinstance(subagent_type, str)
+                    else "",
+                    label=label if isinstance(label, str) else "",
+                    description=description if isinstance(description, str) else "",
+                ).data
+            ]
+        if phase == "complete":
+            return [
+                self.emitter.panel_dispatch_complete(
+                    eval_id=eval_id_str,
+                    dispatch_id=dispatch_id,
+                    duration_ms=payload.get("duration_ms", 0),
+                ).data
+            ]
+        if phase == "error":
+            error = payload.get("error")
+            return [
+                self.emitter.panel_dispatch_error(
+                    eval_id=eval_id_str,
+                    dispatch_id=dispatch_id,
+                    duration_ms=payload.get("duration_ms", 0),
+                    error=error if isinstance(error, str) else "",
+                ).data
+            ]
         return []
 
     @classmethod
@@ -851,7 +907,7 @@ async def stream_agent_events(
     _run_raised: bool = False
     event_sink_token = None
     try:
-        from langgraph.stream.transformers import UpdatesTransformer
+        from langgraph.stream.transformers import CustomTransformer, UpdatesTransformer
 
         from ..middleware.events import (
             MiddlewareEventSink,
@@ -867,7 +923,7 @@ async def stream_agent_events(
                 astream_input,
                 config=config,
                 version="v3",
-                transformers=[UpdatesTransformer],
+                transformers=[UpdatesTransformer, CustomTransformer],
             )
         except AttributeError as exc:
             raise RuntimeError(
