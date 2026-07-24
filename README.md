@@ -626,6 +626,8 @@ This project builds upon the following outstanding open-source works:
 
 - [**LangChain**](https://github.com/langchain-ai/langchain) — A framework for building agents and LLM-powered applications.
 - [**DeepAgents**](https://github.com/langchain-ai/deepagents) — The batteries-included agent harness.
+- [**jiuwenswarm**](https://github.com/openJiuwen-ai/jiuwenswarm) — A framework for coordinating agent swarms to tackle complex tasks.
+
 
 We thank the authors for their valuable contributions to the open-source community.
 

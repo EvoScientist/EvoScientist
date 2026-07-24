@@ -630,6 +630,7 @@ channel_enabled: "telegram,slack,feishu,qq"
 
 - [**LangChain**](https://github.com/langchain-ai/langchain) — 构建智能体和 LLM 驱动应用的框架。
 - [**DeepAgents**](https://github.com/langchain-ai/deepagents) — 开箱即用的智能体编排框架。
+- [**jiuwenswarm**](https://github.com/openJiuwen-ai/jiuwenswarm) — 一个协调智能体峰群处理复杂任务的框架。
 
 感谢以上项目作者对开源社区的宝贵贡献。
 

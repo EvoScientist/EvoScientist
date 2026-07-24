@@ -499,9 +499,14 @@ def _build_base_kwargs(
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
+    # ``async_swap_pending=True`` because ``_maybe_swap_async_subagents``
+    # below re-resolves tools for async subagents against the deployed
+    # graph's own registry (via ``subagents/_factory.py``). A tool missing
+    # from ``tool_registry`` for an async spec logs at DEBUG, not WARNING.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
+        async_swap_pending=True,
     )
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
@@ -569,9 +574,12 @@ def load_mcp_and_build_kwargs(
 
     mcp_main = mcp_by_agent.pop("main", [])
 
+    # Same rationale as ``_build_base_kwargs``: async subagents get
+    # re-resolved downstream by the deployed graph's factory registry.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
+        async_swap_pending=True,
     )
 
     _ensure_general_purpose_subagent(subs)
