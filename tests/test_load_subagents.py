@@ -11,7 +11,7 @@ import textwrap
 
 import pytest
 
-from EvoScientist.utils import load_subagents
+from EvoScientist.utils import load_subagents, resolve_subagent_tools
 
 
 def _write_yaml(tmp_path, name: str, body: str):
@@ -53,6 +53,30 @@ def test_async_flag_defaults_to_false_when_omitted(tmp_path):
     )
     subs = load_subagents(config_path, tool_registry={})
     assert subs[0]["_async"] is False
+
+
+def test_tool_names_are_deferred_until_the_spec_is_selected(tmp_path, caplog):
+    selected_tool = object()
+    config_path = _write_yaml(
+        tmp_path,
+        "agents.yaml",
+        """
+        selected-agent:
+          tools: [available]
+        remote-agent:
+          tools: [remote_only]
+          async: true
+        """,
+    )
+
+    subs = load_subagents(config_path, tool_registry={"available": selected_tool})
+
+    assert not caplog.records
+    assert subs[0]["tools"] == []
+    assert subs[0]["_tool_names"] == ["available"]
+    resolve_subagent_tools(subs[0], {"available": selected_tool})
+    assert subs[0]["tools"] == [selected_tool]
+    assert "_tool_names" not in subs[0]
 
 
 def test_async_flag_rejects_quoted_string(tmp_path):
@@ -141,13 +165,8 @@ def test_non_dict_spec_error_includes_filename_and_name(tmp_path):
         load_subagents(config_path, tool_registry={})
 
 
-def test_missing_tool_on_sync_subagent_logs_warning(tmp_path, caplog):
-    """Sync sub-agents with a tool missing from the registry log at WARNING.
-
-    Sync sub-agents run in-process under the main agent and rely on the
-    in-process registry to wire every tool they declare. A missing tool
-    IS a genuine degradation — surfaces it as a warning.
-    """
+def test_missing_tool_on_sync_subagent_warns_at_resolution(tmp_path, caplog):
+    """A selected sync spec warns when its terminal registry lacks a tool."""
     config_path = _write_yaml(
         tmp_path,
         "planner.yaml",
@@ -163,19 +182,15 @@ def test_missing_tool_on_sync_subagent_logs_warning(tmp_path, caplog):
     assert subs[0]["_async"] is False
     assert subs[0]["tools"] == []
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not warnings
+
+    resolve_subagent_tools(subs[0], {})
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("nonexistent_tool" in r.getMessage() for r in warnings)
 
 
-def test_missing_tool_on_async_subagent_logs_debug_when_swap_pending(tmp_path, caplog):
-    """Sync in-process callers pass ``async_swap_pending=True`` — a tool
-    missing for an ``async: true`` spec logs at DEBUG because the async
-    graph's own registry will re-resolve it downstream
-    (``subagents/_factory.py``).
-
-    Regression guard for the spurious startup WARNING that pre-fix logs
-    fired on every ``EvoSci`` startup even though the tool was wired at
-    runtime by the deployed graph.
-    """
+def test_missing_tool_on_async_subagent_is_deferred_without_logging(tmp_path, caplog):
+    """Async tool names do not emit warnings against the caller registry."""
     config_path = _write_yaml(
         tmp_path,
         "scheduler.yaml",
@@ -188,31 +203,20 @@ def test_missing_tool_on_async_subagent_logs_debug_when_swap_pending(tmp_path, c
         """,
     )
     with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
-        subs = load_subagents(config_path, tool_registry={}, async_swap_pending=True)
+        subs = load_subagents(config_path, tool_registry={})
     assert subs[0]["_async"] is True
     assert subs[0]["tools"] == []
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert not any("nonexistent_tool" in r.getMessage() for r in warnings)
     debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
-    assert any(
-        "nonexistent_tool" in r.getMessage() and "async graph" in r.getMessage()
-        for r in debugs
-    )
+    assert not any("nonexistent_tool" in r.getMessage() for r in debugs)
+    assert subs[0]["_tool_names"] == ["nonexistent_tool"]
 
 
-def test_missing_tool_on_async_subagent_logs_warning_at_terminal_registry(
+def test_missing_async_tool_warns_at_terminal_resolution(
     tmp_path, caplog
 ):
-    """When ``async_swap_pending`` is False (the default), the caller IS the
-    terminal registry — the factory boundary
-    (``subagents/_factory.build_async_subagent_graph``). A tool missing for
-    an ``async: true`` spec is a genuine typo that won't be resolved anywhere
-    downstream, so log at WARNING.
-
-    Without this guard, an earlier version of the fix (unconditional DEBUG for
-    every async spec) silently hid factory-boundary typos. Reviewer flagged
-    this as the last remaining gap.
-    """
+    """The selected async graph warns against its terminal registry."""
     config_path = _write_yaml(
         tmp_path,
         "scheduler.yaml",
@@ -225,8 +229,8 @@ def test_missing_tool_on_async_subagent_logs_warning_at_terminal_registry(
         """,
     )
     with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
-        # Default: async_swap_pending=False → factory-boundary semantics.
         subs = load_subagents(config_path, tool_registry={})
+        resolve_subagent_tools(subs[0], {})
     assert subs[0]["_async"] is True
     assert subs[0]["tools"] == []
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
