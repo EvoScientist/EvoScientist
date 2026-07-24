@@ -57,6 +57,47 @@ class SkillInfo:
     path: Path
     source: str  # "workspace", "global", or "builtin"
     tags: list[str] = field(default_factory=list)
+    # Expert-skill fields for the v1 agent-teams feature. All default
+    # to utility-skill values so existing skills stay unchanged and their
+    # SKILL.md files need no edits.
+    type: str = "utility"  # "utility" (default) or "expert"
+    role: str = ""  # one-line role summary shown to the orchestrator LLM
+    byline: str = ""  # WebUI gallery byline
+    capability_tags: list[str] = field(default_factory=list)  # WebUI chips
+    avatar_hint: str = ""  # WebUI icon hint
+    default_dispatch: str = ""  # "sync" | "panel" (expert skills only)
+    # SKILL.md body (post-frontmatter). Populated by ``_parse_skill_md`` so
+    # the expert-container factory doesn't have to re-read the file on every
+    # main-agent construction. Empty for skills built by hand or when the
+    # source SKILL.md has no body content.
+    body: str = ""
+
+
+# Shared frontmatter split regex. Captures three parts:
+#   1. leading fence (``^---\s*\n``)
+#   2. frontmatter YAML (``.*?``)
+#   3. trailing fence + optional newline (``\n---\s*\n?``)
+# Used by both ``_parse_skill_md`` (needs the YAML) and the expert-container
+# factory (needs the body); a single source of truth for "what is the
+# frontmatter block" so schema extensions don't drift across call sites.
+_FRONTMATTER_SPLIT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
+    """Return ``(frontmatter_yaml, body)`` for a SKILL.md text.
+
+    ``frontmatter_yaml`` is the raw YAML block between the ``---`` fences
+    (still a string, not parsed). ``body`` is the post-fence content with
+    leading whitespace stripped. When there is no valid frontmatter block,
+    ``frontmatter_yaml`` is ``""`` and the whole content becomes the body —
+    matches the legacy expert-container behaviour of passing plain-body
+    files through unchanged.
+    """
+    match = _FRONTMATTER_SPLIT_RE.match(content)
+    if not match:
+        return "", content.lstrip()
+    body = content[match.end() :].lstrip()
+    return match.group(1), body
 
 
 def _normalize_tags(raw: object) -> list[str]:
@@ -206,7 +247,9 @@ def installed_provenance() -> dict[str, dict[str, str | None]]:
 
 
 def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
-    """Parse SKILL.md frontmatter to extract name, description, and tags.
+    """Parse SKILL.md frontmatter to extract name, description, tags, and
+    (for expert skills) role / byline / capability_tags / avatar_hint /
+    default_dispatch.
 
     SKILL.md format:
         ---
@@ -215,6 +258,14 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         tags: [tag1, tag2]
         metadata:
           tags: [tag1, tag2]   # fallback location
+        # Expert-skill fields (all optional; only meaningful when
+        # ``type: expert`` — see agent-teams-design.md):
+        type: expert
+        role: One-line role summary
+        byline: Short persona name for gallery
+        capability_tags: [Tag One, Tag Two]
+        avatar_hint: lightbulb
+        default_dispatch: sync
         ---
         # Skill Title
         ...
@@ -227,40 +278,115 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         SkillInfo with path set to the skill's parent directory.
     """
     parent = skill_md_path.parent
-    content = skill_md_path.read_text(encoding="utf-8")
+    try:
+        content = skill_md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # ``_parse_skill_md`` runs during agent construction (via
+        # ``_fold_expert_subagents`` → ``list_skills``), so an unreadable
+        # SKILL.md in any tier must not abort the whole main-agent build or
+        # ``GET /api/teams``. Degrade to an "(unreadable)" placeholder so
+        # the entry stays visible in ``skill_manager list`` for debugging
+        # but never advances into expert registration (empty body →
+        # ``build_expert_subagent_specs`` skips it).
+        _logger.warning(
+            "Skill %r: could not read %s (%s); skipping.",
+            parent.name,
+            skill_md_path,
+            exc,
+        )
+        return SkillInfo(
+            name=parent.name,
+            description="(unreadable)",
+            path=parent,
+            source=source,
+        )
 
-    def _info(name: str, description: str, tags: list[str] | None = None) -> SkillInfo:
+    def _info(
+        name: str,
+        description: str,
+        tags: list[str] | None = None,
+        *,
+        type_: str = "utility",
+        role: str = "",
+        byline: str = "",
+        capability_tags: list[str] | None = None,
+        avatar_hint: str = "",
+        default_dispatch: str = "",
+        body: str = "",
+    ) -> SkillInfo:
         return SkillInfo(
             name=name,
             description=description,
             path=parent,
             source=source,
             tags=tags or [],
+            type=type_,
+            role=role,
+            byline=byline,
+            capability_tags=capability_tags or [],
+            avatar_hint=avatar_hint,
+            default_dispatch=default_dispatch,
+            body=body,
         )
 
-    # Extract YAML frontmatter
-    frontmatter_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-    if not frontmatter_match:
-        # No frontmatter, use directory name
-        return _info(parent.name, "(no description)")
+    frontmatter_yaml, body = _split_frontmatter_and_body(content)
+    if not frontmatter_yaml:
+        # No frontmatter, use directory name; still cache the body so
+        # the expert-container factory doesn't have to re-read.
+        return _info(parent.name, "(no description)", body=body)
 
     try:
-        frontmatter = yaml.safe_load(frontmatter_match.group(1))
+        frontmatter = yaml.safe_load(frontmatter_yaml)
         if not isinstance(frontmatter, dict):
-            return _info(parent.name, "(empty frontmatter)")
+            return _info(parent.name, "(empty frontmatter)", body=body)
         # Tags: check top-level first, fall back to metadata.tags
         tags = _normalize_tags(frontmatter.get("tags"))
         if not tags:
             metadata = frontmatter.get("metadata")
             if isinstance(metadata, dict):
                 tags = _normalize_tags(metadata.get("tags"))
+        # Expert-skill fields. Only trusted when explicit; unknown
+        # ``type`` values fall back to "utility" so a typo doesn't
+        # accidentally register a skill as an expert. Log the fallback
+        # so authors can debug a "why isn't my expert appearing" case.
+        raw_type = frontmatter.get("type")
+        type_ = raw_type if raw_type in ("expert", "utility") else "utility"
+        if raw_type is not None and raw_type != type_:
+            _logger.warning(
+                "Skill %r: unrecognized type %r in frontmatter; treating as utility.",
+                frontmatter.get("name") or parent.name,
+                raw_type,
+            )
+        role = frontmatter.get("role") or ""
+        byline = frontmatter.get("byline") or ""
+        capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
+        avatar_hint = frontmatter.get("avatar_hint") or ""
+        raw_dispatch = frontmatter.get("default_dispatch")
+        default_dispatch = raw_dispatch if raw_dispatch in ("sync", "panel") else ""
+        # ``.get("name", parent.name)`` only defaults on missing key; a
+        # present-but-empty ``name:`` yields None, which would flow into
+        # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``
+        # collision guard. Coerce to the parent dir name in both cases.
         return _info(
-            frontmatter.get("name", parent.name),
+            frontmatter.get("name") or parent.name,
             frontmatter.get("description", "(no description)"),
             tags,
+            type_=type_,
+            role=str(role),
+            byline=str(byline),
+            capability_tags=capability_tags,
+            avatar_hint=str(avatar_hint),
+            default_dispatch=default_dispatch,
+            body=body,
         )
-    except yaml.YAMLError:
-        return _info(parent.name, "(invalid frontmatter)")
+    except yaml.YAMLError as exc:
+        _logger.warning(
+            "Skill %r: invalid frontmatter YAML in %s (%s); using placeholder.",
+            parent.name,
+            skill_md_path,
+            exc,
+        )
+        return _info(parent.name, "(invalid frontmatter)", body=body)
 
 
 def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
@@ -761,6 +887,28 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
         _add_tier(Path(SKILLS_DIR), source="builtin")
 
     return skills
+
+
+def list_expert_skills(include_system: bool = True) -> list[SkillInfo]:
+    """List installed expert skills (agent-teams v1).
+
+    Filters ``list_skills()`` output to entries whose SKILL.md frontmatter
+    declares ``type: expert``. Defaults ``include_system=True`` because
+    first-party experts (`idea-brainstorm`, etc.) ship under the builtin
+    skills tier; user-installed experts still surface from the workspace
+    and global tiers alongside them.
+
+    Consumed by:
+      - ``GET /api/teams`` (WebUI gallery listing).
+      - Main-agent construction (folds expert skills into the
+        ``subagents=[...]`` list so the ``task`` tool can dispatch to
+        them for sync consult).
+      - The ``skill_manager`` @tool's ``type=expert`` filter.
+
+    Returns:
+        List of ``SkillInfo`` for each expert skill.
+    """
+    return [s for s in list_skills(include_system=include_system) if s.type == "expert"]
 
 
 def uninstall_skill(name: str) -> dict:
