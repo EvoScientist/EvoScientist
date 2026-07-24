@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
@@ -243,6 +245,153 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
             }
         )
     return tokens
+
+
+# Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
+# piped data as code or ship it off-box). Everything else piping is normal.
+_PIPE_NETWORKING_RHS = frozenset(
+    {
+        "nc",
+        "ncat",
+        "netcat",
+        "ssh",
+        "curl",
+        "wget",
+        "telnet",
+        "socat",
+        "scp",
+        "sftp",
+        "rsync",
+        "ftp",
+    }
+)
+_PIPE_INTERPRETER_RHS = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ash",
+        "ksh",
+        "fish",
+        "python",
+        "python2",
+        "python3",
+        "node",
+        "bun",
+        "deno",
+        "ruby",
+        "perl",
+        "php",
+        "lua",
+        "iex",
+        "elixir",
+    }
+)
+_PIPE_DANGEROUS_RHS = _PIPE_INTERPRETER_RHS | _PIPE_NETWORKING_RHS
+
+
+def check_dangerous_command(command: str) -> str | None:
+    """Return a reason if *command* pipes output into an interpreter or a
+    network tool, else ``None``.
+
+    Deliberately narrow: this guards indirect prompt injection (the agent
+    ingests untrusted web content and could be induced to run
+    ``curl … | bash``). Everyday research shell — pipes into ``grep``/``head``,
+    redirects, ``python -c``, ``..``/``~`` paths — is NOT flagged here.
+    Workspace confinement stays in :func:`validate_command`.
+
+    Only the token immediately after the pipe is inspected, so wrapper
+    commands like ``env bash``, ``xargs bash``, or ``timeout 5 bash`` are
+    not detected — this is a known limitation, not a bug to fix here.
+    """
+    after_pipe = False
+    for token in _shell_token_spans(command):
+        if token.get("type") == "op":
+            value = token.get("value")
+            if value == "|":
+                after_pipe = True
+            elif value == "&" and after_pipe:
+                # `|&` (pipe stdout+stderr) tokenizes as `|` then `&`;
+                # keep the pipe context open across the `&`.
+                pass
+            else:
+                after_pipe = False
+            continue
+        if after_pipe:
+            base = str(token.get("value", "")).split("/")[-1]
+            # strip trailing version digits: python3.11 -> python, lua5.4 -> lua
+            normalized = re.sub(r"[0-9.]+$", "", base) or base
+            if base in _PIPE_DANGEROUS_RHS or normalized in _PIPE_DANGEROUS_RHS:
+                kind = (
+                    "networking tool"
+                    if base in _PIPE_NETWORKING_RHS
+                    or normalized in _PIPE_NETWORKING_RHS
+                    else "interpreter"
+                )
+                return f"pipes output into {kind} '{base}'"
+            after_pipe = False
+    return None
+
+
+class ActionDecision(StrEnum):
+    """Outcome of the shell-action policy."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    PROMPT = "prompt"
+
+
+@dataclass(frozen=True)
+class ActionVerdict:
+    """A decision plus the reason to show the user or feed back to the agent."""
+
+    decision: ActionDecision
+    reason: str = ""
+
+
+def resolve_action_decision(
+    command: str,
+    *,
+    auto_approve: bool = False,
+    dangerous_mode: bool = False,
+    allow_list: list[str] | None = None,
+) -> ActionVerdict:
+    """Single source of truth for approve / reject / prompt.
+
+    Precedence:
+      1. ``dangerous_mode`` — the user asked for full power; run everything.
+      2. dangerous detection — pipe into interpreter/network.
+      3. ``auto_approve`` — opt-out means *never prompt*: approve, or reject
+         a dangerous command with a reason the agent can act on.
+      4. ``allow_list`` — case-sensitive match on a whole command or a
+         command-plus-space prefix; blank entries are ignored.
+    """
+    if dangerous_mode:
+        return ActionVerdict(ActionDecision.APPROVE)
+
+    reason = check_dangerous_command(command)
+
+    if auto_approve:
+        if reason:
+            return ActionVerdict(ActionDecision.REJECT, reason)
+        return ActionVerdict(ActionDecision.APPROVE)
+
+    if reason:
+        return ActionVerdict(ActionDecision.PROMPT, reason)
+
+    if allow_list:
+        cmd = command.strip()
+        for prefix in allow_list:
+            prefix = prefix.strip()
+            if not prefix:
+                continue
+            # Match on a token boundary so allow-listing `ls` does not also
+            # approve `lsof`. Case-sensitive, like the shell itself.
+            if cmd == prefix or cmd.startswith(prefix + " "):
+                return ActionVerdict(ActionDecision.APPROVE)
+
+    return ActionVerdict(ActionDecision.PROMPT)
 
 
 _SSH_OPTIONS_WITH_VALUE = {
@@ -1170,7 +1319,12 @@ class MergedSkillsBackend(BackendProtocol):
 
 
 def prepare_sandbox_command(
-    command: str, cwd: str | Path, *, virtual_mode: bool = True, dangerous: bool = False
+    command: str,
+    cwd: str | Path,
+    *,
+    virtual_mode: bool = True,
+    dangerous: bool = False,
+    guard_dangerous: bool = False,
 ) -> tuple[str, str | None]:
     """Normalize workspace paths in ``command`` and validate it for the sandbox.
 
@@ -1180,7 +1334,16 @@ def prepare_sandbox_command(
 
     Returns ``(prepared_command, error)``: ``error`` is a message string when the command
     is rejected (the caller must NOT run it), otherwise ``None``.
+
+    ``guard_dangerous`` (see :func:`check_dangerous_command`) does not see inside an SSH
+    remote payload: a dangerous pipe *inside* a quoted ``ssh host '...'`` argument is not
+    detected, because the quoted payload is a single opaque token. Piping *into* ``ssh``
+    itself (e.g. ``cat secret | ssh host x``) is detected — the check runs on the original,
+    unmasked command so the SSH-masking done below (which also replaces the literal ``ssh``
+    token) does not blind it.
     """
+    original_command = command
+
     ssh_error = _validate_ssh_remote_command_format(command)
     if ssh_error:
         return command, ssh_error
@@ -1216,6 +1379,19 @@ def prepare_sandbox_command(
     )
     if error:
         return command, error
+
+    # No interactive approval is reachable here (unattended main agent, or an
+    # async sub-agent on a remote thread), so refuse the narrow dangerous set
+    # with a reason the agent can act on rather than running it blind.
+    if guard_dangerous and not dangerous:
+        dangerous_reason = check_dangerous_command(original_command)
+        if dangerous_reason:
+            return _restore_spans(command, ssh_replacements), (
+                f"Command blocked: {dangerous_reason}. "
+                f"Rewrite it to avoid that, or request approval from the user "
+                f"(the orchestrator can re-issue it after approval)."
+            )
+
     return _restore_spans(command, ssh_replacements), None
 
 
@@ -1241,6 +1417,7 @@ class CustomSandboxBackend(LocalShellBackend):
         env: dict[str, str] | None = None,
         inherit_env: bool = True,
         dangerous: bool = False,
+        guard_dangerous: bool = False,
     ):
         """
         Initialize custom sandbox backend.
@@ -1256,8 +1433,14 @@ class CustomSandboxBackend(LocalShellBackend):
                 paths anywhere on disk (no workspace confinement). Forces
                 ``virtual_mode=False`` and relaxes path validation while keeping
                 the privileged-command blocklist. Defaults to False.
+            guard_dangerous: Refuse the narrow dangerous-command set (see
+                :func:`check_dangerous_command`) outright, for contexts where
+                no interactive approval is reachable (unattended auto-approve
+                runs, async sub-agents). Bypassed when ``dangerous=True``.
+                Defaults to False.
         """
         self._dangerous = dangerous
+        self._guard_dangerous = guard_dangerous
         if dangerous:
             # Real paths require the legacy (non-virtual) resolution path so the
             # parent backend returns absolute paths as-is.
@@ -1351,7 +1534,11 @@ class CustomSandboxBackend(LocalShellBackend):
             )
 
         command, error = prepare_sandbox_command(
-            command, self.cwd, virtual_mode=self.virtual_mode, dangerous=self._dangerous
+            command,
+            self.cwd,
+            virtual_mode=self.virtual_mode,
+            dangerous=self._dangerous,
+            guard_dangerous=self._guard_dangerous,
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)

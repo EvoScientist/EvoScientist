@@ -731,3 +731,78 @@ class TestResolveHitlApprovalWithPromptFn:
             mock_fn.assert_not_called()
         finally:
             disp._session_auto_approve = original
+
+
+# =============================================================================
+# _build_hitl_interrupt_on
+# =============================================================================
+
+
+class TestInterruptOnWiring:
+    """interrupt_on must be passed natively and gated on auto_approve."""
+
+    def test_hitl_interrupt_on_helper_gates_on_auto_approve(self):
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        assert _build_hitl_interrupt_on(auto_approve=True) is None
+
+    def test_hitl_interrupt_on_helper_returns_shell_tools(self):
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        cfg = _build_hitl_interrupt_on(auto_approve=False)
+        assert cfg == {
+            "execute": True,
+            "run_in_background": True,
+            "schedule_task": True,
+        }
+
+    def test_hitl_interrupt_on_reaches_create_deep_agent(self):
+        """The kwarg must actually reach ``create_deep_agent`` — not just the
+        pure helper — so a future edit that drops it or re-adds a bare
+        ``HumanInTheLoopMiddleware`` append gets caught."""
+        import EvoScientist.EvoScientist as es_mod
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        captured = []
+
+        def fake_create_deep_agent(**kwargs):
+            captured.append(kwargs.get("interrupt_on", "MISSING"))
+            agent = MagicMock()
+            agent.with_config.return_value = agent
+            return agent
+
+        for auto_approve in (False, True):
+            cfg = MagicMock()
+            cfg.auto_approve = auto_approve
+            cfg.dangerous_mode = False
+            cfg.sandbox_execute_timeout = 300
+            cfg.recursion_limit = 100
+
+            with patch(
+                "deepagents.create_deep_agent", side_effect=fake_create_deep_agent
+            ):
+                with patch.object(es_mod, "_apply_env_from_config"):
+                    with patch.object(
+                        es_mod, "_get_default_middleware", return_value=[]
+                    ):
+                        with patch.object(
+                            es_mod,
+                            "load_mcp_and_build_kwargs",
+                            return_value={"name": "x"},
+                        ):
+                            es_mod.create_cli_agent(
+                                workspace_dir="/tmp/test-interrupt-on-wiring",
+                                config=cfg,
+                                chat_model=MagicMock(),
+                            )
+
+        assert captured == [
+            _build_hitl_interrupt_on(auto_approve=False),
+            _build_hitl_interrupt_on(auto_approve=True),
+        ]
+        assert captured[0] == {
+            "execute": True,
+            "run_in_background": True,
+            "schedule_task": True,
+        }
+        assert captured[1] is None

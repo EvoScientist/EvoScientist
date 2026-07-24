@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import (
     AgentMiddleware,
-    HumanInTheLoopMiddleware,
     TodoListMiddleware,
 )
 
@@ -667,6 +666,7 @@ def _get_default_backend():
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
+        guard_dangerous=cfg.auto_approve,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -851,10 +851,37 @@ def _get_default_middleware(
         # (agents rebuild on config change, so the captured flag never staler
         # than the agent it lives on).
         mw.append(
-            BackgroundExecutionMiddleware(async_notifier, dangerous=cfg.dangerous_mode)
+            BackgroundExecutionMiddleware(
+                async_notifier,
+                dangerous=cfg.dangerous_mode,
+                guard_dangerous=cfg.auto_approve,
+            )
         )
 
     return mw
+
+
+def _build_hitl_interrupt_on(*, auto_approve: bool) -> dict[str, bool] | None:
+    """Return the ``interrupt_on`` map for ``create_deep_agent``.
+
+    ``None`` when the user opted out (``auto_approve``, implied by
+    ``auto_mode`` and ``dangerous_mode``) so no interrupt is armed anywhere —
+    unattended runs are never paused. Passing this to ``create_deep_agent``
+    (rather than appending ``HumanInTheLoopMiddleware``) makes declarative
+    sub-agents inherit it; ``AsyncSubAgent`` specs do not inherit and so
+    cannot hang waiting for an approval nobody can deliver. This holds only
+    while EvoScientist passes no ``permissions=`` to ``create_deep_agent``; a
+    permission rule with ``mode="interrupt"`` would still arm file-tool
+    interrupts independently of this value.
+
+    The armed set is :data:`HITL_INTERRUPT_ON` (single source of truth) —
+    ``execute`` / ``run_in_background`` / ``schedule_task`` plus the recursive
+    ``delete`` FS tool that deepagents 0.7.0 ships (it would otherwise bypass
+    the execute blocklist).
+    """
+    if auto_approve:
+        return None
+    return dict(HITL_INTERRUPT_ON)
 
 
 def _get_default_agent():
@@ -888,13 +915,6 @@ def _get_default_agent():
         be = _get_default_backend()
         mw = _get_default_middleware()
 
-        # HITL on main agent only (mirrors create_cli_agent). Use middleware,
-        # not interrupt_on= kwarg — the kwarg propagates to every subagent and
-        # breaks parallel execute calls (multi-pending-interrupt LangGraph
-        # error). See PR #202.
-        if not cfg.auto_approve:
-            mw.append(HumanInTheLoopMiddleware(interrupt_on=dict(HITL_INTERRUPT_ON)))
-
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(
                 be,
@@ -910,6 +930,7 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
+            interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -1022,6 +1043,7 @@ def create_cli_agent(
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
+        guard_dangerous=cfg.auto_approve,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,
@@ -1041,17 +1063,10 @@ def create_cli_agent(
     )
 
     # Delegate middleware construction to the single source of truth so the
-    # CLI agent never drifts from the default chain. Anything CLI-specific
-    # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
+    # CLI agent never drifts from the default chain.
     mw: list[AgentMiddleware] = _get_default_middleware(
         workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model, events=events
     )
-
-    # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
-    # would propagate it to every subagent, breaking parallel execute calls
-    # (multi-pending-interrupt LangGraph error).
-    if not cfg.auto_approve:
-        mw.append(HumanInTheLoopMiddleware(interrupt_on=dict(HITL_INTERRUPT_ON)))
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(
@@ -1067,4 +1082,5 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
+        interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
     ).with_config({"recursion_limit": cfg.recursion_limit})

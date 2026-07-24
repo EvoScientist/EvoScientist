@@ -60,12 +60,17 @@ def _notify_done(
     )
 
 
-def _make_run_in_background(notifier: NotifierPort, dangerous: bool):
+def _make_run_in_background(
+    notifier: NotifierPort, dangerous: bool, guard_dangerous: bool = False
+):
     """Build the ``run_in_background`` tool bound to an injected notifier + policy.
 
     ``dangerous`` is captured from ``cfg.dangerous_mode`` at assembly (the agent
     is rebuilt when config changes, so the captured value never goes stale), and
     the notifier is the injected port used for the completion notification.
+    ``guard_dangerous`` mirrors ``execute``'s backstop: with no interactive
+    approval reachable (``auto_approve``), refuse the narrow dangerous set
+    instead of running it unattended.
     """
 
     @tool(parse_docstring=True)
@@ -87,7 +92,11 @@ def _make_run_in_background(notifier: NotifierPort, dangerous: bool):
         # Same path-rewriting + validation as execute (shared helper) so virtual paths
         # resolve to the workspace and the command can't bypass the sandbox checks.
         command, error = prepare_sandbox_command(
-            command, cwd, virtual_mode=not dangerous, dangerous=dangerous
+            command,
+            cwd,
+            virtual_mode=not dangerous,
+            dangerous=dangerous,
+            guard_dangerous=guard_dangerous,
         )
         if error:
             return error
@@ -153,10 +162,16 @@ class BackgroundExecutionMiddleware(AgentMiddleware):
     Attached to the main agent only (async sub-agents must not spawn local processes).
     """
 
-    def __init__(self, notifier: NotifierPort, *, dangerous: bool = False) -> None:
+    def __init__(
+        self,
+        notifier: NotifierPort,
+        *,
+        dangerous: bool = False,
+        guard_dangerous: bool = False,
+    ) -> None:
         super().__init__()
         self.tools = [
-            _make_run_in_background(notifier, dangerous),
+            _make_run_in_background(notifier, dangerous, guard_dangerous),
             check_process,
             stop_process,
             list_processes,
