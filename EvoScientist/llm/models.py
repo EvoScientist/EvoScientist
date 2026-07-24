@@ -702,11 +702,6 @@ def get_chat_model(
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
     _apply_openrouter_anthropic_prompt_cache(provider, model_id, kwargs)
 
-    if _is_openai_proxy:
-        reasoning = kwargs.setdefault("reasoning", {})
-        if isinstance(reasoning, dict):
-            reasoning.setdefault("context", "all_turns")
-
     _uses_native_deepseek = provider == "deepseek" or (
         provider == "openai"
         and _original_provider == "custom-openai"
@@ -732,6 +727,13 @@ def get_chat_model(
             kwargs.pop("reasoning", None)
         elif _responses_api_setting == "true":
             kwargs["use_responses_api"] = True
+
+    if _is_openai_proxy and kwargs.get("use_responses_api") is True:
+        reasoning = kwargs.setdefault("reasoning", {})
+        if isinstance(reasoning, dict):
+            reasoning = dict(reasoning)
+            reasoning.setdefault("context", "all_turns")
+            kwargs["reasoning"] = reasoning
 
     if _uses_native_deepseek:
         chat_model = EvoChatDeepSeek(model=model_id, **kwargs)

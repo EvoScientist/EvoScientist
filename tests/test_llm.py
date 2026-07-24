@@ -2815,17 +2815,57 @@ class TestAutoConfig:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
         monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        reasoning = {"effort": "low", "context": "previous_response_id"}
 
         get_chat_model(
             "gpt-5.5",
             provider="openai",
-            reasoning={"effort": "low", "context": "previous_response_id"},
+            reasoning=reasoning,
         )
 
         assert mock_init.call_args[1]["reasoning"] == {
             "effort": "low",
             "context": "previous_response_id",
         }
+        assert mock_init.call_args[1]["reasoning"] is not reasoning
+        assert reasoning == {"effort": "low", "context": "previous_response_id"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_reasoning_context_requires_responses_api(
+        self, mock_init, monkeypatch
+    ):
+        """Responses-only reasoning.context is not sent when Chat Completions is forced."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
+
+        get_chat_model(
+            "gpt-5.5",
+            provider="openai",
+            use_responses_api=False,
+            reasoning={"effort": "low"},
+        )
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is False
+        assert call_kwargs["reasoning"] == {"effort": "low"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openai_ccproxy_codex_env_false_drops_reasoning(
+        self, mock_init, monkeypatch
+    ):
+        """The global Chat Completions override still removes reasoning entirely."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "false")
+
+        get_chat_model("gpt-5.5", provider="openai")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["use_responses_api"] is False
+        assert "reasoning" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_ccproxy_codex_none_headers(self, mock_init, monkeypatch):

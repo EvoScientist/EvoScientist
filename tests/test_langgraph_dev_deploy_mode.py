@@ -214,6 +214,7 @@ def test_workspace_dir_env_var_set_regardless_of_mode(
 def test_langgraph_runtime_env_defaults(monkeypatch, tmp_path, runtime_paths):
     """langgraph-api 0.11+ expects DATABASE_URI and REDIS_URI at import time."""
     monkeypatch.delenv("DATABASE_URI", raising=False)
+    monkeypatch.delenv("POSTGRES_URI", raising=False)
     monkeypatch.delenv("REDIS_URI", raising=False)
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
@@ -247,6 +248,26 @@ def test_langgraph_runtime_env_preserves_inherited_values(
     env = captured["env"]
     assert env["DATABASE_URI"] == "postgresql://db.example/evosci"
     assert env["REDIS_URI"] == "redis://redis.example:6380/1"
+
+
+def test_langgraph_runtime_env_treats_blank_values_as_unset(
+    monkeypatch, tmp_path, runtime_paths
+):
+    """Blank env vars should not suppress usable fallbacks."""
+    monkeypatch.setenv("DATABASE_URI", "  ")
+    monkeypatch.setenv("POSTGRES_URI", "postgresql://db.example/from-postgres-uri")
+    monkeypatch.setenv("REDIS_URI", "")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path,
+            port=16184,
+        )
+
+    env = captured["env"]
+    assert env["DATABASE_URI"] == "postgresql://db.example/from-postgres-uri"
+    assert env["REDIS_URI"] == "redis://localhost:6379"
 
 
 # =============================================================================

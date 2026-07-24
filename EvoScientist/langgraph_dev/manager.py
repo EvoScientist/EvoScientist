@@ -680,11 +680,14 @@ def start_langgraph_dev(
     sub_env = os.environ.copy()
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
     langgraph_db = workspace_dir / ".langgraph_api" / "langgraph_dev.db"
-    sub_env.setdefault(
-        "DATABASE_URI",
-        f"sqlite:///{langgraph_db.as_posix()}",
+    sub_env["DATABASE_URI"] = (
+        sub_env.get("DATABASE_URI", "").strip()
+        or sub_env.get("POSTGRES_URI", "").strip()
+        or f"sqlite:///{langgraph_db.as_posix()}"
     )
-    sub_env.setdefault("REDIS_URI", "redis://localhost:6379")
+    sub_env["REDIS_URI"] = sub_env.get("REDIS_URI", "").strip() or (
+        "redis://localhost:6379"
+    )
     sub_env["PYTHONIOENCODING"] = "utf-8"
     sub_env["PYTHONUTF8"] = "1"
 
