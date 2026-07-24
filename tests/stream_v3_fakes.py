@@ -113,6 +113,18 @@ def message_tool_call_block(
     )
 
 
+def custom_subagent_event(
+    payload: dict[str, Any],
+    namespace: Iterable[Any] = (),
+) -> dict[str, Any]:
+    """Build a ``custom``-method v3 event carrying a subagent-lifecycle payload.
+
+    Mirrors the shape ``langchain_quickjs._subagent`` emits via
+    ``stream_writer(event)`` for in-eval ``task()`` fan-out.
+    """
+    return protocol_event("custom", payload, namespace)
+
+
 def tool_started(
     name: str,
     args: dict[str, Any] | None = None,

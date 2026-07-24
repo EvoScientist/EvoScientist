@@ -140,6 +140,73 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def panel_dispatch_start(
+        *,
+        eval_id: str,
+        dispatch_id: str,
+        subagent_type: str,
+        label: str,
+        description: str,
+    ) -> StreamEvent:
+        """A ``task()`` dispatch inside a ``code_interpreter`` eval started.
+
+        Sourced from ``langchain_quickjs``'s custom-stream subagent events.
+        Distinct family from ``subagent_start`` because the semantics differ:
+        short-lived expert dispatch inside a QuickJS eval, grouped by
+        ``eval_id`` (parent ``code_interpreter`` tool_call_id), not a full
+        nested subagent turn.
+        """
+        return StreamEvent(
+            "panel_dispatch_start",
+            {
+                "type": "panel_dispatch_start",
+                "eval_id": eval_id,
+                "id": dispatch_id,
+                "subagent_type": subagent_type,
+                "label": label,
+                "description": description,
+            },
+        )
+
+    @staticmethod
+    def panel_dispatch_complete(
+        *,
+        eval_id: str,
+        dispatch_id: str,
+        duration_ms: int,
+    ) -> StreamEvent:
+        """A ``task()`` dispatch inside a ``code_interpreter`` eval finished OK."""
+        return StreamEvent(
+            "panel_dispatch_complete",
+            {
+                "type": "panel_dispatch_complete",
+                "eval_id": eval_id,
+                "id": dispatch_id,
+                "duration_ms": duration_ms,
+            },
+        )
+
+    @staticmethod
+    def panel_dispatch_error(
+        *,
+        eval_id: str,
+        dispatch_id: str,
+        duration_ms: int,
+        error: str,
+    ) -> StreamEvent:
+        """A ``task()`` dispatch inside a ``code_interpreter`` eval raised."""
+        return StreamEvent(
+            "panel_dispatch_error",
+            {
+                "type": "panel_dispatch_error",
+                "eval_id": eval_id,
+                "id": dispatch_id,
+                "duration_ms": duration_ms,
+                "error": error,
+            },
+        )
+
+    @staticmethod
     def done(response: str = "") -> StreamEvent:
         """Done event."""
         return StreamEvent(
