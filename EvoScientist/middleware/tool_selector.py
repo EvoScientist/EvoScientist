@@ -114,6 +114,22 @@ def _available_always_include(
     return sorted(candidates & available_names)
 
 
+def _is_thinking_tool_choice_error(exc: BaseException) -> bool:
+    """True for the deterministic "forced tool_choice vs thinking" HTTP 400.
+
+    Endpoints with mandatory server-side thinking (kimi-coding's kimi-k2.6,
+    Moonshot's kimi-k3) reject a forced ``tool_choice`` with
+    "tool_choice 'specified' is incompatible with thinking enabled" — and
+    ``disable_thinking`` cannot help because their thinking cannot be turned
+    off client-side. This is a permanent shape/config failure, not a
+    transient provider error, so the selector should degrade to "use all
+    tools" instead of surfacing it (which kills every run of any agent whose
+    tool count exceeds the selection threshold).
+    """
+    msg = str(exc).lower()
+    return "tool_choice" in msg and "thinking" in msg
+
+
 class _ConditionalToolSelectorMiddleware(AgentMiddleware):
     """Wraps LLMToolSelectorMiddleware with a tool-count threshold.
 
@@ -201,6 +217,15 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             from .error_normalization import _is_provider_error
 
             if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
+                if _is_thinking_tool_choice_error(exc):
+                    # Mandatory-thinking endpoint can never accept the forced
+                    # tool_choice — degrade to all tools (see helper docstring).
+                    logger.warning(
+                        "Tool selector: provider rejects forced tool_choice "
+                        "with thinking enabled; using all tools"
+                    )
+                    _end_selection()
+                    return handler(request)
                 # Auth / quota / connection failures on the selector's
                 # own model. Falling back to "use all tools" would hit
                 # the same provider anyway (same client, likely same
@@ -256,6 +281,15 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             from .error_normalization import _is_provider_error
 
             if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
+                if _is_thinking_tool_choice_error(exc):
+                    # Mandatory-thinking endpoint can never accept the forced
+                    # tool_choice — degrade to all tools (see helper docstring).
+                    logger.warning(
+                        "Tool selector: provider rejects forced tool_choice "
+                        "with thinking enabled; using all tools"
+                    )
+                    _end_selection()
+                    return await handler(request)
                 # See sync path — surface provider errors, degrade only
                 # on shape / config failures.
                 raise
