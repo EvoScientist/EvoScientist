@@ -407,6 +407,39 @@ def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
     )
 
 
+def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
+    """Append expert-skill sub-agent specs to ``subs``, guarding names.
+
+    Each installed expert skill becomes an in-process sub-agent entry so
+    the main agent's ``task`` tool (and the QuickJS ``task()`` global for
+    panel mode) can dispatch to it by name. Async-graph deploy of experts
+    is v2 territory — they live purely in the sync in-process registry.
+
+    Skips (with a warning) any expert whose ``name`` collides with a
+    subagent already in ``subs`` or with ``general-purpose``. The reserved
+    name matters because ``_ensure_general_purpose_subagent`` runs right
+    after this and early-returns when it sees the slot occupied — an expert
+    named ``general-purpose`` would silently take the slot and deepagents'
+    default subagent prompt would never reach the agent.
+    """
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from .subagents.expert_container import build_expert_subagent_specs
+
+    logger = logging.getLogger(__name__)
+    taken = {s.get("name") for s in subs} | {GENERAL_PURPOSE_SUBAGENT["name"]}
+    for spec in build_expert_subagent_specs(tool_registry=tool_registry):
+        name = spec["name"]
+        if name in taken:
+            logger.warning(
+                "Expert skill %r collides with an existing sub-agent name; skipping.",
+                name,
+            )
+            continue
+        taken.add(name)
+        subs.append(spec)
+
+
 def _maybe_swap_async_subagents(
     subs: list, middleware: list | None = None, *, cfg=None
 ) -> list:
@@ -524,7 +557,12 @@ def _build_base_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    tool_registry = {"think_tool": think_tool}
+    # `skill_manager` is registered here in addition to `base_tools` because
+    # expert subagents resolve their default toolset from `tool_registry` (see
+    # `_DEFAULT_EXPERT_TOOLS` in expert_container.py). Without this entry the
+    # tool silently misses from every expert sub-agent — e.g. idea-brainstorm
+    # can't run its `paper-navigator` precondition check.
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
@@ -538,6 +576,7 @@ def _build_base_kwargs(
         tool_registry=tool_registry,
         async_swap_pending=True,
     )
+    _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
@@ -595,7 +634,10 @@ def load_mcp_and_build_kwargs(
             workspace_dir=workspace_dir,
         )
 
-    tool_registry = {"think_tool": think_tool}
+    # Match `_build_base_kwargs`: register `skill_manager` in the registry so
+    # expert subagents (which resolve tools via `_DEFAULT_EXPERT_TOOLS` from
+    # `expert_container.py`) actually get it.
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
@@ -615,6 +657,7 @@ def load_mcp_and_build_kwargs(
         tool_registry=registry,
         async_swap_pending=True,
     )
+    _fold_expert_subagents(subs, registry)
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(

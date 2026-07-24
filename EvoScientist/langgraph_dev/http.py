@@ -75,8 +75,58 @@ async def get_models(_request: Request) -> JSONResponse:
     )
 
 
+async def get_teams(_request: Request) -> JSONResponse:
+    """Return installed expert skills as ``{teams: [...]}`` for the WebUI gallery.
+
+    A "team" in the WebUI vocabulary is an installed expert skill —
+    ``SKILL.md`` with ``type: expert`` frontmatter. The response is a
+    curated, gallery-safe projection: name + description, plus optional
+    ``byline`` / ``capability_tags`` / ``avatar_hint`` when the skill
+    populates them.
+
+    Backend implementation details (SKILL.md body / system prompt, role
+    line, default_dispatch, tool list, source tier, filesystem path,
+    tags) are intentionally NOT projected. The gallery only needs
+    identity + descriptor fields to render the card; anything richer
+    belongs in a dedicated info endpoint.
+
+    Sourced from ``list_expert_skills(include_system=True)`` so
+    first-party experts shipped as builtin skills surface alongside
+    workspace/global installs.
+
+    Offloaded to a thread because the skill loader does synchronous
+    filesystem walking + yaml parsing, which langgraph-dev's
+    ``blockbuster`` middleware refuses on the async event loop.
+
+    Response shape (each entry): ``{name, description, byline?,
+    capability_tags?, avatar_hint?}`` — the WebUI gallery consumes these.
+    """
+    from EvoScientist.tools.skills_manager import list_expert_skills
+
+    experts = await asyncio.to_thread(list_expert_skills, True)
+    teams = []
+    for info in experts:
+        entry = {
+            "name": info.name,
+            "description": info.description,
+        }
+        # Optional gallery fields — omit when unpopulated so the WebUI
+        # card degrades gracefully (SkillInfo defaults `byline` /
+        # `avatar_hint` to "" and `capability_tags` to [], which we
+        # treat as "not declared").
+        if info.byline:
+            entry["byline"] = info.byline
+        if info.capability_tags:
+            entry["capability_tags"] = list(info.capability_tags)
+        if info.avatar_hint:
+            entry["avatar_hint"] = info.avatar_hint
+        teams.append(entry)
+    return JSONResponse({"teams": teams})
+
+
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
+        Route("/api/teams", get_teams, methods=["GET"]),
     ]
 )
