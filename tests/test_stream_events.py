@@ -29,6 +29,7 @@ from tests.stream_v3_fakes import (
     SubscriptionSensitiveV3Agent,
     async_iter,
     collect_events,
+    custom_subagent_event,
     message_delta,
     message_finish,
     message_tool_call_block,
@@ -1249,6 +1250,157 @@ class TestUsageStatsExtraction:
         events = await collect_events(agent)
         usage_events = [e for e in events if e.get("type") == "usage_stats"]
         assert len(usage_events) == 0
+
+
+class TestPanelDispatchEvents:
+    """Custom-stream subagent lifecycle from in-eval task() fan-out."""
+
+    async def test_start_event_becomes_panel_dispatch_start(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "subagent_type": "idea-brainstorm",
+                        "label": "innovator voice",
+                        "description": "generate one bold candidate",
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        starts = [e for e in events if e.get("type") == "panel_dispatch_start"]
+        assert len(starts) == 1
+        start = starts[0]
+        assert start["id"] == "ptc_task_abc12345"
+        assert start["eval_id"] == "ci_eval_1"
+        assert start["subagent_type"] == "idea-brainstorm"
+        assert start["label"] == "innovator voice"
+        assert start["description"] == "generate one bold candidate"
+
+    async def test_complete_event_becomes_panel_dispatch_complete(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "duration_ms": 1234,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        completes = [e for e in events if e.get("type") == "panel_dispatch_complete"]
+        assert len(completes) == 1
+        assert completes[0]["id"] == "ptc_task_abc12345"
+        assert completes[0]["duration_ms"] == 1234
+
+    async def test_error_event_becomes_panel_dispatch_error(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "error",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "duration_ms": 42,
+                        "error": "boom",
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        errors = [e for e in events if e.get("type") == "panel_dispatch_error"]
+        assert len(errors) == 1
+        assert errors[0]["error"] == "boom"
+        assert errors[0]["duration_ms"] == 42
+
+    async def test_unknown_custom_type_ignored(self):
+        """Custom payloads whose ``type`` is not ``subagent`` don't emit events."""
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event({"type": "something-else", "value": 1}),
+            ]
+        )
+        events = await collect_events(agent)
+        assert not any(e.get("type", "").startswith("panel_dispatch") for e in events)
+
+    async def test_missing_id_dropped(self):
+        """A malformed subagent event without ``id`` is silently dropped."""
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "subagent_type": "x",
+                        "label": "y",
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        assert not any(e.get("type", "").startswith("panel_dispatch") for e in events)
+
+    async def test_grouped_fanout_shares_eval_id(self):
+        """Parallel dispatches from one eval share the same ``eval_id``."""
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": "d1",
+                        "eval_id": "e1",
+                        "subagent_type": "innovator",
+                        "label": "a",
+                        "description": "d",
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": "d2",
+                        "eval_id": "e1",
+                        "subagent_type": "pragmatist",
+                        "label": "b",
+                        "description": "d",
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "d1",
+                        "eval_id": "e1",
+                        "duration_ms": 100,
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "d2",
+                        "eval_id": "e1",
+                        "duration_ms": 200,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        panel_events = [
+            e for e in events if e.get("type", "").startswith("panel_dispatch")
+        ]
+        assert len(panel_events) == 4
+        assert {e["eval_id"] for e in panel_events} == {"e1"}
 
 
 class TestSummarizationHelpers:
