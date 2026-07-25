@@ -2501,6 +2501,229 @@ class TestPatchOpenrouterStripResponsesReasoning:
 
 
 # =============================================================================
+# Test _patch_anthropic_strip_foreign_reasoning
+# =============================================================================
+
+
+class TestAnthropicStripForeignReasoning:
+    def test_strip_removes_reasoning_content_blocks(self):
+        """reasoning_content blocks are dropped; text and thinking survive."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _normalize_anthropic_replay_messages
+
+        messages = [
+            HumanMessage("hello"),
+            AIMessage(
+                content=[
+                    {"type": "reasoning_content", "reasoning_content": {"text": "hm"}},
+                    {"type": "thinking", "thinking": "hm", "signature": ""},
+                    {"type": "text", "text": "hi"},
+                ]
+            ),
+        ]
+
+        result = _normalize_anthropic_replay_messages(messages)
+
+        types = [b["type"] for b in result[1].content]
+        assert types == ["thinking", "text"]
+
+    def test_missing_thinking_signature_defaulted(self):
+        """Streamed thinking blocks without a signature key get signature ''."""
+        from langchain_core.messages import AIMessage
+
+        from EvoScientist.llm.patches import _normalize_anthropic_replay_messages
+
+        messages = [
+            AIMessage(
+                content=[
+                    {"type": "thinking", "thinking": "hm", "index": 0},
+                    {"type": "text", "text": "hi", "index": 1},
+                ]
+            ),
+        ]
+
+        result = _normalize_anthropic_replay_messages(messages)
+
+        assert result[0].content[0]["signature"] == ""
+        assert "signature" not in result[0].content[1]
+
+    def test_strip_no_change_returns_same_object(self):
+        """Clean histories pass through without copying."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.patches import _normalize_anthropic_replay_messages
+
+        messages = [
+            HumanMessage("hello"),
+            AIMessage(content=[{"type": "text", "text": "hi"}]),
+            AIMessage(content="plain string content"),
+        ]
+
+        assert _normalize_anthropic_replay_messages(messages) is messages
+
+    def test_kimi_k3_exempt_from_flatten_patch(self, monkeypatch):
+        """K3 on custom-anthropic gets no instance flatten closures; others do."""
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+
+        kimi = get_chat_model("moonshotai/kimi-k3", provider="custom-anthropic")
+        assert "_generate" not in vars(kimi)
+
+        other = get_chat_model(
+            "claude-sonnet-4-6", provider="custom-anthropic", max_tokens=1024
+        )
+        assert "_generate" in vars(other)
+
+    def test_reasoning_content_stripped_on_the_wire(self, monkeypatch):
+        """End-to-end: foreign reasoning blocks never reach the Anthropic wire."""
+        import json
+
+        import anthropic
+        import httpx
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+        model = get_chat_model("moonshotai/kimi-k3", provider="custom-anthropic")
+
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "model": "moonshotai/kimi-k3",
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        model._client = anthropic.Anthropic(
+            api_key="test-key",
+            base_url="https://compat.example.com",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+        history = [
+            HumanMessage("hello"),
+            AIMessage(
+                content=[
+                    {"type": "reasoning_content", "reasoning_content": {"text": "hm"}},
+                    {"type": "thinking", "thinking": "hm", "index": 0},
+                    {"type": "text", "text": "hi there"},
+                ]
+            ),
+            HumanMessage("say ok"),
+        ]
+        result = model.invoke(history)
+
+        sent_blocks = [
+            block
+            for message in captured["messages"]
+            for block in (
+                message["content"] if isinstance(message["content"], list) else []
+            )
+        ]
+        sent_types = [block["type"] for block in sent_blocks]
+        assert "reasoning_content" not in sent_types
+        assert "text" in sent_types
+        thinking_blocks = [b for b in sent_blocks if b["type"] == "thinking"]
+        assert thinking_blocks
+        assert thinking_blocks[0]["signature"] == ""
+        assert result.content == "ok"
+
+
+# =============================================================================
+# Test _patch_anthropic_structured_output
+# =============================================================================
+
+
+class TestAnthropicStructuredOutput:
+    @staticmethod
+    def _capture_structured_request(model, response_text):
+        """Invoke a structured-output runnable against a capturing transport."""
+        import json
+
+        import anthropic
+        import httpx
+        from pydantic import BaseModel
+
+        class Pick(BaseModel):
+            answer: str
+
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": response_text,
+                    "model": "test",
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        model._client = anthropic.Anthropic(
+            api_key="test-key",
+            base_url="https://compat.example.com",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        result = model.with_structured_output(Pick).invoke("Reply with answer='ok'")
+        return captured, result
+
+    def test_kimi_k3_defaults_to_json_schema(self, monkeypatch):
+        """K3 structured output binds output_config.format, no forced tool_choice."""
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+        model = get_chat_model("moonshotai/kimi-k3", provider="custom-anthropic")
+
+        captured, result = self._capture_structured_request(
+            model, [{"type": "text", "text": '{"answer": "ok"}'}]
+        )
+
+        assert captured["output_config"]["format"]["type"] == "json_schema"
+        assert "tool_choice" not in captured
+        assert result.answer == "ok"
+
+    def test_claude_keeps_function_calling(self, monkeypatch):
+        """Claude models keep tool-based structured output (no json_schema flip)."""
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        model = get_chat_model(
+            "claude-haiku-4-5", provider="anthropic", max_tokens=1024
+        )
+
+        captured, result = self._capture_structured_request(
+            model,
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "Pick",
+                    "input": {"answer": "ok"},
+                }
+            ],
+        )
+
+        assert "output_config" not in captured
+        assert [t["name"] for t in captured["tools"]] == ["Pick"]
+        assert result.answer == "ok"
+
+
+# =============================================================================
 # Test _apply_auto_config
 # =============================================================================
 
@@ -2558,6 +2781,45 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
+
+    @pytest.mark.parametrize("model", ["moonshotai/kimi-k3", "kimi-k3"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_anthropic_kimi_k3_declares_thinking(
+        self, mock_init, model, monkeypatch
+    ):
+        """K3 via custom-anthropic declares thinking (else forced tool_choice 400s)."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+
+        get_chat_model(model, provider="custom-anthropic")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert call_kwargs["max_tokens"] == 16000
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_kimi_coding_declares_thinking(self, mock_init):
+        """Kimi For Coding plan models declare thinking on the kimi-coding provider."""
+        mock_init.return_value = "mock_model"
+
+        get_chat_model("kimi-for-coding", provider="kimi-coding")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert call_kwargs["max_tokens"] == 16000
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_anthropic_non_kimi_no_thinking(self, mock_init, monkeypatch):
+        """Non-Kimi models on custom-anthropic still skip thinking injection."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+
+        get_chat_model("glm-4.7", provider="custom-anthropic")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "thinking" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_proxy_no_thinking(self, mock_init, monkeypatch):

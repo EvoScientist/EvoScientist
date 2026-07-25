@@ -28,6 +28,8 @@ from .context_window import apply_known_context_window
 from .deepseek import EvoChatDeepSeek
 from .patches import (
     _is_ccproxy_codex,
+    _patch_anthropic_strip_foreign_reasoning,
+    _patch_anthropic_structured_output,
     _patch_ccproxy_system_to_developer,
     _patch_openai_compat_content,
     _patch_openrouter_strip_responses_reasoning,
@@ -144,6 +146,13 @@ _OPENROUTER_MAX_CATEGORIES_PER_REQUEST = 2
 _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS = frozenset(
     {"moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"}
 )
+
+
+def _is_mandatory_thinking_kimi(model_id: str) -> bool:
+    """True for Kimi models whose thinking cannot be disabled (K3 family)."""
+    short_id = model_id.split("/")[-1]
+    return short_id.startswith("kimi-k3") or short_id == "kimi-for-coding"
+
 
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
@@ -431,7 +440,12 @@ def _apply_auto_config(
         else:
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
-            pass
+            # Mandatory-thinking Kimi models (K3 / Kimi For Coding) must declare
+            # thinking so with_structured_output avoids forced tool_choice (400).
+            # max_tokens must exceed budget_tokens (default resolves to 4096).
+            if is_third_party and _is_mandatory_thinking_kimi(model_id):
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+                kwargs.setdefault("max_tokens", 16000)
         elif "fable" in model_id or model_id.endswith(
             ("opus-5", "sonnet-5", "4-6", "4-7", "4-8")
         ):
@@ -749,11 +763,14 @@ def get_chat_model(
     # (SiliconFlow, OpenRouter, custom-openai, etc.) and
     # native OpenAI through a proxy, to avoid "sequence expected string" errors.
     # Moonshot and Kimi Coding support standard format, no patch needed.
+    # Mandatory-thinking Kimi models on Anthropic-routed endpoints are exempt:
+    # flatten drops thinking blocks, which Kimi requires on tool-call turns.
     _no_patch_providers = {"moonshot", "kimi-coding"}
     if (
         (_is_third_party or _is_openai_proxy)
         and _original_provider not in _no_patch_providers
         and not _uses_native_deepseek
+        and not (provider == "anthropic" and _is_mandatory_thinking_kimi(model_id))
     ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
@@ -765,6 +782,10 @@ def get_chat_model(
 
     if provider == "openrouter":
         _enable_openrouter_429_retry(chat_model)
+
+    if provider == "anthropic":
+        _patch_anthropic_strip_foreign_reasoning()
+        _patch_anthropic_structured_output()
 
     apply_known_context_window(chat_model)
 
