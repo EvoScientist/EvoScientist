@@ -2546,6 +2546,19 @@ class TestAutoConfig:
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
 
+    @pytest.mark.parametrize("model", ["claude-opus-5", "claude-sonnet-5"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_anthropic_5_series_adaptive_thinking(self, mock_init, model, monkeypatch):
+        """Anthropic 5-series models get adaptive thinking (budget_tokens would 400)."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        get_chat_model(model, provider="anthropic")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert call_kwargs["effort"] == "max"
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_proxy_no_thinking(self, mock_init, monkeypatch):
         """Anthropic 4-6 models via proxy skip thinking (history round-trip 422)."""

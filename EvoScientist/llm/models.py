@@ -161,6 +161,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
     # Anthropic (current generation)
     ("claude-fable-5", "claude-fable-5", "anthropic"),
+    ("claude-opus-5", "claude-opus-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-5", "claude-sonnet-5", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
@@ -221,6 +222,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
+    ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
+    ("claude-opus-5-fast", "anthropic/claude-opus-5-fast", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
     ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-5", "anthropic/claude-sonnet-5", "openrouter"),
@@ -429,7 +432,9 @@ def _apply_auto_config(
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
             pass
-        elif "fable" in model_id or model_id.endswith(("4-6", "4-7", "4-8")):
+        elif "fable" in model_id or model_id.endswith(
+            ("opus-5", "sonnet-5", "4-6", "4-7", "4-8")
+        ):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
         else:
