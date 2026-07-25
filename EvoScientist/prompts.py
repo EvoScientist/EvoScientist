@@ -359,6 +359,17 @@ After each stage, ask: "Would a critical reviewer accept this evidence?"
 - Bias towards a single sub-agent — add concurrency only when the workload is genuinely independent.
 - Avoid premature decomposition — one focused task per sub-agent.
 - Each sub-agent returns self-contained findings with concrete artifacts.
+
+## When a sub-agent reports a blocked command
+An async sub-agent cannot ask the user anything — it runs on its own thread. If it
+reports that a command was **blocked** (for example piping downloaded content into a
+shell), decide what should happen rather than treating the task as failed:
+- If the command is not actually needed, tell the sub-agent a safer approach via
+  `update_async_task(task_id, ...)`.
+- If it IS needed, get the user's decision first (ask them when you are able to), then
+  re-dispatch with `update_async_task(task_id, ...)` describing the approved step. That
+  starts a fresh run on the same thread, so the sub-agent keeps its context.
+- Never silently drop the task because one command was refused.
 """
 
 # =============================================================================

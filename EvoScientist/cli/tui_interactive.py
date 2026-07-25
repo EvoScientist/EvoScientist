@@ -472,6 +472,12 @@ def _normalize_chat_scroll(container: Any) -> None:
         scrollbar.position = container.scroll_y
 
 
+def _session_auto_approve_decisions(action_requests: list) -> list[dict]:
+    """TUI session "approve all": an explicit human opt-in, so blanket-approve
+    everything (dangerous set included), matching the Rich CLI and channel."""
+    return [{"type": "approve"} for _ in action_requests]
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -2136,20 +2142,15 @@ def run_textual_interactive(
 
                         elif event_type == "interrupt":
                             action_reqs = event.get("action_requests", [])
-                            n = len(action_reqs) or 1
+                            interrupt_id = event.get("interrupt_id")
 
-                            # HITL: check session auto-approve first
+                            # HITL: session "approve all" blanket-approves.
                             if self._hitl_auto_approve:
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_hitl_resume
 
-                                _stream_input = Command(
-                                    resume={
-                                        "decisions": [
-                                            {"type": "approve"} for _ in range(n)
-                                        ]
-                                    }
+                                decisions = _session_auto_approve_decisions(action_reqs)
+                                _stream_input = build_hitl_resume(
+                                    interrupt_id, decisions
                                 )
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop
@@ -2169,12 +2170,10 @@ def run_textual_interactive(
                                     response = await _mark_cancelled_response()
                                     break
                                 if decisions is not None:
-                                    from langgraph.types import (
-                                        Command,  # type: ignore[import-untyped]
-                                    )
+                                    from ..backends import build_hitl_resume
 
-                                    _stream_input = Command(
-                                        resume={"decisions": decisions}
+                                    _stream_input = build_hitl_resume(
+                                        interrupt_id, decisions
                                     )
                                     _hitl_resuming = True
                                     break  # re-enter outer HITL loop
@@ -2203,12 +2202,10 @@ def run_textual_interactive(
                             if decided_event and decided_event.decisions is not None:
                                 if decided_event.auto_approve_session:
                                     self._hitl_auto_approve = True
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_hitl_resume
 
-                                _stream_input = Command(
-                                    resume={"decisions": decided_event.decisions}
+                                _stream_input = build_hitl_resume(
+                                    interrupt_id, decided_event.decisions
                                 )
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop with resume

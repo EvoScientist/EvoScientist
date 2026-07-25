@@ -642,8 +642,14 @@ def load_mcp_and_build_kwargs(
 # =============================================================================
 
 
-def _get_default_backend():
-    """Build the default composite backend from current paths."""
+def _get_default_backend(*, guard_dangerous: bool | None = None):
+    """Build the default composite backend from current paths.
+
+    ``guard_dangerous`` — when ``None`` (default) follows ``cfg.auto_approve``;
+    the two research async sub-agent graphs (``writing-agent`` /
+    ``data-analysis-agent``) pass ``True`` because their remote thread has no
+    approval path at all (see ``subagents/_factory._GUARDED_ASYNC_SUBAGENTS``).
+    """
     from deepagents.backends import CompositeBackend
 
     from .backends import (
@@ -653,6 +659,8 @@ def _get_default_backend():
     )
 
     cfg = _ensure_config()
+    if guard_dangerous is None:
+        guard_dangerous = cfg.auto_approve
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
@@ -666,7 +674,7 @@ def _get_default_backend():
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
-        guard_dangerous=cfg.auto_approve,
+        guard_dangerous=guard_dangerous,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -862,22 +870,12 @@ def _get_default_middleware(
 
 
 def _build_hitl_interrupt_on(*, auto_approve: bool) -> dict[str, bool] | None:
-    """Return the ``interrupt_on`` map for ``create_deep_agent``.
-
-    ``None`` when the user opted out (``auto_approve``, implied by
-    ``auto_mode`` and ``dangerous_mode``) so no interrupt is armed anywhere —
-    unattended runs are never paused. Passing this to ``create_deep_agent``
-    (rather than appending ``HumanInTheLoopMiddleware``) makes declarative
-    sub-agents inherit it; ``AsyncSubAgent`` specs do not inherit and so
-    cannot hang waiting for an approval nobody can deliver. This holds only
-    while EvoScientist passes no ``permissions=`` to ``create_deep_agent``; a
-    permission rule with ``mode="interrupt"`` would still arm file-tool
-    interrupts independently of this value.
-
-    The armed set is :data:`HITL_INTERRUPT_ON` (single source of truth) —
-    ``execute`` / ``run_in_background`` / ``schedule_task`` plus the recursive
-    ``delete`` FS tool that deepagents 0.7.0 ships (it would otherwise bypass
-    the execute blocklist).
+    """Return :data:`HITL_INTERRUPT_ON` for ``create_deep_agent``, or ``None``
+    when the user opted out (``auto_approve`` / ``auto_mode`` /
+    ``dangerous_mode``) so nothing is armed and unattended runs never pause.
+    Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``) lets
+    declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not — so
+    async agents can't hang on an approval nobody can deliver.
     """
     if auto_approve:
         return None

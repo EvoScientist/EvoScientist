@@ -192,7 +192,9 @@ def test_cancel_unwinds_hitl_prompt_and_renderer(monkeypatch):
     )
     monkeypatch.setattr(
         "EvoScientist.config.settings.load_config",
-        lambda: SimpleNamespace(auto_approve=False, shell_allow_list=""),
+        lambda: SimpleNamespace(
+            auto_approve=False, dangerous_mode=False, shell_allow_list=""
+        ),
     )
 
     async def _empty_stream(_request):

@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
@@ -30,6 +31,9 @@ from deepagents.backends.protocol import (
 
 from . import paths
 from .cancellation import current_cancel_event
+
+if TYPE_CHECKING:
+    from langgraph.types import Command
 
 # Reproduced here to dodge a circular import from .EvoScientist (the canonical
 # SKILLS_DIR constant).
@@ -392,6 +396,21 @@ def resolve_action_decision(
                 return ActionVerdict(ActionDecision.APPROVE)
 
     return ActionVerdict(ActionDecision.PROMPT)
+
+
+def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
+    """Build a HITL resume Command keyed by interrupt_id.
+
+    Keying by id (not the flat ``{"decisions": …}``) is REQUIRED whenever the
+    graph has more than one pending interrupt — parallel sub-agents that each
+    call ``execute`` do exactly that, and a flat resume raises
+    ``RuntimeError: When there are multiple pending interrupts …``. Resuming a
+    single id resolves that interrupt and re-parks the rest (they re-emit on the
+    next stream), so callers drain them one at a time. Safe for N=1 too.
+    """
+    from langgraph.types import Command
+
+    return Command(resume={interrupt_id: {"decisions": decisions}})
 
 
 _SSH_OPTIONS_WITH_VALUE = {

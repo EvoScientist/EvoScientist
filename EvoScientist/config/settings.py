@@ -27,7 +27,7 @@ HITL_SHELL_TOOLS = ("execute", "run_in_background")
 
 # Armed non-shell destructive tools must always prompt — no allow-list carve-outs
 # (their args carry paths, not commands). Keep aligned with HITL_INTERRUPT_ON.
-HITL_ALWAYS_PROMPT_TOOLS = ("delete",)
+HITL_ALWAYS_PROMPT_TOOLS = ("delete", "schedule_task")
 
 
 class MemoryObservationTarget(StrEnum):
@@ -480,10 +480,11 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
-        # Dangerous mode implies auto_approve regardless of source (CLI, env,
-        # config file). Mirrors how auto_mode implies auto_approve — done here so
-        # the coupling holds even when dangerous_mode is set via `config set`.
-        if self.dangerous_mode:
+        # auto_mode and dangerous_mode both imply auto_approve regardless of
+        # source (CLI, env, config file, direct construction) — done here so the
+        # "unattended → zero prompts" contract holds even when either is set via
+        # `config set` or a config file rather than a CLI flag.
+        if self.auto_mode or self.dangerous_mode:
             self.auto_approve = True
 
         _normalize_str_enum_fields(self)

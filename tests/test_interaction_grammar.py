@@ -154,6 +154,7 @@ class TestApprovalPolicy:
         p = I.ApprovalPolicy()
         cfg = MagicMock()
         cfg.auto_approve = True
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             reqs = [{"name": "execute", "args": {"command": "rm -rf /"}}]
             assert p.auto_decision("tg:c1", reqs) == [{"type": "approve"}]
@@ -163,6 +164,7 @@ class TestApprovalPolicy:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = ""
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             reqs = [{"name": "execute", "args": {"command": "rm -rf /"}}]
             assert p.auto_decision("tg:c1", reqs) is None
@@ -179,6 +181,7 @@ class TestConfigAutoApprove:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = ""
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
                 I.config_auto_approve(
@@ -191,6 +194,7 @@ class TestConfigAutoApprove:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = "ls,python"
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
                 I.config_auto_approve(
@@ -203,6 +207,7 @@ class TestConfigAutoApprove:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = "ls,cat"
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
                 I.config_auto_approve(
