@@ -46,6 +46,7 @@ class TestModelsRegistry:
         assert "deepseek" in providers
         assert "moonshot" in providers
         assert "kimi-coding" in providers
+        assert "atlascloud" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -67,6 +68,7 @@ class TestModelsRegistry:
             "deepseek",
             "moonshot",
             "kimi-coding",
+            "atlascloud",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
@@ -90,6 +92,9 @@ class TestModelsRegistry:
         assert len(openrouter_models) > 0
         siliconflow_models = get_models_for_provider("siliconflow")
         assert len(siliconflow_models) > 0
+        atlas_models = get_models_for_provider("atlascloud")
+        assert ("qwen3.5-27b", "qwen/qwen3.5-27b") in atlas_models
+        assert get_models_for_provider("atlas") == atlas_models
 
 
 # =============================================================================
@@ -389,6 +394,46 @@ def _sdk_retry_supports_status_codes_override() -> bool:
 
 
 class TestThirdPartyRouting:
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_atlascloud_routes_through_openai(self, mock_init, monkeypatch):
+        """Atlas Cloud should use OpenAI-compatible routing with its default URL."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ATLASCLOUD_API_KEY", "atlas-key-123")
+
+        get_chat_model("qwen3.5-27b", provider="atlascloud")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "qwen/qwen3.5-27b"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.atlascloud.ai/v1"
+        assert call_kwargs["api_key"] == "atlas-key-123"
+        assert "reasoning" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_atlas_aliases_and_env_aliases(self, mock_init, monkeypatch):
+        """Atlas aliases should route to the same provider and env fallbacks."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ATLASCLOUD_API_KEY", raising=False)
+        monkeypatch.setenv("ATLAS_CLOUD_API_KEY", "atlas-cloud-key")
+        monkeypatch.setenv("ATLAS_CLOUD_BASE_URL", "https://atlas.example/v1/")
+
+        get_chat_model("deepseek-v4-pro", provider="atlas")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "deepseek-ai/deepseek-v4-pro"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://atlas.example/v1"
+        assert call_kwargs["api_key"] == "atlas-cloud-key"
+
+    def test_atlascloud_host_maps_to_provider(self):
+        """Provider error envelopes should identify Atlas Cloud by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.atlascloud.ai/v1", "openai")
+            == "atlascloud"
+        )
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_siliconflow_routes_through_openai(self, mock_init, monkeypatch):
         """SiliconFlow provider should route through OpenAI with correct base_url."""

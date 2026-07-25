@@ -176,6 +176,7 @@ def _redact_api_keys(message: str) -> str:
 _HOST_TO_PROVIDER: dict[str, str] = {
     "api.openai.com": "openai",
     "api.anthropic.com": "anthropic",
+    "api.atlascloud.ai": "atlascloud",
     "api.deepseek.com": "deepseek",
     "api.moonshot.cn": "moonshot",
     "api.siliconflow.cn": "siliconflow",
