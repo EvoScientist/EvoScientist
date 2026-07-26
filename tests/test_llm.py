@@ -2368,22 +2368,28 @@ class TestPatchOpenAICaptureReasoningContent:
         from langchain_core.messages import AIMessage
         from langchain_openai.chat_models.base import _convert_message_to_dict
 
-        msg = AIMessage(
-            content="",
-            additional_kwargs={
-                "tool_calls": [
-                    {
-                        "id": "call_bad",
-                        "type": "function",
-                        "function": {"name": "", "arguments": "{}"},
-                    }
-                ]
-            },
-        )
-        result = _convert_message_to_dict(msg)
+        blank_call = {"function": {"name": "", "arguments": "{}"}}
+        missing_call = {"function": {"arguments": "{}"}}
+        valid_call = {"function": {"name": "get_weather", "arguments": "{}"}}
 
-        assert "tool_calls" not in result
-        assert result["content"] == ""
+        invalid_msg = AIMessage(
+            content="",
+            additional_kwargs={"tool_calls": [blank_call, missing_call]},
+        )
+        invalid_result = _convert_message_to_dict(invalid_msg)
+
+        assert "tool_calls" not in invalid_result
+        # Upstream changes empty content to None while tool calls are present.
+        assert invalid_result["content"] == ""
+
+        mixed_msg = AIMessage(
+            content="calling tool",
+            additional_kwargs={"tool_calls": [missing_call, valid_call]},
+        )
+        mixed_result = _convert_message_to_dict(mixed_msg)
+
+        assert mixed_result["tool_calls"] == [valid_call]
+        assert mixed_result["content"] == "calling tool"
 
 
 class TestIsResponsesReasoningItem:
