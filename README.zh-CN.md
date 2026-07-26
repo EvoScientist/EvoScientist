@@ -160,7 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
-- **[2026 年 7 月 26 日]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 可在 Anthropic 与 OpenRouter 中选用（含 fast）；Kimi K3 打通 Anthropic 协议通道（Kimi For Coding、自定义端点），结构化输出、历史回放、多轮 thinking 均可用；修复中断的工具调用历史、技能安装路径泄漏，以及 OpenRouter SSE 流式回归（固定到 0.11 以下）。
+- **[2026 年 7 月 26 日]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 可在 Anthropic 与 OpenRouter 中选用（含 fast），Google 与 OpenRouter 另新增 Gemini 3.6 Flash 与 3.5 Flash Lite；Kimi K3 打通 Anthropic 协议通道（Kimi For Coding、自定义端点），结构化输出、历史回放、多轮 thinking 均可用；修复中断的工具调用历史、技能安装路径泄漏，以及 OpenRouter SSE 流式回归（固定到 0.11 以下）。
 - **[2026 年 7 月 18 日]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 可在 Moonshot 与 OpenRouter 中选用（1M 上下文）；清理孤儿运行后，异步子代理不再卡在 pending 状态；Telegram 斜杠命令；provider 修复（DeepSeek 原生 SDK、ChatGPT OAuth 下的 GPT-5.x、OpenAI `reasoning_effort`）；tool-selector 流式输出更安静，checkpoint 体积更小。
 - **[2026 年 7 月 11 日]** **[v0.2.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.2)** — onboarding 与 `/model` 新增可选模型：OpenAI 与 OpenRouter 的 GPT-5.6（sol、terra、luna），以及 OpenRouter 上的 Grok 4.5 与腾讯混元 HY3；收紧配置文件权限，并重做了辅助模型的 onboarding OAuth 流程。
 - **[2026 年 7 月 5 日]** **[v0.2.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.1)** — AutoSkills：EvoMemory 从自身的观察记录聚类中起草可复用技能，供你用 `/autoskills` 审核；新增面向无头 / SDK 客户端的 `--output-format stream-json`；更丰富的斜杠命令补全；修复 Windows UTF-8 配置读取；TUI 欢迎横幅修复；langchain-openrouter 升级到 0.2.5。
