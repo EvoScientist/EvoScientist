@@ -2363,6 +2363,28 @@ class TestPatchOpenAICaptureReasoningContent:
         assert msg.tool_calls[0]["name"] == "get_weather"
         assert msg.additional_kwargs.get("reasoning_content") == "use the tool"
 
+    def test_outgoing_tool_calls_without_names_are_removed(self):
+        """Malformed replay entries are not sent to strict compatible APIs."""
+        from langchain_core.messages import AIMessage
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
+        msg = AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "call_bad",
+                        "type": "function",
+                        "function": {"name": "", "arguments": "{}"},
+                    }
+                ]
+            },
+        )
+        result = _convert_message_to_dict(msg)
+
+        assert "tool_calls" not in result
+        assert result["content"] == ""
+
 
 class TestIsResponsesReasoningItem:
     """_is_responses_reasoning_item flags encrypted OpenAI-Responses items."""

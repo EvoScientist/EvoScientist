@@ -743,6 +743,7 @@ def _patch_openai_capture_reasoning_content() -> None:
 
         _orig_dict_to_msg = _base._convert_dict_to_message
         _orig_delta_to_chunk = _base._convert_delta_to_message_chunk
+        _orig_msg_to_dict = _base._convert_message_to_dict
 
         def _patched_dict_to_msg(_dict, *args, **kwargs):
             msg = _orig_dict_to_msg(_dict, *args, **kwargs)
@@ -763,8 +764,29 @@ def _patch_openai_capture_reasoning_content() -> None:
                 )
             return chunk
 
+        def _patched_msg_to_dict(message, *args, **kwargs):
+            result = _orig_msg_to_dict(message, *args, **kwargs)
+            # Strict OpenAI-compatible APIs reject replayed calls with blank names.
+            tool_calls = result.get("tool_calls")
+            if isinstance(tool_calls, list):
+                valid = [
+                    tc
+                    for tc in tool_calls
+                    if isinstance(tc, dict)
+                    and isinstance(tc.get("function"), dict)
+                    and tc["function"].get("name")
+                ]
+                if valid:
+                    result["tool_calls"] = valid
+                else:
+                    result.pop("tool_calls", None)
+                    if result.get("content") is None:
+                        result["content"] = ""
+            return result
+
         _base._convert_dict_to_message = _patched_dict_to_msg
         _base._convert_delta_to_message_chunk = _patched_delta_to_chunk
+        _base._convert_message_to_dict = _patched_msg_to_dict
         _openai_capture_patched = True
     except Exception:
         pass
