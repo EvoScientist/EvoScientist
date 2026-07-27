@@ -819,12 +819,10 @@ def get_effective_config(
 
     Priority (highest to lowest):
         1. CLI arguments (``cli_overrides``)
-        2. Parent-process environment variables for ``EVOSCIENTIST_*`` keys
-           in ``_ENV_MAPPINGS``
+        2. Parent-process environment variables for any ``EVOSCIENTIST_*`` key
         3. ``.env`` file at (or above) the current working directory
         4. Parent-process environment variables for everything else
-           (third-party API keys / base URLs in ``_ENV_MAPPINGS``, plus
-           arbitrary unmapped keys)
+           (third-party API keys / base URLs, plus arbitrary unmapped keys)
         5. Config file (``~/.config/evoscientist/config.yaml``)
         6. Dataclass defaults
 
@@ -851,18 +849,21 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
-    # Snapshot shell values ONLY for EVOSCIENTIST_* keys — our own config knobs
-    # where CLI/parent-process intent should stay authoritative over any
-    # workspace ``.env``. Third-party API keys (ANTHROPIC_API_KEY,
-    # OPENAI_API_KEY, ...) are also in _ENV_MAPPINGS but follow the industry
-    # convention that ``.env`` is the per-project credential store; extending
-    # shell-wins to them would silently flip a workspace-key override back to
-    # a global ``.bashrc`` key. See the priority table + tradeoff note in the
-    # docstring above.
+    # Snapshot shell values for every EVOSCIENTIST_* env var — our own
+    # namespaced config knobs where CLI/parent-process intent should stay
+    # authoritative over any workspace ``.env``. Keying off the prefix (rather
+    # than filtering ``_ENV_MAPPINGS``) also covers keys that are read directly
+    # via ``os.environ.get(...)`` without going through ``get_effective_config``
+    # (e.g. ``EVOSCIENTIST_DEPLOY_MODE`` set on the subprocess env by
+    # ``langgraph_dev.manager`` for MCP-load / async-subagent dispatch), and it
+    # means future ``EVOSCIENTIST_*`` config knobs get the same protection
+    # automatically. Third-party API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+    # ...) are excluded on purpose — see the priority table + tradeoff note in
+    # the docstring above.
     parent_env_snapshot = {
-        env_key: os.environ[env_key]
-        for env_key in _ENV_MAPPINGS.values()
-        if env_key.startswith("EVOSCIENTIST_") and env_key in os.environ
+        env_key: env_value
+        for env_key, env_value in os.environ.items()
+        if env_key.startswith("EVOSCIENTIST_")
     }
     load_dotenv(find_dotenv(usecwd=True), override=True)
     if parent_env_snapshot:
