@@ -6,7 +6,8 @@ interrupted (cancelled, crashed, timed out) after the model emitted tool calls
 but before those tools produced results. This middleware rewrites the outgoing
 request so every dangling tool call is closed with a synthetic error result and
 every orphan ``ToolMessage`` (a result whose originating call is gone) is
-dropped.
+dropped. It also removes tool calls without names, which strict
+OpenAI-compatible providers reject during history replay.
 
 It covers cases that deepagents' ``PatchToolCallsMiddleware`` does not:
 
@@ -80,14 +81,42 @@ def repair_tool_history(
 
         if pending:
             close_pending()
-        repaired.append(message)
         if isinstance(message, AIMessage):
-            all_calls = list(message.tool_calls) + list(
-                getattr(message, "invalid_tool_calls", []) or []
+            tool_calls = [call for call in message.tool_calls if call.get("name")]
+            invalid_calls = [
+                call
+                for call in (getattr(message, "invalid_tool_calls", []) or [])
+                if call.get("name")
+            ]
+            additional_kwargs = message.additional_kwargs
+            raw_calls = additional_kwargs.get("tool_calls")
+            valid_raw_calls = []
+            if isinstance(raw_calls, list):
+                for call in raw_calls:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(function, dict) and function.get("name"):
+                        valid_raw_calls.append(call)
+                additional_kwargs = dict(additional_kwargs)
+                if valid_raw_calls:
+                    additional_kwargs["tool_calls"] = valid_raw_calls
+                else:
+                    additional_kwargs.pop("tool_calls", None)
+
+            message = message.model_copy(
+                update={
+                    "tool_calls": tool_calls,
+                    "invalid_tool_calls": invalid_calls,
+                    "additional_kwargs": additional_kwargs,
+                }
             )
+            all_calls = tool_calls + invalid_calls
             for call in all_calls:
                 if tool_call_id := call.get("id"):
                     pending[tool_call_id] = call.get("name")
+            for call in valid_raw_calls:
+                if tool_call_id := call.get("id"):
+                    pending[tool_call_id] = call["function"]["name"]
+        repaired.append(message)
 
     if pending:
         close_pending()

@@ -73,6 +73,41 @@ def test_preserves_complete_tool_exchanges():
     assert repair_tool_history(messages) == messages
 
 
+def test_removes_unnamed_calls_before_serialization():
+    from langchain_openai.chat_models.base import _convert_message_to_dict
+
+    raw_valid = {
+        "id": "raw-good",
+        "function": {"name": "execute", "arguments": "{}"},
+    }
+    message = AIMessage(content="").model_copy(
+        update={
+            "tool_calls": [{"id": "bad", "name": "", "args": {}}],
+            "invalid_tool_calls": [
+                {**_invalid_tool_call("invalid"), "name": None},
+            ],
+            "additional_kwargs": {
+                "tool_calls": [
+                    {"id": "raw-bad", "function": {"arguments": "{}"}},
+                    raw_valid,
+                ]
+            },
+        }
+    )
+    messages = [
+        message,
+        ToolMessage("bad", tool_call_id="bad"),
+        ToolMessage("raw-good", tool_call_id="raw-good"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert repaired[0].tool_calls == []
+    assert repaired[0].invalid_tool_calls == []
+    assert _convert_message_to_dict(repaired[0])["tool_calls"] == [raw_valid]
+    assert [message.tool_call_id for message in repaired[1:]] == ["raw-good"]
+
+
 def test_wrap_model_call_repairs_request():
     request = _request(
         [
