@@ -80,6 +80,12 @@ _PROCESS_DRAIN_GRACE_SECONDS = 1.0
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Force-stop a shell and its descendants without waiting for reaping."""
+    # A completed Popen has already reaped its PID, which the OS may reuse.
+    # Inspect the recorded state rather than calling poll(): an exited but
+    # unreaped shell can still have live descendants in its process group.
+    if process.returncode is not None:
+        return
+
     try:
         if os.name == "nt":
             # CREATE_NEW_PROCESS_GROUP alone does not make terminate() recursive.

@@ -2,6 +2,7 @@
 
 import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1603,6 +1604,25 @@ def test_active_shell_registry_lock_allows_signal_handler_reentry():
         lock.release()
     finally:
         lock.release()
+
+
+def test_terminate_process_tree_does_not_target_reaped_pid(monkeypatch):
+    """A completed Popen PID must not be reused as a process-group target."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=5)
+    termination_attempted = False
+
+    def fail_termination(*args, **kwargs):
+        nonlocal termination_attempted
+        termination_attempted = True
+
+    monkeypatch.setattr(backends.os, "killpg", fail_termination, raising=False)
+    monkeypatch.setattr(backends.subprocess, "run", fail_termination)
+    monkeypatch.setattr(process, "kill", fail_termination)
+
+    backends._terminate_process_tree(process)
+
+    assert termination_attempted is False
 
 
 # === '..' traversal false-positive fix ===
