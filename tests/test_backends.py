@@ -1578,13 +1578,19 @@ class TestExecuteTimeout:
     ):
         """An escaped descendant cannot hold execute() open through inherited pipes."""
         monkeypatch.setattr(backends, "_PROCESS_DRAIN_GRACE_SECONDS", 0.05)
-        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace,
+            virtual_mode=True,
+            env={"EVOSCI_TEST_PYTHON": sys.executable},
+        )
         code = (
             "import os,time; "
             "pid=os.fork(); "
             "os._exit(0) if pid else (os.setsid(), time.sleep(1), os._exit(0))"
         )
-        command = f"python3 -c {shlex.quote(code)}"
+        # Pass the absolute executable through the environment so virtual-path
+        # normalization does not reinterpret it as a workspace path.
+        command = f'"$EVOSCI_TEST_PYTHON" -c {shlex.quote(code)}'
 
         started = time.monotonic()
         response = backend.execute(command, timeout=0.05)
