@@ -34,6 +34,15 @@ def _reset_notifier_queues():
     async_notifier.drain_notifications()
 
 
+@pytest.fixture(autouse=True)
+def _zero_sse_poll_interval(monkeypatch):
+    """Zero the SSE loop's inter-iteration sleep so tests don't pay real wall
+    time between yields. Tests that also need the heartbeat or max-lifetime
+    interval tuned monkeypatch those constants separately.
+    """
+    monkeypatch.setattr("EvoScientist.langgraph_dev.http._SSE_POLL_INTERVAL_S", 0)
+
+
 def test_get_models_returns_entries_and_default():
     mock_cfg = EvoScientistConfig(
         model="claude-sonnet-4-6", provider="custom-anthropic"
@@ -335,3 +344,58 @@ async def test_sse_returns_cleanly_when_client_is_disconnected_before_first_chec
     # Notification stayed on the queue — the disconnected loop never drained.
     remaining = async_notifier.drain_thread_notifications("thread-x")
     assert [n.task_id for n in remaining] == ["t-x"]
+
+
+async def test_sse_preserves_queue_tail_on_mid_batch_disconnect(monkeypatch):
+    """A disconnect after the first yielded event must leave later events
+    on the queue instead of draining them into an already-broken socket.
+    This is the invariant behind the one-at-a-time dequeue in the handler:
+    ``is_disconnected`` is re-checked between every pop.
+    """
+    from EvoScientist.cli import async_notifier
+
+    async_notifier._enqueue(_make_notification("t-1", "thread-mid"))
+    async_notifier._enqueue(_make_notification("t-2", "thread-mid"))
+    async_notifier._enqueue(_make_notification("t-3", "thread-mid"))
+
+    # disconnect_after=2 → loop yields t-1, yields t-2, then observes
+    # disconnect on the next iteration and returns.
+    chunks = await _collect_events(_FakeRequest("thread-mid", disconnect_after=2))
+    payloads = _parse_data_events(chunks)
+    assert [p["task_id"] for p in payloads] == ["t-1", "t-2"]
+
+    # t-3 survives on the queue for the next reconnect.
+    remaining = async_notifier.drain_thread_notifications("thread-mid")
+    assert [n.task_id for n in remaining] == ["t-3"]
+
+
+async def test_sse_emits_heartbeat_when_queue_is_idle(monkeypatch):
+    """With no notifications enqueued, an idle iteration past the heartbeat
+    interval emits a ``: keepalive`` comment line. Comment lines are the
+    SSE-spec keep-alive that browsers silently ignore.
+    """
+    monkeypatch.setattr("EvoScientist.langgraph_dev.http._SSE_HEARTBEAT_INTERVAL_S", 0)
+
+    chunks = await _collect_events(_FakeRequest("thread-idle", disconnect_after=1))
+    # No data: events (queue was empty), one keepalive comment.
+    assert _parse_data_events(chunks) == []
+    keepalives = [c for c in chunks if c.startswith(": keepalive")]
+    assert len(keepalives) == 1
+
+
+async def test_sse_returns_when_max_lifetime_elapsed(monkeypatch):
+    """On lifetime expiry the generator must return so the EventSource
+    client can transparently reconnect (SSE spec-defined behavior).
+    ``disconnect_after`` is set generously so a return can only come from
+    the lifetime check, not from the disconnect path.
+    """
+    from EvoScientist.cli import async_notifier
+
+    monkeypatch.setattr("EvoScientist.langgraph_dev.http._SSE_MAX_LIFETIME_S", 0)
+    async_notifier._enqueue(_make_notification("t-late", "thread-late"))
+
+    chunks = await _collect_events(_FakeRequest("thread-late", disconnect_after=1000))
+    assert chunks == []
+    # Notification stayed on the queue — the loop returned before draining.
+    remaining = async_notifier.drain_thread_notifications("thread-late")
+    assert [n.task_id for n in remaining] == ["t-late"]
