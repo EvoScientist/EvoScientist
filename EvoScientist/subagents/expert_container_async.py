@@ -109,6 +109,21 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
                 "with status='error' explaining the skill is missing."
             )
 
+        # Mirrors the sync fold-in's empty-body skip in
+        # ``expert_container.py::build_expert_subagent_specs``. A skill with
+        # only a role line (or nothing) would otherwise run against a
+        # persona-less system prompt — a worse failure mode than the expert
+        # being absent. Prefer a well-formed error envelope over silent
+        # nonsense.
+        if not (match.body or "").strip():
+            return (
+                f"ERROR: Expert skill '{skill_name}' has an empty SKILL.md "
+                "body — the persona / pipeline the sub-agent needs is missing. "
+                "This is a skill-authoring bug; the sub-agent cannot proceed. "
+                "Return an error envelope with status='error' naming the "
+                "empty skill."
+            )
+
         output_path = state.get("output_path")
         # Only wrong-type is a hard error here. Whether ``output_path`` is
         # REQUIRED for this run is the SKILL.md body's contract to enforce
@@ -195,6 +210,18 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     specs: list[dict[str, Any]] = []
     for skill in list_expert_skills(include_system=True):
         if skill.default_dispatch != "async":
+            continue
+        # Same empty-body skip the sync fold-in enforces in
+        # ``expert_container.py::build_expert_subagent_specs``. Advertising
+        # a body-less expert in ``start_async_task``'s tool schema, then
+        # rejecting it at loader time, wastes a launch round-trip; filter
+        # upstream so ``start_async_task`` never sees the broken skill.
+        if not (skill.body or "").strip():
+            _logger.warning(
+                "Expert skill %r: SKILL.md body is empty; skipping "
+                "async-dispatch registration.",
+                skill.name,
+            )
             continue
         specs.append(
             {

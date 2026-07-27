@@ -97,16 +97,32 @@ class TestComposePrompt:
         assert composed.startswith("ERROR:")
         assert "(none)" in composed
 
-    def test_empty_body_still_returns_prompt(self):
-        """Skill with an empty body: role line + newline, no crash."""
+    def test_empty_body_returns_error_cue(self):
+        """A skill with an empty SKILL.md body would otherwise run against a
+        persona-less system prompt (just the role line). Mirror the sync
+        fold-in's policy: refuse to compose a prompt at all and surface the
+        skill-authoring bug through the LLM's error envelope."""
         mw = ExpertSkillLoaderMiddleware()
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info(body="")],
         ):
             composed = mw._compose_prompt({"skill_name": "literature-review"})
-        assert composed.startswith("You are literature-review strategist.")
-        assert composed.endswith("\n")
+        assert composed.startswith("ERROR:")
+        assert "empty SKILL.md body" in composed
+        assert "literature-review" in composed  # names the offending skill
+
+    def test_whitespace_only_body_returns_error_cue(self):
+        """A body that's just whitespace (`   \\n\\n`) is still empty in the
+        sense that matters — no persona, no pipeline. Same error cue."""
+        mw = ExpertSkillLoaderMiddleware()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_skill_info(body="   \n\n  \n")],
+        ):
+            composed = mw._compose_prompt({"skill_name": "literature-review"})
+        assert composed.startswith("ERROR:")
+        assert "empty SKILL.md body" in composed
 
     def test_runtime_context_tail_surfaces_output_path(self):
         """A populated ``output_path`` in state must appear in the composed

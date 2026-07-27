@@ -91,6 +91,32 @@ class TestBuildExpertAsyncSubagentSpecs:
         assert specs[0]["is_expert"] is True
         assert "http://localhost:6174" in specs[0]["url"]
 
+    def test_empty_body_experts_skipped(self):
+        """Empty-body async experts are filtered out at spec-build time so
+        ``start_async_task``'s tool schema never advertises a broken skill.
+        Mirrors the sync fold-in in
+        ``expert_container.py::build_expert_subagent_specs``."""
+        cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+        skills = [
+            _skill("literature-review", "async"),  # normal body from _skill()
+            _skill("empty-persona", "async"),
+        ]
+        # Second skill has no body — dataclass field default is ``""``, but
+        # helper sets it to "body\n" — override to empty.
+        skills[1].body = ""
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+        ):
+            specs = build_expert_async_subagent_specs(cfg=cfg)
+        assert [s["name"] for s in specs] == ["literature-review"]
+
 
 # =============================================================================
 # build_expert_subagent_specs (sync side) — must exclude async experts
