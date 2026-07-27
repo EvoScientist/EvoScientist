@@ -12,6 +12,7 @@ def skill_manager(
     name: str = "",
     tag: str = "",
     include_system: bool = False,
+    skill_type: Literal["all", "expert", "utility"] = "all",
 ) -> str:
     """Manage user-installable skills: install from GitHub or local path, list available skills, browse remote skills, get details, or uninstall.
 
@@ -27,6 +28,8 @@ def skill_manager(
     action="list":
       List installed skills. By default only shows user-installed skills.
       Set include_system=True to also show built-in system skills.
+      Set skill_type="expert" to show only expert skills (agent teams);
+      set skill_type="utility" to exclude them; leave as "all" (default) for no filter.
       Built-in skills evolve over time, so use action="list" to see the current set.
 
     action="browse" (optional tag):
@@ -36,7 +39,8 @@ def skill_manager(
 
     action="info" (requires name):
       Get details (description, source, path, tags) about a specific skill by name.
-      Searches both user and system skills.
+      Expert skills also surface their role, byline, capability tags, and default
+      dispatch mode. Searches both user and system skills.
 
     action="uninstall" (requires name):
       Remove a user-installed skill by name. System skills cannot be uninstalled.
@@ -47,6 +51,7 @@ def skill_manager(
         name: Required for info and uninstall — the skill name (for example, one returned by action="list")
         tag: Optional for browse — filter by tag (e.g. "core", "writing", "experiments", "research")
         include_system: Only for list — set True to include built-in system skills in the output
+        skill_type: Only for list — one of "all" (default; no filter), "expert" (agent-team skills), or "utility"
 
     Returns:
         Result message
@@ -79,7 +84,16 @@ def skill_manager(
 
     elif action == "list":
         skills = list_skills(include_system=include_system)
+        # `skill_type="all"` (default) is the no-filter case. A specific
+        # value ("expert" or "utility") narrows the list to that type.
+        # Empty string is NOT a legal input — Gemini's function-declaration
+        # schema rejects empty enum values (was the root cause of a live
+        # smoke failure); the `Literal` above defends against it.
+        if skill_type in ("expert", "utility"):
+            skills = [s for s in skills if s.type == skill_type]
         if not skills:
+            if skill_type in ("expert", "utility"):
+                return f"No {skill_type} skills found."
             if include_system:
                 return "No skills found."
             return "No user skills installed. Use action='install' to add skills, or set include_system=True to see built-in skills."
@@ -147,13 +161,29 @@ def skill_manager(
                 f"Skill not found: {name}. "
                 f"Use action='list' with include_system=True to see all available skills."
             )
-        tags_str = f"\nTags: {', '.join(info.tags)}" if info.tags else ""
-        return (
-            f"Name: {info.name}\n"
-            f"Description: {info.description}\n"
-            f"Source: {info.source}\n"
-            f"Path: {info.path}{tags_str}"
-        )
+        lines = [
+            f"Name: {info.name}",
+            f"Description: {info.description}",
+            f"Source: {info.source}",
+            f"Path: {info.path}",
+        ]
+        if info.tags:
+            lines.append(f"Tags: {', '.join(info.tags)}")
+        # Expert-skill surface (agent-teams v1): only shown when the
+        # skill declared `type: expert` in its SKILL.md frontmatter.
+        if info.type == "expert":
+            lines.append("Type: expert")
+            if info.role:
+                lines.append(f"Role: {info.role}")
+            if info.byline:
+                lines.append(f"Byline: {info.byline}")
+            if info.capability_tags:
+                lines.append(f"Capability tags: {', '.join(info.capability_tags)}")
+            if info.avatar_hint:
+                lines.append(f"Avatar hint: {info.avatar_hint}")
+            if info.default_dispatch:
+                lines.append(f"Default dispatch: {info.default_dispatch}")
+        return "\n".join(lines)
 
     else:
         return f"Unknown action: {action}. Use 'install', 'list', 'browse', 'uninstall', or 'info'."
