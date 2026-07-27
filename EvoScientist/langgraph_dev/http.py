@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 from starlette.applications import Starlette
@@ -39,6 +40,8 @@ from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
 from EvoScientist.llm.models import list_model_picker_entries
+
+logger = logging.getLogger(__name__)
 
 # SSE poll cadence: how often the ``/api/async-notifications/stream`` handler
 # checks the per-thread queue between yields. 250 ms is fast enough that a
@@ -170,25 +173,39 @@ async def stream_async_notifications(request: Request) -> StreamingResponse:
     async def event_stream():
         start_s = time.monotonic()
         last_activity_s = start_s
-        while True:
-            if time.monotonic() - start_s >= _SSE_MAX_LIFETIME_S:
-                return
-            if await request.is_disconnected():
-                return
-            notif = take_one_thread_notification(thread_id)
-            if notif is not None:
-                payload = {k: getattr(notif, k) for k in _NOTIFICATION_WIRE_FIELDS}
-                yield f"data: {json.dumps(payload)}\n\n"
-                last_activity_s = time.monotonic()
-                # Loop back immediately to drain the next queued item,
-                # re-checking disconnect and lifetime between each so
-                # a mid-batch interruption preserves the remainder.
-                continue
-            now_s = time.monotonic()
-            if now_s - last_activity_s >= _SSE_HEARTBEAT_INTERVAL_S:
-                yield ": keepalive\n\n"
-                last_activity_s = now_s
-            await asyncio.sleep(_SSE_POLL_INTERVAL_S)
+        try:
+            while True:
+                if time.monotonic() - start_s >= _SSE_MAX_LIFETIME_S:
+                    return
+                if await request.is_disconnected():
+                    return
+                notif = take_one_thread_notification(thread_id)
+                if notif is not None:
+                    payload = {k: getattr(notif, k) for k in _NOTIFICATION_WIRE_FIELDS}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    last_activity_s = time.monotonic()
+                    # Loop back immediately to drain the next queued item,
+                    # re-checking disconnect and lifetime between each so
+                    # a mid-batch interruption preserves the remainder.
+                    continue
+                now_s = time.monotonic()
+                if now_s - last_activity_s >= _SSE_HEARTBEAT_INTERVAL_S:
+                    yield ": keepalive\n\n"
+                    last_activity_s = now_s
+                await asyncio.sleep(_SSE_POLL_INTERVAL_S)
+        except asyncio.CancelledError:
+            # Cooperative cancel from the ASGI server on client teardown —
+            # propagate without logging (not an error condition).
+            raise
+        except Exception:
+            # Any other exception would otherwise be swallowed silently:
+            # the 200 OK + text/event-stream response line is already on
+            # the wire, so the client sees a truncated stream with no
+            # error event and nothing surfaces on the server side.
+            logger.exception(
+                "SSE stream for thread %s terminated unexpectedly", thread_id
+            )
+            raise
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
