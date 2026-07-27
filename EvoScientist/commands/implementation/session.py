@@ -214,7 +214,22 @@ class NewCommand(Command):
     category = "Session"
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        # ``/new`` means fresh state — release any invited experts before
+        # starting the new session. Uniform with the ``ChannelRuntime.clear``
+        # path on channel shutdown; avoids the "why is idea-brainstorm still
+        # active in my new thread?" surprise. Users who want to reuse an
+        # invite in the next thread can re-invite explicitly.
+        runtime = ctx.channel_runtime
+        dismissed: list[str] = []
+        if runtime is not None and runtime.active_teams:
+            dismissed = list(runtime.active_teams)
+            runtime.active_teams = []
         await ctx.ui.start_new_session()
+        if dismissed:
+            ctx.ui.append_system(
+                f"Dismissed experts on new session: {', '.join(dismissed)}",
+                style="dim",
+            )
 
 
 class ClearCommand(Command):

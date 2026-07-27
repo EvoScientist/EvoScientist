@@ -12,6 +12,7 @@ from EvoScientist.tools.skills_manager import (
     _parse_github_url,
     _parse_skill_md,
     _record_install,
+    _reset_skills_changed_callbacks,
     _validate_skill_dir,
     fetch_remote_skill_index,
     get_all_tags,
@@ -21,6 +22,7 @@ from EvoScientist.tools.skills_manager import (
     list_expert_skills,
     list_skills,
     list_skills_by_tag,
+    register_skills_changed_callback,
     resolve_remote_head,
     uninstall_skill,
 )
@@ -1589,3 +1591,68 @@ class TestSkillManagerInstall:
         assert "Path: /skills/worked" in result
         assert "broken" in result
         assert "corrupt frontmatter" in result
+
+
+# =============================================================================
+# Tests for the skills-changed publish primitive
+# =============================================================================
+
+
+@pytest.fixture
+def isolated_skills_changed_callbacks():
+    """Clear the module-level callback list before and after each test so
+    subscribers registered elsewhere (e.g. by importing ``experts.py``) do
+    not leak in or out of these tests.
+    """
+    _reset_skills_changed_callbacks()
+    yield
+    _reset_skills_changed_callbacks()
+
+
+class TestSkillsChangedCallback:
+    """Verifies install_skill / uninstall_skill fire subscribers on every
+    return path — success, early error return, and success-with-real-mutation.
+    """
+
+    def test_install_skill_fires_callback_on_error_return(
+        self, isolated_skills_changed_callbacks, temp_skills_dir
+    ):
+        fired: list[bool] = []
+        register_skills_changed_callback(lambda: fired.append(True))
+        result = install_skill("/nonexistent/path", str(temp_skills_dir))
+        assert result["success"] is False
+        assert fired == [True]
+
+    def test_install_skill_fires_callback_on_success(
+        self, isolated_skills_changed_callbacks, sample_skill_dir, temp_skills_dir
+    ):
+        fired: list[bool] = []
+        register_skills_changed_callback(lambda: fired.append(True))
+        result = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        assert result["success"] is True
+        assert fired == [True]
+
+    def test_uninstall_skill_fires_callback_on_error_return(
+        self, isolated_skills_changed_callbacks
+    ):
+        fired: list[bool] = []
+        register_skills_changed_callback(lambda: fired.append(True))
+        result = uninstall_skill("nonexistent-skill")
+        assert result["success"] is False
+        assert fired == [True]
+
+    def test_misbehaving_callback_does_not_break_return(
+        self, isolated_skills_changed_callbacks, temp_skills_dir
+    ):
+        good: list[bool] = []
+
+        def bad_callback() -> None:
+            raise RuntimeError("subscriber intentionally raising")
+
+        register_skills_changed_callback(bad_callback)
+        register_skills_changed_callback(lambda: good.append(True))
+        # Bad callback runs first; the good one still fires; the install
+        # return value is unaffected.
+        result = install_skill("/nonexistent/path", str(temp_skills_dir))
+        assert result["success"] is False
+        assert good == [True]

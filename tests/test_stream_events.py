@@ -158,6 +158,26 @@ class TestV3ProtocolStreaming:
         assert "stream_mode" not in kwargs
         assert "subgraphs" not in kwargs
 
+    async def test_configurable_extra_merged_into_config(self):
+        """``configurable_extra`` from RunRequest lands next to thread_id."""
+        agent = FakeV3Agent([message_delta("hi")])
+        await collect_events(
+            agent,
+            thread_id="t1",
+            configurable_extra={"active_teams": ["idea-brainstorm"]},
+        )
+        _, kwargs = agent.astream_events.call_args
+        configurable = kwargs["config"]["configurable"]
+        assert configurable["thread_id"] == "t1"
+        assert configurable["active_teams"] == ["idea-brainstorm"]
+
+    async def test_configurable_extra_none_leaves_thread_id_only(self):
+        """When no extras are passed, only ``thread_id`` sits under configurable."""
+        agent = FakeV3Agent([message_delta("hi")])
+        await collect_events(agent, thread_id="t1")
+        _, kwargs = agent.astream_events.call_args
+        assert kwargs["config"]["configurable"] == {"thread_id": "t1"}
+
     async def test_streamed_non_selector_json_is_replayed(self):
         """Normal JSON answers are not swallowed by selector JSON buffering."""
         agent = FakeV3Agent(

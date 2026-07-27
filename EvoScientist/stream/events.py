@@ -860,6 +860,7 @@ async def stream_agent_events(
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,
     events: "ToolSelectionView | None" = None,
+    configurable_extra: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -875,6 +876,10 @@ async def stream_agent_events(
         metadata: Optional metadata dict merged into the LangGraph config
             (e.g. agent_name, updated_at for checkpoint persistence).
         media: Optional list of local file paths for attachments.
+        configurable_extra: Optional extra keys merged into ``configurable``
+            alongside ``thread_id`` — e.g. ``{"active_teams": [...]}`` from
+            TUI ``/expert`` bindings, mirroring what WebUI writes via
+            langgraph-sdk. Ignored if ``None`` or empty.
 
     Yields:
         Event dicts: thinking, text, tool_call, tool_result,
@@ -886,7 +891,11 @@ async def stream_agent_events(
 
         events = SessionEventSink()
 
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    configurable: dict[str, Any] = {
+        **(configurable_extra or {}),
+        "thread_id": thread_id,
+    }
+    config: dict[str, Any] = {"configurable": configurable}
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()
