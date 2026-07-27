@@ -30,3 +30,21 @@ class TestActiveTeamsConfigurableExtra:
         # to the runtime's session-scoped invite list.
         result["active_teams"].append("mutated")
         assert runtime.active_teams == ["idea-brainstorm", "paper-review"]
+
+
+class TestChannelRuntimeClear:
+    """``ChannelRuntime.clear`` runs on channel shutdown; it must leave the
+    session-scoped ``active_teams`` list intact so stopping a channel does
+    not silently dismiss the user's invited experts. ``/new`` and
+    ``/expert clear`` handle invite reset explicitly.
+    """
+
+    def test_clear_preserves_active_teams(self):
+        runtime = ChannelRuntime()
+        runtime.agent = object()
+        runtime.thread_id = "t-42"
+        runtime.active_teams = ["idea-brainstorm"]
+        runtime.clear()
+        assert runtime.agent is None
+        assert runtime.thread_id is None
+        assert runtime.active_teams == ["idea-brainstorm"]

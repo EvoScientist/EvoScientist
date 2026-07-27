@@ -81,9 +81,12 @@ class ChannelRuntime:
         self.thread_id = thread_id
 
     def clear(self) -> None:
+        # ``active_teams`` is session-scoped and reset explicitly by ``/new``
+        # (session.py) and ``/expert clear`` — not tied to channel lifecycle.
+        # Clearing here on channel shutdown would silently dismiss the user's
+        # invited experts, which they never asked for.
         self.agent = None
         self.thread_id = None
-        self.active_teams = []
 
 
 def active_teams_configurable_extra(
