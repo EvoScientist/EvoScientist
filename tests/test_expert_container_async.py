@@ -108,6 +108,63 @@ class TestComposePrompt:
         assert composed.startswith("You are literature-review strategist.")
         assert composed.endswith("\n")
 
+    def test_runtime_context_tail_surfaces_output_path(self):
+        """A populated ``output_path`` in state must appear in the composed
+        prompt's Runtime-context tail block AND the "write verbatim" cue,
+        so the LLM can honour the caller-provided path instead of inventing
+        its own filename."""
+        mw = ExpertSkillLoaderMiddleware()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_skill_info()],
+        ):
+            composed = mw._compose_prompt(
+                {
+                    "skill_name": "literature-review",
+                    "output_path": "./artifacts/literature-review/survey.md",
+                }
+            )
+        # Tail block header and the exact path both appear.
+        assert "## Runtime context" in composed
+        assert (
+            "``output_path``: ``./artifacts/literature-review/survey.md``" in composed
+        )
+        # The imperative "verbatim" cue only emits when output_path is populated.
+        assert "verbatim" in composed
+
+    def test_runtime_context_omits_output_path_line_when_absent(self):
+        """When state has no ``output_path`` (skill's SKILL.md doesn't require
+        one), the tail block emits without the output_path line AND without
+        the "write verbatim" cue — a skill that computes its own default
+        path shouldn't be told to honour a nonexistent state field."""
+        mw = ExpertSkillLoaderMiddleware()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_skill_info()],
+        ):
+            composed = mw._compose_prompt({"skill_name": "literature-review"})
+        assert "## Runtime context" in composed
+        assert "``skill_name``: ``literature-review``" in composed
+        assert "``output_path``" not in composed
+        assert "verbatim" not in composed
+
+    def test_non_string_output_path_returns_error_cue(self):
+        """A non-string ``output_path`` (e.g. int from a wire-format bug)
+        surfaces as an error cue naming the wrong type, so the LLM halts
+        with a well-formed envelope instead of coercing garbage into the
+        filesystem."""
+        mw = ExpertSkillLoaderMiddleware()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_skill_info()],
+        ):
+            composed = mw._compose_prompt(
+                {"skill_name": "literature-review", "output_path": 42}
+            )
+        assert composed.startswith("ERROR:")
+        assert "int" in composed  # names the offending type
+        assert "literature-review" in composed  # names the expert for triage
+
 
 # =============================================================================
 # ExpertContainerState — state schema smoke check
