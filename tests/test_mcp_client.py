@@ -335,9 +335,7 @@ class TestOwnedRuntimeLoading:
     async def test_direct_caller_does_not_hide_running_loop_violation(self):
         config = {"server": {"transport": "http", "url": "http://example.test"}}
 
-        with pytest.raises(
-            AsyncRuntimeError, match="cannot block a running event loop"
-        ):
+        with pytest.raises(AsyncRuntimeError, match=r"await aload_mcp_tools\(config"):
             load_mcp_tools(config)
 
 

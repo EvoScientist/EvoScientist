@@ -884,10 +884,15 @@ def load_mcp_tools(
         server_tools = runtime.run_sync(
             lambda: _load_tools(config, on_progress=on_progress)
         )
-    except AsyncRuntimeError:
+    except AsyncRuntimeError as exc:
         # A bridge lifecycle/call-site error is not an MCP availability
         # failure.  In particular, hiding a running-loop violation here makes
         # callers cache an empty tool set for the rest of the process.
+        if "cannot block a running event loop" in str(exc):
+            raise AsyncRuntimeError(
+                "load_mcp_tools() cannot run inside an async context; use "
+                "`await aload_mcp_tools(config, on_progress=...)` instead"
+            ) from exc
         raise
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
