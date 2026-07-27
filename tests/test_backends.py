@@ -1594,6 +1594,17 @@ class TestExecuteTimeout:
         assert elapsed < 0.4
 
 
+def test_active_shell_registry_lock_allows_signal_handler_reentry():
+    """A signal handler can re-enter registry code on the interrupted thread."""
+    lock = backends._active_shell_processes_lock
+    assert lock.acquire(timeout=0.1)
+    try:
+        assert lock.acquire(timeout=0.1)
+        lock.release()
+    finally:
+        lock.release()
+
+
 # === '..' traversal false-positive fix ===
 
 

@@ -73,7 +73,7 @@ BLOCKED_COMMANDS = [
 ]
 
 
-_active_shell_processes_lock = threading.Lock()
+_active_shell_processes_lock = threading.RLock()
 _active_shell_processes: dict[threading.Event, set[subprocess.Popen[str]]] = {}
 _PROCESS_DRAIN_GRACE_SECONDS = 1.0
 
