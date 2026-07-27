@@ -53,6 +53,17 @@ _SSE_POLL_INTERVAL_S = 0.25
 # silently ignore comment lines, so this is invisible in the browser.
 _SSE_HEARTBEAT_INTERVAL_S = 15.0
 
+# Absolute per-connection lifetime. On expiry the generator returns and the
+# EventSource client transparently reconnects (SSE spec-defined behavior).
+# Bounds the zombie-connection failure mode: a suspended tab or a half-closed
+# tunnel can hold TCP open indefinitely because our 15-byte heartbeats fit
+# in the kernel send buffer for hours before a write blocks, so neither
+# is_disconnected() nor a write-side exception fires on a useful timescale.
+# The cap forces a periodic tear-down that cleans zombies without disrupting
+# live clients (reconnect gap is sub-second; notifications enqueued during
+# the gap survive on the queue and drain on the reopen).
+_SSE_MAX_LIFETIME_S = 900.0
+
 # Wire fields projected onto each SSE event. Deliberately excludes
 # ``origin_cli_thread_id`` — the client already knows the thread it
 # opened the stream against, so echoing it is redundant.
@@ -152,19 +163,27 @@ async def stream_async_notifications(request: Request) -> StreamingResponse:
     O(1) and non-blocking. langgraph-dev's ``blockbuster`` middleware
     flags sync file I/O, not brief lock acquisitions.
     """
-    from EvoScientist.cli.async_notifier import drain_thread_notifications
+    from EvoScientist.cli.async_notifier import take_one_thread_notification
 
     thread_id = request.path_params["thread_id"]
 
     async def event_stream():
-        last_activity_s = time.monotonic()
+        start_s = time.monotonic()
+        last_activity_s = start_s
         while True:
+            if time.monotonic() - start_s >= _SSE_MAX_LIFETIME_S:
+                return
             if await request.is_disconnected():
                 return
-            for notif in drain_thread_notifications(thread_id):
+            notif = take_one_thread_notification(thread_id)
+            if notif is not None:
                 payload = {k: getattr(notif, k) for k in _NOTIFICATION_WIRE_FIELDS}
                 yield f"data: {json.dumps(payload)}\n\n"
                 last_activity_s = time.monotonic()
+                # Loop back immediately to drain the next queued item,
+                # re-checking disconnect and lifetime between each so
+                # a mid-batch interruption preserves the remainder.
+                continue
             now_s = time.monotonic()
             if now_s - last_activity_s >= _SSE_HEARTBEAT_INTERVAL_S:
                 yield ": keepalive\n\n"
