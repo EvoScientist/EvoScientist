@@ -75,6 +75,7 @@ BLOCKED_COMMANDS = [
 
 _active_shell_processes_lock = threading.Lock()
 _active_shell_processes: dict[threading.Event, set[subprocess.Popen[str]]] = {}
+_PROCESS_DRAIN_GRACE_SECONDS = 1.0
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
@@ -96,6 +97,19 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
             process.kill()
         except OSError:
             pass
+
+
+def _stop_collecting_process_output(process: subprocess.Popen[str]) -> None:
+    """Close inherited pipes and reap *process* without blocking the caller."""
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+    if process.poll() is None:
+        threading.Thread(target=process.wait, daemon=True).start()
 
 
 def cancel_active_shell_processes(event: threading.Event) -> None:
@@ -1347,7 +1361,8 @@ class CustomSandboxBackend(LocalShellBackend):
             )
 
         process: subprocess.Popen[str] | None = None
-        timed_out = False
+        termination_reason: str | None = None
+        output_abandoned = False
         try:
             process_options: dict[str, object] = {}
             if os.name == "nt":
@@ -1368,25 +1383,44 @@ class CustomSandboxBackend(LocalShellBackend):
             )
             _register_shell_process(cancel_event, process)
             deadline = time.monotonic() + effective_timeout
+            drain_deadline: float | None = None
 
             while True:
-                if cancel_event is not None and cancel_event.is_set():
+                now = time.monotonic()
+                if (
+                    termination_reason is None
+                    and cancel_event is not None
+                    and cancel_event.is_set()
+                ):
+                    termination_reason = "cancelled"
                     _terminate_process_tree(process)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
+                    drain_deadline = now + _PROCESS_DRAIN_GRACE_SECONDS
+                elif termination_reason is None and now >= deadline:
+                    termination_reason = "timed_out"
                     _terminate_process_tree(process)
+                    drain_deadline = now + _PROCESS_DRAIN_GRACE_SECONDS
+
+                if drain_deadline is not None and now >= drain_deadline:
+                    _stop_collecting_process_output(process)
+                    stdout = stderr = ""
+                    output_abandoned = True
+                    break
+
+                communicate_deadline = (
+                    drain_deadline if drain_deadline is not None else deadline
+                )
                 try:
                     stdout, stderr = process.communicate(
-                        timeout=max(0.01, min(0.1, remaining)) if not timed_out else 1.0
+                        timeout=max(
+                            0.01,
+                            min(0.1, communicate_deadline - time.monotonic()),
+                        )
                     )
                     break
                 except subprocess.TimeoutExpired:
-                    if timed_out:
-                        _terminate_process_tree(process)
                     continue
 
-            if timed_out:
+            if termination_reason == "timed_out":
                 if timeout is not None:
                     timeout_output = (
                         "Error: Command timed out after "
@@ -1401,13 +1435,15 @@ class CustomSandboxBackend(LocalShellBackend):
                 response = ExecuteResponse(
                     output=timeout_output,
                     exit_code=124,
-                    truncated=False,
+                    truncated=output_abandoned,
                 )
-            elif cancel_event is not None and cancel_event.is_set():
+            elif termination_reason == "cancelled" or (
+                cancel_event is not None and cancel_event.is_set()
+            ):
                 response = ExecuteResponse(
                     output="Command cancelled.",
                     exit_code=130,
-                    truncated=False,
+                    truncated=output_abandoned,
                 )
             else:
                 output_parts = []

@@ -1566,6 +1566,33 @@ class TestExecuteTimeout:
         assert response.exit_code == 124
         assert elapsed < 1
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX detached-process regression",
+    )
+    def test_timeout_bounds_drain_when_detached_descendant_holds_pipes(
+        self,
+        tmp_workspace,
+        monkeypatch,
+    ):
+        """An escaped descendant cannot hold execute() open through inherited pipes."""
+        monkeypatch.setattr(backends, "_PROCESS_DRAIN_GRACE_SECONDS", 0.05)
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        code = (
+            "import os,time; "
+            "pid=os.fork(); "
+            "os._exit(0) if pid else (os.setsid(), time.sleep(1), os._exit(0))"
+        )
+        command = f"python3 -c {shlex.quote(code)}"
+
+        started = time.monotonic()
+        response = backend.execute(command, timeout=0.05)
+        elapsed = time.monotonic() - started
+
+        assert response.exit_code == 124
+        assert response.truncated is True
+        assert elapsed < 0.4
+
 
 # === '..' traversal false-positive fix ===
 
