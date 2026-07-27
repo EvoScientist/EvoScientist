@@ -419,7 +419,7 @@ def cmd_interactive(
         width = console.size.width
         console.print(Text("\u2500" * width, style="dim"))
 
-    from ..commands.base import ChannelRuntime
+    from ..commands.base import ChannelRuntime, active_teams_configurable_extra
 
     channel_runtime = ChannelRuntime()
 
@@ -1055,6 +1055,9 @@ def cmd_interactive(
                             show_thinking=show_thinking,
                             interactive=True,
                             metadata=meta,
+                            configurable_extra=active_teams_configurable_extra(
+                                channel_runtime
+                            ),
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
@@ -1118,6 +1121,7 @@ def cmd_interactive(
                     show_thinking=show_thinking,
                     interactive=True,
                     metadata=meta,
+                    configurable_extra=active_teams_configurable_extra(channel_runtime),
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
                     gateway=runtime_gateways.graph_gateway,
@@ -1419,6 +1423,9 @@ def cmd_interactive(
                             show_thinking=show_thinking,
                             interactive=True,
                             metadata=meta,
+                            configurable_extra=active_teams_configurable_extra(
+                                channel_runtime
+                            ),
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,
                             gateway=runtime_gateways.graph_gateway,

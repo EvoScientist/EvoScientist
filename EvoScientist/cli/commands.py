@@ -16,7 +16,12 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from ..commands.base import ChannelRuntime, Command, CommandContext
+from ..commands.base import (
+    ChannelRuntime,
+    Command,
+    CommandContext,
+    active_teams_configurable_extra,
+)
 from ..gateway import (
     GraphGateway,
     GraphTarget,
@@ -1280,6 +1285,7 @@ def _serve_process_message(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
@@ -1309,6 +1315,7 @@ def _serve_drain_notifications(
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
+    channel_runtime: ChannelRuntime | None = None,
 ) -> None:
     """Drain the async-task notification queue in headless serve mode.
 
@@ -1340,6 +1347,7 @@ def _serve_drain_notifications(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
                 gateway=runtime_state.runtime_gateways.graph_gateway,
             )
         except Exception as exc:
@@ -1596,6 +1604,7 @@ def serve(
                     model=config.model,
                     workspace_dir=ws,
                     show_thinking=effective_channel_thinking,
+                    channel_runtime=channel_runtime,
                 )
     except KeyboardInterrupt:
         shutdown_event.set()

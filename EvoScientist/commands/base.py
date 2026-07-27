@@ -86,6 +86,23 @@ class ChannelRuntime:
         self.active_teams = []
 
 
+def active_teams_configurable_extra(
+    runtime: ChannelRuntime | None,
+) -> dict[str, Any] | None:
+    """Build ``RunRequest.configurable_extra`` from a channel runtime.
+
+    Returns ``{"active_teams": [...]}`` when the runtime has invited
+    experts, or ``None`` when there is no runtime or no active invites —
+    lets stream call sites forward the field unconditionally without
+    each duplicating the "read runtime slot, build dict, drop when
+    empty" three-liner.
+    """
+    if runtime is None:
+        return None
+    invited = list(runtime.active_teams)
+    return {"active_teams": invited} if invited else None
+
+
 @dataclass
 class CommandContext:
     """Context passed to commands during execution."""
