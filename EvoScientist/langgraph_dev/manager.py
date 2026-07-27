@@ -722,9 +722,8 @@ def start_langgraph_dev(
     # the config file says — which desyncs from the bind port whenever
     # ``--port`` differs from the persisted ``langgraph_dev_port``, and
     # every async subagent launch fails with "All connection attempts failed".
-    # Strip any inherited value first so a stray shell export cannot shadow
-    # the caller-resolved bind port.
-    sub_env.pop("EVOSCIENTIST_LANGGRAPH_DEV_PORT", None)
+    # ``get_effective_config`` snapshots this value before ``load_dotenv``
+    # so a workspace ``.env`` cannot shadow the caller-resolved bind port.
     sub_env["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] = str(port)
 
     try:

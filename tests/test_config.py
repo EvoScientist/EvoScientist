@@ -952,3 +952,26 @@ class TestDotenvIsolation:
         get_effective_config()
 
         assert "MINIMAX_BASE_URL" not in os.environ
+
+    def test_parent_env_wins_over_dotenv_for_mapped_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Parent-process env values for ``_ENV_MAPPINGS`` keys must not be
+        shadowed by a workspace ``.env``. ``EvoSci deploy --port X`` propagates
+        the resolved bind port via ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` on the
+        subprocess env; without the snapshot-and-restore around ``load_dotenv``,
+        a workspace ``.env`` with the same key would clobber it and every
+        self-loop async task would target the wrong port.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=9999\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "6606")
+
+        config = get_effective_config()
+
+        assert config.langgraph_dev_port == 6606
+        assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
