@@ -28,6 +28,8 @@ from .context_window import apply_known_context_window
 from .deepseek import EvoChatDeepSeek
 from .patches import (
     _is_ccproxy_codex,
+    _patch_anthropic_strip_foreign_reasoning,
+    _patch_anthropic_structured_output,
     _patch_ccproxy_system_to_developer,
     _patch_openai_compat_content,
     _patch_openrouter_strip_responses_reasoning,
@@ -145,6 +147,13 @@ _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS = frozenset(
     {"moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"}
 )
 
+
+def _is_mandatory_thinking_kimi(model_id: str) -> bool:
+    """True for Kimi models whose thinking cannot be disabled (K3 family)."""
+    short_id = model_id.split("/")[-1]
+    return short_id.startswith("kimi-k3") or short_id == "kimi-for-coding"
+
+
 # Model registry: list of (short_name, model_id, provider)
 # Allows same short_name across different providers.
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
@@ -161,6 +170,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
     # Anthropic (current generation)
     ("claude-fable-5", "claude-fable-5", "anthropic"),
+    ("claude-opus-5", "claude-opus-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-5", "claude-sonnet-5", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
@@ -182,7 +192,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5-mini", "gpt-5-mini", "openai"),
     ("gpt-5-nano", "gpt-5-nano", "openai"),
     # Google GenAI
+    ("gemini-3.6-flash", "gemini-3.6-flash", "google-genai"),
     ("gemini-3.5-flash", "gemini-3.5-flash", "google-genai"),
+    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite", "google-genai"),
     ("gemini-3.1-pro", "gemini-3.1-pro-preview", "google-genai"),
     (
         "gemini-3.1-pro-customtools",
@@ -221,6 +233,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
+    ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
+    ("claude-opus-5-fast", "anthropic/claude-opus-5-fast", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
     ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-5", "anthropic/claude-sonnet-5", "openrouter"),
@@ -232,7 +246,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
     ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
     ("gpt-5.3-codex", "openai/gpt-5.3-codex", "openrouter"),
+    ("gemini-3.6-flash", "google/gemini-3.6-flash", "openrouter"),
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "openrouter"),
+    ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "openrouter"),
     ("gemini-3.1-pro", "google/gemini-3.1-pro-preview", "openrouter"),
     ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("kimi-k3", "moonshotai/kimi-k3", "openrouter"),
@@ -428,8 +444,15 @@ def _apply_auto_config(
         else:
             _is_proxy = False
         if _is_proxy or (is_third_party and not _supports_thinking):
-            pass
-        elif "fable" in model_id or model_id.endswith(("4-6", "4-7", "4-8")):
+            # Mandatory-thinking Kimi models (K3 / Kimi For Coding) must declare
+            # thinking so with_structured_output avoids forced tool_choice (400).
+            # max_tokens must exceed budget_tokens (default resolves to 4096).
+            if is_third_party and _is_mandatory_thinking_kimi(model_id):
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+                kwargs.setdefault("max_tokens", 16000)
+        elif "fable" in model_id or model_id.endswith(
+            ("opus-5", "sonnet-5", "4-6", "4-7", "4-8")
+        ):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
         else:
@@ -728,6 +751,13 @@ def get_chat_model(
         elif _responses_api_setting == "true":
             kwargs["use_responses_api"] = True
 
+    if _is_openai_proxy and kwargs.get("use_responses_api") is True:
+        reasoning = kwargs.setdefault("reasoning", {})
+        if isinstance(reasoning, dict):
+            reasoning = dict(reasoning)
+            reasoning.setdefault("context", "all_turns")
+            kwargs["reasoning"] = reasoning
+
     if _uses_native_deepseek:
         chat_model = EvoChatDeepSeek(model=model_id, **kwargs)
     else:
@@ -737,11 +767,14 @@ def get_chat_model(
     # (SiliconFlow, OpenRouter, custom-openai, etc.) and
     # native OpenAI through a proxy, to avoid "sequence expected string" errors.
     # Moonshot and Kimi Coding support standard format, no patch needed.
+    # Mandatory-thinking Kimi models on Anthropic-routed endpoints are exempt:
+    # flatten drops thinking blocks, which Kimi requires on tool-call turns.
     _no_patch_providers = {"moonshot", "kimi-coding"}
     if (
         (_is_third_party or _is_openai_proxy)
         and _original_provider not in _no_patch_providers
         and not _uses_native_deepseek
+        and not (provider == "anthropic" and _is_mandatory_thinking_kimi(model_id))
     ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
@@ -753,6 +786,10 @@ def get_chat_model(
 
     if provider == "openrouter":
         _enable_openrouter_429_retry(chat_model)
+
+    if provider == "anthropic":
+        _patch_anthropic_strip_foreign_reasoning()
+        _patch_anthropic_structured_output()
 
     apply_known_context_window(chat_model)
 

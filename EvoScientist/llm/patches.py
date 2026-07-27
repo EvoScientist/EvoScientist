@@ -22,11 +22,19 @@ Utilities:
 
 from __future__ import annotations
 
+import functools
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import Any
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +834,80 @@ _patch_langgraph_schema_generator_silence_warnings()
 
 
 # ---------------------------------------------------------------------------
+# Patch (lazy, Anthropic protocol): strip foreign reasoning blocks from
+# outgoing assistant messages.
+#
+# History produced on OpenAI-compatible providers (Qwen/DashScope, DeepSeek, …)
+# can carry `reasoning_content` content blocks in AI messages. When a session
+# switches to an Anthropic-protocol endpoint (native Anthropic, custom-anthropic,
+# kimi-coding, minimax), langchain-anthropic's `_format_messages` passes unknown
+# block types through verbatim (`else: content.append(block)`), and strict
+# Anthropic-compatible backends (e.g. Moonshot's Kimi For Coding endpoint at
+# api.kimi.com) reject the request with an opaque HTTP 400. Upstream already
+# skips the OpenAI-Responses `reasoning` / `function_call` types the same way;
+# `reasoning_content` is simply missing from that list. These blocks are display
+# metadata — no Anthropic-protocol block type has this name — so stripping is
+# always safe. Anthropic `thinking` blocks are preserved (Kimi backends require
+# them on tool-call turns, even unsigned), but a missing `signature` is
+# defaulted to "": Anthropic-compatible backends stream thinking without a
+# signature_delta, so the aggregated block lacks the key, and strict edges
+# (e.g. OpenRouter's Anthropic schema) reject replay with 400
+# ("signature: expected string, received undefined"). Native Anthropic thinking
+# always carries a signature string, so the default never fires there.
+# ---------------------------------------------------------------------------
+_anthropic_foreign_reasoning_patched = False
+_FOREIGN_REASONING_BLOCK_TYPES = frozenset({"reasoning_content"})
+
+
+def _normalize_anthropic_replay_messages(
+    messages: Sequence[BaseMessage],
+) -> Sequence[BaseMessage]:
+    """Sanitize AI-message list content for Anthropic-protocol replay."""
+    cleaned: list[BaseMessage] = []
+    changed = False
+    for message in messages:
+        if isinstance(message, AIMessage) and isinstance(message.content, list):
+            blocks: list[Any] = []
+            block_changed = False
+            for block in message.content:
+                if isinstance(block, dict):
+                    btype = block.get("type")
+                    if btype in _FOREIGN_REASONING_BLOCK_TYPES:
+                        block_changed = True
+                        continue
+                    if btype == "thinking" and not isinstance(
+                        block.get("signature"), str
+                    ):
+                        block = {**block, "signature": ""}
+                        block_changed = True
+                blocks.append(block)
+            if block_changed:
+                message = message.model_copy(update={"content": blocks})
+                changed = True
+        cleaned.append(message)
+    return cleaned if changed else messages
+
+
+def _patch_anthropic_strip_foreign_reasoning() -> None:
+    global _anthropic_foreign_reasoning_patched
+    if _anthropic_foreign_reasoning_patched:
+        return
+    try:
+        import langchain_anthropic.chat_models as _mod
+
+        _orig = _mod._format_messages
+
+        @functools.wraps(_orig)
+        def _patched(messages: Sequence[BaseMessage]) -> Any:
+            return _orig(_normalize_anthropic_replay_messages(messages))
+
+        _mod._format_messages = _patched
+        _anthropic_foreign_reasoning_patched = True
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Patch (lazy, OpenRouter only): strip OpenAI-Responses encrypted reasoning
 # items from outgoing assistant messages.
 #
@@ -921,6 +1003,53 @@ def _patch_openrouter_structured_output() -> None:
 
         ChatOpenRouter.with_structured_output = _patched
         _openrouter_structured_output_patched = True
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Patch (lazy, Anthropic protocol): default structured output to json_schema
+# for mandatory-thinking Kimi models (K3 / Kimi For Coding).
+#
+# These endpoints run with thinking always on and reject a forced tool choice
+# with HTTP 400 ("tool_choice 'specified' is incompatible with thinking
+# enabled") — ChatAnthropic's function_calling default forces tool_choice, so
+# every structured-output call (LLMToolSelectorMiddleware included) fails.
+# With thinking declared, langchain-anthropic falls back to tool_choice auto,
+# but the model then calls the tool only sometimes (OutputParserException).
+# These endpoints accept output_config.format (verified live via OpenRouter's
+# Anthropic-compatible edge), which needs no tool_choice — route them there.
+# Gated on the instance's model, so copies behave correctly and Claude models
+# keep the function_calling default.
+# ---------------------------------------------------------------------------
+_anthropic_structured_output_patched = False
+
+
+def _patch_anthropic_structured_output() -> None:
+    global _anthropic_structured_output_patched
+    if _anthropic_structured_output_patched:
+        return
+    try:
+        from langchain_anthropic import ChatAnthropic
+
+        _orig = ChatAnthropic.with_structured_output
+
+        def _patched(
+            self: Any,
+            schema: Any = None,
+            *,
+            method: str = "function_calling",
+            **kwargs: Any,
+        ) -> Any:
+            if method == "function_calling":
+                from .models import _is_mandatory_thinking_kimi
+
+                if _is_mandatory_thinking_kimi(self.model):
+                    method = "json_schema"
+            return _orig(self, schema, method=method, **kwargs)
+
+        ChatAnthropic.with_structured_output = _patched
+        _anthropic_structured_output_patched = True
     except Exception:
         pass
 

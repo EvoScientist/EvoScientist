@@ -952,7 +952,7 @@ wheels = [
 
 [[package]]
 name = "evoscientist"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents", extra = ["quickjs"] },
