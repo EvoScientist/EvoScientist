@@ -22,11 +22,14 @@ async def collect_events(
     thread_id: str = "t1",
     *,
     events=None,
+    configurable_extra: dict[str, Any] | None = None,
 ):
     """Collect stream_agent_events output for tests.
 
     ``events`` is the frontend tool-selection sink to drive suppression /
     selection rendering (defaults to the silent NoOpSink inside the stream).
+    ``configurable_extra`` is forwarded verbatim to ``stream_agent_events``
+    for tests that assert plumbing into the LangGraph ``configurable`` dict.
     """
     collected = []
     async for ev in stream_agent_events(
@@ -34,6 +37,7 @@ async def collect_events(
         message,
         thread_id,
         events=events,
+        configurable_extra=configurable_extra,
     ):
         collected.append(ev)
     return collected

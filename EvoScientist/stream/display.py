@@ -1440,6 +1440,7 @@ def _run_streaming(
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict[str, object] | None = None,
+    configurable_extra: dict[str, Any] | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
     cancel_scope: str | None = None,
@@ -1526,6 +1527,7 @@ def _run_streaming(
                 message=message,
                 thread_id=thread_id,
                 metadata=metadata,
+                configurable_extra=configurable_extra,
                 target=_graph_target_for_local_agent(agent, metadata),
             )
         )
@@ -1768,6 +1770,7 @@ def _run_streaming(
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
+                configurable_extra=configurable_extra,
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,
                 cancel_scope=cancel_scope,
