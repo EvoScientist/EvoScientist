@@ -367,7 +367,12 @@ class AsyncRuntime:
             raise
 
     async def run_async(self, factory: AsyncFactory[T]) -> T:
-        """Await owned work without blocking the caller's event loop."""
+        """Await owned work without blocking the caller's event loop.
+
+        Current UI adapters cross through ``to_thread`` and :meth:`run_sync`.
+        This public bridge is retained for embedders and future async surfaces
+        whose event loop must remain responsive while the owned loop does work.
+        """
         caller_loop = asyncio.get_running_loop()
         with self._lock:
             runtime_loop = self._loop
@@ -400,7 +405,11 @@ class AsyncRuntime:
         *,
         name: str,
     ) -> RuntimeHandle[Any]:
-        """Start durable work, retaining it and logging unhandled failures."""
+        """Start durable work, retaining it and logging unhandled failures.
+
+        This public primitive is reserved for runtime-owned background
+        services; scoped request work should continue to use :meth:`submit`.
+        """
         handle = self._submit(factory, name=name)
         handle.add_done_callback(self._on_background_done)
         return handle
