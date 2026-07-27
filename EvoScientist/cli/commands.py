@@ -11,6 +11,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
+import click
 import typer
 from rich.markup import escape
 from rich.table import Table
@@ -71,6 +72,18 @@ if TYPE_CHECKING:
 _ASYNC_RUNTIME_META_KEY = "evoscientist.async_runtime"
 
 
+def _close_cli_async_runtime(runtime: AsyncRuntime) -> None:
+    """Close the owned runtime or surface a controlled CLI shutdown failure."""
+    try:
+        runtime.close()
+    except TimeoutError as exc:
+        click.echo(
+            f"Error: Async runtime shutdown did not complete: {exc}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from None
+
+
 def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
     """Return the application-scoped runtime owned by this CLI invocation."""
     root = ctx.find_root()
@@ -78,7 +91,7 @@ def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
     if runtime is None:
         runtime = AsyncRuntime()
         root.meta[_ASYNC_RUNTIME_META_KEY] = runtime
-        root.call_on_close(runtime.close)
+        root.call_on_close(lambda: _close_cli_async_runtime(runtime))
     if not isinstance(runtime, AsyncRuntime):  # pragma: no cover - defensive
         raise RuntimeError("CLI async runtime context is invalid")
     return runtime
@@ -1558,7 +1571,7 @@ def serve(
 
     shutdown_event = threading.Event()
     no_active_cancel_scope = object()
-    active_cancel_scope: str | None | object = no_active_cancel_scope
+    active_cancel_scope: str | object | None = no_active_cancel_scope
 
     def _handle_shutdown(signum: int, _frame: Any) -> None:
         shutdown_event.set()

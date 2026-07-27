@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 import EvoScientist.cli.commands  # noqa: F401 - registers commands on app
+from EvoScientist.cli import commands
 from EvoScientist.cli._app import app
 
 
@@ -99,3 +100,32 @@ def test_channel_setup_shares_and_closes_cli_runtime(monkeypatch):
         thread.name == "evosci-async-runtime" and thread.is_alive()
         for thread in threading.enumerate()
     )
+
+
+def test_cli_reports_runtime_close_timeout_without_raw_exception(monkeypatch):
+    class _TimeoutRuntime:
+        def run_sync(self, factory):
+            return asyncio.run(factory())
+
+        def close(self):
+            raise TimeoutError("executor work still active")
+
+    async def fake_db_stats():
+        return {
+            "db_path": "/tmp/sessions.db",
+            "size_bytes": 0,
+            "thread_count": 0,
+            "checkpoint_count": 0,
+            "write_count": 0,
+            "top_threads": [],
+        }
+
+    monkeypatch.setattr(commands, "AsyncRuntime", _TimeoutRuntime)
+    monkeypatch.setattr("EvoScientist.sessions.db_stats", fake_db_stats)
+
+    result = CliRunner().invoke(app, ["sessions", "stats"])
+
+    assert result.exit_code == 1
+    assert "Async runtime shutdown did not complete" in result.output
+    assert "executor work still active" in result.output
+    assert not isinstance(result.exception, TimeoutError)
