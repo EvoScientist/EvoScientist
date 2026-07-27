@@ -155,6 +155,18 @@ def test_cancel_interrupts_owned_questionary_prompt():
     assert result == {"cancelled": True}
 
 
+def test_cancelled_stream_does_not_repaint_final_live_frame():
+    """Late stream cleanup must not overwrite a newer frontend frame."""
+    live = MagicMock()
+    handle = display_mod.RuntimeHandle()
+    handle.cancel()
+
+    display_mod._update_final_live_frame(live, object(), handle)
+
+    live.update.assert_not_called()
+    live.refresh.assert_not_called()
+
+
 def test_cancel_unwinds_hitl_prompt_and_renderer(monkeypatch):
     """The real Rich HITL branch must release its prompt before returning."""
     cancel_scope = "scope:hitl-questionary"

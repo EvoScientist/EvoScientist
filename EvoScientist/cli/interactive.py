@@ -7,7 +7,7 @@ import random
 import signal
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -115,6 +115,15 @@ class _StartupSession:
     thread_id: str
     workspace_dir: str | None
     resumed: bool
+
+
+async def _run_serialized_turn(
+    turn_lock: asyncio.Lock,
+    operation: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Run one session turn without overlapping another frontend source."""
+    async with turn_lock:
+        return await operation()
 
 
 # =============================================================================
@@ -922,6 +931,8 @@ def cmd_interactive(
 
             # ---- Channel queue processing (bus → main thread) ----
 
+            turn_lock = asyncio.Lock()
+
             async def _process_channel_message(msg: ChannelMessage) -> None:
                 """Process a single channel message with real-time streaming.
 
@@ -1229,7 +1240,10 @@ def cmd_interactive(
                     except queue.Empty:
                         msg = None
                     if msg is not None:
-                        await _process_channel_message(msg)
+                        await _run_serialized_turn(
+                            turn_lock,
+                            lambda _msg=msg: _process_channel_message(_msg),
+                        )
                         continue  # check queues again immediately
 
                     # Notification path (only when no channel message was pending).
@@ -1246,8 +1260,13 @@ def cmd_interactive(
                         try:
                             await async_notifier.consume_notifications(
                                 run_message=lambda text, notifs, _tid=current_tid: (
-                                    _inject_notification_message(
-                                        text, notifs, target_thread_id=_tid
+                                    _run_serialized_turn(
+                                        turn_lock,
+                                        lambda: _inject_notification_message(
+                                            text,
+                                            notifs,
+                                            target_thread_id=_tid,
+                                        ),
                                     )
                                 ),
                                 read_async_tasks_state=read_async_tasks_state,
@@ -1465,18 +1484,23 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        await _run_rich_cli_streaming_turn(
-                            ui_backend=state["ui_backend"],
-                            agent=ready_agent,
-                            message=message_to_send,
-                            thread_id=state["thread_id"],
-                            show_thinking=show_thinking,
-                            interactive=True,
-                            metadata=meta,
-                            on_stream_event=_handle_stream_status_event,
-                            status_footer_builder=_stream_status_footer,
-                            gateway=runtime_gateways.graph_gateway,
-                            runtime=async_runtime,
+                        await _run_serialized_turn(
+                            turn_lock,
+                            lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
+                                _run_rich_cli_streaming_turn(
+                                    ui_backend=state["ui_backend"],
+                                    agent=_agent,
+                                    message=_message,
+                                    thread_id=_thread_id,
+                                    show_thinking=show_thinking,
+                                    interactive=True,
+                                    metadata=_meta,
+                                    on_stream_event=_handle_stream_status_event,
+                                    status_footer_builder=_stream_status_footer,
+                                    gateway=runtime_gateways.graph_gateway,
+                                    runtime=async_runtime,
+                                )
+                            ),
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()

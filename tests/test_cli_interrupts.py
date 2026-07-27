@@ -9,6 +9,38 @@ import pytest
 from EvoScientist.cli import interactive
 
 
+@pytest.mark.asyncio
+async def test_session_turns_are_serialized() -> None:
+    """A channel turn cannot start while a foreground turn owns the session."""
+    turn_lock = asyncio.Lock()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+    order: list[str] = []
+
+    async def first_turn() -> None:
+        order.append("first-started")
+        first_started.set()
+        await release_first.wait()
+        order.append("first-finished")
+
+    async def second_turn() -> None:
+        order.append("second-started")
+        second_started.set()
+
+    first = asyncio.create_task(interactive._run_serialized_turn(turn_lock, first_turn))
+    await first_started.wait()
+    second = asyncio.create_task(
+        interactive._run_serialized_turn(turn_lock, second_turn)
+    )
+    await asyncio.sleep(0)
+
+    assert not second_started.is_set()
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert order == ["first-started", "first-finished", "second-started"]
+
+
 @pytest.mark.skipif(
     threading.current_thread() is not threading.main_thread(),
     reason="process signal handlers require the main thread",

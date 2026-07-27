@@ -61,6 +61,18 @@ class _StreamPromptCancelled(Exception):
     """Internal control flow for an owned terminal prompt cancellation."""
 
 
+def _update_final_live_frame(
+    live: Any,
+    final_display: Any,
+    stream_handle: RuntimeHandle[Any] | None,
+) -> None:
+    """Render the final frame unless this owned stream was cancelled."""
+    if stream_handle is not None and stream_handle.cancelled():
+        return
+    live.update(final_display)
+    live.refresh()
+
+
 def _graph_target_for_local_agent(
     agent: "CompiledStateGraph",
     metadata: dict[str, object] | None = None,
@@ -1682,8 +1694,7 @@ def _run_streaming(
                                 interactive, status_footer_builder
                             ),
                         )
-                    live.update(final_display)
-                    live.refresh()
+                    _update_final_live_frame(live, final_display, stream_handle)
 
             stream_handle: RuntimeHandle[None] | None = None
 
