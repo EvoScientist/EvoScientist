@@ -202,8 +202,8 @@ class _FakeRequest:
 
     ``stream_async_notifications`` only touches ``path_params`` and
     ``is_disconnected()`` on the Request, so a full Starlette Request is
-    overkill. Setting ``_disconnect_after`` bounds the loop for tests
-    that need to observe multiple iterations (e.g. heartbeat).
+    overkill. ``disconnect_after`` bounds the loop after N connectedness
+    checks so each test drives the generator to a deterministic exit.
     """
 
     def __init__(self, thread_id: str, disconnect_after: int = 1) -> None:

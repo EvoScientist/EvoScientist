@@ -138,31 +138,43 @@ async def stream_async_notifications(request: Request) -> StreamingResponse:
     the client already knows the thread it opened the stream against, so
     echoing it back is redundant.
 
-    Consume semantics: the queue entry is drained as it is committed to
-    the wire — there is no read-vs-drain distinction. If the client
-    disconnects mid-event, that specific event is already gone from the
-    server queue; SSE has no at-least-once redelivery guarantee, and
-    downstream idempotency (WebUI-side task_id-keyed dedup) covers the
-    resulting gap.
+    Consume semantics: at-most-once. Each notification is popped from the
+    server queue as it is committed to the wire; SSE offers no
+    redelivery, so an event lost between the yield and the client is
+    unrecoverable and there is no server- or client-side dedup that can
+    reconstruct it. The mid-batch loss window is bounded by the
+    one-at-a-time dequeue in ``event_stream``: ``is_disconnected`` is
+    re-checked between every pop, so a disconnect after event N leaves
+    events N+1.. on the queue rather than draining them into an
+    already-broken socket. Clients that need certainty about task
+    completion should reconcile via ``check_async_task``; this stream is
+    a low-latency wake-up, not a source of truth.
 
-    Per-thread only: ``drain_thread_notifications`` reads from
+    Per-thread only: ``take_one_thread_notification`` reads from
     ``_notifications_by_thread[thread_id]``. The unrouted bucket
-    (notifications with ``origin_cli_thread_id=None``) is intentionally
-    excluded from this endpoint to prevent multi-tab clients from receiving
-    duplicate notifications for the same task.
+    (notifications with ``origin_cli_thread_id=None``) is excluded so a
+    routed drain does not steal from the TUI's single-consumer path.
+    Same-thread multi-tab is explicitly out of scope: the drain is
+    destructive, so two open streams on the same ``thread_id`` will
+    split notifications arbitrarily between them and only one tab will
+    fire the synthetic turn. Callers that need multi-tab fan-out must
+    coordinate at a higher layer (e.g. a single-tab-per-thread policy
+    in the WebUI, or a broker in front of this endpoint).
 
-    Lifetime: the connection is held open as long as the client is
-    connected. There is no server-side cutoff. Client closes when the
-    thread has no more active async subagents (WebUI-side policy) or on
-    tab close.
+    Lifetime: bounded by ``_SSE_MAX_LIFETIME_S``. On expiry the
+    generator returns and the EventSource client transparently
+    reconnects (spec-defined). This caps the zombie-connection failure
+    mode where a suspended tab or half-closed tunnel holds TCP open long
+    enough that neither ``is_disconnected`` nor a write-side error fires
+    on a useful timescale, while remaining invisible to live clients.
 
     Heartbeat: an SSE comment line (``: keepalive\\n\\n``) fires every
     ``_SSE_HEARTBEAT_INTERVAL_S`` of idle time to keep intermediate
     proxies from evicting the connection. Real notifications reset the
     heartbeat timer since they serve the same keep-alive purpose.
 
-    Not offloaded to a thread: ``drain_thread_notifications`` acquires a
-    ``threading.Lock`` briefly and pulls from a ``queue.Queue`` — both
+    Not offloaded to a thread: ``take_one_thread_notification`` acquires
+    a ``threading.Lock`` briefly and pops from a ``queue.Queue`` — both
     O(1) and non-blocking. langgraph-dev's ``blockbuster`` middleware
     flags sync file I/O, not brief lock acquisitions.
     """
