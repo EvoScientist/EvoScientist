@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,6 +47,58 @@ import yaml
 from .. import paths
 
 _logger = logging.getLogger(__name__)
+
+
+# --- skills-changed publish primitive ---------------------------------------
+#
+# ``install_skill`` and ``uninstall_skill`` are called from six places today:
+# three slash commands, two paths in the agent's ``skill_manager`` @tool, and
+# the onboarding step. Consumers that cache skill data (currently the
+# /expert completion popup) need to invalidate on every mutation, and wiring
+# that at each caller site was the "vibes and hope" pattern reviewers rightly
+# called out on PR #371 — the next caller silently reintroduces staleness.
+#
+# The invariant lives here instead: any subscriber registered via
+# ``register_skills_changed_callback`` is fired after every install / uninstall
+# call, so no caller has to remember.
+
+_skills_changed_callbacks: list[Callable[[], None]] = []
+
+
+def register_skills_changed_callback(callback: Callable[[], None]) -> None:
+    """Register a callback fired after every ``install_skill`` /
+    ``uninstall_skill`` call.
+
+    Consumers that cache skill data — e.g. the ``/expert`` completion
+    popup — subscribe once at import time so every mutation path
+    (commands, agent ``skill_manager`` @tool, onboarding) invalidates
+    their view. Callbacks are process-scoped and never unregistered
+    automatically; tests should call ``_reset_skills_changed_callbacks``
+    from a fixture to isolate state.
+    """
+    _skills_changed_callbacks.append(callback)
+
+
+def _reset_skills_changed_callbacks() -> None:
+    """Test hook: clear the callback list."""
+    _skills_changed_callbacks.clear()
+
+
+def _notify_skills_changed() -> None:
+    """Fire every registered callback.
+
+    Exceptions are logged but swallowed so a misbehaving subscriber can't
+    break the install/uninstall return path.
+    """
+    for cb in _skills_changed_callbacks:
+        try:
+            cb()
+        except Exception:
+            _logger.warning(
+                "skills-changed callback %r raised; continuing.",
+                getattr(cb, "__qualname__", cb),
+                exc_info=True,
+            )
 
 
 @dataclass
@@ -609,6 +662,17 @@ def install_skill(
         - path: installed path (if successful)
         - error: error message (if failed)
     """
+    try:
+        return _install_skill_impl(source, dest_dir, global_install)
+    finally:
+        _notify_skills_changed()
+
+
+def _install_skill_impl(
+    source: str,
+    dest_dir: str | None = None,
+    global_install: bool = True,
+) -> dict:
     dest_dir = dest_dir or (
         str(paths.GLOBAL_SKILLS_DIR) if global_install else str(paths.USER_SKILLS_DIR)
     )
@@ -924,6 +988,13 @@ def uninstall_skill(name: str) -> dict:
         - success: bool
         - error: error message (if failed)
     """
+    try:
+        return _uninstall_skill_impl(name)
+    finally:
+        _notify_skills_changed()
+
+
+def _uninstall_skill_impl(name: str) -> dict:
     # Validate name to prevent path traversal
     clean_name = _sanitize_name(name)
     if not clean_name:

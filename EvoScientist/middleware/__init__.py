@@ -4,6 +4,7 @@ Re-exports middleware classes and factory functions so that existing
 ``from EvoScientist.middleware import X`` imports continue to work.
 """
 
+from .active_team import ActiveTeamMiddleware, create_active_team_middleware
 from .ask_user import (
     AskUserMiddleware,
     AskUserRequest,
@@ -39,6 +40,7 @@ from .tool_selector import create_tool_selector_middleware
 from .utils import disable_thinking
 
 __all__ = [
+    "ActiveTeamMiddleware",
     "AskUserMiddleware",
     "AskUserRequest",
     "AskUserWidgetResult",
@@ -54,6 +56,7 @@ __all__ = [
     "SchedulerMiddleware",
     "ToolErrorHandlerMiddleware",
     "compute_context_editing_trigger",
+    "create_active_team_middleware",
     "create_code_interpreter_middleware",
     "create_context_editing_middleware",
     "create_memory_lifecycle_middleware",

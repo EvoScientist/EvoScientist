@@ -730,6 +730,7 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
+        create_active_team_middleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -803,6 +804,13 @@ def _get_default_middleware(
         # envelope wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
         ConfigurableModelMiddleware(),
+        # Team-binding cue for the main agent only. Reads
+        # `configurable.active_teams: list[str]` and appends a cue biasing
+        # the main agent to consult the invited expert(s). Skipped for
+        # async subagents (a running expert graph shouldn't inject a
+        # "prefer expert X" hint into its own system prompt — the persona
+        # is already baked in). See agent-teams-design.md.
+        *([] if for_async_subagent else [create_active_team_middleware()]),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),

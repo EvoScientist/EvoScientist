@@ -1782,6 +1782,10 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     _anchor_engaged = False
+                    _active_teams = list(self._channel_runtime.active_teams)
+                    _configurable_extra = (
+                        {"active_teams": _active_teams} if _active_teams else None
+                    )
                     async for event in graph_gateway.stream_events(
                         RunRequest(
                             message=_stream_input,
@@ -1791,6 +1795,7 @@ def run_textual_interactive(
                                 local_graph=agent,
                                 workspace_dir=self._workspace_dir,
                             ),
+                            configurable_extra=_configurable_extra,
                         )
                     ):
                         if is_stream_cancel_requested(cancel_scope):
