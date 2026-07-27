@@ -207,7 +207,19 @@ async def stream_async_notifications(request: Request) -> StreamingResponse:
             )
             raise
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            # nginx defaults to ``proxy_buffering on`` which holds the response
+            # body until an internal buffer fills, so heartbeats and events
+            # would arrive in clumps or not at all. Opt out per-response.
+            "X-Accel-Buffering": "no",
+            # Cheap insurance against intermediaries caching the stream —
+            # matches the WHATWG SSE examples.
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 app = Starlette(
