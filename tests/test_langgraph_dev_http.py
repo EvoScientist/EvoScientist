@@ -329,7 +329,7 @@ async def test_sse_does_not_emit_notifications_for_other_threads():
 
     assert [p["task_id"] for p in payloads] == ["t-B"]
     # thread-A's notification survives — nobody drained it.
-    remaining = async_notifier.drain_thread_notifications("thread-A")
+    remaining = async_notifier.drain_notifications("thread-A")
     assert [n.task_id for n in remaining] == ["t-A"]
 
 
@@ -342,7 +342,7 @@ async def test_sse_returns_cleanly_when_client_is_disconnected_before_first_chec
     chunks = await _collect_events(_FakeRequest("thread-x", disconnect_after=0))
     assert chunks == []
     # Notification stayed on the queue — the disconnected loop never drained.
-    remaining = async_notifier.drain_thread_notifications("thread-x")
+    remaining = async_notifier.drain_notifications("thread-x")
     assert [n.task_id for n in remaining] == ["t-x"]
 
 
@@ -365,7 +365,7 @@ async def test_sse_preserves_queue_tail_on_mid_batch_disconnect(monkeypatch):
     assert [p["task_id"] for p in payloads] == ["t-1", "t-2"]
 
     # t-3 survives on the queue for the next reconnect.
-    remaining = async_notifier.drain_thread_notifications("thread-mid")
+    remaining = async_notifier.drain_notifications("thread-mid")
     assert [n.task_id for n in remaining] == ["t-3"]
 
 
@@ -397,5 +397,5 @@ async def test_sse_returns_when_max_lifetime_elapsed(monkeypatch):
     chunks = await _collect_events(_FakeRequest("thread-late", disconnect_after=1000))
     assert chunks == []
     # Notification stayed on the queue — the loop returned before draining.
-    remaining = async_notifier.drain_thread_notifications("thread-late")
+    remaining = async_notifier.drain_notifications("thread-late")
     assert [n.task_id for n in remaining] == ["t-late"]

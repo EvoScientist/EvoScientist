@@ -452,31 +452,14 @@ def drain_notifications(
     return items
 
 
-def drain_thread_notifications(thread_id: str) -> list[AsyncTaskNotification]:
-    """Pull pending notifications for ``thread_id`` only (non-blocking).
-
-    Unlike :func:`drain_notifications`, this does NOT include the unrouted
-    bucket. Callers that only want notifications explicitly routed to their
-    thread use this.
-
-    Cross-thread safety: unrouted notifications (``origin_cli_thread_id=None``)
-    are excluded so a routed drain does not steal work from the TUI's
-    single-consumer path. The TUI drain path (``drain_notifications``)
-    includes the unrouted bucket by design.
-    """
-    with _notifications_lock:
-        q = _notifications_by_thread.get(thread_id)
-    if q is None:
-        return []
-    return _drain_one_queue(q)
-
-
 def take_one_thread_notification(thread_id: str) -> AsyncTaskNotification | None:
     """Pop one pending notification for ``thread_id``, or ``None`` if empty.
 
-    Companion to :func:`drain_thread_notifications` for callers that need to
-    re-check external conditions (client disconnect, lifetime cap) between
-    each dequeue so an interruption preserves the queue tail instead of
+    Excludes the unrouted bucket so a routed drain does not steal work
+    from the TUI's single-consumer path (``drain_notifications`` includes
+    the unrouted bucket by design). The pop-one shape lets callers re-check
+    external conditions (client disconnect, lifetime cap) between each
+    dequeue so an interruption preserves the queue tail instead of
     dropping the remainder of a batch that had already been drained into
     a local list.
     """
