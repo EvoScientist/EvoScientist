@@ -6,11 +6,25 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.commands.implementation.experts import (
     ExpertCommand,
     ExpertsCommand,
+    invalidate_experts_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _bust_experts_cache_between_tests():
+    """The dispatchable-experts cache in ``experts.py`` is module-level; without
+    resetting it, a test that patches ``list_expert_skills`` sees the previous
+    test's fakes.
+    """
+    invalidate_experts_cache()
+    yield
+    invalidate_experts_cache()
 
 
 class _FakeUI:
@@ -161,3 +175,60 @@ class TestExpertToggle:
         ctx = CommandContext(agent=None, thread_id="t1", ui=ui, channel_runtime=None)
         await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         assert any("/expert requires a session runtime" in text for text, _ in ui.lines)
+
+
+class TestExpertCompletions:
+    """``ExpertCommand.get_completions`` mixes dynamic expert names with the
+    static ``clear`` subcommand. Regression coverage for the three fixes on
+    PR #371: exact-match suppression, past-first-arg guard, and
+    case-insensitive matching.
+    """
+
+    def _patched_experts(self, *names: str):
+        # Patch ``list_dispatchable_experts`` directly (not the underlying
+        # ``list_expert_skills``) so the test does not depend on the shipped
+        # yaml sub-agent set — the reserved-name filter would otherwise
+        # silently reject a fake whose name collides with a future yaml
+        # sub-agent.
+        return patch(
+            "EvoScientist.subagents.expert_container.list_dispatchable_experts",
+            return_value=[_FakeSkillInfo(name=n) for n in names],
+        )
+
+    def test_lists_installed_experts_and_clear(self):
+        cmd = ExpertCommand()
+        with self._patched_experts("smoke-test-sync-expert", "smoke-test-alt-expert"):
+            completions = cmd.get_completions([""])
+        names = {name for name, _ in completions}
+        assert names == {"smoke-test-sync-expert", "smoke-test-alt-expert", "clear"}
+
+    def test_case_insensitive_prefix_match(self):
+        # Skill dir names sometimes have uppercase; completion typed
+        # lowercase must still surface them.
+        cmd = ExpertCommand()
+        with self._patched_experts("Smoke-Test-Case-Expert", "smoke-test-sync-expert"):
+            completions = cmd.get_completions(["smoke-test-c"])
+        names = {name for name, _ in completions}
+        assert names == {"Smoke-Test-Case-Expert"}
+
+    def test_exact_match_hides_popup_same_case(self):
+        cmd = ExpertCommand()
+        with self._patched_experts("smoke-test-sync-expert"):
+            completions = cmd.get_completions(["smoke-test-sync-expert"])
+        assert completions == []
+
+    def test_exact_match_hides_popup_different_case(self):
+        # Case-insensitive exact-match suppression: typing the name in a
+        # different case than the skill dir still fully completes it and
+        # hides the popup.
+        cmd = ExpertCommand()
+        with self._patched_experts("Smoke-Test-Case-Expert"):
+            completions = cmd.get_completions(["smoke-test-case-expert"])
+        assert completions == []
+
+    def test_past_first_arg_returns_empty(self):
+        # /expert takes a single positional. Trailing space -> tokens == ["n", ""].
+        cmd = ExpertCommand()
+        with self._patched_experts("smoke-test-sync-expert"):
+            assert cmd.get_completions(["smoke-test-sync-expert", ""]) == []
+            assert cmd.get_completions(["smoke-test-sync-expert", "foo"]) == []

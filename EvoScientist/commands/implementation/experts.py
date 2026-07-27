@@ -161,9 +161,11 @@ class ExpertCommand(Command):
             *self._get_expert_candidates(),
             ("clear", "Dismiss all invited experts"),
         ]
-        matches = [(name, desc) for name, desc in candidates if name.startswith(prefix)]
+        matches = [
+            (name, desc) for name, desc in candidates if name.lower().startswith(prefix)
+        ]
         # Exact match — argument already complete, hide the popup.
-        if len(matches) == 1 and matches[0][0] == prefix:
+        if len(matches) == 1 and matches[0][0].lower() == prefix:
             return []
         return matches
 
