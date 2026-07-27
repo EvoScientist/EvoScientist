@@ -27,10 +27,28 @@ class PendingChannelSends:
         self._logger = logger
         self._lock = threading.Lock()
         self._pending: list[tuple[concurrent.futures.Future[Any], str, int]] = []
+        self._tail: concurrent.futures.Future[Any] | None = None
 
     @staticmethod
     def _close(coro: Coroutine[Any, Any, Any]) -> None:
         coro.close()
+
+    async def _run_after(
+        self,
+        predecessor: concurrent.futures.Future[Any] | None,
+        coro: Coroutine[Any, Any, Any],
+    ) -> Any:
+        if predecessor is not None:
+            try:
+                await asyncio.shield(asyncio.wrap_future(predecessor))
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    self._close(coro)
+                    raise
+            except Exception:
+                pass
+        return await coro
 
     def submit(
         self,
@@ -42,13 +60,16 @@ class PendingChannelSends:
         if self._loop is None:
             self._close(coro)
             return
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        except Exception as exc:
-            self._close(coro)
-            self._logger.debug("%s send failed: %s", label, exc)
-            return
         with self._lock:
+            ordered_coro = self._run_after(self._tail, coro)
+            try:
+                future = asyncio.run_coroutine_threadsafe(ordered_coro, self._loop)
+            except Exception as exc:
+                self._close(ordered_coro)
+                self._close(coro)
+                self._logger.debug("%s send failed: %s", label, exc)
+                return
+            self._tail = future
             self._pending.append((future, label, timeout))
 
     def _take_pending(

@@ -47,12 +47,14 @@ async def test_pending_send_does_not_stall_owned_runtime() -> None:
 @pytest.mark.asyncio
 async def test_async_settlement_waits_for_every_scheduled_send() -> None:
     """The channel response can wait for all callback delivery off-loop."""
+    first_started = asyncio.Event()
     first_release = asyncio.Event()
     events: list[str] = []
     sends = PendingChannelSends(asyncio.get_running_loop(), logging.getLogger(__name__))
 
     async def _first() -> None:
         events.append("first-started")
+        first_started.set()
         await first_release.wait()
         events.append("first-finished")
 
@@ -63,11 +65,11 @@ async def test_async_settlement_waits_for_every_scheduled_send() -> None:
     sends.submit(_second(), "Second")
 
     settle = asyncio.create_task(sends.settle_async())
-    await asyncio.sleep(0)
+    await asyncio.wait_for(first_started.wait(), timeout=1)
     assert not settle.done()
+    assert events == ["first-started"]
 
     first_release.set()
     await asyncio.wait_for(settle, timeout=1)
 
-    assert "first-finished" in events
-    assert "second-finished" in events
+    assert events == ["first-started", "first-finished", "second-finished"]
