@@ -6,12 +6,12 @@ invocation time. Registered once in ``langgraph.json``; parameterised per
 run via the payload the main agent's ``start_async_task`` passes through
 :class:`EvoScientist.middleware.expert_async_subagent.EvoAsyncSubAgentMiddleware`.
 
-Rationale — see the follow-up entry in ``notes/teams-and-workflows/
-agent-teams-design.md``: the alternative (one graph per expert, registered
-statically in ``langgraph.json``) doesn't scale to ``skill_manager install
-<expert>`` at runtime, because a new expert would need a repo edit + a
-langgraph dev restart. The generic-container approach preserves the
-"installable async expert" story.
+Why one shared graph rather than one graph per expert: the per-expert
+alternative (each expert registered statically in ``langgraph.json``)
+doesn't scale to ``skill_manager install <expert>`` at runtime, because a
+new expert would need a repo edit + a langgraph dev restart. The
+generic-container approach preserves the "installable async expert"
+story.
 
 State schema
 ------------
