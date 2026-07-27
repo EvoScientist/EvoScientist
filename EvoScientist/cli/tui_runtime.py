@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..gateway import GraphGateway
+from ..runtime import AsyncRuntimeError
 from ..stream.console import console
 from .tui_backends import RichStreamingBackend, StreamingTUIBackend
 
@@ -144,6 +145,8 @@ def run_streaming(
             gateway=gateway,
             runtime=runtime,
         )
+    except AsyncRuntimeError:
+        raise
     except RuntimeError:
         requested = normalize_ui_backend(ui_backend)
         if requested == "tui":

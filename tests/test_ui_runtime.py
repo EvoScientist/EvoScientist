@@ -14,6 +14,7 @@ from EvoScientist.cli.tui_runtime import (
     run_streaming,
     run_streaming_async,
 )
+from EvoScientist.runtime import AsyncRuntimeError
 from tests.fakes import FakeGraphGateway
 
 
@@ -84,6 +85,38 @@ def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
         gateway=FakeGraphGateway(),
     )
     assert result == "fallback-ok"
+
+
+def test_run_streaming_does_not_retry_on_owned_runtime_error(monkeypatch):
+    attempts = 0
+
+    class _RuntimeFailureBackend:
+        def run_streaming(self, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise AsyncRuntimeError("owned runtime failed")
+
+    monkeypatch.setattr(
+        "EvoScientist.cli.tui_runtime.get_backend",
+        lambda *a, **k: _RuntimeFailureBackend(),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.cli.tui_runtime.RichStreamingBackend",
+        lambda: _RuntimeFailureBackend(),
+    )
+
+    with pytest.raises(AsyncRuntimeError, match="owned runtime failed"):
+        run_streaming(
+            ui_backend="tui",
+            agent=object(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=FakeGraphGateway(),
+        )
+
+    assert attempts == 1
 
 
 async def test_async_streaming_cancellation_stops_and_joins_worker(monkeypatch):
