@@ -43,6 +43,24 @@ def invalidate_experts_cache() -> None:
     _dispatchable_experts_cache = None
 
 
+def _subscribe_cache_invalidation() -> None:
+    """Register with ``skills_manager`` so every install/uninstall path
+    (slash commands, agent ``skill_manager`` @tool, onboarding) busts
+    the /expert popup — no caller has to remember.
+    """
+    try:
+        from ...tools.skills_manager import register_skills_changed_callback
+
+        register_skills_changed_callback(invalidate_experts_cache)
+    except Exception:
+        # ``skills_manager`` not importable in some early-init contexts;
+        # cache staleness is a UX inconvenience, not a correctness bug.
+        pass
+
+
+_subscribe_cache_invalidation()
+
+
 def _dispatchable_experts() -> list[SkillInfo]:
     """Cached list of experts that /expert can safely invite.
 

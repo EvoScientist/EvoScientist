@@ -110,9 +110,6 @@ class InstallSkill(Command):
             style="dim",
         )
         result = install_skill(source, global_install=not local)
-        from .experts import invalidate_experts_cache
-
-        invalidate_experts_cache()
         if result.get("batch"):
             for item in result.get("installed", []):
                 ctx.ui.append_system(f"Installed: {item['name']}", style="green")
@@ -233,11 +230,8 @@ class InstallSkills(Command):
 
         # Install selected skills
         installed_count = 0
-        from .experts import invalidate_experts_cache
-
         for source in selected_sources:
             result = install_skill(source, global_install=True)
-            invalidate_experts_cache()
             if result.get("batch"):
                 for item in result.get("installed", []):
                     ctx.ui.append_system(f"Installed: {item['name']}", style="green")
@@ -284,9 +278,6 @@ class UninstallSkill(Command):
             return
 
         result = uninstall_skill(name)
-        from .experts import invalidate_experts_cache
-
-        invalidate_experts_cache()
         if result["success"]:
             ctx.ui.append_system(f"Uninstalled: {name}", style="green")
             ctx.ui.append_system("Reload with /new to apply.", style="dim")
