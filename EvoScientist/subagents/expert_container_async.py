@@ -271,6 +271,19 @@ def build_expert_container_async_graph() -> Any:
     )
 
     subagents: list[dict[str, Any]] = []
+    # The async expert runs as its own graph inside langgraph-dev, so it
+    # does NOT inherit the main agent's subagent stack. Without at least
+    # one dispatchable target, the expert's ``task()`` tool has no target
+    # to call — long-horizon experts (e.g. literature-review's Phase 2
+    # ``paper-navigator`` fan-out) rely on this. ``general-purpose`` is
+    # deepagents' default sub-agent and provides the fan-out capability
+    # symmetric with what the main agent has by default.
+    #
+    # Trade-off: an expert LLM that never uses ``task()`` still pays the
+    # schema-description tokens on every model call. Acceptable at v1; if
+    # experts routinely abuse the fan-out or ignore it entirely, a
+    # per-skill ``include_general_purpose: false`` frontmatter opt-out
+    # is a natural follow-up.
     _ensure_general_purpose_subagent(subagents)
     _inject_subagent_middleware(subagents)
 
