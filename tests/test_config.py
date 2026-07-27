@@ -975,3 +975,25 @@ class TestDotenvIsolation:
 
         assert config.langgraph_dev_port == 6606
         assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+
+    def test_dotenv_wins_over_shell_for_third_party_api_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Third-party API keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``,
+        ...) are conventionally set per-project via a workspace ``.env`` to
+        shadow whatever global key sits in the shell (e.g. ``~/.bashrc``).
+        The ``_ENV_MAPPINGS`` snapshot must not disturb that: only
+        ``EVOSCIENTIST_*`` keys are treated as parent-process-authoritative.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=workspace-key\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "shell-key")
+
+        config = get_effective_config()
+
+        assert config.openai_api_key == "workspace-key"
+        assert os.environ["OPENAI_API_KEY"] == "workspace-key"

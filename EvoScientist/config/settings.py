@@ -819,21 +819,31 @@ def get_effective_config(
 
     Priority (highest to lowest):
         1. CLI arguments (``cli_overrides``)
-        2. Parent-process environment variables for keys in ``_ENV_MAPPINGS``
+        2. Parent-process environment variables for ``EVOSCIENTIST_*`` keys
+           in ``_ENV_MAPPINGS``
         3. ``.env`` file at (or above) the current working directory
-        4. Parent-process environment variables for arbitrary (unmapped) keys
+        4. Parent-process environment variables for everything else
+           (third-party API keys / base URLs in ``_ENV_MAPPINGS``, plus
+           arbitrary unmapped keys)
         5. Config file (``~/.config/evoscientist/config.yaml``)
         6. Dataclass defaults
 
     Rows 2 and 4 differ because ``load_dotenv`` is called with
     ``override=True``, so a workspace ``.env`` normally shadows anything
-    already set in the shell. That is desirable for arbitrary keys but
-    would silently defeat explicit parent-process propagation of the
-    handful of keys declared in ``_ENV_MAPPINGS`` (e.g. the bind port
-    that ``EvoSci deploy --port X`` hands to the langgraph dev
-    subprocess). To keep CLI/parent intent authoritative for those keys,
-    we snapshot their shell values before ``load_dotenv`` runs and
-    re-apply the snapshot afterwards.
+    already set in the shell. That is the right behavior for third-party
+    credentials (``.env`` is the industry-standard per-project credential
+    store; extending shell-wins to them would silently flip a workspace
+    key back to a global ``.bashrc`` key), but it would defeat explicit
+    parent-process propagation of our own ``EVOSCIENTIST_*`` config knobs
+    (e.g. the bind port that ``EvoSci deploy --port X`` hands to the
+    langgraph dev subprocess). We snapshot the shell values for the
+    ``EVOSCIENTIST_*`` slice before ``load_dotenv`` runs and re-apply
+    them afterwards; third-party keys keep ``.env``-wins semantics.
+
+    Tradeoff of the narrower snapshot: ``OPENAI_API_KEY=xxx evoscientist
+    ...`` inline overrides still lose to a workspace ``.env`` containing
+    ``OPENAI_API_KEY``. Users who need to override a ``.env``-defined
+    credential inline must edit or unset the ``.env`` entry.
 
     Args:
         cli_overrides: Dictionary of CLI argument overrides.
@@ -841,14 +851,18 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
-    # Snapshot shell values for config-mapped env keys BEFORE load_dotenv so a
-    # workspace ``.env`` cannot shadow explicit parent-process settings on the
-    # keys we declare as runtime-configurable via env (see the priority table
-    # in the docstring).
+    # Snapshot shell values ONLY for EVOSCIENTIST_* keys — our own config knobs
+    # where CLI/parent-process intent should stay authoritative over any
+    # workspace ``.env``. Third-party API keys (ANTHROPIC_API_KEY,
+    # OPENAI_API_KEY, ...) are also in _ENV_MAPPINGS but follow the industry
+    # convention that ``.env`` is the per-project credential store; extending
+    # shell-wins to them would silently flip a workspace-key override back to
+    # a global ``.bashrc`` key. See the priority table + tradeoff note in the
+    # docstring above.
     parent_env_snapshot = {
         env_key: os.environ[env_key]
         for env_key in _ENV_MAPPINGS.values()
-        if env_key in os.environ
+        if env_key.startswith("EVOSCIENTIST_") and env_key in os.environ
     }
     load_dotenv(find_dotenv(usecwd=True), override=True)
     if parent_env_snapshot:
