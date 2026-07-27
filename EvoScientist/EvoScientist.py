@@ -579,6 +579,23 @@ def _route_async_specs_through_evo_middleware(
             None,
         )
         if watcher is not None:
+            # The mutation reaches through two layers of private state:
+            # ``AsyncWatcherMiddleware._clients`` (our own) and
+            # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
+            # renames ``_agents`` or wraps it in an immutable snapshot, the
+            # ``.update(...)`` below silently lands on nothing — expert
+            # completion nudges then stop firing without a diagnostic surface.
+            # Convert that silent-drop into a grep-able error line and bail
+            # out of the extension path; expert dispatches still work, just
+            # without completion notifications until upstream drift is fixed.
+            if not hasattr(watcher._clients, "_agents"):
+                logging.getLogger(__name__).error(
+                    "AsyncWatcherMiddleware._clients has no `_agents` slot — "
+                    "deepagents internal renamed; expert completion "
+                    "notifications will not fire until the extension hook is "
+                    "updated to the new attribute name."
+                )
+                return sync_subs
             watcher._clients._agents.update({s["name"]: s for s in expert_specs})
         else:
             # No YAML async subagents were registered, so ``_maybe_swap`` did
