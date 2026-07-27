@@ -126,6 +126,75 @@ def build_expert_subagent_spec(
     }
 
 
+_reserved_subagent_names_cache: frozenset[str] | None = None
+
+
+def _reserved_subagent_names() -> frozenset[str]:
+    """Names ``_fold_expert_subagents`` refuses for expert registration.
+
+    Union of every static yaml sub-agent name (from ``subagents/*.yaml``)
+    plus deepagents' ``general-purpose``. Mirrors the ``taken`` set built
+    inline in ``EvoScientist.py::_fold_expert_subagents`` so callers that
+    need to know "which names will be rejected at fold time" don't have
+    to replay it.
+
+    Cached on first call — yaml sub-agent files are static per process.
+    """
+    global _reserved_subagent_names_cache
+    if _reserved_subagent_names_cache is not None:
+        return _reserved_subagent_names_cache
+
+    from pathlib import Path
+
+    import yaml
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from .. import subagents as _subagents_pkg
+
+    names: set[str] = {GENERAL_PURPOSE_SUBAGENT["name"]}
+    for pkg_dir in _subagents_pkg.__path__:
+        for yml_path in Path(pkg_dir).glob("*.yaml"):
+            if yml_path.name.startswith(("_", ".")):
+                continue
+            try:
+                data = yaml.safe_load(yml_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                names.update(str(k) for k in data)
+    _reserved_subagent_names_cache = frozenset(names)
+    return _reserved_subagent_names_cache
+
+
+def list_dispatchable_experts(*, include_system: bool = True) -> list[SkillInfo]:
+    """Experts that will actually be dispatchable via ``task()``.
+
+    Combines ``list_expert_skills`` with the same filters
+    ``build_expert_subagent_specs`` (empty body) and
+    ``_fold_expert_subagents`` (name collision with yaml sub-agents or
+    ``general-purpose``) apply at construction time. Callers surfacing
+    experts to the user (e.g. the ``/expert`` slash command) should use
+    this instead of ``list_expert_skills`` directly, otherwise they can
+    accept a name that will silently misroute or per-turn error at
+    dispatch time.
+
+    Read-only filter — construction-time warnings for empty-body /
+    colliding experts are emitted by ``build_expert_subagent_specs`` and
+    ``_fold_expert_subagents`` respectively, so nothing is logged here.
+    """
+    from ..tools.skills_manager import list_expert_skills
+
+    reserved = _reserved_subagent_names()
+    dispatchable: list[SkillInfo] = []
+    for info in list_expert_skills(include_system=include_system):
+        if not _body_of(info).strip():
+            continue
+        if info.name in reserved:
+            continue
+        dispatchable.append(info)
+    return dispatchable
+
+
 def build_expert_subagent_specs(
     tool_registry: dict[str, Any] | None = None,
     *,

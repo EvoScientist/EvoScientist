@@ -19,25 +19,48 @@ the TUI-side equivalent.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.table import Table
 
 from ..base import Argument, Command, CommandContext, SubCommand
 from ..manager import manager
 
-_expert_candidates_cache: list[tuple[str, str]] | None = None
+if TYPE_CHECKING:
+    from ...tools.skills_manager import SkillInfo
+
+_dispatchable_experts_cache: list[SkillInfo] | None = None
 
 
 def invalidate_experts_cache() -> None:
-    """Reset the /expert completion cache.
+    """Reset the /expert dispatchable-experts cache.
 
     Called after ``install_skill`` / ``uninstall_skill`` mutations so a
     freshly installed expert shows up in the /expert popup on the next
     keystroke.
     """
-    global _expert_candidates_cache
-    _expert_candidates_cache = None
+    global _dispatchable_experts_cache
+    _dispatchable_experts_cache = None
+
+
+def _dispatchable_experts() -> list[SkillInfo]:
+    """Cached list of experts that /expert can safely invite.
+
+    Filters ``list_expert_skills`` down to those that pass the same
+    empty-body + name-collision guards ``build_expert_subagent_specs``
+    and ``_fold_expert_subagents`` apply at agent-construction time, so
+    the /expert popup and invite-accept path only ever surface names
+    that will actually reach ``ActiveTeamMiddleware``'s cue.
+    """
+    global _dispatchable_experts_cache
+    if _dispatchable_experts_cache is None:
+        try:
+            from ...subagents.expert_container import list_dispatchable_experts
+
+            _dispatchable_experts_cache = list_dispatchable_experts(include_system=True)
+        except Exception:
+            return []
+    return _dispatchable_experts_cache
 
 
 class ExpertsCommand(Command):
@@ -107,18 +130,7 @@ class ExpertCommand(Command):
     ]
 
     def _get_expert_candidates(self) -> list[tuple[str, str]]:
-        global _expert_candidates_cache
-        if _expert_candidates_cache is None:
-            try:
-                from ...tools.skills_manager import list_expert_skills
-
-                _expert_candidates_cache = [
-                    (s.name, s.role or s.description)
-                    for s in list_expert_skills(include_system=True)
-                ]
-            except Exception:
-                return []
-        return _expert_candidates_cache
+        return [(s.name, s.role or s.description) for s in _dispatchable_experts()]
 
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
         """Complete expert names + the ``clear`` subcommand."""
@@ -169,14 +181,23 @@ class ExpertCommand(Command):
             )
             return
 
-        from ...tools.skills_manager import list_expert_skills
+        dispatchable = {s.name for s in _dispatchable_experts()}
+        if target not in dispatchable:
+            from ...tools.skills_manager import list_expert_skills
 
-        available = {s.name for s in list_expert_skills(include_system=True)}
-        if target not in available:
-            ctx.ui.append_system(
-                f"No expert skill named '{target}'. `/experts` lists installed ones.",
-                style="red",
-            )
+            installed = {s.name for s in list_expert_skills(include_system=True)}
+            if target in installed:
+                ctx.ui.append_system(
+                    f"Expert '{target}' can't be dispatched (empty SKILL.md body "
+                    "or name collision with a built-in sub-agent).",
+                    style="red",
+                )
+            else:
+                ctx.ui.append_system(
+                    f"No expert skill named '{target}'. `/experts` lists "
+                    "installed ones.",
+                    style="red",
+                )
             return
 
         if target in runtime.active_teams:
@@ -185,6 +206,12 @@ class ExpertCommand(Command):
         else:
             runtime.active_teams = [*runtime.active_teams, target]
             ctx.ui.append_system(f"Invited expert: {target}", style="green")
+            # Case (c): expert was installed after agent construction, so it
+            # will not reach ``task()`` until the graph is rebuilt. Cheap
+            # always-print hint mirrors the /install-skill success message.
+            ctx.ui.append_system(
+                "If just installed, run /new to activate it.", style="dim"
+            )
         if runtime.active_teams:
             ctx.ui.append_system(
                 f"Active: {', '.join(runtime.active_teams)}", style="dim"

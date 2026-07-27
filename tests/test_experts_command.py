@@ -40,6 +40,10 @@ class _FakeSkillInfo:
     type: str = "expert"
     tags: list[str] = field(default_factory=list)
     source: str = "builtin"
+    # Non-empty by default so the fake passes the empty-body filter in
+    # ``list_dispatchable_experts``. Tests that specifically want to
+    # exercise the empty-body reject path pass ``body=""``.
+    body: str = "persona"
 
 
 def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _FakeUI]:
