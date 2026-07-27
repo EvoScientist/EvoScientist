@@ -57,14 +57,15 @@ _SSE_POLL_INTERVAL_S = 0.25
 _SSE_HEARTBEAT_INTERVAL_S = 15.0
 
 # Absolute per-connection lifetime. On expiry the generator returns and the
-# EventSource client transparently reconnects (SSE spec-defined behavior).
-# Bounds the zombie-connection failure mode: a suspended tab or a half-closed
-# tunnel can hold TCP open indefinitely because our 15-byte heartbeats fit
-# in the kernel send buffer for hours before a write blocks, so neither
-# is_disconnected() nor a write-side exception fires on a useful timescale.
-# The cap forces a periodic tear-down that cleans zombies without disrupting
-# live clients (reconnect gap is sub-second; notifications enqueued during
-# the gap survive on the queue and drain on the reopen).
+# EventSource client transparently reconnects (SSE spec-defined behavior;
+# the browser picks the reconnect delay unless the server advertises a
+# ``retry:`` field, which we do not). Bounds the zombie-connection failure
+# mode: a suspended tab or a half-closed tunnel can hold TCP open indefinitely
+# because our 15-byte heartbeats fit in the kernel send buffer for hours
+# before a write blocks, so neither is_disconnected() nor a write-side
+# exception fires on a useful timescale. Notifications enqueued during the
+# reconnect gap survive on the queue and drain on the reopen, so gap
+# duration is not correctness-critical.
 _SSE_MAX_LIFETIME_S = 900.0
 
 # Wire fields projected onto each SSE event. Deliberately excludes

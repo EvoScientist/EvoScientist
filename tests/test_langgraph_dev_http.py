@@ -377,10 +377,11 @@ async def test_sse_emits_heartbeat_when_queue_is_idle(monkeypatch):
     monkeypatch.setattr("EvoScientist.langgraph_dev.http._SSE_HEARTBEAT_INTERVAL_S", 0)
 
     chunks = await _collect_events(_FakeRequest("thread-idle", disconnect_after=1))
-    # No data: events (queue was empty), one keepalive comment.
+    # No data: events (queue was empty), exactly one keepalive comment
+    # emitted with both trailing newlines (a missing second newline would
+    # leave the frame buffered in an SSE parser).
     assert _parse_data_events(chunks) == []
-    keepalives = [c for c in chunks if c.startswith(": keepalive")]
-    assert len(keepalives) == 1
+    assert [c for c in chunks if c.startswith(":")] == [": keepalive\n\n"]
 
 
 async def test_sse_returns_when_max_lifetime_elapsed(monkeypatch):
