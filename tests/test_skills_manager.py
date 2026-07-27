@@ -1082,7 +1082,7 @@ default_dispatch: async
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.default_dispatch == "async"
 
-    def test_invalid_default_dispatch_falls_back_to_empty(self, tmp_path):
+    def test_invalid_default_dispatch_falls_back_to_empty(self, tmp_path, caplog):
         skill_dir = tmp_path / "bad-dispatch"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
@@ -1097,9 +1097,22 @@ default_dispatch: asynchronous
 # Body
 """
         )
-        result = _parse_skill_md(skill_dir / "SKILL.md")
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
         assert result.default_dispatch == ""  # rejected, not passed through
+        # A typo like ``asynchronous`` is silently indistinguishable from
+        # unset without the warning; the log line must name the offending
+        # value so authors can see why their expert didn't register async.
+        assert any(
+            "unrecognized default_dispatch" in rec.message
+            and "asynchronous" in rec.message
+            for rec in caplog.records
+        )
 
     def test_capability_tags_accepts_comma_string(self, tmp_path):
         """capability_tags falls back to comma-separated string parsing (like `tags`)."""

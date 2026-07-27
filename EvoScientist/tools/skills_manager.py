@@ -418,6 +418,17 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         default_dispatch = (
             raw_dispatch if raw_dispatch in ("sync", "panel", "async") else ""
         )
+        # Mirror the ``raw_type`` handling above. A typo like
+        # ``default_dispatch: asnyc`` would otherwise be indistinguishable
+        # from an unset field and would register the skill under sync
+        # dispatch — the opposite of the author's intent.
+        if raw_dispatch is not None and raw_dispatch != default_dispatch:
+            _logger.warning(
+                "Skill %r: unrecognized default_dispatch %r in frontmatter; "
+                "treating as unset (skill will register under sync dispatch).",
+                frontmatter.get("name") or parent.name,
+                raw_dispatch,
+            )
         # ``.get("name", parent.name)`` only defaults on missing key; a
         # present-but-empty ``name:`` yields None, which would flow into
         # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``
