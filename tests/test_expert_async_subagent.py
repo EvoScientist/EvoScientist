@@ -234,6 +234,45 @@ class TestStartToolInvocation:
         assert "async_tasks" in result.update
         assert "task-abc" in result.update["async_tasks"]
 
+    def test_start_injects_cfg_model_into_configurable(self):
+        """cfg.model / cfg.provider land in ``config.configurable`` on every
+        ``runs.create`` so the deployed graph re-resolves its chat model per
+        run instead of using whatever was baked at container-build time.
+        Without this the ``/model`` CLI switch silently doesn't propagate to
+        expert launches.
+        """
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = self._fake_client()
+        fake_cfg = EvoScientistConfig(model="test-model-abc", provider="test-provider")
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+            # ``_read_cfg_configurable`` in llm/patches.py imports
+            # ``_ensure_config`` from ``EvoScientist.EvoScientist`` at call
+            # time; patch there so the proxy sees our fake config.
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=fake_cfg),
+        ):
+            start.func(
+                description="w",
+                subagent_type="literature-review",
+                payload={"skill_name": "literature-review", "output_path": "./x.md"},
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        kwargs = client.runs.create.call_args.kwargs
+        assert "config" in kwargs, (
+            "runs.create must receive config kwarg for model passthrough"
+        )
+        configurable = kwargs["config"]["configurable"]
+        assert configurable["model"] == "test-model-abc"
+        assert configurable["model_provider"] == "test-provider"
+
     def test_start_rejects_expert_without_payload(self):
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")

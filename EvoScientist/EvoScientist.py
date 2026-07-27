@@ -554,6 +554,16 @@ def _route_async_specs_through_evo_middleware(
     async_specs.extend(expert_specs)
 
     if async_specs:
+        # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
+        # only when the yaml-async spec list is non-empty. An expert-only setup
+        # (no ``writing-agent`` / ``data-analysis-agent`` / ``scheduler`` in
+        # yaml) would otherwise miss the patch entirely, so we install it here
+        # too. Idempotent — the shared ``_model_passthrough_patched`` flag
+        # guards against double-patching.
+        from .llm.patches import _patch_deepagents_model_passthrough
+
+        _patch_deepagents_model_passthrough()
+
         base_middleware.append(EvoAsyncSubAgentMiddleware(async_subagents=async_specs))
 
     # Extend AsyncWatcherMiddleware's client cache with expert specs so

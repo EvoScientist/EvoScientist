@@ -300,6 +300,21 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         async_subagents: list[AsyncSubAgent],
         system_prompt: str | None = None,
     ) -> None:
+        # Install the model-passthrough patch BEFORE ``super().__init__(...)``
+        # so upstream's ``_build_async_subagent_tools`` sees the patched
+        # ``_build_start_tool`` / ``_build_update_tool`` module attributes.
+        # Idempotent (guarded by ``_model_passthrough_patched`` in
+        # ``llm/patches.py``), so re-invocation on repeated middleware
+        # construction is a no-op. Without this, super()'s vanilla tools
+        # would still ignore ``cfg.model`` — including ``update_async_task``,
+        # which we inherit unchanged below.
+        from ..llm.patches import (
+            _ClientCacheProxy,
+            _patch_deepagents_model_passthrough,
+        )
+
+        _patch_deepagents_model_passthrough()
+
         # Upstream's __init__ validates spec shape, builds the default 5-tool
         # list, and composes the system_prompt. Delegate to it, then swap in
         # the payload-aware start tool. This wastes one tool-build cycle
@@ -314,7 +329,13 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
             else ASYNC_TASK_SYSTEM_PROMPT,
         )
         agent_map: dict[str, AsyncSubAgent] = {a["name"]: a for a in async_subagents}
-        clients = _ClientCache(agent_map)
+        # Wrap the client cache in ``_ClientCacheProxy`` so ``client.runs.create``
+        # in our replacement start tool (and in the rebuilt check / update /
+        # cancel / list tools below) injects ``configurable.model`` /
+        # ``configurable.model_provider`` per run. ``_ClientCacheProxy`` exposes
+        # the same ``get_sync`` / ``get_async`` surface as ``_ClientCache``, so
+        # the upstream tool builders accept it without a type change.
+        clients = _ClientCacheProxy(_ClientCache(agent_map))
         agents_desc = "\n".join(
             f"- {a['name']}: {a['description']}" for a in async_subagents
         )
