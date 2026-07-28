@@ -91,25 +91,34 @@ def repair_tool_history(
             additional_kwargs = message.additional_kwargs
             raw_calls = additional_kwargs.get("tool_calls")
             valid_raw_calls = []
-            if isinstance(raw_calls, list):
-                for call in raw_calls:
-                    function = call.get("function") if isinstance(call, dict) else None
-                    name = function.get("name") if isinstance(function, dict) else None
-                    tool_call_id = call.get("id") if isinstance(call, dict) else None
-                    # Entries without a usable str name AND id can never be
-                    # closed by a result, so keeping them would leave
-                    # provider-invalid history in the payload.
-                    if (
-                        isinstance(name, str)
-                        and name
-                        and isinstance(tool_call_id, str)
-                        and tool_call_id
-                    ):
-                        valid_raw_calls.append(call)
+            if "tool_calls" in additional_kwargs:
+                if isinstance(raw_calls, list):
+                    for call in raw_calls:
+                        function = (
+                            call.get("function") if isinstance(call, dict) else None
+                        )
+                        name = (
+                            function.get("name") if isinstance(function, dict) else None
+                        )
+                        tool_call_id = (
+                            call.get("id") if isinstance(call, dict) else None
+                        )
+                        # Entries without a usable str name AND id can never be
+                        # closed by a result, so keeping them would leave
+                        # provider-invalid history in the payload.
+                        if (
+                            isinstance(name, str)
+                            and name
+                            and isinstance(tool_call_id, str)
+                            and tool_call_id
+                        ):
+                            valid_raw_calls.append(call)
                 additional_kwargs = dict(additional_kwargs)
                 if valid_raw_calls:
                     additional_kwargs["tool_calls"] = valid_raw_calls
                 else:
+                    # Also covers non-list junk (dict/str/int), which would
+                    # otherwise crash langchain's serializer downstream.
                     additional_kwargs.pop("tool_calls", None)
 
             message = message.model_copy(

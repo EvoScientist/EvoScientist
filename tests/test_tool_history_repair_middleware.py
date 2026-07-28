@@ -144,6 +144,18 @@ def test_non_str_raw_id_entry_is_dropped_with_its_result():
     assert not any(isinstance(m, ToolMessage) for m in repaired)
 
 
+def test_non_list_raw_tool_calls_value_is_dropped():
+    for junk in ({"id": "bad", "function": {"name": "x"}}, "bad", 1):
+        message = AIMessage(content="").model_copy(
+            update={"additional_kwargs": {"extra": "kept", "tool_calls": junk}}
+        )
+
+        repaired = repair_tool_history([message])
+
+        assert "tool_calls" not in repaired[0].additional_kwargs
+        assert repaired[0].additional_kwargs["extra"] == "kept"
+
+
 def test_removes_raw_tool_calls_key_when_all_entries_invalid():
     message = AIMessage(content="").model_copy(
         update={
