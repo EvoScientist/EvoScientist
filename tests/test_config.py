@@ -1022,3 +1022,26 @@ class TestDotenvIsolation:
         get_effective_config()
 
         assert os.environ["EVOSCIENTIST_DEPLOY_MODE"] == "full"
+
+    def test_empty_shell_evoscientist_key_defers_to_dotenv(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """A set-but-empty shell export of an ``EVOSCIENTIST_*`` key is
+        treated as "unset" for merge purposes, so a workspace ``.env`` value
+        can still populate the config. Matches the ``if env_value:`` truthy
+        check in the ``_ENV_MAPPINGS`` loop; without this coupling, an empty
+        parent export would silently regress vs main by causing the key to
+        fall through to file/defaults instead of ``.env``.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=6606\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "")
+
+        config = get_effective_config()
+
+        assert config.langgraph_dev_port == 6606
+        assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"

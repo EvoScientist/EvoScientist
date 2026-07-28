@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, get_type_hints
 
 import yaml
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
@@ -826,21 +826,24 @@ def get_effective_config(
         5. Config file (``~/.config/evoscientist/config.yaml``)
         6. Dataclass defaults
 
-    Rows 2 and 4 differ because ``load_dotenv`` is called with
-    ``override=True``, so a workspace ``.env`` normally shadows anything
-    already set in the shell. That is the right behavior for third-party
-    credentials (``.env`` is the industry-standard per-project credential
-    store; extending shell-wins to them would silently flip a workspace
-    key back to a global ``.bashrc`` key), but it would defeat explicit
-    parent-process propagation of our own ``EVOSCIENTIST_*`` config knobs
-    (e.g. the bind port that ``EvoSci deploy --port X`` hands to the
-    langgraph dev subprocess). We snapshot the shell values for the
-    ``EVOSCIENTIST_*`` slice before ``load_dotenv`` runs and re-apply
-    them afterwards; third-party keys keep ``.env``-wins semantics.
+    Rows 2 and 4 differ because ``.env`` values need different treatment
+    for our own namespaced config knobs vs third-party credentials.
+    Third-party keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ...)
+    follow the industry convention that ``.env`` is the per-project
+    credential store; extending shell-wins to them would silently flip
+    a workspace key back to a global ``.bashrc`` key. Our own
+    ``EVOSCIENTIST_*`` keys are the opposite: an explicit CLI/parent-
+    process value (e.g. the bind port that ``EvoSci deploy --port X``
+    hands to the langgraph dev subprocess) must not be shadowed by a
+    workspace ``.env``. We implement this by reading ``.env`` into a
+    dict via ``dotenv_values`` (no ``os.environ`` mutation), then
+    writing third-party keys unconditionally and ``EVOSCIENTIST_*`` keys
+    only when the shell doesn't already have a non-empty value.
 
-    Tradeoff of the narrower snapshot: ``OPENAI_API_KEY=xxx evoscientist
-    ...`` inline overrides still lose to a workspace ``.env`` containing
-    ``OPENAI_API_KEY``. Users who need to override a ``.env``-defined
+    Tradeoff: ``OPENAI_API_KEY=xxx evoscientist ...`` inline overrides
+    still lose to a workspace ``.env`` containing ``OPENAI_API_KEY``,
+    because the merge writes third-party keys from ``.env``
+    unconditionally. Users who need to override a ``.env``-defined
     credential inline must edit or unset the ``.env`` entry.
 
     Args:
@@ -849,25 +852,34 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
-    # Snapshot shell values for every EVOSCIENTIST_* env var — our own
-    # namespaced config knobs where CLI/parent-process intent should stay
-    # authoritative over any workspace ``.env``. Keying off the prefix (rather
-    # than filtering ``_ENV_MAPPINGS``) also covers keys that are read directly
-    # via ``os.environ.get(...)`` without going through ``get_effective_config``
-    # (e.g. ``EVOSCIENTIST_DEPLOY_MODE`` set on the subprocess env by
-    # ``langgraph_dev.manager`` for MCP-load / async-subagent dispatch), and it
-    # means future ``EVOSCIENTIST_*`` config knobs get the same protection
-    # automatically. Third-party API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY,
-    # ...) are excluded on purpose — see the priority table + tradeoff note in
-    # the docstring above.
-    parent_env_snapshot = {
-        env_key: env_value
-        for env_key, env_value in os.environ.items()
-        if env_key.startswith("EVOSCIENTIST_")
-    }
-    load_dotenv(find_dotenv(usecwd=True), override=True)
-    if parent_env_snapshot:
-        os.environ.update(parent_env_snapshot)
+    # Merge workspace ``.env`` into ``os.environ`` without going through
+    # ``load_dotenv``. The previous snapshot → ``load_dotenv`` → restore
+    # sequence was a read-modify-write on ``os.environ`` that could race with
+    # concurrent ``get_effective_config`` calls in the langgraph dev subprocess
+    # (per-request threads in ``langgraph_dev/http.py``, ``sessions.py``
+    # checkpoint writes, memory workers): one thread's mid-flight ``.env``
+    # value could be re-captured by another as "parent env" and then restored
+    # last, promoting the ``.env`` value into the snapshot permanently.
+    #
+    # ``dotenv_values`` returns a dict without touching ``os.environ``, so the
+    # merge below is a pure write sequence and idempotent under interleaving.
+    # Third-party keys keep ``.env``-wins (industry convention).
+    # ``EVOSCIENTIST_*`` keys are our own namespaced config knobs where
+    # CLI/parent-process intent should stay authoritative — write from ``.env``
+    # only when the shell doesn't already have a non-empty value. Treating an
+    # empty shell value as "unset" matches the ``if env_value:`` truthy check
+    # in the ``_ENV_MAPPINGS`` loop below; without this, an empty parent export
+    # would silently regress vs main by falling through to file/defaults.
+    dotenv_path = find_dotenv(usecwd=True)
+    dotenv_map = dotenv_values(dotenv_path) if dotenv_path else {}
+    for env_key, env_value in dotenv_map.items():
+        if env_value is None:
+            continue  # bare ``FOO`` without ``=`` — nothing to write
+        if env_key.startswith("EVOSCIENTIST_"):
+            if not os.environ.get(env_key):
+                os.environ[env_key] = env_value
+        else:
+            os.environ[env_key] = env_value
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
