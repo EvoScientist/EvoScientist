@@ -373,6 +373,51 @@ class TestChoiceValidator:
         assert "one of" in str(exc_info.value.message)
 
 
+class TestValidateAtlasCloudKey:
+    def test_empty_key_skipped(self):
+        from EvoScientist.config.onboard.validators import validate_atlascloud_key
+
+        is_valid, msg = validate_atlascloud_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    @pytest.mark.parametrize("status", [400, 404])
+    def test_uses_non_billable_sentinel_model(self, status):
+        from EvoScientist.config.onboard.validators import validate_atlascloud_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = status
+            is_valid, msg = validate_atlascloud_key("atlas-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["model"] == "atlascloud/auth-preflight"
+        assert payload["max_tokens"] == 1
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_rejection_is_invalid(self, status):
+        from EvoScientist.config.onboard.validators import validate_atlascloud_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = status
+            is_valid, msg = validate_atlascloud_key("bad-key")
+
+        assert is_valid is False
+        assert msg == "Invalid API key"
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_transient_status_is_inconclusive(self, status):
+        from EvoScientist.config.onboard.validators import validate_atlascloud_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = status
+            is_valid, msg = validate_atlascloud_key("atlas-key")
+
+        assert is_valid is False
+        assert "inconclusive" in msg.lower()
+
+
 # =============================================================================
 # Test Step Functions (Mocked questionary)
 # =============================================================================

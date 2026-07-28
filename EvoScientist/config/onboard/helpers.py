@@ -15,6 +15,7 @@ from ..settings import EvoScientistConfig
 from .style import QMARK, WIZARD_STYLE, console
 from .validators import (
     validate_anthropic_key,
+    validate_atlascloud_key,
     validate_dashscope_code_key,
     validate_dashscope_key,
     validate_deepseek_key,
@@ -69,6 +70,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "OpenRouter",
             config.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", ""),
             validate_openrouter_key,
+        ),
+        "atlascloud": (
+            "Atlas Cloud",
+            config.atlascloud_api_key or os.environ.get("ATLASCLOUD_API_KEY", ""),
+            validate_atlascloud_key,
         ),
         "deepseek": (
             "DeepSeek",

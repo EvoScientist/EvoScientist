@@ -118,6 +118,7 @@ _PROVIDER_KEY_ATTR = {
     "google-genai": "google_api_key",
     "siliconflow": "siliconflow_api_key",
     "openrouter": "openrouter_api_key",
+    "atlascloud": "atlascloud_api_key",
     "deepseek": "deepseek_api_key",
     "zhipu": "zhipu_api_key",
     "zhipu-code": "zhipu_api_key",

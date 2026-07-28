@@ -321,6 +321,44 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_atlascloud_key(api_key: str) -> tuple[bool, str]:
+    """Validate an Atlas Cloud key without invoking a billable model.
+
+    The probe deliberately targets a nonexistent sentinel model. A 400/404
+    means authentication passed and model resolution failed; 401/403 means
+    the key was rejected. Rate limits and server errors remain inconclusive.
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import httpx
+
+        resp = httpx.post(
+            "https://api.atlascloud.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "atlascloud/auth-preflight",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 400, 404):
+            return True, "Valid"
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
 def validate_deepseek_key(api_key: str) -> tuple[bool, str]:
     """Validate a DeepSeek API key by making a test request.
 
