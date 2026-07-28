@@ -8,6 +8,7 @@ to be available.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,77 @@ def reset_module_state():
     manager._PROCESS_WORKSPACE = None
     manager._ASYNC_SUBAGENTS_AVAILABLE = False
     manager._LOG_OFFSET_AT_START = 0
+
+
+# =============================================================================
+# langgraph CLI resolution
+# =============================================================================
+
+
+class TestLanggraphCliResolution:
+    def _make_executable(self, path):
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    def test_prefers_current_python_environment_over_path(self, tmp_path, monkeypatch):
+        local_bin = tmp_path / "local" / "bin"
+        local_bin.mkdir(parents=True)
+        local_langgraph = local_bin / "langgraph"
+        self._make_executable(local_langgraph)
+
+        path_bin = tmp_path / "path" / "bin"
+        path_bin.mkdir(parents=True)
+        path_langgraph = path_bin / "langgraph"
+        self._make_executable(path_langgraph)
+
+        monkeypatch.setattr(sys, "executable", str(local_bin / "python"))
+        monkeypatch.setattr(
+            manager.shutil,
+            "which",
+            lambda command: str(path_langgraph) if command == "langgraph" else None,
+        )
+
+        assert manager._langgraph_exe() == str(local_langgraph)
+
+    def test_falls_back_to_path_when_environment_binary_missing(
+        self, tmp_path, monkeypatch
+    ):
+        path_bin = tmp_path / "path" / "bin"
+        path_bin.mkdir(parents=True)
+        path_langgraph = path_bin / "langgraph"
+        self._make_executable(path_langgraph)
+
+        monkeypatch.setattr(
+            sys, "executable", str(tmp_path / "local" / "bin" / "python")
+        )
+        monkeypatch.setattr(
+            manager.shutil,
+            "which",
+            lambda command: str(path_langgraph) if command == "langgraph" else None,
+        )
+
+        assert manager._langgraph_exe() == str(path_langgraph)
+
+    def test_checks_windows_suffix_next_to_current_python(self, tmp_path, monkeypatch):
+        scripts_dir = tmp_path / "Scripts"
+        scripts_dir.mkdir()
+        local_langgraph = scripts_dir / "langgraph.exe"
+        self._make_executable(local_langgraph)
+
+        path_bin = tmp_path / "path" / "bin"
+        path_bin.mkdir(parents=True)
+        path_langgraph = path_bin / "langgraph.exe"
+        self._make_executable(path_langgraph)
+
+        monkeypatch.setattr(sys, "executable", str(scripts_dir / "python.exe"))
+        monkeypatch.setattr(manager.os, "name", "nt", raising=False)
+        monkeypatch.setattr(
+            manager.shutil,
+            "which",
+            lambda command: str(path_langgraph) if command == "langgraph" else None,
+        )
+
+        assert manager._langgraph_exe() == str(local_langgraph)
 
 
 # =============================================================================
@@ -485,6 +557,48 @@ class TestStartLanggraphDevRotatesLog:
         assert pid_dir.is_dir()
 
 
+@pytest.fixture
+def start_langgraph_dev_capture(tmp_path, monkeypatch):
+    """Prereq patches + capturing ``_fake_popen`` for ``start_langgraph_dev``
+    tests. Mocks everything up to (but not including) ``Popen``, redirecting
+    all runtime paths under ``tmp_path``, then installs a ``_fake_popen``
+    that records the argv, env, and ``_LOG_OFFSET_AT_START`` at the instant
+    ``Popen`` is invoked and raises ``FileNotFoundError`` to stop before the
+    real spawn. Callers may seed the log file (available as ``env.log``)
+    before invoking ``start_langgraph_dev``.
+    """
+    pid_dir = tmp_path / "pids"
+    log = tmp_path / "langgraph_dev.log"
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.LanggraphRuntimePaths.for_directory(pid_dir),
+            log_file=log,
+        ),
+    )
+    monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
+    fake_config = tmp_path / "langgraph.json"
+    fake_config.write_text("{}")
+    monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")
+    monkeypatch.setattr(manager, "_packaged_langgraph_config", lambda: fake_config)
+
+    captured: dict = {}
+
+    def _fake_popen(args, **kwargs):
+        # Read the offset global at the instant Popen is invoked — this is
+        # strictly after the capture line in start_langgraph_dev.
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        captured["offset"] = manager._LOG_OFFSET_AT_START
+        raise FileNotFoundError("stop before real spawn")
+
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
+    )
+    return SimpleNamespace(tmp_path=tmp_path, log=log, captured=captured)
+
+
 class TestStartLanggraphDevCapturesLogOffset:
     """``start_langgraph_dev`` must capture ``_LOG_OFFSET_AT_START`` at the
     right moment — after ``_rotate_log_if_needed`` + ``open('ab')`` but
@@ -494,73 +608,90 @@ class TestStartLanggraphDevCapturesLogOffset:
     a regression moving the capture line would actually be caught.
     """
 
-    def _patch_prereqs(self, tmp_path, monkeypatch, log):
-        """Mock everything up to (but not including) Popen, redirecting all
-        runtime paths under ``tmp_path``."""
-        pid_dir = tmp_path / "pids"
-        monkeypatch.setattr(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(
-                manager.LanggraphRuntimePaths.for_directory(pid_dir),
-                log_file=log,
-            ),
-        )
-        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
-        fake_config = tmp_path / "langgraph.json"
-        fake_config.write_text("{}")
-        monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")
-        monkeypatch.setattr(manager, "_packaged_langgraph_config", lambda: fake_config)
-
-    def test_offset_equals_existing_log_size(self, tmp_path, monkeypatch):
+    def test_offset_equals_existing_log_size(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
         """No rotation → offset is the pre-existing (appended-to) log size,
         so a stale URL above that offset is never re-read."""
-        log = tmp_path / "langgraph_dev.log"
-        log.write_bytes(b"x" * 512)
+        env = start_langgraph_dev_capture
+        env.log.write_bytes(b"x" * 512)
         # Keep the log well under the rotation threshold so it is NOT rotated.
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 10**9)
-        self._patch_prereqs(tmp_path, monkeypatch, log)
 
-        captured: dict = {}
-
-        def _fake_popen(args, **kwargs):
-            # Read the global at the instant Popen is invoked — this is
-            # strictly after the capture line in start_langgraph_dev.
-            captured["offset"] = manager._LOG_OFFSET_AT_START
-            raise FileNotFoundError("stop before real spawn")
-
-        monkeypatch.setattr(
-            "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
-        )
         try:
-            manager.start_langgraph_dev(workspace_dir=tmp_path)
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
         except FileNotFoundError:
             pass
-        assert captured["offset"] == 512
+        assert env.captured["offset"] == 512
 
-    def test_offset_zero_after_forced_rotation(self, tmp_path, monkeypatch):
+    def test_offset_zero_after_forced_rotation(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
         """Forced rotation moves the old log away; the fresh ``open('ab')``
         starts empty → offset 0 (scan the whole new file)."""
-        log = tmp_path / "langgraph_dev.log"
-        log.write_bytes(b"x" * 4096)
+        env = start_langgraph_dev_capture
+        env.log.write_bytes(b"x" * 4096)
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
-        self._patch_prereqs(tmp_path, monkeypatch, log)
 
-        captured: dict = {}
-
-        def _fake_popen(args, **kwargs):
-            captured["offset"] = manager._LOG_OFFSET_AT_START
-            raise FileNotFoundError("stop before real spawn")
-
-        monkeypatch.setattr(
-            "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
-        )
         try:
-            manager.start_langgraph_dev(workspace_dir=tmp_path)
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
         except FileNotFoundError:
             pass
-        assert (tmp_path / "langgraph_dev.log.1").exists()  # rotation happened
-        assert captured["offset"] == 0
+        assert (env.tmp_path / "langgraph_dev.log.1").exists()  # rotation happened
+        assert env.captured["offset"] == 0
+
+
+class TestStartLanggraphDevPropagatesPort:
+    """``start_langgraph_dev`` must export the effective bind port into the
+    subprocess env as ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` so the deployed
+    main agent's ``cfg.langgraph_dev_port`` matches what langgraph dev
+    actually bound to. Without this, ``EvoSci deploy --port X`` binds to X
+    but the deployed agent reads the persisted ``langgraph_dev_port``
+    (whatever ``EvoSci config set langgraph_dev_port`` last wrote), and
+    every ``start_async_task`` fails with "All connection attempts failed"
+    because the self-loop URL points at an unbound port.
+    """
+
+    def test_env_carries_explicit_bind_port(self, start_langgraph_dev_capture):
+        """The ``env`` passed to Popen must set the env var to ``str(port)``
+        matching whatever the caller resolved, AND that value must match the
+        ``--port`` argv the subprocess is spawned with. Comparing both closes
+        the exact desync class this PR fixes — a future refactor that changed
+        how argv gets its port (or introduced a second port variable) would
+        slip past a pure env-only assertion."""
+        env = start_langgraph_dev_capture
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6617)
+        except FileNotFoundError:
+            pass
+        assert env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6617"
+        argv = env.captured["args"]
+        assert (
+            argv[argv.index("--port") + 1]
+            == env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"]
+        )
+
+    def test_env_value_replaces_inherited(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
+        """A stray parent-shell export of ``EVOSCIENTIST_LANGGRAPH_DEV_PORT``
+        must NOT shadow the caller-resolved bind port in the subprocess env.
+        Dict assignment on ``sub_env`` already guarantees this, but the
+        argv-vs-env cross-check pins the invariant against a future refactor
+        that decoupled the two."""
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "9999")
+        env = start_langgraph_dev_capture
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6606)
+        except FileNotFoundError:
+            pass
+        # Parent's 9999 replaced; caller's 6606 wins in both env and argv.
+        assert env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+        argv = env.captured["args"]
+        assert (
+            argv[argv.index("--port") + 1]
+            == env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"]
+        )
 
 
 # =============================================================================

@@ -18,6 +18,7 @@ from .context_editing import (
     create_context_editing_middleware,
 )
 from .context_overflow import ContextOverflowMapperMiddleware
+from .error_normalization import ErrorNormalizationMiddleware
 from .memory import (
     EvoMemoryMiddleware,
     create_memory_middleware,
@@ -34,6 +35,7 @@ from .scheduler import (
     create_scheduler_middleware,
 )
 from .tool_error_handler import ToolErrorHandlerMiddleware
+from .tool_history_repair import ToolHistoryRepairMiddleware
 from .tool_selector import create_tool_selector_middleware
 from .utils import disable_thinking
 
@@ -44,6 +46,7 @@ __all__ = [
     "Choice",
     "ConfigurableModelMiddleware",
     "ContextOverflowMapperMiddleware",
+    "ErrorNormalizationMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
     "ModelFallbackMiddleware",
@@ -51,6 +54,7 @@ __all__ = [
     "RuntimeContextMiddleware",
     "SchedulerMiddleware",
     "ToolErrorHandlerMiddleware",
+    "ToolHistoryRepairMiddleware",
     "compute_context_editing_trigger",
     "create_code_interpreter_middleware",
     "create_context_editing_middleware",

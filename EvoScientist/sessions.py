@@ -32,7 +32,7 @@ import atexit
 import logging
 import math
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1532,7 +1532,7 @@ class _RestoredThreadInfo:
     model: str | None
 
 
-async def _restore_webui_threads_to_global_store() -> None:
+async def _restore_webui_threads_to_global_store() -> bool:
     """Re-populate ``GlobalStore["threads"]`` from SQLite on server startup.
 
     The inmem runtime's thread registry lives in memory (pickled to
@@ -1554,7 +1554,10 @@ async def _restore_webui_threads_to_global_store() -> None:
     ``workspace_dir`` are excluded.
 
     Best-effort: any exception is logged and swallowed so a broken restore
-    never prevents the ``langgraph dev`` server from starting.
+    never prevents the ``langgraph dev`` server from starting. Returns True
+    when the restore completed, False when it failed or the runtime is
+    unavailable — a partially-restored registry must not be swept for
+    orphans, or runs of not-yet-appended valid threads would be dropped.
     """
     try:
         from langgraph_runtime_inmem.database import (
@@ -1562,7 +1565,7 @@ async def _restore_webui_threads_to_global_store() -> None:
         )
     except ImportError:
         # langgraph_runtime_inmem not available (unit tests, plain CLI mode).
-        return
+        return False
 
     def _to_uuid_safe(v: Any) -> uuid.UUID | None:
         try:
@@ -1769,6 +1772,64 @@ async def _restore_webui_threads_to_global_store() -> None:
             "empty until new threads are created.",
             exc_info=True,
         )
+        return False
+    return True
+
+
+def _sweep_orphaned_global_store_entries(store: MutableMapping[str, Any]) -> int:
+    """Drop registry runs and crons whose thread no longer exists (issue #358).
+
+    The inmem runtime never discards a run whose thread was deleted:
+    ``Runs.next`` reschedules it forever, and ``.langgraph_ops.pckl``
+    persistence reloads it on every start, so zombies accumulate until the
+    queue starves. Thread-bound crons (``crons.create_for_thread``) keep
+    firing against their deleted thread the same way; stateless crons
+    (``thread_id is None``) are never touched. Must run after the
+    thread-registry restore above so the surviving thread set is final.
+    Mutates the store lists in place — the runtime holds references to the
+    same lists.
+    """
+    valid_thread_ids = {
+        str(entry.get("thread_id")) for entry in store.get("threads") or []
+    }
+    removed = 0
+    runs: list[dict[str, Any]] | None = store.get("runs")
+    if runs:
+        before = len(runs)
+        runs[:] = [run for run in runs if str(run.get("thread_id")) in valid_thread_ids]
+        removed += before - len(runs)
+    crons: list[dict[str, Any]] | None = store.get("crons")
+    if crons:
+        before = len(crons)
+        crons[:] = [
+            cron
+            for cron in crons
+            if cron.get("thread_id") is None
+            or str(cron.get("thread_id")) in valid_thread_ids
+        ]
+        removed += before - len(crons)
+    return removed
+
+
+async def _sweep_orphaned_runs_in_global_store() -> None:
+    """Best-effort orphaned run/cron sweep against the live LangGraph registry."""
+    try:
+        from langgraph_runtime_inmem.database import (
+            GLOBAL_STORE,
+        )
+    except ImportError:
+        # langgraph_runtime_inmem not available (unit tests, plain CLI mode).
+        return
+    try:
+        removed = _sweep_orphaned_global_store_entries(GLOBAL_STORE)
+        if removed:
+            _logger.info(
+                "Dropped %d orphaned run(s)/cron(s) whose thread no longer "
+                "exists from the LangGraph registry.",
+                removed,
+            )
+    except Exception:
+        _logger.warning("Orphaned-run sweep failed (non-fatal).", exc_info=True)
 
 
 @asynccontextmanager
@@ -1802,5 +1863,6 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
     ) as saver:
         await saver.setup()
         await _purge_internal_worker_threads()
-        await _restore_webui_threads_to_global_store()
+        if await _restore_webui_threads_to_global_store():
+            await _sweep_orphaned_runs_in_global_store()
         yield saver

@@ -41,6 +41,9 @@ logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from .middleware.events import MiddlewareEventSink
+    from .runtime import AsyncRuntime
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -244,7 +247,11 @@ def _load_mcp_config_once() -> tuple[str, dict]:
     return sig, cfg
 
 
-def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
+def _load_mcp_tools_cached(
+    on_progress=None,
+    *,
+    runtime: "AsyncRuntime | None" = None,
+) -> dict[str, list]:
     """Load MCP tools with config-aware caching.
 
     Args:
@@ -265,7 +272,11 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
         return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
 
-    loaded = load_mcp_tools(config=cfg, on_progress=on_progress)
+    loaded = load_mcp_tools(
+        config=cfg,
+        on_progress=on_progress,
+        runtime=runtime,
+    )
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     return {k: list(v) for k, v in loaded.items()}
@@ -305,6 +316,7 @@ def _inject_subagent_middleware(
     """
     from .middleware import (
         ContextOverflowMapperMiddleware,
+        ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -333,6 +345,11 @@ def _inject_subagent_middleware(
             memory_scheduler=memory_scheduler,
         )
         middleware = [
+            # Outermost — catches provider-SDK exceptions from the
+            # model call (including inner middlewares) and normalizes
+            # them into a non-dataclass envelope wrapper before
+            # anything downstream sees them.
+            ErrorNormalizationMiddleware(),
             # Subagents share the main agent's model: use the threaded
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
@@ -459,9 +476,12 @@ def _maybe_swap_async_subagents(
             out.append(s)
 
     if agent_specs and middleware is not None:
+        from .cli import async_notifier
         from .middleware.async_watcher import AsyncWatcherMiddleware
 
-        middleware.append(AsyncWatcherMiddleware(agent_specs))
+        # Composition root wires the concrete notifier port into the middleware;
+        # the middleware itself never imports the CLI layer.
+        middleware.append(AsyncWatcherMiddleware(agent_specs, notifier=async_notifier))
 
     # Forward the CLI's live (model, provider) into deepagents'
     # start/update_async_task tool calls so the deployed graph can
@@ -488,9 +508,14 @@ def _build_base_kwargs(
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
+    # ``async_swap_pending=True`` because ``_maybe_swap_async_subagents``
+    # below re-resolves tools for async subagents against the deployed
+    # graph's own registry (via ``subagents/_factory.py``). A tool missing
+    # from ``tool_registry`` for an async spec logs at DEBUG, not WARNING.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
+        async_swap_pending=True,
     )
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
@@ -517,6 +542,7 @@ def load_mcp_and_build_kwargs(
     cfg=None,
     chat_model=None,
     workspace_dir=None,
+    runtime: "AsyncRuntime | None" = None,
 ):
     """Load MCP tools (cached by config) and build agent kwargs.
 
@@ -535,7 +561,10 @@ def load_mcp_and_build_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    mcp_by_agent = _load_mcp_tools_cached(on_progress=on_mcp_progress)
+    mcp_by_agent = _load_mcp_tools_cached(
+        on_progress=on_mcp_progress,
+        runtime=runtime,
+    )
     if not mcp_by_agent:
         return _build_base_kwargs(
             base_backend,
@@ -558,9 +587,12 @@ def load_mcp_and_build_kwargs(
 
     mcp_main = mcp_by_agent.pop("main", [])
 
+    # Same rationale as ``_build_base_kwargs``: async subagents get
+    # re-resolved downstream by the deployed graph's factory registry.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
+        async_swap_pending=True,
     )
 
     _ensure_general_purpose_subagent(subs)
@@ -644,6 +676,7 @@ def _get_default_middleware(
     cfg=None,
     chat_model=None,
     memory_source_agent: str = "EvoScientist",
+    events: "MiddlewareEventSink | None" = None,
 ):
     """Build the default middleware list.
 
@@ -663,12 +696,19 @@ def _get_default_middleware(
             (avoids writing module globals on the pure path).
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
+        events: Frontend/session-supplied event sink. Middleware report
+            tool-selection events and model-fallback notices to it.
+            Defaults to the current stream run's sink for main agents; async
+            sub-agent stacks are always forced to ``NoOpSink`` (they must not
+            drive the main-agent widgets).
     """
     from .middleware import (
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
+        ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
+        ToolHistoryRepairMiddleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -679,6 +719,13 @@ def _get_default_middleware(
         default_memory_scheduler,
         load_fallback_chain,
     )
+    from .middleware.events import NO_OP_SINK, RunScopedEventSink
+
+    # Subagent stacks never drive the main-agent frontend widgets; force the
+    # no-op sink there regardless of what the caller passed. Main stacks built
+    # without an explicit frontend/session sink report into the active stream
+    # run's sink, preserving selector suppression for headless local runs.
+    events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
     if cfg.model_fallbacks:
@@ -729,14 +776,20 @@ def _get_default_middleware(
 
             tool_selector_model = get_chat_model(model=aux_model, provider=aux_provider)
     mw = [
+        # Outermost — catches provider-SDK exceptions from the model
+        # call (including exceptions surfaced through inner
+        # middlewares) and normalizes them into a non-dataclass
+        # envelope wrapper before anything downstream sees them.
+        ErrorNormalizationMiddleware(),
+        ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
-        ModelFallbackMiddleware(),
+        ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         *create_tool_selector_middleware(
             model=tool_selector_model,
-            track_stream_selection=not for_async_subagent,
+            events=events,
         ),
         # Interpreter prompt must land before runtime/memory context, so this
         # middleware sits ahead of runtime_context in the stack.
@@ -771,9 +824,15 @@ def _get_default_middleware(
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
     # must not spawn local OS processes.
     if not for_async_subagent:
+        from .cli import async_notifier
         from .middleware.background import BackgroundExecutionMiddleware
 
-        mw.append(BackgroundExecutionMiddleware())
+        # Inject the notifier port + the assembly-time dangerous-mode policy
+        # (agents rebuild on config change, so the captured flag never staler
+        # than the agent it lives on).
+        mw.append(
+            BackgroundExecutionMiddleware(async_notifier, dangerous=cfg.dangerous_mode)
+        )
 
     return mw
 
@@ -868,6 +927,8 @@ def create_cli_agent(
     chat_model=None,
     *,
     on_mcp_progress=None,
+    events: "MiddlewareEventSink | None" = None,
+    runtime: "AsyncRuntime | None" = None,
 ) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
@@ -894,6 +955,8 @@ def create_cli_agent(
         chat_model: Optional pre-built chat model.  Only triggers the pure
             path when ``config`` is also explicit; otherwise it is ignored in
             favor of the ``_ensure_chat_model()`` fallback.
+        runtime: Optional application-scoped runtime for synchronous MCP tool
+            discovery. Direct callers get a scoped runtime when omitted.
     """
     import os as _os
 
@@ -969,7 +1032,7 @@ def create_cli_agent(
     # CLI agent never drifts from the default chain. Anything CLI-specific
     # (e.g. ``HumanInTheLoopMiddleware``) is appended below.
     mw: list[AgentMiddleware] = _get_default_middleware(
-        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model, events=events
     )
 
     # HITL on main agent only — passing `interrupt_on=` to create_deep_agent
@@ -994,6 +1057,7 @@ def create_cli_agent(
         cfg=cfg,
         chat_model=chat_model,
         workspace_dir=workspace_dir,
+        runtime=runtime,
     )
 
     return create_deep_agent(

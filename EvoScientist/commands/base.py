@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway
+    from ..runtime import AsyncRuntime
 
 
 @dataclass
@@ -91,6 +92,7 @@ class CommandContext:
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
     graph_gateway: GraphGateway | None = None
+    async_runtime: AsyncRuntime | None = None
     command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.

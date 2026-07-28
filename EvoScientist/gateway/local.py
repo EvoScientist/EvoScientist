@@ -19,6 +19,8 @@ from .types import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..middleware.events import SessionEvents
+
 
 @dataclass(frozen=True, slots=True)
 class LocalThreadStore:
@@ -61,9 +63,16 @@ class LocalThreadStore:
 
 @dataclass(slots=True)
 class LocalGraphGateway:
-    """Gateway backed by the current in-process graph and session helpers."""
+    """Gateway backed by the current in-process graph and session helpers.
+
+    ``events`` is the frontend/session event sink for this runtime — normally
+    the same instance injected into the agent's middleware. If it is ``None``,
+    ``stream_agent_events`` creates a per-run session sink and binds it for
+    default main-agent middleware via ``RunScopedEventSink``.
+    """
 
     thread_store: ThreadStore = field(default_factory=LocalThreadStore)
+    events: SessionEvents | None = None
 
     async def create_thread(
         self,
@@ -155,6 +164,7 @@ class LocalGraphGateway:
             request.thread_id,
             metadata=request.metadata,
             media=request.media,
+            events=self.events,
         )
         try:
             async for event in inner:

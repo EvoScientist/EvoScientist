@@ -19,7 +19,7 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
@@ -75,6 +75,12 @@ class _SyncRunsClient(Protocol):
 
     def get(self, thread_id: str, run_id: str) -> Run: ...
 
+    def list(
+        self, thread_id: str, *, limit: int, offset: int, status: str
+    ) -> list[Run]: ...
+
+    def cancel_many(self, *, thread_id: str, run_ids: Sequence[str]) -> object: ...
+
 
 class SyncLangGraphClient(Protocol):
     """Sync subset of the LangGraph SDK used by background runs."""
@@ -106,6 +112,14 @@ class _AsyncRunsClient(Protocol):
     ) -> Run: ...
 
     async def get(self, thread_id: str, run_id: str) -> Run: ...
+
+    async def list(
+        self, thread_id: str, *, limit: int, offset: int, status: str
+    ) -> list[Run]: ...
+
+    async def cancel_many(
+        self, *, thread_id: str, run_ids: Sequence[str]
+    ) -> object: ...
 
 
 class AsyncLangGraphClient(Protocol):
@@ -246,12 +260,97 @@ async def _aget_run_status(
     return run["status"]
 
 
+# Page size for enumerating a thread's runs before deletion. The SDK's
+# ``runs.list`` defaults to limit=10, which would silently skip runs on
+# threads with a longer history.
+_RUN_CANCEL_PAGE_SIZE = 100
+
+# Statuses worth cancelling; listed server-side so terminal history is
+# never paged through.
+_CANCELABLE_RUN_STATUSES = ("pending", "running")
+
+
+def _cancel_thread_runs(
+    client: SyncLangGraphClient,
+    thread_id: str,
+    *,
+    name: str,
+) -> None:
+    """Best-effort interrupt of the thread's pending/running runs.
+
+    The server's ``threads.delete`` cascade-removes queued runs from the
+    registry, but it does not interrupt a run that is already executing —
+    cancelling first sends the interrupt control message so in-flight work
+    actually stops (issue #358). It also protects cleanup paths that
+    mutate the registry without going through ``threads.delete``. The bulk
+    cancel is skipped when nothing is cancellable (the server 404s on an
+    empty cancel set), which keeps the common terminal-only path to two
+    cheap filtered GETs.
+    """
+    try:
+        run_ids: list[str] = []
+        for status in _CANCELABLE_RUN_STATUSES:
+            offset = 0
+            while True:
+                page = client.runs.list(
+                    thread_id,
+                    limit=_RUN_CANCEL_PAGE_SIZE,
+                    offset=offset,
+                    status=status,
+                )
+                run_ids.extend(run["run_id"] for run in page)
+                if len(page) < _RUN_CANCEL_PAGE_SIZE:
+                    break
+                offset += _RUN_CANCEL_PAGE_SIZE
+        if run_ids:
+            client.runs.cancel_many(
+                thread_id=thread_id, run_ids=list(dict.fromkeys(run_ids))
+            )
+    except Exception:
+        logger.warning(
+            "Failed to cancel %s runs on thread %s", name, thread_id, exc_info=True
+        )
+
+
+async def _acancel_thread_runs(
+    client: AsyncLangGraphClient,
+    thread_id: str,
+    *,
+    name: str,
+) -> None:
+    """Async variant of :func:`_cancel_thread_runs`."""
+    try:
+        run_ids: list[str] = []
+        for status in _CANCELABLE_RUN_STATUSES:
+            offset = 0
+            while True:
+                page = await client.runs.list(
+                    thread_id,
+                    limit=_RUN_CANCEL_PAGE_SIZE,
+                    offset=offset,
+                    status=status,
+                )
+                run_ids.extend(run["run_id"] for run in page)
+                if len(page) < _RUN_CANCEL_PAGE_SIZE:
+                    break
+                offset += _RUN_CANCEL_PAGE_SIZE
+        if run_ids:
+            await client.runs.cancel_many(
+                thread_id=thread_id, run_ids=list(dict.fromkeys(run_ids))
+            )
+    except Exception:
+        logger.warning(
+            "Failed to cancel %s runs on thread %s", name, thread_id, exc_info=True
+        )
+
+
 def _delete_thread(
     client: SyncLangGraphClient,
     thread_id: str,
     *,
     name: str,
 ) -> None:
+    _cancel_thread_runs(client, thread_id, name=name)
     try:
         client.threads.delete(thread_id)
     except Exception:
@@ -264,6 +363,7 @@ async def _adelete_thread(
     *,
     name: str,
 ) -> None:
+    await _acancel_thread_runs(client, thread_id, name=name)
     try:
         await client.threads.delete(thread_id)
     except Exception:

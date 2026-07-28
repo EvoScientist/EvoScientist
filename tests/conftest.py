@@ -1,26 +1,10 @@
 """Shared fixtures for EvoScientist tests."""
 
+from pathlib import Path
+
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def _reset_tool_selection_state():
-    """Isolate the process-global tool-selection state around every test.
-
-    ``middleware.tool_selector`` records the last selected tools and the
-    selector-active flag in module globals that ``stream/tool_selection.py``
-    reads to decide whether to suppress selector output. A test that drives the
-    selector or tracker would otherwise leave those globals set and silently
-    flip unrelated streaming tests later in the same process. Reset on both ends
-    so order and worker sharding can't reintroduce the leak.
-    """
-    from EvoScientist.middleware.tool_selector import (
-        reset_tool_selection_state_for_tests,
-    )
-
-    reset_tool_selection_state_for_tests()
-    yield
-    reset_tool_selection_state_for_tests()
+_NONEXISTENT_DOTENV = str(Path(__file__).with_name(".pytest-dotenv-does-not-exist"))
 
 
 @pytest.fixture
@@ -164,3 +148,24 @@ def restore_model_passthrough_patch():
         yield
     finally:
         _reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dotenv(monkeypatch):
+    """Keep the developer's real .env out of the test environment.
+
+    ``get_effective_config`` runs ``load_dotenv(find_dotenv(usecwd=True),
+    override=True)``, so any test that loads config injects the repo's
+    real .env into ``os.environ`` for the rest of the pytest process.
+    An empty-valued line like ``MINIMAX_BASE_URL=`` then makes
+    ``os.environ.get(key, default)`` return "" instead of the default,
+    breaking unrelated tests later in the run (see issue #322).
+
+    Pointing ``find_dotenv`` at a fixed path that does not exist makes
+    ``load_dotenv`` a no-op without creating a temporary directory for
+    every test.
+    """
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.find_dotenv",
+        lambda *args, **kwargs: _NONEXISTENT_DOTENV,
+    )

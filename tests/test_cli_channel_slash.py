@@ -6,6 +6,8 @@ fed to the LLM as a plain prompt, on every UI surface (Rich CLI, TUI,
 headless ``serve``).
 """
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.cli.channel import (
@@ -58,23 +60,28 @@ async def test_non_slash_returns_false():
     append.assert_not_called()
 
 
-async def test_unresolved_slash_returns_false():
-    """Unknown slash commands must fall through (matches TUI behavior)."""
+async def test_unresolved_slash_returns_unknown_command_response():
+    """Unknown slash commands must never fall through to the agent."""
     msg = _make_msg(content="/unknown-cmd")
     append = MagicMock()
     with patch(
         "EvoScientist.commands.manager.manager.resolve",
         return_value=None,
     ):
-        handled = await dispatch_channel_slash_command(
-            msg,
-            agent=None,
-            thread_id="t1",
-            workspace_dir=None,
-            checkpointer=None,
-            append_system=append,
-        )
-    assert handled is False
+        with patch("EvoScientist.cli.channel._set_channel_response") as mock_response:
+            handled = await dispatch_channel_slash_command(
+                msg,
+                agent=None,
+                thread_id="t1",
+                workspace_dir=None,
+                checkpointer=None,
+                append_system=append,
+            )
+    assert handled is True
+    mock_response.assert_called_once_with(
+        "msg-1",
+        "Unknown command: /unknown-cmd\nType /help to see available commands.",
+    )
 
 
 async def test_successful_slash_execution_sets_response_and_breadcrumb():
@@ -110,6 +117,75 @@ async def test_successful_slash_execution_sets_response_and_breadcrumb():
     assert "Command executed" in mock_set_resp.call_args[0][1]
     breadcrumbs = [call.args[0] for call in append.call_args_list]
     assert any("Executed command from" in t for t in breadcrumbs)
+
+
+async def test_slash_with_flushed_output_suppresses_executed_ack():
+    """When the command's own output already reached the channel, the
+    response is the already-sent sentinel, not a second ack message."""
+    from EvoScientist.cli.channel import COMMAND_OUTPUT_ALREADY_SENT
+
+    msg = _make_msg()
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+
+    async def _execute_with_output(content, ctx):
+        ctx.ui.sent_to_channel = True
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["core"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            new=AsyncMock(side_effect=_execute_with_output),
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent="fake-agent",
+            thread_id="t1",
+            workspace_dir="/tmp",
+            checkpointer=None,
+            append_system=MagicMock(),
+        )
+    assert handled is True
+    mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
+
+
+async def test_real_help_command_publishes_help_once():
+    """Exercise the registered /help command rather than a mocked command."""
+    from EvoScientist.cli.channel import COMMAND_OUTPUT_ALREADY_SENT
+
+    bus = SimpleNamespace(publish_outbound=AsyncMock())
+    msg = _make_msg(content="/help")
+    msg.channel_type = "telegram"
+    msg.bus_ref = bus
+
+    with (
+        patch("EvoScientist.cli.channel._bus_loop", asyncio.get_running_loop()),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            workspace_dir=None,
+            checkpointer=None,
+            append_system=MagicMock(),
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert handled is True
+    bus.publish_outbound.assert_awaited_once()
+    outbound = bus.publish_outbound.await_args.args[0]
+    assert outbound.channel == "telegram"
+    assert "Available commands:" in outbound.content
+    assert "/help" in outbound.content
+    mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
 
 
 async def test_slash_dispatch_passes_graph_gateway_to_command_context():
@@ -438,6 +514,43 @@ async def test_command_error_skips_completion_hook_and_reports_error():
     assert handled is True
     completed.assert_not_awaited()
     mock_set_resp.assert_called_once_with("msg-1", "Command error: workspace conflict")
+
+
+async def test_command_error_with_flushed_output_suppresses_second_error():
+    """CommandManager already flushes its error text to channel UIs."""
+    from EvoScientist.cli.channel import COMMAND_OUTPUT_ALREADY_SENT
+
+    msg = _make_msg(content="/resume abc")
+    fake_cmd = MagicMock()
+    fake_cmd.needs_agent.return_value = False
+
+    async def _execute(_command, ctx):
+        ctx.command_error = "workspace conflict"
+        ctx.ui.sent_to_channel = True
+        return True
+
+    with (
+        patch(
+            "EvoScientist.commands.manager.manager.resolve",
+            return_value=(fake_cmd, ["abc"]),
+        ),
+        patch(
+            "EvoScientist.commands.manager.manager.execute",
+            side_effect=_execute,
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_set_resp,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="old-thread",
+            workspace_dir="/old-workspace",
+            checkpointer=None,
+            append_system=MagicMock(),
+        )
+
+    assert handled is True
+    mock_set_resp.assert_called_once_with("msg-1", COMMAND_OUTPUT_ALREADY_SENT)
 
 
 async def test_empty_command_error_still_reports_error():

@@ -2,7 +2,9 @@
 
 import re
 import shlex
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1125,6 +1127,20 @@ class TestSandboxId:
 # === execute() literal cwd sanitization ===
 
 
+class TestExecuteValidation:
+    @pytest.mark.parametrize("command", ["", None, 123])
+    def test_execute_rejects_empty_or_non_string_commands(self, command, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        response = backend.execute(command)
+
+        assert response == backends.ExecuteResponse(
+            output="Error: Command must be a non-empty string.",
+            exit_code=1,
+            truncated=False,
+        )
+
+
 class TestExecuteCwdSanitization:
     def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
         """``prepare_sandbox_command`` must rewrite a literal workspace-root
@@ -1140,7 +1156,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = f"mkdir -p {tmp_workspace}/test-sanitized && echo ok"
 
@@ -1161,7 +1179,9 @@ class TestExecuteCwdSanitization:
             captured["timeout"] = timeout
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = (
             "ssh -p 2222 -i key host "
@@ -1183,7 +1203,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         workspace = tmp_path / "ws"
         workspace.mkdir()
         backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
@@ -1213,7 +1235,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute("ssh -N host", timeout=30)
@@ -1256,7 +1280,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "ssh host 'echo $(cat /etc/passwd)'"
 
@@ -1274,7 +1300,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute(
@@ -1297,7 +1325,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute("ssh host 'pwd' > /tmp/out", timeout=30)
@@ -1314,7 +1344,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "echo __EVOSCI_SSH_REMOTE_0__ && ssh host 'ls /home'"
 
@@ -1356,7 +1388,9 @@ class TestExecuteCwdSanitization:
             captured["timeout"] = timeout
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "ssh host 'ls /home/username/project'"
 
@@ -1390,7 +1424,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
         resp = backend.execute(f"{ssh_path} host ls /home/username/project", timeout=30)
@@ -1407,7 +1443,9 @@ class TestExecuteCwdSanitization:
             captured["command"] = command
             return backends.ExecuteResponse(output="ok", exit_code=0, truncated=False)
 
-        monkeypatch.setattr(backends.LocalShellBackend, "execute", fake_execute)
+        monkeypatch.setattr(
+            CustomSandboxBackend, "_execute_prepared_command", fake_execute
+        )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         command = "cat /data/file.txt && ssh host 'ls /home/username/project'"
 
@@ -1513,6 +1551,84 @@ class TestExecuteTimeout:
 
         execute_accepts_timeout.cache_clear()
         assert execute_accepts_timeout(CustomSandboxBackend) is True
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process-group regression",
+    )
+    def test_timeout_kills_descendants_after_shell_leader_exits(self, tmp_workspace):
+        """A dead shell leader must not hide descendants retaining its pipes."""
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+
+        started = time.monotonic()
+        response = backend.execute("sleep 2 &", timeout=0.1)
+        elapsed = time.monotonic() - started
+
+        assert response.exit_code == 124
+        assert elapsed < 1
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX detached-process regression",
+    )
+    def test_timeout_bounds_drain_when_detached_descendant_holds_pipes(
+        self,
+        tmp_workspace,
+        monkeypatch,
+    ):
+        """An escaped descendant cannot hold execute() open through inherited pipes."""
+        monkeypatch.setattr(backends, "_PROCESS_DRAIN_GRACE_SECONDS", 0.05)
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace,
+            virtual_mode=True,
+            env={"EVOSCI_TEST_PYTHON": sys.executable},
+        )
+        code = (
+            "import os,time; "
+            "pid=os.fork(); "
+            "os._exit(0) if pid else (os.setsid(), time.sleep(1), os._exit(0))"
+        )
+        # Pass the absolute executable through the environment so virtual-path
+        # normalization does not reinterpret it as a workspace path.
+        command = f'"$EVOSCI_TEST_PYTHON" -c {shlex.quote(code)}'
+
+        started = time.monotonic()
+        response = backend.execute(command, timeout=0.05)
+        elapsed = time.monotonic() - started
+
+        assert response.exit_code == 124
+        assert response.truncated is True
+        assert elapsed < 0.4
+
+
+def test_active_shell_registry_lock_allows_signal_handler_reentry():
+    """A signal handler can re-enter registry code on the interrupted thread."""
+    lock = backends._active_shell_processes_lock
+    assert lock.acquire(timeout=0.1)
+    try:
+        assert lock.acquire(timeout=0.1)
+        lock.release()
+    finally:
+        lock.release()
+
+
+def test_terminate_process_tree_does_not_target_reaped_pid(monkeypatch):
+    """A completed Popen PID must not be reused as a process-group target."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=5)
+    termination_attempted = False
+
+    def fail_termination(*args, **kwargs):
+        nonlocal termination_attempted
+        termination_attempted = True
+
+    monkeypatch.setattr(backends.os, "killpg", fail_termination, raising=False)
+    monkeypatch.setattr(backends.subprocess, "run", fail_termination)
+    monkeypatch.setattr(process, "kill", fail_termination)
+
+    backends._terminate_process_tree(process)
+
+    assert termination_attempted is False
 
 
 # === '..' traversal false-positive fix ===

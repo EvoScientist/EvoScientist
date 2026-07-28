@@ -25,7 +25,7 @@ async def validate_email_imap(
 
     import asyncio
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _check():
         try:
@@ -62,7 +62,7 @@ async def validate_email_smtp(
 
     import asyncio
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _check():
         server = None

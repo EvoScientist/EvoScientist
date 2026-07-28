@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,9 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[26 Jul 2026]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 selectable on Anthropic and OpenRouter (incl. fast), plus Gemini 3.6 Flash and 3.5 Flash Lite on Google and OpenRouter; Kimi K3 now works over Anthropic-protocol channels (Kimi For Coding, custom endpoints), covering structured output, history replay, and multi-turn thinking; fixes for interrupted tool-call history, skill-install path leaks, and OpenRouter SSE streaming (pinned below 0.11).
+- **[18 Jul 2026]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 selectable on Moonshot and OpenRouter (1M context); async sub-agent runs no longer get stuck pending thanks to orphaned-run cleanup; Telegram slash commands; provider fixes (DeepSeek native SDK, GPT-5.x via ChatGPT OAuth, OpenAI `reasoning_effort`); quieter tool-selector streaming and smaller checkpoints.
+- **[11 Jul 2026]** **[v0.2.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.2)** — New models selectable in onboarding and `/model`: GPT-5.6 (sol, terra, luna) for OpenAI and OpenRouter, plus Grok 4.5 and Tencent Hunyuan HY3 on OpenRouter; tighter config-file permissions and a reworked onboarding OAuth flow for auxiliary models.
 - **[05 Jul 2026]** **[v0.2.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.1)** — AutoSkills: EvoMemory drafts reusable skills from its own observation clusters for you to review via `/autoskills`; a new `--output-format stream-json` for headless / SDK clients; richer slash-command completions; Windows UTF-8 config reads; a TUI welcome-banner fix; langchain-openrouter 0.2.5.
 - **[26 Jun 2026]** **[v0.2.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.0)** — Scheduled tasks: cron-style recurring runs via `/schedule` or natural language, run unattended with shell-access gating; self-linking memory that connects observations into a knowledge graph (complements / contradicts / supersedes); a read-only `GET /api/models` endpoint for the WebUI model picker.
 - **[23 Jun 2026]** **[v0.1.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.9)** — Hotfix for fresh installs: the first message crashed with `The subagent `task` tool cannot be exposed via `ptc`` after deepagents 0.6.11 / langchain-quickjs 0.3 reserved `task` as the REPL global. Removed `task` from the code-interpreter PTC allowlist (`task()` stays available as the REPL global; async dispatch stays in PTC) and pinned `deepagents[quickjs]~=0.6.11`.
@@ -433,10 +436,7 @@ EvoSci deploy                     # standalone LangGraph server for external UIs
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
 ```
 
-`--output-format stream-json` makes a single-shot (`-p`) run emit its native
-events as line-delimited JSON on stdout (one object per line), with all human
-output on stderr — the integration surface for headless clients (e.g. an agent
-runtime). See [docs/stream-json.md](docs/stream-json.md) for the event schema.
+`--output-format stream-json` makes a single-shot (`-p`) run emit its native events as line-delimited JSON on stdout (one object per line), with all human output on stderr — the integration surface for headless clients (e.g. an agent runtime). See [docs/guides/stream-json.md](docs/guides/stream-json.md) for the event schema.
 
 </details>
 
@@ -627,6 +627,8 @@ This project builds upon the following outstanding open-source works:
 
 - [**LangChain**](https://github.com/langchain-ai/langchain) — A framework for building agents and LLM-powered applications.
 - [**DeepAgents**](https://github.com/langchain-ai/deepagents) — The batteries-included agent harness.
+- [**jiuwenswarm**](https://github.com/openJiuwen-ai/jiuwenswarm) — A framework for coordinating agent swarms to tackle complex tasks.
+
 
 We thank the authors for their valuable contributions to the open-source community.
 
@@ -748,9 +750,9 @@ Every contribution brings us one step closer to a future where AI accelerates sc
   <img src="https://contrib.rocks/image?repo=EvoScientist/EvoScientist" />
 </a>
 
-<!-- ### 📈 Star History
+### 📈 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=EvoScientist/EvoScientist&type=date&legend=bottom-right)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=bottom-right) -->
+[![Star History Chart](https://api.star-history.com/chart?repos=EvoScientist/EvoScientist&type=date&legend=top-left&sealed_token=-XivKBib6Pb_YTJjMxBwUghZaRWxGqr5HYBKsa5jyiCgVMWfHmmkLyCYbT0uUvJJdUQsza9mRnlk1-QVQzm-s0UExQ_8DIBSrWKIrPQz5WzNlRURsUoHSA)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=top-left)
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 

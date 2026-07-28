@@ -943,3 +943,250 @@ class TestSkillManagerList:
             result = skill_manager.invoke({"action": "list", "include_system": False})
 
         assert "No user skills installed" in result
+
+
+class TestSkillManagerInfo:
+    """Tests for the skill_manager() tool's action='info' output.
+
+    Guards the sandbox-visible ``Path: /skills/<name>`` shape and the absence
+    of any host filesystem path in the agent-visible response. Agents burn
+    turns on ``cd <host-path> && …`` chains whenever the host path leaks.
+    """
+
+    def _make_skill(self, parent, name, description="A skill"):
+        skill_dir = parent / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n"
+        )
+        return skill_dir
+
+    def test_info_reports_virtual_mount_path(self, tmp_path):
+        """``Path:`` is the sandbox-visible ``/skills/<name>``, not the host path."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "info-skill")
+        install_skill(str(tmp_path / "info-skill"), str(workspace_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke({"action": "info", "name": "info-skill"})
+
+        assert "Path: /skills/info-skill" in result
+
+    def test_info_omits_host_path(self, tmp_path):
+        """No host filesystem path leaks into the response.
+
+        Stronger than a label-only check: catches any future refactor that
+        keeps the path visible under a different label (``Local:``,
+        ``Installed at:``, embedded in ``Source: …``).
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skills_manager import get_skill_info
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "host-leak-guard")
+        install_skill(str(tmp_path / "host-leak-guard"), str(workspace_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            info = get_skill_info("host-leak-guard")
+            result = skill_manager.invoke({"action": "info", "name": "host-leak-guard"})
+
+        assert str(info.path) not in result
+
+
+class TestSkillManagerInstall:
+    """Tests for the skill_manager() tool's action='install' output shape.
+
+    Covers both single-install and batch-install returns:
+    - Single: ``{"success": True, "name": ..., "path": ..., "description": ...}``.
+    - Batch: ``{"success": ..., "batch": True, "installed": [...], "failed": [...]}``
+      with no top-level ``name``, ``path``, ``description``, or ``error``.
+    """
+
+    def _make_skill(self, parent, name, description="A skill"):
+        skill_dir = parent / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n"
+        )
+        return skill_dir
+
+    def test_install_single_reports_virtual_mount_path(self, tmp_path):
+        """Single install: ``Path: /skills/<name>``, no host path."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "solo-skill")
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke(
+                {"action": "install", "source": str(tmp_path / "solo-skill")}
+            )
+
+        assert "Successfully installed skill: solo-skill" in result
+        assert "Path: /skills/solo-skill" in result
+
+    def test_install_single_omits_host_path(self, tmp_path):
+        """Single install: no host filesystem path leaks into the response.
+
+        ``install_skill(source)`` defaults to ``global_install=True``, so the
+        skill lands under ``GLOBAL_SKILLS_DIR`` rather than ``USER_SKILLS_DIR``.
+        Checking against a narrower directory (e.g. workspace_dir) would pass
+        even without the scrub - the check has to cover every path the tool
+        might resolve to. ``tmp_path`` covers both patched dirs and the source
+        path used by ``install_skill``.
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+        self._make_skill(tmp_path, "leak-guard-install")
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke(
+                {"action": "install", "source": str(tmp_path / "leak-guard-install")}
+            )
+
+        assert str(tmp_path) not in result
+
+    def test_install_batch_lists_each_skill_with_virtual_path(self, tmp_path):
+        """Batch install: one block per installed skill, each with ``Path: /skills/<name>``."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+        pack = tmp_path / "pack"
+        pack.mkdir()
+        self._make_skill(pack, "alpha", description="first")
+        self._make_skill(pack, "beta", description="second")
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+        ):
+            result = skill_manager.invoke({"action": "install", "source": str(pack)})
+
+        assert "Successfully installed skill: alpha" in result
+        assert "Successfully installed skill: beta" in result
+        assert "Path: /skills/alpha" in result
+        assert "Path: /skills/beta" in result
+        # Same leak guard as ``test_install_single_omits_host_path``: batch
+        # returns must not surface any host path either. Cover every dir the
+        # install might resolve to.
+        assert str(tmp_path) not in result
+
+    def test_install_batch_all_fail_returns_error_list(self, tmp_path):
+        """Batch install where every skill fails must not KeyError on the
+        missing top-level ``error`` field.
+
+        Pre-fix behavior: ``result['error']`` crashed because
+        ``_batch_install_local`` returns ``{"success": False, "batch": True,
+        "installed": [], "failed": [{"name": ..., "error": ...}]}`` with no
+        top-level ``error`` key. This test pins the guard.
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+
+        batch_result = {
+            "success": False,
+            "batch": True,
+            "installed": [],
+            "failed": [
+                {"name": "broken-a", "error": "corrupt frontmatter"},
+                {"name": "broken-b", "error": "missing SKILL.md"},
+            ],
+        }
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch(
+                "EvoScientist.tools.skills_manager.install_skill",
+                return_value=batch_result,
+            ),
+        ):
+            result = skill_manager.invoke(
+                {"action": "install", "source": "some/source"}
+            )
+
+        # No KeyError, and every failure surfaced.
+        assert "broken-a" in result
+        assert "corrupt frontmatter" in result
+        assert "broken-b" in result
+        assert "missing SKILL.md" in result
+
+    def test_install_batch_partial_fail_surfaces_both(self, tmp_path):
+        """Batch install with partial failure lists successes AND failures.
+
+        Pre-fix behavior: partial failures were silently dropped; only the
+        success blocks reached the agent.
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        global_dir = tmp_path / "global-empty"
+        global_dir.mkdir()
+
+        partial_result = {
+            "success": True,
+            "batch": True,
+            "installed": [
+                {
+                    "name": "worked",
+                    "path": str(workspace_dir / "worked"),
+                    "description": "installed cleanly",
+                },
+            ],
+            "failed": [
+                {"name": "broken", "error": "corrupt frontmatter"},
+            ],
+        }
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
+            patch(
+                "EvoScientist.tools.skills_manager.install_skill",
+                return_value=partial_result,
+            ),
+        ):
+            result = skill_manager.invoke(
+                {"action": "install", "source": "some/source"}
+            )
+
+        assert "Successfully installed skill: worked" in result
+
+        assert "Path: /skills/worked" in result
+        assert "broken" in result
+        assert "corrupt frontmatter" in result

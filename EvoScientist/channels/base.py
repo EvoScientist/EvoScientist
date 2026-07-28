@@ -7,6 +7,7 @@ This module defines the Channel interface that all messaging channels
 import asyncio
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -17,10 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import MEDIA_DIR
+from ..runtime import AsyncRuntime
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
 from .debug import TraceMixin, debug_trace_enabled
 from .formatter import UnifiedFormatter
+from .interaction import is_slash_command
 from .plugin import ChannelMeta, ChannelPlugin
 
 _logger = logging.getLogger(__name__)
@@ -298,6 +301,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             maxsize=queue_maxsize
         )
         self._running = False
+        self._startup_event = threading.Event()
+        self._startup_error: str | None = None
 
         # Global tracing can be enabled via shared config/env even when
         # individual channel factories have not been updated yet.
@@ -923,34 +928,27 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             return None
         return self._raw_to_inbound(current)
 
-    def _build_inbound(self, raw: RawIncoming) -> InboundMessage | None:
+    def _build_inbound(
+        self,
+        raw: RawIncoming,
+        *,
+        runtime: AsyncRuntime | None = None,
+    ) -> InboundMessage | None:
         """Run *raw* through inbound middlewares and convert to InboundMessage.
 
-        Synchronous wrapper around :meth:`_build_inbound_async`.  When an
-        event loop is already running, the coroutine is scheduled on that
-        loop via :func:`asyncio.run_coroutine_threadsafe` to avoid
-        thread-safety issues with middleware state (DedupCache,
-        GroupHistoryBuffer, etc.).
+        Compatibility wrapper for synchronous integrations. Internal channel
+        implementations should await :meth:`_build_inbound_async` on their
+        transport loop. A caller may provide its application runtime to reuse
+        that owner; otherwise a runtime is scoped to this call.
+
+        This method deliberately rejects callers already running an event
+        loop. Blocking such a loop while scheduling the coroutine back onto it
+        deadlocks; async callers must await :meth:`_build_inbound_async`.
         """
-        import asyncio
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._build_inbound_async(raw),
-                loop,
-            )
-            return future.result()
-        else:
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(self._build_inbound_async(raw))
-            finally:
-                new_loop.close()
+        if runtime is None:
+            with AsyncRuntime(thread_name="evosci-channel-adapter-runtime") as owned:
+                return self._build_inbound(raw, runtime=owned)
+        return runtime.run_sync(lambda: self._build_inbound_async(raw))
 
     def _raw_to_inbound(self, raw: RawIncoming) -> InboundMessage | None:
         """Convert a RawIncoming to InboundMessage (pure transformation, no filtering).
@@ -1054,6 +1052,43 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Buffer *msg* with debounce, then publish to bus."""
         sender = msg.sender_id
 
+        if self._on_activity:
+            try:
+                self._on_activity(sender, "received")
+            except Exception:
+                pass
+
+        # Slash commands are control messages, not prompt fragments. Flush any
+        # prompt already waiting for this sender, then publish the command as
+        # its own message so either arrival order cannot newline-merge them.
+        if is_slash_command(msg.content) and self._bus:
+            # A flush removes itself from this mapping before awaiting the bus
+            # publish.  Therefore a task still present here has not detached
+            # its buffered payload yet and is safe to cancel; an in-flight,
+            # backpressured publish is deliberately left alone.
+            debounce_task = self._debounce_tasks.pop(sender, None)
+            if debounce_task is not None:
+                debounce_task.cancel()
+                try:
+                    await debounce_task
+                except asyncio.CancelledError:
+                    # Awaiting a cancelled child normally raises here with no
+                    # cancellation pending on this task.  If our caller also
+                    # cancelled queue_message(), preserve that outer signal.
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
+                        raise
+            try:
+                await self._process_buffered_messages(sender)
+            except Exception:
+                _logger.error(
+                    f"{self.name} buffered-prompt flush failed for {sender}; "
+                    "publishing the command anyway",
+                    exc_info=True,
+                )
+            await self._bus.publish_inbound(msg)
+            return
+
         if sender not in self._message_buffers:
             self._message_buffers[sender] = []
             self._message_metadata[sender] = msg.metadata
@@ -1065,12 +1100,6 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             self._message_ids[sender] = msg.message_id
         if msg.media:
             self._message_media[sender].extend(msg.media)
-
-        if self._on_activity:
-            try:
-                self._on_activity(sender, "received")
-            except Exception:
-                pass
 
         if sender in self._debounce_tasks:
             self._debounce_tasks[sender].cancel()
@@ -1086,8 +1115,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             await asyncio.sleep(_w)
             try:
                 await self._process_buffered_messages(_s)
-            except Exception as e:
-                _logger.error(f"{self.name} debounce flush error for {_s}: {e}")
+            except Exception:
+                _logger.error(
+                    f"{self.name} debounce flush error for {_s}", exc_info=True
+                )
 
         self._debounce_tasks[sender] = asyncio.create_task(debounce_callback())
 
@@ -1167,16 +1198,25 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Run the channel with auto-reconnect (exponential backoff)."""
         backoff = 1.0
         max_backoff = 60.0
+        self._startup_event.clear()
+        self._startup_error = None
         self._running = True
         while self._running:
             try:
                 await self.start()
+                self._startup_error = None
+                self._startup_event.set()
                 backoff = 1.0
                 async for msg in self.receive():
                     await self.queue_message(msg)
             except asyncio.CancelledError:
+                if not self._startup_event.is_set():
+                    self._startup_error = "startup cancelled"
+                    self._startup_event.set()
                 break
             except ChannelError as e:
+                self._startup_error = str(e)
+                self._startup_event.set()
                 self._trace_event(
                     "channel_fatal_error",
                     error_type=type(e).__name__,
@@ -1203,6 +1243,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 _logger.info(f"Reconnecting {self.name} in {backoff:.1f}s...")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+
+        if not self._startup_event.is_set():
+            self._startup_error = "channel stopped before startup completed"
+            self._startup_event.set()
 
     # ── Channel allow-list check ─────────────────────────────────────
 

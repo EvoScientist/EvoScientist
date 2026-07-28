@@ -1,6 +1,7 @@
 """Tests for EvoScientist/stream/events.py helpers."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from deepagents import create_deep_agent
@@ -26,6 +27,7 @@ from tests.stream_v3_fakes import (
     FakeV3Agent,
     HangingV3Agent,
     SubscriptionSensitiveV3Agent,
+    async_iter,
     collect_events,
     message_delta,
     message_finish,
@@ -410,14 +412,53 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selector_reasoning_delta_is_suppressed(self):
         """Selector reasoning must not appear as main-agent thinking."""
-        import EvoScientist.middleware.tool_selector as selector_mod
+        from EvoScientist.stream.sink import SessionEventSink
 
-        original_active = selector_mod._selector_active
-        selector_mod._selector_active = True
-        try:
-            agent = FakeV3Agent(
-                [
-                    protocol_event(
+        sink = SessionEventSink()
+        sink.on_tool_selection_started(30)  # selector call in flight
+        agent = FakeV3Agent(
+            [
+                protocol_event(
+                    "messages",
+                    (
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "reasoning-delta",
+                                "reasoning": "selector-only thought",
+                            },
+                        },
+                        {},
+                    ),
+                )
+            ]
+        )
+        events = await collect_events(agent, events=sink)
+
+        assert not any(
+            e.get("type") == "thinking" and e.get("content") == "selector-only thought"
+            for e in events
+        )
+
+    async def test_default_run_scoped_sink_suppresses_selector_reasoning(self):
+        """Default main-agent middleware reports into the current stream sink."""
+        from EvoScientist.middleware.events import RunScopedEventSink
+
+        middleware_events = RunScopedEventSink()
+
+        class Run:
+            def __init__(self):
+                self.subagents = async_iter([])
+                self.aborted = False
+
+            def __aiter__(self):
+                return self._iter_events()
+
+            async def _iter_events(self):
+                middleware_events.on_tool_selection_started(30)
+                try:
+                    yield protocol_event(
                         "messages",
                         (
                             {
@@ -425,38 +466,134 @@ class TestV3ProtocolStreaming:
                                 "index": 0,
                                 "delta": {
                                     "type": "reasoning-delta",
-                                    "reasoning": "selector-only thought",
+                                    "reasoning": "default selector thought",
                                 },
                             },
                             {},
                         ),
                     )
-                ]
-            )
-            events = await collect_events(agent)
-        finally:
-            selector_mod._selector_active = original_active
+                finally:
+                    middleware_events.on_tool_selection_ended()
+
+            async def abort(self):
+                self.aborted = True
+
+        class Agent:
+            async def aget_state(self, _config):
+                return SimpleNamespace(values={})
+
+            def astream_events(self, *_args, **_kwargs):
+                return Run()
+
+        events = await collect_events(Agent())
 
         assert not any(
-            e.get("type") == "thinking" and e.get("content") == "selector-only thought"
+            e.get("type") == "thinking"
+            and e.get("content") == "default selector thought"
             for e in events
         )
 
+    @pytest.mark.filterwarnings(
+        "ignore:The v3 streaming protocol on Pregel is experimental"
+    )
+    async def test_sync_middleware_event_reaches_bound_stream_sink_via_executor(self):
+        """LangChain executor context carries the active stream binding."""
+        from langchain.agents.middleware.types import AgentMiddleware
+        from langchain_core.runnables.config import run_in_executor
+
+        from EvoScientist.middleware.events import RunScopedEventSink
+        from EvoScientist.stream.sink import SessionEventSink
+
+        class SyncSelectionProbeMiddleware(AgentMiddleware):
+            name = "sync_selection_probe"
+
+            def __init__(self):
+                super().__init__()
+                self.called = False
+                self.events = RunScopedEventSink()
+
+            def wrap_model_call(self, request, handler):
+                self.called = True
+                self.events.on_tool_selection_started(2)
+                self.events.on_tool_selection(["probe_tool"], 2)
+                try:
+                    return handler(request)
+                finally:
+                    self.events.on_tool_selection_ended()
+
+        middleware = SyncSelectionProbeMiddleware()
+        sink = SessionEventSink()
+        inner_agent = create_deep_agent(
+            model=_ToolCallingFakeModel(responses=[AIMessage(content="inner answer")]),
+            tools=[],
+            system_prompt="Answer directly.",
+            middleware=[middleware],
+        )
+
+        class ExecutorBackedAgent:
+            async def aget_state(self, _config):
+                return SimpleNamespace(values={})
+
+            def astream_events(self, astream_input, config, **_kwargs):
+                return ExecutorBackedRun(astream_input, config)
+
+        class ExecutorBackedRun:
+            def __init__(self, astream_input, config):
+                self._astream_input = astream_input
+                self._config = config
+                self.subagents = async_iter([])
+
+            def __aiter__(self):
+                return self._iter_events()
+
+            async def _iter_events(self):
+                await run_in_executor(
+                    None,
+                    lambda: inner_agent.invoke(
+                        self._astream_input,
+                        config=self._config,
+                    ),
+                )
+                yield protocol_event(
+                    "messages", (AIMessage(content="final answer"), {})
+                )
+
+            async def abort(self):
+                pass
+
+        agent = ExecutorBackedAgent()
+
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent,
+                "answer",
+                "live-deepagents-sync-contextvar",
+                events=sink,
+            )
+        ]
+
+        assert middleware.called is True
+        assert any(
+            event.get("type") == "done" and event.get("content") == "final answer"
+            for event in events
+        )
+        assert sink.tool_selection_active is False
+        assert sink.tool_selection_pending() is True
+        assert sink.consume_tool_selection() == (True, ["probe_tool"])
+
     async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
-        import EvoScientist.middleware.tool_selector as selector_mod
+        from EvoScientist.stream.sink import SessionEventSink
 
-        original_active = selector_mod._selector_active
-        selector_mod._selector_active = True
-        try:
-            message = AIMessage(
-                additional_kwargs={"reasoning_content": "selector whole thought"},
-                content="",
-            )
-            agent = FakeV3Agent([protocol_event("messages", (message, {}))])
-            events = await collect_events(agent)
-        finally:
-            selector_mod._selector_active = original_active
+        sink = SessionEventSink()
+        sink.on_tool_selection_started(30)
+        message = AIMessage(
+            additional_kwargs={"reasoning_content": "selector whole thought"},
+            content="",
+        )
+        agent = FakeV3Agent([protocol_event("messages", (message, {}))])
+        events = await collect_events(agent, events=sink)
 
         assert not any(
             e.get("type") == "thinking" and e.get("content") == "selector whole thought"
@@ -779,32 +916,25 @@ class TestV3ProtocolStreaming:
 
     async def test_tool_selection_flushes_before_tool_only_step(self):
         """Selector UI event is emitted even when selection is followed only by a tool."""
-        import EvoScientist.middleware.tool_selector as selector_mod
+        from EvoScientist.stream.sink import SessionEventSink
 
-        original_selected = selector_mod._current_selected_tools
-        original_total = selector_mod._total_tools_count
-        original_last = selector_mod._last_emitted_tools
-        selector_mod._current_selected_tools = ["read_file"]
-        selector_mod._total_tools_count = 3
-        selector_mod._last_emitted_tools = []
-        try:
-            output = ToolMessage(
-                content="File content",
-                name="read_file",
-                tool_call_id="tc1",
-            )
-            agent = FakeV3Agent(
-                [
-                    message_delta('{"tools":["read_file"]}'),
-                    tool_started("read_file", {"path": "notes.txt"}),
-                    tool_finished(output),
-                ]
-            )
-            events = await collect_events(agent)
-        finally:
-            selector_mod._current_selected_tools = original_selected
-            selector_mod._total_tools_count = original_total
-            selector_mod._last_emitted_tools = original_last
+        # The frontend sink holds a pending selection (1 of 3 tools) — the
+        # suppressor must surface it before the tool-only step.
+        sink = SessionEventSink()
+        sink.on_tool_selection(["read_file"], 3)
+        output = ToolMessage(
+            content="File content",
+            name="read_file",
+            tool_call_id="tc1",
+        )
+        agent = FakeV3Agent(
+            [
+                message_delta('{"tools":["read_file"]}'),
+                tool_started("read_file", {"path": "notes.txt"}),
+                tool_finished(output),
+            ]
+        )
+        events = await collect_events(agent, events=sink)
 
         event_types = [e["type"] for e in events]
         assert event_types.index("tool_selection") < event_types.index("tool_call")

@@ -138,3 +138,29 @@ async def test_handle_session_resume_distinguishes_non_displayable_messages():
     ]
     text = _sent_text(bus_ref)
     assert "No displayable messages in this session." in text
+
+
+class TestSentToChannelFlag:
+    async def test_starts_false(self):
+        ui, _ = _make_ui(thread_store=FakeThreadStore())
+        assert ui.sent_to_channel is False
+
+    async def test_flush_of_empty_buffer_keeps_flag_false(self, monkeypatch):
+        ui, _ = _make_ui(thread_store=FakeThreadStore())
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr("EvoScientist.cli.channel._bus_loop", loop)
+        await ui.flush()
+        assert ui.sent_to_channel is False
+
+    async def test_flush_with_output_sets_flag(self, monkeypatch):
+        bus = SimpleNamespace(publish_outbound=AsyncMock())
+        ui, _ = _make_ui(thread_store=FakeThreadStore(), bus_ref=bus)
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr("EvoScientist.cli.channel._bus_loop", loop)
+        ui.append_system("hello")
+        await ui.flush()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert ui.sent_to_channel is True
+        outbound = bus.publish_outbound.await_args.args[0]
+        assert outbound.failure_notice == "Command output could not be delivered."

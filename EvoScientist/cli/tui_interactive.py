@@ -11,6 +11,7 @@ import logging
 import queue
 import random
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,11 +54,11 @@ from .channel import (
     ChannelMessage,
     _auto_start_channel,
     _channels_is_running,
-    _channels_running_list,
     _channels_stop,
     _message_queue,
     _set_channel_response,
     dispatch_channel_slash_command,
+    get_channel_startup_results,
 )
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .history_suggester import HistorySuggester
@@ -77,6 +78,9 @@ from .status_bar import (
     make_usage_status_snapshot,
 )
 
+if TYPE_CHECKING:
+    from ..runtime import AsyncRuntime
+
 _channel_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -90,6 +94,45 @@ def _shorten_path(path: str) -> str:
     from .agent import _shorten_path as _sp
 
     return _sp(path)
+
+
+async def _auto_start_channel_in_worker(
+    agent: Any,
+    thread_id: str,
+    config: Any,
+    *,
+    send_thinking: bool,
+    runtime: Any,
+    stop_requested: threading.Event,
+) -> list[tuple[str, bool, str]]:
+    """Run blocking channel startup without occupying the TUI event loop."""
+
+    def _start() -> list[tuple[str, bool, str]]:
+        try:
+            return _auto_start_channel(
+                agent,
+                thread_id,
+                config,
+                send_thinking=send_thinking,
+                runtime=runtime,
+            )
+        finally:
+            if stop_requested.is_set():
+                _channels_stop(runtime=runtime)
+
+    worker = asyncio.create_task(asyncio.to_thread(_start))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        stop_requested.set()
+        try:
+            await worker
+        except Exception:
+            _channel_logger.debug(
+                "Channel startup worker failed during cancellation",
+                exc_info=True,
+            )
+        raise
 
 
 def _build_welcome_banner(
@@ -220,6 +263,9 @@ async def _sync_tui_command_completion(
     cmd: Command,
 ) -> None:
     """Adopt successful command-side state changes back into the TUI app."""
+    if app._exiting:
+        return
+
     agent_swapped = ctx.agent is not None and ctx.agent is not original_agent
     if agent_swapped:
         from ..EvoScientist import _ensure_config
@@ -273,6 +319,159 @@ def _stopped_response_after_narration(
     return display_current, display_stopped, full_stopped
 
 
+# (kind, payload, item_index): kind is "header"/"sep"/"item"; payload is the
+# category name for headers or the candidate for items; item_index is the
+# candidate's position in the source list (-1 for non-item rows).
+_CompletionRow = tuple[str, Any, int]
+
+
+def _build_completion_rows(items: list[Any]) -> list[_CompletionRow]:
+    """Flatten completion candidates into render rows with category headers."""
+    rows: list[_CompletionRow] = []
+    last_cat = ""
+    for i, candidate in enumerate(items):
+        cat = getattr(candidate, "category", "")
+        if cat and cat != last_cat:
+            if last_cat:
+                rows.append(("sep", "", -1))
+            rows.append(("header", cat, -1))
+            last_cat = cat
+        rows.append(("item", candidate, i))
+    return rows
+
+
+def _window_completion_rows(
+    rows: list[_CompletionRow],
+    selected: int,
+    max_rows: int,
+) -> tuple[list[_CompletionRow], int, int]:
+    """Slice *rows* to a window of at most *max_rows* total display lines.
+
+    The window always contains the selected item (top of the list when
+    nothing is selected) and reserves one line per overflow indicator.
+    Returns ``(visible_rows, hidden_items_above, hidden_items_below)``.
+    """
+    max_rows = max(max_rows, 5)
+    if len(rows) <= max_rows:
+        return list(rows), 0, 0
+
+    sel_row = 0
+    if selected >= 0:
+        for r, (kind, _payload, idx) in enumerate(rows):
+            if kind == "item" and idx == selected:
+                sel_row = r
+                break
+
+    # Center the selection; centering keeps it clear of the indicator
+    # lines that replace the window's edge rows when content is clipped.
+    start = min(max(sel_row - max_rows // 2, 0), len(rows) - max_rows)
+    end = start + max_rows
+    content_start = start + (1 if start > 0 else 0)
+    content_end = end - (1 if end < len(rows) else 0)
+
+    above = sum(1 for kind, _p, _i in rows[:content_start] if kind == "item")
+    below = sum(1 for kind, _p, _i in rows[content_end:] if kind == "item")
+    return rows[content_start:content_end], above, below
+
+
+def _render_completion_text(items: list[Any], selected: int, max_rows: int) -> Text:
+    """Render the completion popup content bounded to *max_rows* lines."""
+    rows = _build_completion_rows(items)
+    visible, above, below = _window_completion_rows(rows, selected, max_rows)
+
+    # Blank separator lines are cosmetic — drop them at the window edges.
+    while visible and visible[0][0] == "sep":
+        visible = visible[1:]
+    while visible and visible[-1][0] == "sep":
+        visible = visible[:-1]
+
+    lines: list[Text] = []
+    if above:
+        lines.append(Text(f"   ↑ {above} more", style="dim italic"))
+    for kind, payload, idx in visible:
+        if kind == "sep":
+            lines.append(Text())
+        elif kind == "header":
+            lines.append(Text(f" {payload}", style="bold #6b7280"))
+        elif idx == selected:
+            lines.append(
+                Text.assemble(
+                    ("  ▸ ", "bold"),
+                    (f"{payload.text:<28}", "bold"),
+                    (payload.description, "bold"),
+                )
+            )
+        else:
+            lines.append(
+                Text.assemble(
+                    ("    ", "#888888"),
+                    (f"{payload.text:<28}", "#888888"),
+                    (payload.description, "#888888"),
+                )
+            )
+    if below:
+        lines.append(Text(f"   ↓ {below} more", style="dim italic"))
+    return Text("\n").join(lines)
+
+
+# Hard cap on popup lines so the popup never dwarfs the chat area
+# (mainstream CLI behavior); matches the pre-#354 max-height.
+_COMPLETION_MAX_VISIBLE_ROWS = 15
+# Rows kept free for the input row, status bar and a slice of chat. On
+# terminals shorter than ~17 rows the 5-row floor wins over this
+# reservation — a smaller popup would be unusable.
+_COMPLETION_RESERVED_ROWS = 12
+
+
+def _completion_row_budget(height: int) -> int:
+    """Popup line budget for a terminal of *height* rows."""
+    if height <= 0:
+        return _COMPLETION_MAX_VISIBLE_ROWS
+    return max(5, min(height - _COMPLETION_RESERVED_ROWS, _COMPLETION_MAX_VISIBLE_ROWS))
+
+
+# Textual converts rich Text to Content and drops rich no_wrap/overflow
+# attributes, so line cropping must be enforced here in CSS.
+_COMPLETIONS_CSS = """
+#completions {
+    display: none;
+    height: auto;
+    background: #1e1f26;
+    padding: 0 1;
+    border-bottom: solid #0284c7;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+"""
+
+
+def _normalize_chat_scroll(container: Any) -> None:
+    """Repair the chat scroll state after the popup resized the viewport.
+
+    Textual's compositor recomputes ``scroll_y`` for anchored containers
+    bypassing the validator, so when the popup hides and the content fits
+    again, ``scroll_y`` can go negative — the scrollbar then renders as if
+    scrolled to the bottom while the content sits at the top (issue #301
+    family). Runs after refresh so sizes are current.
+    """
+    # force=True: with the content fitting, the scrollbar is hidden and
+    # allow_vertical_scroll is False — an unforced scroll_home would
+    # silently no-op and leave the negative scroll_y in place.
+    if container.is_anchored:
+        if container.max_scroll_y <= 0:
+            container.anchor(False)
+            container.scroll_home(animate=False, immediate=True, force=True)
+    elif container.scroll_y < 0:
+        container.scroll_home(animate=False, immediate=True, force=True)
+    # Resync the scrollbar thumb: watch_scroll_y skips the update while
+    # the scrollbar is hidden (or when the compositor wrote scroll_y via
+    # set_reactive), so a stale position survives until the scrollbar
+    # reappears — rendering as "scrolled to bottom" at the top.
+    scrollbar = getattr(container, "vertical_scrollbar", None)
+    if scrollbar is not None and scrollbar.position != container.scroll_y:
+        scrollbar.position = container.scroll_y
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -287,6 +486,7 @@ def run_textual_interactive(
     load_agent: Callable[..., Any],
     create_session_workspace: Callable[[str | None], str],
     config: Any | None = None,
+    async_runtime: AsyncRuntime | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop."""
     if config is None:
@@ -294,7 +494,15 @@ def run_textual_interactive(
 
         config = get_effective_config()
 
-    runtime_gateways = create_runtime_gateways()
+    # One frontend event sink for the whole TUI session — injected into the
+    # agent's middleware (write side) and the local gateway's streaming path
+    # (read side). The fallback-notice display is bound to the App's
+    # _append_system once the App exists (on_mount); tool-selection needs no
+    # display hook (its widget is mounted from the stream event).
+    from ..stream.sink import SessionEventSink
+
+    event_sink = SessionEventSink()
+    runtime_gateways = create_runtime_gateways(events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
 
     try:
@@ -333,7 +541,8 @@ def run_textual_interactive(
         def supports_interactive(self) -> bool:
             return True
 
-        CSS = """
+        CSS = (
+            """
         Screen {
             layout: vertical;
             background: #16161a;
@@ -385,14 +594,9 @@ def run_textual_interactive(
             padding: 0 2;
             color: #9ca3af;
         }
-        #completions {
-            display: none;
-            height: auto;
-            max-height: 15;
-            background: #1e1f26;
-            padding: 0 1;
-            border-bottom: solid #0284c7;
-        }
+        """
+            + _COMPLETIONS_CSS
+            + """
         #status {
             height: 1;
             min-height: 1;
@@ -401,6 +605,7 @@ def run_textual_interactive(
             padding: 0 1;
         }
         """
+        )
         BINDINGS: ClassVar[list[Binding]] = [
             Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
             Binding("ctrl+v", "paste_clipboard", "Paste", show=False),
@@ -438,7 +643,8 @@ def run_textual_interactive(
             self._resumed = resumed
             self._resume_warning = resume_warning
             self._channel_timer: Any = None
-            self._started_channel_types: list[str] = []
+            self._channel_start_results: list[tuple[str, bool, str]] = []
+            self._channel_start_stop = threading.Event()
             self._busy = False
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
@@ -449,6 +655,7 @@ def run_textual_interactive(
             ] = []  # queued messages to send after current turn
             self._comp_items: list = []
             self._comp_index: int = -1
+            self._comp_last_height: int = 0
             self._comp_base: str = ""
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
@@ -465,6 +672,7 @@ def run_textual_interactive(
 
             self._channel_runtime = ChannelRuntime()
             self._quit_pending: bool = False
+            self._exiting: bool = False
             self._current_model: str | None = model
             self._current_provider: str | None = provider
             self._status_started_at = datetime.now()
@@ -516,6 +724,7 @@ def run_textual_interactive(
             self._agent_loader.start(
                 workspace_dir=workspace,
                 checkpointer=self._checkpointer,
+                events=self._runtime_gateways.graph_gateway.events,
             )
 
         def _mount_mcp_loader_widget(self) -> None:
@@ -794,11 +1003,13 @@ def run_textual_interactive(
             yield Static("", id="status")
 
         def on_mount(self) -> None:
-            # Register fallback middleware UI callback so messages appear
-            # as SystemMessage widgets in the chat container.
-            from ..middleware.model_fallback import set_ui_emit
-
-            set_ui_emit(lambda text, style: self._append_system(text, style))
+            # Bind the session sink's fallback-notice display so model-fallback
+            # messages appear as SystemMessage widgets in the chat container.
+            # ``event_sink`` is the concrete SessionEventSink created by the
+            # enclosing factory — the same instance the gateway carries.
+            event_sink.set_fallback_display(
+                lambda text, style: self._append_system(text, style)
+            )
 
             self._render_welcome()
             self._render_status()
@@ -850,11 +1061,22 @@ def run_textual_interactive(
                         exc_info=True,
                     )
                     return
-                self._start_channels()
+                await self._start_channels()
 
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
             ch_task.add_done_callback(self._background_tasks.discard)
+
+        def on_resize(self, event: Any) -> None:
+            """Re-window the completion popup for the new terminal height."""
+            try:
+                comp_widget = self.query_one("#completions", Static)
+            except Exception:
+                return
+            if comp_widget.display and self._comp_items:
+                # Deferred: this handler can run before the base App
+                # handler updates self.size with the new dimensions.
+                self.call_after_refresh(self._render_completions)
 
         # ── Update check ──────────────────────────────────────
 
@@ -877,28 +1099,46 @@ def run_textual_interactive(
 
         # ── Channel integration ────────────────────────────────
 
-        def _start_channels(self) -> None:
+        async def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
             try:
                 from ..config import load_config
 
-                cfg = load_config()
+                cfg = await asyncio.to_thread(load_config)
                 if cfg and cfg.channel_enabled and not _channels_is_running():
-                    _auto_start_channel(
+                    results = await _auto_start_channel_in_worker(
                         self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
                         send_thinking=self._channel_send_thinking,
                         runtime=self._channel_runtime,
+                        stop_requested=self._channel_start_stop,
                     )
-                    types = [
-                        t.strip() for t in cfg.channel_enabled.split(",") if t.strip()
-                    ]
-                    self._started_channel_types = types
+                    if self._exiting:
+                        return
+                    current_agent = self._agent_loader.agent
+                    if current_agent is not None and _channels_is_running():
+                        self._channel_runtime.bind(
+                            current_agent,
+                            self._conversation_tid,
+                        )
+                    self._channel_start_results = results
                     self._render_welcome()
+            except asyncio.CancelledError:
+                self._channel_start_stop.set()
+                raise
             except Exception as e:
                 _channel_logger.debug(f"Channel auto-start failed: {e}")
-            self._channel_timer = self.set_interval(0.1, self._poll_channel_queue)
+            finally:
+                if (
+                    not self._exiting
+                    and not self._channel_start_stop.is_set()
+                    and self._channel_timer is None
+                ):
+                    self._channel_timer = self.set_interval(
+                        0.1,
+                        self._poll_channel_queue,
+                    )
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
@@ -1075,7 +1315,9 @@ def run_textual_interactive(
             go negative and pushes the welcome banner out of view (issue #301).
             """
             container.anchor(False)
-            container.scroll_home(animate=False, immediate=True)
+            # force=True: with content fitting, the scrollbar is hidden and
+            # allow_vertical_scroll is False — unforced scroll_home no-ops.
+            container.scroll_home(animate=False, immediate=True, force=True)
 
         def _append_system(self, text: str, style: str = "dim") -> None:
             """Mount a SystemMessage widget into #chat."""
@@ -1125,7 +1367,7 @@ def run_textual_interactive(
             Returns the ``ApprovalWidget.Decided`` message, or ``None`` on
             timeout / cancellation.
             """
-            self._approval_future = asyncio.get_event_loop().create_future()
+            self._approval_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._approval_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1171,7 +1413,7 @@ def run_textual_interactive(
 
             Returns the selected thread_id, or ``None`` on cancel/timeout.
             """
-            self._picker_future = asyncio.get_event_loop().create_future()
+            self._picker_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._picker_future, timeout=120)
             except (TimeoutError, asyncio.CancelledError):
@@ -1199,7 +1441,7 @@ def run_textual_interactive(
 
             Returns list of install sources, or None on cancel/timeout.
             """
-            self._browser_future = asyncio.get_event_loop().create_future()
+            self._browser_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._browser_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1226,7 +1468,7 @@ def run_textual_interactive(
 
         async def _wait_for_mcp_browse(self, browser_widget) -> list | None:
             """Wait for user to complete MCP server browsing."""
-            self._mcp_browser_future = asyncio.get_event_loop().create_future()
+            self._mcp_browser_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._mcp_browser_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1254,7 +1496,7 @@ def run_textual_interactive(
 
             Returns ``(name, provider)`` or ``None`` on cancel/timeout.
             """
-            self._model_picker_future = asyncio.get_event_loop().create_future()
+            self._model_picker_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._model_picker_future, timeout=120)
             except (TimeoutError, asyncio.CancelledError):
@@ -1316,6 +1558,7 @@ def run_textual_interactive(
             """
             from ..stream.display import (
                 is_stream_cancel_requested,
+                iter_with_stream_cancel,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1542,16 +1785,21 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     _anchor_engaged = False
-                    async for event in graph_gateway.stream_events(
-                        RunRequest(
-                            message=_stream_input,
-                            thread_id=thread_id_override or self._conversation_tid,
-                            metadata=metadata,
-                            target=GraphTarget(
-                                local_graph=agent,
-                                workspace_dir=self._workspace_dir,
-                            ),
-                        )
+                    async for event in iter_with_stream_cancel(
+                        graph_gateway.stream_events(
+                            RunRequest(
+                                message=_stream_input,
+                                thread_id=(
+                                    thread_id_override or self._conversation_tid
+                                ),
+                                metadata=metadata,
+                                target=GraphTarget(
+                                    local_graph=agent,
+                                    workspace_dir=self._workspace_dir,
+                                ),
+                            )
+                        ),
+                        cancel_scope,
                     ):
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
@@ -2142,6 +2390,11 @@ def run_textual_interactive(
             cancelled = False
             response = ""
             try:
+                # Foreground turns share the legacy default scope. Reset it at
+                # the turn boundary; scoped channel stop requests remain armed.
+                from ..stream.display import clear_stream_cancel
+
+                clear_stream_cancel()
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
@@ -2176,6 +2429,17 @@ def run_textual_interactive(
                 )
             except asyncio.CancelledError:
                 cancelled = True
+                try:
+                    from ..middleware.code_interpreter import (
+                        aclose_code_interpreters,
+                    )
+
+                    await aclose_code_interpreters()
+                except Exception:
+                    _channel_logger.debug(
+                        "code interpreter cleanup after cancellation failed",
+                        exc_info=True,
+                    )
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._busy = False
@@ -2309,6 +2573,7 @@ def run_textual_interactive(
                     on_cmd_completed=self._on_channel_cmd_completed,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
                 if _slash_handled:
                     # A channel-issued /new or /resume rotates the thread in
@@ -2784,30 +3049,36 @@ def run_textual_interactive(
         def _hide_completions(self) -> None:
             self._comp_items = []
             self._comp_index = -1
-            self.query_one("#completions", Static).display = False
+            self._comp_last_height = 0
+            comp_widget = self.query_one("#completions", Static)
+            was_visible = comp_widget.display
+            comp_widget.display = False
+            # Called on every ordinary input change — only a popup that was
+            # actually visible changed the chat viewport.
+            if was_visible:
+                self.call_after_refresh(self._normalize_chat_after_popup)
+
+        def _completion_max_rows(self) -> int:
+            return _completion_row_budget(int(getattr(self.size, "height", 0) or 0))
 
         def _render_completions(self) -> None:
-            comp_text = Text()
-            last_cat = ""
-            for i, candidate in enumerate(self._comp_items):
-                cmd, desc = candidate.text, candidate.description
-                cat = getattr(candidate, "category", "")
-                if cat and cat != last_cat:
-                    if last_cat:
-                        comp_text.append("\n")
-                    comp_text.append(f" {cat}\n", style="bold #6b7280")
-                    last_cat = cat
-                if i == self._comp_index:
-                    comp_text.append("  \u25b8 ", style="bold")
-                    comp_text.append(f"{cmd:<28}", style="bold")
-                    comp_text.append(desc, style="bold")
-                else:
-                    comp_text.append("    ", style="#888888")
-                    comp_text.append(f"{cmd:<28}", style="#888888")
-                    comp_text.append(desc, style="#888888")
-                if i < len(self._comp_items) - 1:
-                    comp_text.append("\n")
+            comp_text = _render_completion_text(
+                self._comp_items, self._comp_index, self._completion_max_rows()
+            )
             self.query_one("#completions", Static).update(comp_text)
+            # Selection-only navigation keeps the height — skip the (cheap
+            # but per-keystroke) normalize unless the viewport can change.
+            n_lines = len(comp_text.plain.splitlines()) if comp_text.plain else 0
+            if n_lines != self._comp_last_height:
+                self._comp_last_height = n_lines
+                self.call_after_refresh(self._normalize_chat_after_popup)
+
+        def _normalize_chat_after_popup(self) -> None:
+            try:
+                container = self.query_one("#chat", VerticalScroll)
+            except Exception:
+                return
+            _normalize_chat_scroll(container)
 
         # ── Slash commands ─────────────────────────────────────
 
@@ -2847,6 +3118,7 @@ def run_textual_interactive(
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
 
                 if await cmd_manager.execute(command, ctx):
@@ -2864,8 +3136,9 @@ def run_textual_interactive(
                 self._render_status()
             finally:
                 self._busy = False
-                prompt_widget.disabled = False
-                prompt_widget.focus()
+                if not self._exiting:
+                    prompt_widget.disabled = False
+                    prompt_widget.focus()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -2970,13 +3243,13 @@ def run_textual_interactive(
 
         def _do_exit(self) -> None:
             """Clean up channels, unregister callbacks, and exit."""
-            from ..middleware.model_fallback import set_ui_emit
-
-            set_ui_emit(None)
+            self._exiting = True
+            self._channel_start_stop.set()
+            event_sink.set_fallback_display(None)
             if self._channel_timer is not None:
                 self._channel_timer.stop()
                 self._channel_timer = None
-            self._started_channel_types.clear()
+            self._channel_start_results.clear()
             if _channels_is_running():
                 try:
                     _channels_stop(runtime=self._channel_runtime)
@@ -2992,6 +3265,9 @@ def run_textual_interactive(
                     self._queued_messages.clear()
                     self._render_queue_indicator()
                 if self._run_task is not None and not self._run_task.done():
+                    from ..stream.display import request_stream_cancel
+
+                    request_stream_cancel()
                     self._run_task.cancel()
                 else:
                     # Edge case: busy but no task — force reset
@@ -3105,11 +3381,11 @@ def run_textual_interactive(
         def _render_welcome(self) -> None:
             channels_info: list[tuple[str, bool, str]] | None = None
             try:
-                running = _channels_running_list()
-                started = self._started_channel_types
-                if running or started:
-                    all_types = list(dict.fromkeys(running + started))
-                    channels_info = [(ct, True, "connected (bus)") for ct in all_types]
+                current = get_channel_startup_results()
+                if current:
+                    self._channel_start_results = current
+                if self._channel_start_results:
+                    channels_info = self._channel_start_results
                 else:
                     from ..config import load_config
 
@@ -3359,6 +3635,18 @@ def run_textual_interactive(
             finally:
                 from .resume_hint import print_resume_hint
 
+                try:
+                    from ..middleware.code_interpreter import (
+                        aclose_code_interpreters,
+                    )
+
+                    await aclose_code_interpreters()
+                except Exception:
+                    _channel_logger.debug(
+                        "code interpreter cleanup failed",
+                        exc_info=True,
+                    )
+
                 # Best-effort resume hint — guarded so failures here (e.g.
                 # DB teardown race during abnormal shutdown) cannot shadow
                 # the original run_async traceback.
@@ -3378,12 +3666,4 @@ def run_textual_interactive(
                 except Exception:
                     _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
-    import nest_asyncio  # type: ignore[import-untyped]
-
-    nest_asyncio.apply()
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(_amain())
+    asyncio.run(_amain())

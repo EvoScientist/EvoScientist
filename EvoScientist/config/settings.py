@@ -1,8 +1,9 @@
 """Configuration management for EvoScientist.
 
-Handles loading, saving, and merging configuration from multiple sources
-with the following priority (highest to lowest):
-    CLI arguments > Environment variables > Config file > Defaults
+Handles loading, saving, and merging configuration from multiple sources.
+See :func:`get_effective_config` for the authoritative priority chain —
+``EVOSCIENTIST_*`` shell values and third-party keys are treated
+asymmetrically with respect to workspace ``.env`` handling.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, get_type_hints
 
 import yaml
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
@@ -122,6 +123,16 @@ def get_config_path() -> Path:
 # =============================================================================
 # Configuration dataclass
 # =============================================================================
+
+# OpenRouter app-attribution defaults (issue #339). Single source of truth: the
+# EvoScientistConfig fields below default to these, and llm/models.py imports
+# them for its env-fallback, so the values never drift across the two layers.
+OPENROUTER_DEFAULT_HTTP_REFERER = "https://github.com/EvoScientist/EvoScientist"
+OPENROUTER_DEFAULT_APP_TITLE = "EvoScientist"
+# OpenRouter honors only the first 2 categories per request (server-side limit)
+# and silently ignores the rest, so keep the two most relevant ones. Chosen per
+# maintainer review — creative-writing is a less competitive marketplace group.
+OPENROUTER_DEFAULT_APP_CATEGORIES = "creative-writing,personal-agent"
 
 
 @dataclass
@@ -279,10 +290,21 @@ class EvoScientistConfig:
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
-    reasoning_effort: str = "high"
+    # Empty means use the provider/model default. A non-empty value is an
+    # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
+    reasoning_effort: str = ""
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
     openrouter_anthropic_prompt_cache: bool = True
+    # OpenRouter app attribution (issue #339). Sent only for the openrouter
+    # provider; identifies EvoScientist in OpenRouter's app rankings/analytics.
+    # Override (e.g. a private fork) via these fields or their env vars.
+    # Defaults live in the module constants above (also imported by llm/models.py).
+    openrouter_http_referer: str = OPENROUTER_DEFAULT_HTTP_REFERER
+    openrouter_app_title: str = OPENROUTER_DEFAULT_APP_TITLE
+    # Comma-separated; split into a list before being passed to
+    # langchain-openrouter (its app_categories kwarg expects list[str]).
+    openrouter_app_categories: str = OPENROUTER_DEFAULT_APP_CATEGORIES
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -763,6 +785,9 @@ _ENV_MAPPINGS = {
     "openrouter_anthropic_prompt_cache": (
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ),
+    "openrouter_http_referer": "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+    "openrouter_app_title": "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+    "openrouter_app_categories": "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
     "dangerous_mode": "EVOSCIENTIST_DANGEROUS_MODE",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
@@ -796,10 +821,33 @@ def get_effective_config(
     """Get effective configuration by merging all sources.
 
     Priority (highest to lowest):
-        1. CLI arguments (cli_overrides)
-        2. Environment variables
-        3. Config file
-        4. Defaults
+        1. CLI arguments (``cli_overrides``)
+        2. Parent-process environment variables for any ``EVOSCIENTIST_*`` key
+        3. ``.env`` file at (or above) the current working directory
+        4. Parent-process environment variables for everything else
+           (third-party API keys / base URLs, plus arbitrary unmapped keys)
+        5. Config file (``~/.config/evoscientist/config.yaml``)
+        6. Dataclass defaults
+
+    Rows 2 and 4 differ because ``.env`` values need different treatment
+    for our own namespaced config knobs vs third-party credentials.
+    Third-party keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ...)
+    follow the industry convention that ``.env`` is the per-project
+    credential store; extending shell-wins to them would silently flip
+    a workspace key back to a global ``.bashrc`` key. Our own
+    ``EVOSCIENTIST_*`` keys are the opposite: an explicit CLI/parent-
+    process value (e.g. the bind port that ``EvoSci deploy --port X``
+    hands to the langgraph dev subprocess) must not be shadowed by a
+    workspace ``.env``. We implement this by reading ``.env`` into a
+    dict via ``dotenv_values`` (no ``os.environ`` mutation), then
+    writing third-party keys unconditionally and ``EVOSCIENTIST_*`` keys
+    only when the shell doesn't already have a non-empty value.
+
+    Tradeoff: ``OPENAI_API_KEY=xxx evoscientist ...`` inline overrides
+    still lose to a workspace ``.env`` containing ``OPENAI_API_KEY``,
+    because the merge writes third-party keys from ``.env``
+    unconditionally. Users who need to override a ``.env``-defined
+    credential inline must edit or unset the ``.env`` entry.
 
     Args:
         cli_overrides: Dictionary of CLI argument overrides.
@@ -807,7 +855,34 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
-    load_dotenv(find_dotenv(usecwd=True), override=True)
+    # Merge workspace ``.env`` into ``os.environ`` without going through
+    # ``load_dotenv``. The previous snapshot → ``load_dotenv`` → restore
+    # sequence was a read-modify-write on ``os.environ`` that could race with
+    # concurrent ``get_effective_config`` calls in the langgraph dev subprocess
+    # (per-request threads in ``langgraph_dev/http.py``, ``sessions.py``
+    # checkpoint writes, memory workers): one thread's mid-flight ``.env``
+    # value could be re-captured by another as "parent env" and then restored
+    # last, promoting the ``.env`` value into the snapshot permanently.
+    #
+    # ``dotenv_values`` returns a dict without touching ``os.environ``, so the
+    # merge below is a pure write sequence and idempotent under interleaving.
+    # Third-party keys keep ``.env``-wins (industry convention).
+    # ``EVOSCIENTIST_*`` keys are our own namespaced config knobs where
+    # CLI/parent-process intent should stay authoritative — write from ``.env``
+    # only when the shell doesn't already have a non-empty value. Treating an
+    # empty shell value as "unset" matches the ``if env_value:`` truthy check
+    # in the ``_ENV_MAPPINGS`` loop below; without this, an empty parent export
+    # would silently regress vs main by falling through to file/defaults.
+    dotenv_path = find_dotenv(usecwd=True)
+    dotenv_map = dotenv_values(dotenv_path) if dotenv_path else {}
+    for env_key, env_value in dotenv_map.items():
+        if env_value is None:
+            continue  # bare ``FOO`` without ``=`` — nothing to write
+        if env_key.startswith("EVOSCIENTIST_"):
+            if not os.environ.get(env_key):
+                os.environ[env_key] = env_value
+        else:
+            os.environ[env_key] = env_value
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
@@ -896,6 +971,22 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
+    if config.openrouter_http_referer and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_HTTP_REFERER"] = (
+            config.openrouter_http_referer
+        )
+    if config.openrouter_app_title and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_TITLE"] = config.openrouter_app_title
+    if config.openrouter_app_categories and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"] = (
+            config.openrouter_app_categories
+        )
     if not config.openrouter_anthropic_prompt_cache and not os.environ.get(
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):

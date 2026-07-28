@@ -10,7 +10,7 @@ import mimetypes
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.graph import END
@@ -26,6 +26,9 @@ from .summarization import (
 from .tool_results import _extract_command_tool_content, _extract_tool_content
 from .tool_selection import _ToolSelectionSuppressor
 from .utils import DisplayLimits, is_success
+
+if TYPE_CHECKING:
+    from ..middleware.events import ToolSelectionView
 from .v3_payloads import (
     RawMap,
     _as_raw_map,
@@ -195,7 +198,10 @@ class _V3EventProcessor:
         existing_summarization_event: Mapping[str, object] | None,
         existing_messages: object = None,
         process_value_messages: bool = False,
+        events: "ToolSelectionView | None" = None,
     ) -> None:
+        from ..middleware.events import NO_OP_SINK
+
         self.emitter = emitter
         self.subagents = subagents
         self._suppressed_summarization_signature = _summarization_event_signature(
@@ -210,7 +216,7 @@ class _V3EventProcessor:
         ] = {}
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
-        self._selector = _ToolSelectionSuppressor(emitter)
+        self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
 
     @staticmethod
     def _tool_scope(
@@ -797,6 +803,7 @@ async def stream_agent_events(
     thread_id: str,
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,
+    events: "ToolSelectionView | None" = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -818,6 +825,11 @@ async def stream_agent_events(
                      subagent_start, subagent_tool_call, subagent_tool_result, subagent_end,
                      done, error
     """
+    if events is None:
+        from .sink import SessionEventSink
+
+        events = SessionEventSink()
+
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     if metadata:
         config["metadata"] = metadata
@@ -837,8 +849,18 @@ async def stream_agent_events(
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
     _run_raised: bool = False
+    event_sink_token = None
     try:
         from langgraph.stream.transformers import UpdatesTransformer
+
+        from ..middleware.events import (
+            MiddlewareEventSink,
+            bind_run_event_sink,
+            reset_run_event_sink,
+        )
+
+        if isinstance(events, MiddlewareEventSink):
+            event_sink_token = bind_run_event_sink(events)
 
         try:
             stream_result = agent.astream_events(
@@ -858,6 +880,7 @@ async def stream_agent_events(
             emitter,
             subagents,
             existing_summarization_event,
+            events=events,
         )
         queue: asyncio.Queue[Any] = asyncio.Queue()
         producer_done = object()
@@ -964,6 +987,8 @@ async def stream_agent_events(
                 task.cancel()
         if producers:
             await asyncio.gather(*producers, return_exceptions=True)
+        if event_sink_token is not None:
+            reset_run_event_sink(event_sink_token)
         # When the run ended with an exception the LangGraph checkpoint may be
         # left interrupted (``next`` non-empty). Clear it — unless it's a real
         # human-in-the-loop pause — so the next user message starts a fresh turn

@@ -306,14 +306,19 @@ def is_async_subagents_available() -> bool:
 
 def _langgraph_exe() -> str | None:
     """Return the path to the langgraph CLI binary, or None if not found."""
+    import sys
+
+    executable_dir = os.path.dirname(sys.executable)
+    candidate_names = (
+        ["langgraph.exe", "langgraph"] if os.name == "nt" else ["langgraph"]
+    )
+    for candidate_name in candidate_names:
+        candidate = os.path.join(executable_dir, candidate_name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     found = shutil.which("langgraph")
     if found:
         return found
-    import sys as _sys
-
-    candidate = os.path.join(os.path.dirname(_sys.executable), "langgraph")
-    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        return candidate
     return None
 
 
@@ -708,7 +713,22 @@ def start_langgraph_dev(
     sub_env.pop("EVOSCIENTIST_DEPLOY_MODE", None)
     sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "full" if deploy_mode else "stripped"
 
+    # Propagate the effective bind port into the subprocess's config resolution
+    # via the standard ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` override (see
+    # ``EvoScientist/config/settings.py``). Without this, ``EvoSci deploy
+    # --port X`` binds to X but the deployed main agent still reads
+    # ``cfg.langgraph_dev_port`` from disk and dispatches self-loop async
+    # tasks (start_async_task → http://localhost:{cfg.port}) to whatever
+    # the config file says — which desyncs from the bind port whenever
+    # ``--port`` differs from the persisted ``langgraph_dev_port``, and
+    # every async subagent launch fails with "All connection attempts failed".
+    # ``get_effective_config`` treats ``EVOSCIENTIST_*`` shell values as
+    # authoritative over any workspace ``.env`` (see its docstring), so a
+    # ``.env`` in the subprocess cwd cannot shadow the caller-resolved port.
+    sub_env["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] = str(port)
+
     try:
+        logger.info("Starting langgraph dev with CLI: %s", exe)
         proc = subprocess.Popen(
             [
                 exe,
