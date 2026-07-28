@@ -760,7 +760,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         2. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
         3. Non-retryable pattern match → ``None``.
         4. Rate-limit pattern match → ``_rate_limit_delay``.
-        5. Default ``1.0`` s (generic transient-error retry).
+        5. Default ``None`` for non-retryable errors.
 
         Channels can customize behavior declaratively via class attributes
         ``_non_retryable_patterns``, ``_rate_limit_patterns``, and
@@ -790,8 +790,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         ):
             return self._rate_limit_delay
 
-        # 5. Default
-        return 1.0
+        # 5. Default: not retryable
+        return None
 
     def _parse_retry_after_header(self, exc: Exception) -> float | None:
         """Try to extract a ``Retry-After`` value from an HTTP response."""

@@ -1222,13 +1222,10 @@ class TestChannelReconnect:
 
 class TestExtractRetryAfter:
     def test_never_returns_none(self):
-        """[B-01] Base _extract_retry_after always returns float, never None."""
+        """[B-01] Base _extract_retry_after returns None for non-retryable errors."""
         ch = StubChannel()
-        # Even for a generic exception, it returns 1.0 instead of None
         result = ch._extract_retry_after(ValueError("bad"))
-        # BUG: This should return None for non-retryable errors
-        # Current behavior: always returns 1.0
-        assert result is not None  # Documents the bug
+        assert result is None
 
     def test_extracts_retry_after_attribute(self):
         ch = StubChannel()
