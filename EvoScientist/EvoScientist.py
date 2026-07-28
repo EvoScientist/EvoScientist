@@ -318,6 +318,7 @@ def _inject_subagent_middleware(
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
+        ToolHistoryRepairMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
@@ -350,6 +351,8 @@ def _inject_subagent_middleware(
             # them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
             ErrorNormalizationMiddleware(),
+            # Sync subagents replay their own history to strict providers too.
+            ToolHistoryRepairMiddleware(),
             # Subagents share the main agent's model: use the threaded
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).

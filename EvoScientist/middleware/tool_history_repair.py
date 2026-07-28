@@ -94,7 +94,17 @@ def repair_tool_history(
             if isinstance(raw_calls, list):
                 for call in raw_calls:
                     function = call.get("function") if isinstance(call, dict) else None
-                    if isinstance(function, dict) and function.get("name"):
+                    name = function.get("name") if isinstance(function, dict) else None
+                    tool_call_id = call.get("id") if isinstance(call, dict) else None
+                    # Entries without a usable str name AND id can never be
+                    # closed by a result, so keeping them would leave
+                    # provider-invalid history in the payload.
+                    if (
+                        isinstance(name, str)
+                        and name
+                        and isinstance(tool_call_id, str)
+                        and tool_call_id
+                    ):
                         valid_raw_calls.append(call)
                 additional_kwargs = dict(additional_kwargs)
                 if valid_raw_calls:
@@ -114,8 +124,7 @@ def repair_tool_history(
                 if tool_call_id := call.get("id"):
                     pending[tool_call_id] = call.get("name")
             for call in valid_raw_calls:
-                if tool_call_id := call.get("id"):
-                    pending[tool_call_id] = call["function"]["name"]
+                pending[call["id"]] = call["function"]["name"]
         repaired.append(message)
 
     if pending:
