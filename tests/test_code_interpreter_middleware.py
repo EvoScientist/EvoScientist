@@ -9,6 +9,7 @@ allowlist (``task()`` stays reachable as the REPL global, with responseSchema).
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -61,6 +62,28 @@ async def test_aclose_code_interpreters_closes_registered_instances(monkeypatch)
     await aclose_code_interpreters()
 
     close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_aclose_code_interpreters_bounds_stalled_cleanup(monkeypatch, caplog):
+    middleware = create_code_interpreter_middleware()
+    cancelled = asyncio.Event()
+
+    async def stalled_close():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(middleware, "aclose", stalled_close)
+
+    await asyncio.wait_for(
+        aclose_code_interpreters(timeout=0.01),
+        timeout=0.2,
+    )
+
+    assert cancelled.is_set()
+    assert "cleanup did not finish within 0.01 seconds" in caplog.text
 
 
 def test_middleware_uses_thread_mode():

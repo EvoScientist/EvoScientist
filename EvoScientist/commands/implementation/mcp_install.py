@@ -37,7 +37,7 @@ class InstallMCPCommand(Command):
         try:
             import asyncio
 
-            servers = await asyncio.get_event_loop().run_in_executor(
+            servers = await asyncio.get_running_loop().run_in_executor(
                 None, fetch_marketplace_index
             )
         except Exception as e:

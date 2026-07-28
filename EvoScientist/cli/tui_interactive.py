@@ -78,6 +78,9 @@ from .status_bar import (
     make_usage_status_snapshot,
 )
 
+if TYPE_CHECKING:
+    from ..runtime import AsyncRuntime
+
 _channel_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -483,6 +486,7 @@ def run_textual_interactive(
     load_agent: Callable[..., Any],
     create_session_workspace: Callable[[str | None], str],
     config: Any | None = None,
+    async_runtime: AsyncRuntime | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop."""
     if config is None:
@@ -1363,7 +1367,7 @@ def run_textual_interactive(
             Returns the ``ApprovalWidget.Decided`` message, or ``None`` on
             timeout / cancellation.
             """
-            self._approval_future = asyncio.get_event_loop().create_future()
+            self._approval_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._approval_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1409,7 +1413,7 @@ def run_textual_interactive(
 
             Returns the selected thread_id, or ``None`` on cancel/timeout.
             """
-            self._picker_future = asyncio.get_event_loop().create_future()
+            self._picker_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._picker_future, timeout=120)
             except (TimeoutError, asyncio.CancelledError):
@@ -1437,7 +1441,7 @@ def run_textual_interactive(
 
             Returns list of install sources, or None on cancel/timeout.
             """
-            self._browser_future = asyncio.get_event_loop().create_future()
+            self._browser_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._browser_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1464,7 +1468,7 @@ def run_textual_interactive(
 
         async def _wait_for_mcp_browse(self, browser_widget) -> list | None:
             """Wait for user to complete MCP server browsing."""
-            self._mcp_browser_future = asyncio.get_event_loop().create_future()
+            self._mcp_browser_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._mcp_browser_future, timeout=300)
             except (TimeoutError, asyncio.CancelledError):
@@ -1492,7 +1496,7 @@ def run_textual_interactive(
 
             Returns ``(name, provider)`` or ``None`` on cancel/timeout.
             """
-            self._model_picker_future = asyncio.get_event_loop().create_future()
+            self._model_picker_future = asyncio.get_running_loop().create_future()
             try:
                 return await asyncio.wait_for(self._model_picker_future, timeout=120)
             except (TimeoutError, asyncio.CancelledError):
@@ -1554,6 +1558,7 @@ def run_textual_interactive(
             """
             from ..stream.display import (
                 is_stream_cancel_requested,
+                iter_with_stream_cancel,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1780,16 +1785,21 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     _anchor_engaged = False
-                    async for event in graph_gateway.stream_events(
-                        RunRequest(
-                            message=_stream_input,
-                            thread_id=thread_id_override or self._conversation_tid,
-                            metadata=metadata,
-                            target=GraphTarget(
-                                local_graph=agent,
-                                workspace_dir=self._workspace_dir,
-                            ),
-                        )
+                    async for event in iter_with_stream_cancel(
+                        graph_gateway.stream_events(
+                            RunRequest(
+                                message=_stream_input,
+                                thread_id=(
+                                    thread_id_override or self._conversation_tid
+                                ),
+                                metadata=metadata,
+                                target=GraphTarget(
+                                    local_graph=agent,
+                                    workspace_dir=self._workspace_dir,
+                                ),
+                            )
+                        ),
+                        cancel_scope,
                     ):
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
@@ -2380,6 +2390,11 @@ def run_textual_interactive(
             cancelled = False
             response = ""
             try:
+                # Foreground turns share the legacy default scope. Reset it at
+                # the turn boundary; scoped channel stop requests remain armed.
+                from ..stream.display import clear_stream_cancel
+
+                clear_stream_cancel()
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
@@ -2414,6 +2429,17 @@ def run_textual_interactive(
                 )
             except asyncio.CancelledError:
                 cancelled = True
+                try:
+                    from ..middleware.code_interpreter import (
+                        aclose_code_interpreters,
+                    )
+
+                    await aclose_code_interpreters()
+                except Exception:
+                    _channel_logger.debug(
+                        "code interpreter cleanup after cancellation failed",
+                        exc_info=True,
+                    )
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._busy = False
@@ -2547,6 +2573,7 @@ def run_textual_interactive(
                     on_cmd_completed=self._on_channel_cmd_completed,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
                 if _slash_handled:
                     # A channel-issued /new or /resume rotates the thread in
@@ -3091,6 +3118,7 @@ def run_textual_interactive(
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
                     graph_gateway=self._runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
 
                 if await cmd_manager.execute(command, ctx):
@@ -3237,6 +3265,9 @@ def run_textual_interactive(
                     self._queued_messages.clear()
                     self._render_queue_indicator()
                 if self._run_task is not None and not self._run_task.done():
+                    from ..stream.display import request_stream_cancel
+
+                    request_stream_cancel()
                     self._run_task.cancel()
                 else:
                     # Edge case: busy but no task — force reset
@@ -3604,6 +3635,18 @@ def run_textual_interactive(
             finally:
                 from .resume_hint import print_resume_hint
 
+                try:
+                    from ..middleware.code_interpreter import (
+                        aclose_code_interpreters,
+                    )
+
+                    await aclose_code_interpreters()
+                except Exception:
+                    _channel_logger.debug(
+                        "code interpreter cleanup failed",
+                        exc_info=True,
+                    )
+
                 # Best-effort resume hint — guarded so failures here (e.g.
                 # DB teardown race during abnormal shutdown) cannot shadow
                 # the original run_async traceback.
@@ -3623,12 +3666,4 @@ def run_textual_interactive(
                 except Exception:
                     _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
-    import nest_asyncio  # type: ignore[import-untyped]
-
-    nest_asyncio.apply()
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(_amain())
+    asyncio.run(_amain())

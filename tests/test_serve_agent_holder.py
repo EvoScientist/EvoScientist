@@ -8,6 +8,8 @@ captured at startup.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +29,7 @@ from EvoScientist.cli.commands import (
 from EvoScientist.commands.base import ChannelRuntime
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.gateway import RuntimeGateways, ThreadStore
+from EvoScientist.runtime import AsyncRuntime
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
@@ -59,6 +62,7 @@ def _runtime_state(
     config: EvoScientistConfig | None = None,
     thread_store: ThreadStore | None = None,
     runtime_gateways: RuntimeGateways | None = None,
+    async_runtime: AsyncRuntime | None = None,
 ) -> ServeRuntimeState:
     store = thread_store or _thread_store()
     return ServeRuntimeState(
@@ -67,7 +71,20 @@ def _runtime_state(
         workspace_dir=workspace_dir,
         config=config,
         runtime_gateways=runtime_gateways or _runtime_gateways(store),
+        async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
     )
+
+
+def test_serve_runtime_state_requires_owned_runtime():
+    """Message processing cannot be constructed without its runtime owner."""
+    with pytest.raises(TypeError, match="async_runtime"):
+        ServeRuntimeState(
+            agent=_agent(),
+            thread_id="tid",
+            workspace_dir=None,
+            config=None,
+            runtime_gateways=_runtime_gateways(),
+        )
 
 
 async def test_hook_updates_runtime_state_on_agent_swap():
@@ -203,7 +220,11 @@ async def test_hook_updates_workspace_dir_on_resume():
         await hook(ctx, old_agent, cmd)
 
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/restored-ws")
-    load_agent.assert_called_once_with(workspace_dir="/restored-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/restored-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     assert state.workspace_dir == "/restored-ws"
     assert state.agent is reloaded_agent
 
@@ -366,7 +387,11 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         await cb("new-tid", "/new-ws")
 
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/new-ws")
-    load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/new-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     assert call_order == ["load", "sync"]
     assert state.thread_id == "new-tid"
     assert state.workspace_dir == "/new-ws"
@@ -443,7 +468,11 @@ async def test_serve_resume_callback_preserves_state_when_sync_fails():
     ):
         await cb("new-tid", "/new-ws")
 
-    load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/new-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     set_active.assert_called_once_with("/old-ws")
     assert state.agent is old_agent
     assert state.resume_warning_thread_id is None
@@ -480,7 +509,11 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
     ):
         await cb("new-tid", "/new-ws")
 
-    load_agent.assert_called_once_with(workspace_dir="/new-ws", config=cfg)
+    load_agent.assert_called_once_with(
+        workspace_dir="/new-ws",
+        config=cfg,
+        runtime=state.async_runtime,
+    )
     set_active.assert_called_once_with("/old-ws")
     sync_server.assert_not_awaited()
     assert state.resume_warning_thread_id is None
@@ -536,6 +569,7 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
     )
 
     with (
+        AsyncRuntime(thread_name="test-serve-runtime") as async_runtime,
         patch(
             "EvoScientist.cli.commands.dispatch_channel_slash_command",
             new=AsyncMock(side_effect=RuntimeError("slash broke")),
@@ -543,6 +577,7 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
         patch("EvoScientist.cli.commands._set_channel_response") as mock_set_resp,
         patch("EvoScientist.cli.tui_runtime.run_streaming") as mock_run_streaming,
     ):
+        state.async_runtime = async_runtime
         _register_channel_request(msg)
         _serve_process_message(
             msg,
@@ -588,6 +623,7 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
         return {}
 
     with (
+        AsyncRuntime(thread_name="test-serve-runtime") as async_runtime,
         patch(
             "EvoScientist.cli.commands.dispatch_channel_slash_command",
             new=AsyncMock(side_effect=_fake_dispatch),
@@ -598,6 +634,7 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
         ),
         patch("EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"),
     ):
+        state.async_runtime = async_runtime
         _register_channel_request(msg)
         _serve_process_message(
             msg,
@@ -609,3 +646,78 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
 
     assert captured["slash_workspace"] == "/restored-workspace"
     assert captured["meta_workspace"] == "/restored-workspace"
+
+
+def test_serve_channel_send_does_not_block_owned_runtime_loop():
+    """Channel I/O is scheduled on the bus loop and settled before the reply."""
+    from EvoScientist.cli import channel as channel_mod
+
+    events: list[str] = []
+    callback_elapsed: list[float] = []
+
+    class _ChannelRef:
+        send_thinking = True
+
+        async def send_thinking_message(self, **_kwargs):
+            events.append("send-started")
+            await asyncio.sleep(0.05)
+            events.append("send-finished")
+
+    msg = ChannelMessage(
+        msg_id="msg-nonblocking-send",
+        content="hello",
+        sender="channel-user",
+        channel_type="telegram",
+        metadata={},
+        channel_ref=_ChannelRef(),
+        bus_ref=None,
+        chat_id="channel-user",
+        message_id="ts-send",
+    )
+    state = _runtime_state(agent=_agent(), thread_id="tid")
+
+    def _fake_run_streaming(**kwargs):
+        async def _invoke_callback() -> None:
+            started = time.monotonic()
+            kwargs["on_thinking"]("x" * 250)
+            callback_elapsed.append(time.monotonic() - started)
+            events.append("callback-returned")
+
+        kwargs["runtime"].run_sync(_invoke_callback)
+        return "ok"
+
+    def _capture_response(_msg_id: str, _response: str) -> None:
+        events.append("response-set")
+
+    with AsyncRuntime(thread_name="test-serve-send-runtime") as runtime:
+        runtime.submit(lambda: asyncio.sleep(0)).result(timeout=1)
+        state.async_runtime = runtime
+        assert runtime._loop is not None
+
+        with (
+            patch.object(channel_mod, "_bus_loop", runtime._loop),
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming",
+                side_effect=_fake_run_streaming,
+            ),
+            patch(
+                "EvoScientist.cli.commands._set_channel_response",
+                side_effect=_capture_response,
+            ),
+        ):
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg,
+                runtime_state=state,
+                model="model",
+                workspace_dir="/tmp",
+                show_thinking=True,
+            )
+
+    assert callback_elapsed[0] < 0.5
+    assert events.index("callback-returned") < events.index("send-started")
+    assert events.index("send-finished") < events.index("response-set")

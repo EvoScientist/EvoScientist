@@ -16,6 +16,7 @@ pilot so they exercise the actual production code path.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -31,13 +32,12 @@ pytest.importorskip("textual")
 # ``EvoTextualInteractiveApp`` is defined inside ``run_textual_interactive``,
 # so it is not reachable as ``tui_interactive.EvoTextualInteractiveApp``.  We
 # grab it by invoking the factory once with a patched ``App.run_async`` that
-# captures the freshly-built instance.  The factory must be invoked from a
-# fresh top-level event loop (it pulls in nest_asyncio and the global loop),
-# so each test boots it via :func:`_capture_app`.
+# captures the freshly-built instance. The synchronous factory owns its
+# top-level event loop, so each test boots it via :func:`_capture_app`.
 # ---------------------------------------------------------------------------
 
 
-def _capture_app(monkeypatch) -> object:
+async def _capture_app(monkeypatch) -> object:
     """Build an ``EvoTextualInteractiveApp`` without entering its main loop."""
     from textual.app import App
 
@@ -83,10 +83,11 @@ def _capture_app(monkeypatch) -> object:
     # and the module-level ``create_session_workspace`` / ``load_agent``
     # symbols never get a chance to run.
 
-    # The factory is synchronous at the outer level — it drives its own loop
-    # via ``nest_asyncio`` + ``loop.run_until_complete`` internally.
+    # The factory is synchronous at the outer level and owns its top-level
+    # loop via ``asyncio.run``.
     try:
-        tui_mod.run_textual_interactive(
+        await asyncio.to_thread(
+            tui_mod.run_textual_interactive,
             show_thinking=False,
             channel_send_thinking=False,
             workspace_dir=None,
@@ -131,7 +132,7 @@ async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -162,7 +163,7 @@ async def test_clear_chat_with_anchor_released_also_resets(monkeypatch):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -190,7 +191,7 @@ async def test_clear_chat_short_conversation_anchored(monkeypatch):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -227,7 +228,7 @@ async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch)
     # Tall-ish terminal: welcome + a few messages must fit in the
     # viewport, mirroring the user's manual-test setup.
     async with app.run_test(size=(80, 40)) as pilot:
@@ -301,7 +302,7 @@ async def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
     from EvoScientist.cli.widgets.assistant_message import AssistantMessage
     from EvoScientist.cli.widgets.user_message import UserMessage
 
-    app = _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch)
     # Tall terminal: welcome + a short exchange fits with room to spare,
     # which is exactly the bug condition (content < viewport).
     async with app.run_test(size=(80, 40)) as pilot:
@@ -339,7 +340,7 @@ async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)

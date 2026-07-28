@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[26 Jul 2026]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 selectable on Anthropic and OpenRouter (incl. fast), plus Gemini 3.6 Flash and 3.5 Flash Lite on Google and OpenRouter; Kimi K3 now works over Anthropic-protocol channels (Kimi For Coding, custom endpoints), covering structured output, history replay, and multi-turn thinking; fixes for interrupted tool-call history, skill-install path leaks, and OpenRouter SSE streaming (pinned below 0.11).
 - **[18 Jul 2026]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 selectable on Moonshot and OpenRouter (1M context); async sub-agent runs no longer get stuck pending thanks to orphaned-run cleanup; Telegram slash commands; provider fixes (DeepSeek native SDK, GPT-5.x via ChatGPT OAuth, OpenAI `reasoning_effort`); quieter tool-selector streaming and smaller checkpoints.
 - **[11 Jul 2026]** **[v0.2.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.2)** — New models selectable in onboarding and `/model`: GPT-5.6 (sol, terra, luna) for OpenAI and OpenRouter, plus Grok 4.5 and Tencent Hunyuan HY3 on OpenRouter; tighter config-file permissions and a reworked onboarding OAuth flow for auxiliary models.
 - **[05 Jul 2026]** **[v0.2.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.1)** — AutoSkills: EvoMemory drafts reusable skills from its own observation clusters for you to review via `/autoskills`; a new `--output-format stream-json` for headless / SDK clients; richer slash-command completions; Windows UTF-8 config reads; a TUI welcome-banner fix; langchain-openrouter 0.2.5.
@@ -749,9 +750,9 @@ Every contribution brings us one step closer to a future where AI accelerates sc
   <img src="https://contrib.rocks/image?repo=EvoScientist/EvoScientist" />
 </a>
 
-<!-- ### 📈 Star History
+### 📈 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=EvoScientist/EvoScientist&type=date&legend=bottom-right)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=bottom-right) -->
+[![Star History Chart](https://api.star-history.com/chart?repos=EvoScientist/EvoScientist&type=date&legend=top-left&sealed_token=-XivKBib6Pb_YTJjMxBwUghZaRWxGqr5HYBKsa5jyiCgVMWfHmmkLyCYbT0uUvJJdUQsza9mRnlk1-QVQzm-s0UExQ_8DIBSrWKIrPQz5WzNlRURsUoHSA)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=top-left)
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 

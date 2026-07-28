@@ -29,7 +29,9 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import logging
 import weakref
 
 from langchain.agents.middleware.types import ModelRequest
@@ -40,6 +42,9 @@ from langchain_quickjs import CodeInterpreterMiddleware
 # values; tests / ad-hoc callers can omit and get sensible defaults.
 _DEFAULT_TIMEOUT_SECONDS: float = 60.0
 _DEFAULT_MAX_RESULT_CHARS: int = 10000
+_CLOSE_TIMEOUT_SECONDS: float = 10.0
+
+logger = logging.getLogger(__name__)
 
 _MEMORY_FIRST_INTERPRETER_PROMPT = (
     "\n\nWhen memory tools (search_observations, read_memory) are available, use "
@@ -83,10 +88,34 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
 _live_interpreters = weakref.WeakSet()
 
 
-async def aclose_code_interpreters() -> None:
-    """Close all live EvoScientist QuickJS middleware instances."""
-    for middleware in tuple(_live_interpreters):
-        await middleware.aclose()
+async def aclose_code_interpreters(
+    *,
+    timeout: float = _CLOSE_TIMEOUT_SECONDS,
+) -> None:
+    """Close live QuickJS middleware without blocking application shutdown."""
+    middlewares = tuple(_live_interpreters)
+    if not middlewares:
+        return
+
+    close_tasks = [middleware.aclose() for middleware in middlewares]
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*close_tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        logger.warning(
+            "code interpreter cleanup did not finish within %g seconds",
+            timeout,
+        )
+        return
+
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.debug(
+                "code interpreter cleanup failed",
+                exc_info=(type(result), result, result.__traceback__),
+            )
 
 
 # Read-only, batchable tools that benefit from being callable inside JS.
