@@ -10,6 +10,7 @@ from __future__ import annotations
 import questionary
 from questionary import Choice
 
+from ...runtime import AsyncRuntime
 from ..settings import EvoScientistConfig
 from .helpers import (
     _setup_imessage,
@@ -21,7 +22,11 @@ from .style import (
 )
 
 
-def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
+def _step_channels(
+    config: EvoScientistConfig,
+    *,
+    runtime: AsyncRuntime | None = None,
+) -> dict[str, object]:
     """Step: Select channels to enable on startup.
 
     Presents a multi-select list of supported channels.
@@ -35,6 +40,12 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
         Dict mapping config field names to their new values.
         Empty dict when the user skips or selects nothing.
     """
+    # Direct/programmatic callers still get a single owned runtime for the
+    # whole step. CLI callers pass their application-scoped runtime instead.
+    if runtime is None:
+        with AsyncRuntime(thread_name="evosci-onboard-runtime") as owned_runtime:
+            return _step_channels(config, runtime=owned_runtime)
+
     # Currently enabled channels
     _currently_enabled = {
         t.strip()
@@ -592,11 +603,9 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
                         f" to {_accounts_path}.[/dim]"
                     )
                     try:
-                        import asyncio
-
                         from ...channels.wechat.personal import qr_login
 
-                        creds = asyncio.run(qr_login())
+                        creds = runtime.run_sync(qr_login)
                     except Exception as exc:
                         console.print(f"  [red]✗ Scan failed: {exc}[/red]")
                         creds = None
@@ -783,7 +792,7 @@ def _step_channels(config: EvoScientistConfig) -> dict[str, object]:
             updates[senders_field] = senders.strip()
 
         # Probe validation
-        _probe_channel(ch_name, config, updates)
+        _probe_channel(ch_name, config, updates, runtime=runtime)
 
         enabled_channels.append(ch_name)
 
@@ -820,12 +829,13 @@ def _probe_channel(
     ch_name: str,
     config: EvoScientistConfig,
     updates: dict[str, object],
+    *,
+    runtime: AsyncRuntime,
 ) -> None:
     """Run the probe for a channel type and print the result.
 
     Non-fatal: prints a warning on failure but does not prevent enabling.
     """
-    import asyncio
 
     def _val(key: str, fallback: str = "") -> str:
         """Get a value from updates first, then config, then fallback."""
@@ -928,17 +938,7 @@ def _probe_channel(
             return True, "No probe available"
 
     try:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import nest_asyncio  # type: ignore[import-untyped]
-
-                nest_asyncio.apply()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        ok, detail = loop.run_until_complete(_run())
+        ok, detail = runtime.run_sync(_run)
         if ok:
             console.print(f"  [green]✓ {detail}[/green]")
         else:

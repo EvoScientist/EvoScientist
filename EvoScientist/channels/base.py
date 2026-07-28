@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import MEDIA_DIR
+from ..runtime import AsyncRuntime
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
 from .debug import TraceMixin, debug_trace_enabled
@@ -927,34 +928,27 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             return None
         return self._raw_to_inbound(current)
 
-    def _build_inbound(self, raw: RawIncoming) -> InboundMessage | None:
+    def _build_inbound(
+        self,
+        raw: RawIncoming,
+        *,
+        runtime: AsyncRuntime | None = None,
+    ) -> InboundMessage | None:
         """Run *raw* through inbound middlewares and convert to InboundMessage.
 
-        Synchronous wrapper around :meth:`_build_inbound_async`.  When an
-        event loop is already running, the coroutine is scheduled on that
-        loop via :func:`asyncio.run_coroutine_threadsafe` to avoid
-        thread-safety issues with middleware state (DedupCache,
-        GroupHistoryBuffer, etc.).
+        Compatibility wrapper for synchronous integrations. Internal channel
+        implementations should await :meth:`_build_inbound_async` on their
+        transport loop. A caller may provide its application runtime to reuse
+        that owner; otherwise a runtime is scoped to this call.
+
+        This method deliberately rejects callers already running an event
+        loop. Blocking such a loop while scheduling the coroutine back onto it
+        deadlocks; async callers must await :meth:`_build_inbound_async`.
         """
-        import asyncio
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._build_inbound_async(raw),
-                loop,
-            )
-            return future.result()
-        else:
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(self._build_inbound_async(raw))
-            finally:
-                new_loop.close()
+        if runtime is None:
+            with AsyncRuntime(thread_name="evosci-channel-adapter-runtime") as owned:
+                return self._build_inbound(raw, runtime=owned)
+        return runtime.run_sync(lambda: self._build_inbound_async(raw))
 
     def _raw_to_inbound(self, raw: RawIncoming) -> InboundMessage | None:
         """Convert a RawIncoming to InboundMessage (pure transformation, no filtering).

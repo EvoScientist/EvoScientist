@@ -1,6 +1,8 @@
 """Tests for EvoScientist.mcp module."""
 
+import asyncio
 import textwrap
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,10 +18,12 @@ from EvoScientist.mcp.client import (
     add_mcp_server,
     edit_mcp_server,
     load_mcp_config,
+    load_mcp_tools,
     parse_mcp_add_args,
     parse_mcp_edit_args,
     remove_mcp_server,
 )
+from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 
 # ---- _interpolate_env ----
 
@@ -281,6 +285,58 @@ class TestBuildConnections:
 def _make_tool(name: str):
     """Create a minimal mock tool with a .name attribute."""
     return SimpleNamespace(name=name)
+
+
+class TestOwnedRuntimeLoading:
+    def test_reuses_caller_runtime_for_discovery(self, monkeypatch):
+        executions: list[tuple[str, asyncio.AbstractEventLoop]] = []
+        tool = _make_tool("search")
+
+        async def fake_load(_config, *, on_progress=None):
+            executions.append(
+                (threading.current_thread().name, asyncio.get_running_loop())
+            )
+            return {"server": [tool]}
+
+        monkeypatch.setattr("EvoScientist.mcp.client._load_tools", fake_load)
+        config = {"server": {"transport": "http", "url": "http://example.test"}}
+
+        with AsyncRuntime(thread_name="test-mcp-runtime") as runtime:
+            first = load_mcp_tools(config, runtime=runtime)
+            second = load_mcp_tools(config, runtime=runtime)
+
+        assert first == {"main": [tool]}
+        assert second == {"main": [tool]}
+        assert [thread for thread, _loop in executions] == [
+            "test-mcp-runtime",
+            "test-mcp-runtime",
+        ]
+        assert executions[0][1] is executions[1][1]
+
+    def test_direct_caller_gets_a_scoped_runtime(self, monkeypatch):
+        execution: dict[str, object] = {}
+
+        async def fake_load(_config, *, on_progress=None):
+            execution["thread"] = threading.current_thread().name
+            execution["loop"] = asyncio.get_running_loop()
+            return {"server": []}
+
+        monkeypatch.setattr("EvoScientist.mcp.client._load_tools", fake_load)
+        config = {"server": {"transport": "http", "url": "http://example.test"}}
+
+        assert load_mcp_tools(config) == {"main": []}
+        assert execution["thread"] == "evosci-mcp-runtime"
+        assert isinstance(execution["loop"], asyncio.AbstractEventLoop)
+        assert not any(
+            thread.name == "evosci-mcp-runtime" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    async def test_direct_caller_does_not_hide_running_loop_violation(self):
+        config = {"server": {"transport": "http", "url": "http://example.test"}}
+
+        with pytest.raises(AsyncRuntimeError, match=r"await aload_mcp_tools\(config"):
+            load_mcp_tools(config)
 
 
 class TestFilterTools:

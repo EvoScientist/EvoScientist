@@ -30,6 +30,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
         "nvidia",
         "siliconflow",
         "openrouter",
+        "requesty",
         "custom-openai",
         "custom-anthropic",
     }
