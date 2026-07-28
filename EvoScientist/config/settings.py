@@ -1,8 +1,9 @@
 """Configuration management for EvoScientist.
 
-Handles loading, saving, and merging configuration from multiple sources
-with the following priority (highest to lowest):
-    CLI arguments > Environment variables > Config file > Defaults
+Handles loading, saving, and merging configuration from multiple sources.
+See :func:`get_effective_config` for the authoritative priority chain —
+``EVOSCIENTIST_*`` shell values and third-party keys are treated
+asymmetrically with respect to workspace ``.env`` handling.
 """
 
 from __future__ import annotations
