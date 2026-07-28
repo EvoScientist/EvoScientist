@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from .middleware.events import MiddlewareEventSink
+    from .runtime import AsyncRuntime
 
 # =============================================================================
 # Constants
@@ -246,7 +247,11 @@ def _load_mcp_config_once() -> tuple[str, dict]:
     return sig, cfg
 
 
-def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
+def _load_mcp_tools_cached(
+    on_progress=None,
+    *,
+    runtime: "AsyncRuntime | None" = None,
+) -> dict[str, list]:
     """Load MCP tools with config-aware caching.
 
     Args:
@@ -267,7 +272,11 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
         return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
 
-    loaded = load_mcp_tools(config=cfg, on_progress=on_progress)
+    loaded = load_mcp_tools(
+        config=cfg,
+        on_progress=on_progress,
+        runtime=runtime,
+    )
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     return {k: list(v) for k, v in loaded.items()}
@@ -533,6 +542,7 @@ def load_mcp_and_build_kwargs(
     cfg=None,
     chat_model=None,
     workspace_dir=None,
+    runtime: "AsyncRuntime | None" = None,
 ):
     """Load MCP tools (cached by config) and build agent kwargs.
 
@@ -551,7 +561,10 @@ def load_mcp_and_build_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    mcp_by_agent = _load_mcp_tools_cached(on_progress=on_mcp_progress)
+    mcp_by_agent = _load_mcp_tools_cached(
+        on_progress=on_mcp_progress,
+        runtime=runtime,
+    )
     if not mcp_by_agent:
         return _build_base_kwargs(
             base_backend,
@@ -915,6 +928,7 @@ def create_cli_agent(
     *,
     on_mcp_progress=None,
     events: "MiddlewareEventSink | None" = None,
+    runtime: "AsyncRuntime | None" = None,
 ) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
@@ -941,6 +955,8 @@ def create_cli_agent(
         chat_model: Optional pre-built chat model.  Only triggers the pure
             path when ``config`` is also explicit; otherwise it is ignored in
             favor of the ``_ensure_chat_model()`` fallback.
+        runtime: Optional application-scoped runtime for synchronous MCP tool
+            discovery. Direct callers get a scoped runtime when omitted.
     """
     import os as _os
 
@@ -1041,6 +1057,7 @@ def create_cli_agent(
         cfg=cfg,
         chat_model=chat_model,
         workspace_dir=workspace_dir,
+        runtime=runtime,
     )
 
     return create_deep_agent(
