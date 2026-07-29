@@ -406,6 +406,17 @@ class TestValidateAtlasCloudKey:
         assert is_valid is False
         assert msg == "Invalid API key"
 
+    def test_insufficient_balance_means_valid_key(self):
+        """402 fires before model resolution, so auth passed — key is valid."""
+        from EvoScientist.config.onboard.validators import validate_atlascloud_key
+
+        with patch("httpx.post") as mock_post:
+            mock_post.return_value.status_code = 402
+            is_valid, msg = validate_atlascloud_key("atlas-key")
+
+        assert is_valid is True
+        assert "insufficient balance" in msg.lower()
+
     @pytest.mark.parametrize("status", [400, 429, 500, 503])
     def test_transient_status_is_inconclusive(self, status):
         from EvoScientist.config.onboard.validators import validate_atlascloud_key

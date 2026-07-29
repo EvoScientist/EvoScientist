@@ -350,6 +350,10 @@ def validate_atlascloud_key(api_key: str) -> tuple[bool, str]:
         )
         if resp.status_code in (200, 404):
             return True, "Valid"
+        # Atlas checks account balance before model resolution: a valid key
+        # on an uncredited account gets 402 from the sentinel probe.
+        if resp.status_code == 402:
+            return True, "Valid (insufficient balance — top up to use)"
         if resp.status_code in (401, 403):
             return False, "Invalid API key"
         return False, f"Validation inconclusive (HTTP {resp.status_code})"
