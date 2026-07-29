@@ -322,11 +322,12 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
 
 
 def validate_atlascloud_key(api_key: str) -> tuple[bool, str]:
-    """Validate an Atlas Cloud key without invoking a billable model.
+    """Validate an Atlas Cloud key with a nonexistent sentinel model.
 
-    The probe deliberately targets a nonexistent sentinel model. A 400/404
-    means authentication passed and model resolution failed; 401/403 means
-    the key was rejected. Rate limits and server errors remain inconclusive.
+    The probe deliberately targets a nonexistent sentinel model. A 404 means
+    authentication passed and model resolution failed; 200 also confirms
+    authentication if the sentinel unexpectedly resolves. A 401/403 means the
+    key was rejected. Other statuses remain inconclusive until verified.
     """
     if not api_key:
         return True, "Skipped (no key provided)"
@@ -347,8 +348,67 @@ def validate_atlascloud_key(api_key: str) -> tuple[bool, str]:
             },
             timeout=10,
         )
-        if resp.status_code in (200, 400, 404):
+        if resp.status_code in (200, 404):
             return True, "Valid"
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
+def validate_requesty_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Requesty API key against the router's auth layer.
+
+    Unlike OpenRouter, Requesty's ``/v1/models`` endpoint returns HTTP 200
+    (the public model catalog) even for a missing or invalid key, so it
+    cannot be used to check a key. We instead issue a minimal
+    ``/v1/chat/completions`` request, but deliberately target a nonexistent
+    sentinel model: the router checks auth *before* resolving the model, so
+    the response distinguishes the two failures without depending on any
+    real model staying available upstream.
+
+    - valid key → 404 ("Model and/or policy not supported"), i.e. auth passed
+      (or 200 in the unlikely event the sentinel ever resolves);
+    - invalid/missing key → 401/403 ("Invalid authorization token");
+    - 429 (rate-limit) / 5xx (router incident) leave validity unknown, so a
+      transient outage doesn't reject a good key.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import httpx
+
+        resp = httpx.post(
+            "https://router.requesty.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                # Deliberately nonexistent sentinel: auth is resolved before
+                # the model, so a valid key gets a 404 (model-not-found)
+                # rather than depending on a specific model being available.
+                "model": "requesty/auth-preflight",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=10,
+        )
+        # 200 (accepted) or 404 (auth passed, model not found) → key is good.
+        if resp.status_code in (200, 404):
+            return True, "Valid"
+        # Only 401/403 mean the key is actually rejected. 429 (rate-limit)
+        # and 5xx (router incident) leave the key validity unknown — surface
+        # the real status so the user doesn't go re-roll a good key during
+        # an outage.
         if resp.status_code in (401, 403):
             return False, "Invalid API key"
         return False, f"Validation inconclusive (HTTP {resp.status_code})"

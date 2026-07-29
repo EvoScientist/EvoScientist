@@ -2,8 +2,8 @@
 
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
-Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, ZhipuAI,
-Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and custom
+Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
+ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and custom
 OpenAI/Anthropic-compatible endpoints) and convenient short names for common
 models.
 """
@@ -49,6 +49,7 @@ _DASHSCOPE_CODE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 _ATLASCLOUD_BASE_URL = "https://api.atlascloud.ai/v1"
 _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
+_REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
@@ -115,18 +116,12 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
     "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
+    "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
     ),  # base_url from CUSTOM_OPENAI_BASE_URL env
 }
-
-_PROVIDER_ALIASES = {
-    "atlas": "atlascloud",
-    "atlas-cloud": "atlascloud",
-}
-_ATLASCLOUD_API_KEY_ENVS = ("ATLASCLOUD_API_KEY", "ATLAS_CLOUD_API_KEY")
-_ATLASCLOUD_BASE_URL_ENVS = ("ATLASCLOUD_BASE_URL", "ATLAS_CLOUD_BASE_URL")
 
 # Providers routed through the Anthropic provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -179,8 +174,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
     ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
     # Atlas Cloud (OpenAI-compatible)
-    ("deepseek-v4-pro", "deepseek-ai/deepseek-v4-pro", "atlascloud"),
-    ("deepseek-v4-flash", "deepseek-ai/deepseek-v4-flash", "atlascloud"),
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
     ("claude-fable-5", "claude-fable-5", "anthropic"),
@@ -245,6 +238,15 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
+    # Requesty (aggregator — OpenAI-compatible router, provider/model IDs).
+    # Listed before OpenRouter so that for model names shared with OpenRouter
+    # or a native provider, Requesty does not override them (the dict below is
+    # last-entry-wins); Requesty is selected explicitly via get_models_for_provider.
+    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4-6", "requesty"),
+    ("claude-opus-4.8", "anthropic/claude-opus-4-8", "requesty"),
+    ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
+    ("grok-4.3", "xai/grok-4.3", "requesty"),
+    ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
@@ -361,16 +363,7 @@ def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
     Returns:
         List of (short_name, model_id) tuples for the provider.
     """
-    provider = _PROVIDER_ALIASES.get(provider, provider)
     return [(name, model_id) for name, model_id, p in _MODEL_ENTRIES if p == provider]
-
-
-def _first_env_value(names: tuple[str, ...]) -> str:
-    for name in names:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value
-    return ""
 
 
 def _env_flag_enabled(name: str) -> bool:
@@ -382,9 +375,17 @@ def _env_flag_disabled(name: str) -> bool:
     return value is not None and value.strip().lower() in _FALSEY_ENV_VALUES
 
 
-def _supports_openrouter_anthropic_prompt_cache(provider: str, model_id: str) -> bool:
-    """Return whether EvoScientist should declare OpenRouter Claude caching."""
-    return provider == "openrouter" and model_id.startswith(
+def _supports_openrouter_anthropic_prompt_cache(
+    provider: str | None, model_id: str
+) -> bool:
+    """Return whether EvoScientist should declare Claude caching for a router.
+
+    Both OpenRouter and Requesty are OpenAI-compatible routers that forward an
+    Anthropic-style ``cache_control`` declaration through to Claude models
+    addressed as ``anthropic/...``. Implicit caching is handled upstream for
+    most providers, but Claude prompt caching needs the explicit declaration.
+    """
+    return provider in ("openrouter", "requesty") and model_id.startswith(
         ("anthropic/", "~anthropic/")
     )
 
@@ -409,16 +410,25 @@ def _has_cache_control_override(kwargs: dict[str, Any]) -> bool:
 
 
 def _apply_openrouter_anthropic_prompt_cache(
-    provider: str,
+    provider: str | None,
     model_id: str,
     kwargs: dict[str, Any],
 ) -> None:
-    """Declare OpenRouter Claude prompt caching unless explicitly disabled.
+    """Declare router Claude prompt caching unless explicitly disabled.
 
-    OpenRouter already handles implicit caching for most providers, but Claude
-    prompt caching needs Anthropic-style cache-control declaration.
+    OpenRouter and Requesty both handle implicit caching for most providers,
+    but Claude prompt caching needs an Anthropic-style cache-control
+    declaration. Each router honours its own opt-out env flag
+    (``EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE`` /
+    ``EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE``).
     """
-    if _env_flag_disabled("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"):
+    if provider is None:
+        return
+    disable_flag = {
+        "openrouter": "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "requesty": "EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE",
+    }.get(provider)
+    if disable_flag is not None and _env_flag_disabled(disable_flag):
         return
     if not _supports_openrouter_anthropic_prompt_cache(provider, model_id):
         return
@@ -529,8 +539,6 @@ def get_chat_model(
         >>> model = get_chat_model("claude-3-opus-20240229", provider="anthropic")  # Full ID
     """
     model = model or DEFAULT_MODEL
-    if provider:
-        provider = _PROVIDER_ALIASES.get(provider, provider)
 
     # Look up short name in registry (provider-aware)
     model_id = None
@@ -629,18 +637,11 @@ def get_chat_model(
                     "OpenAI-compatible API endpoint URL (e.g. https://api.openai.com/v1)."
                 )
             base_url = base_url.rstrip("/")
-        elif provider == "atlascloud":
-            base_url = (
-                _first_env_value(_ATLASCLOUD_BASE_URL_ENVS) or base_url_default or ""
-            ).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
-        if provider == "atlascloud":
-            api_key = _first_env_value(_ATLASCLOUD_API_KEY_ENVS)
-        else:
-            api_key = os.environ.get(api_key_env, "")
+        api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
         # SiliconFlow: disable thinking — LangChain drops reasoning_content
@@ -755,7 +756,10 @@ def get_chat_model(
             kwargs["base_url"] = base_url
 
     _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
-    _apply_openrouter_anthropic_prompt_cache(provider, model_id, kwargs)
+    # OpenAI-routed routers (e.g. Requesty) reassign ``provider`` to "openai"
+    # above, so use the original provider name to detect router-level caching.
+    _cache_provider = _original_provider or provider
+    _apply_openrouter_anthropic_prompt_cache(_cache_provider, model_id, kwargs)
 
     _uses_native_deepseek = provider == "deepseek" or (
         provider == "openai"

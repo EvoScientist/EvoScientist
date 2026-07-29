@@ -381,8 +381,8 @@ class TestValidateAtlasCloudKey:
         assert is_valid is True
         assert "Skipped" in msg
 
-    @pytest.mark.parametrize("status", [400, 404])
-    def test_uses_non_billable_sentinel_model(self, status):
+    @pytest.mark.parametrize("status", [200, 404])
+    def test_accepts_authenticated_sentinel_statuses(self, status):
         from EvoScientist.config.onboard.validators import validate_atlascloud_key
 
         with patch("httpx.post") as mock_post:
@@ -406,7 +406,7 @@ class TestValidateAtlasCloudKey:
         assert is_valid is False
         assert msg == "Invalid API key"
 
-    @pytest.mark.parametrize("status", [429, 500, 503])
+    @pytest.mark.parametrize("status", [400, 429, 500, 503])
     def test_transient_status_is_inconclusive(self, status):
         from EvoScientist.config.onboard.validators import validate_atlascloud_key
 

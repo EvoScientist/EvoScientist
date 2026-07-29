@@ -26,6 +26,7 @@ from .validators import (
     validate_nvidia_key,
     validate_openai_key,
     validate_openrouter_key,
+    validate_requesty_key,
     validate_siliconflow_key,
     validate_volcengine_key,
     validate_zhipu_key,
@@ -75,6 +76,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Atlas Cloud",
             config.atlascloud_api_key or os.environ.get("ATLASCLOUD_API_KEY", ""),
             validate_atlascloud_key,
+        ),
+        "requesty": (
+            "Requesty",
+            config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
+            validate_requesty_key,
         ),
         "deepseek": (
             "DeepSeek",

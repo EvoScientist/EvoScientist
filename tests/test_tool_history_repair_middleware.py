@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -71,6 +71,187 @@ def test_preserves_complete_tool_exchanges():
     ]
 
     assert repair_tool_history(messages) == messages
+
+
+def test_removes_unnamed_calls_before_serialization():
+    from langchain_openai.chat_models.base import _convert_message_to_dict
+
+    raw_valid = {
+        "id": "raw-good",
+        "function": {"name": "execute", "arguments": "{}"},
+    }
+    message = AIMessage(content="").model_copy(
+        update={
+            "tool_calls": [{"id": "bad", "name": "", "args": {}}],
+            "invalid_tool_calls": [
+                {**_invalid_tool_call("invalid"), "name": None},
+            ],
+            "additional_kwargs": {
+                "tool_calls": [
+                    {"id": "raw-bad", "function": {"arguments": "{}"}},
+                    raw_valid,
+                ]
+            },
+        }
+    )
+    messages = [
+        message,
+        ToolMessage("bad", tool_call_id="bad"),
+        ToolMessage("raw-good", tool_call_id="raw-good"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert repaired[0].tool_calls == []
+    assert repaired[0].invalid_tool_calls == []
+    assert _convert_message_to_dict(repaired[0])["tool_calls"] == [raw_valid]
+    assert [message.tool_call_id for message in repaired[1:]] == ["raw-good"]
+
+
+def test_malformed_raw_entries_are_dropped_without_crashing():
+    message = AIMessage(content="").model_copy(
+        update={
+            "additional_kwargs": {
+                "tool_calls": [
+                    {"id": ["a"], "function": {"name": "x", "arguments": "{}"}},
+                    {"id": "c1", "function": {"name": ["evil"], "arguments": "{}"}},
+                    {"id": "c2", "function": {"name": 7, "arguments": "{}"}},
+                ]
+            },
+        }
+    )
+
+    repaired = repair_tool_history([message])
+
+    assert "tool_calls" not in repaired[0].additional_kwargs
+    assert not any(isinstance(m, ToolMessage) for m in repaired)
+
+
+def test_non_str_raw_id_entry_is_dropped_with_its_result():
+    message = AIMessage(content="").model_copy(
+        update={
+            "additional_kwargs": {
+                "tool_calls": [
+                    {"id": 123, "function": {"name": "f", "arguments": "{}"}}
+                ]
+            },
+        }
+    )
+
+    repaired = repair_tool_history([message, ToolMessage("real", tool_call_id="123")])
+
+    assert "tool_calls" not in repaired[0].additional_kwargs
+    assert not any(isinstance(m, ToolMessage) for m in repaired)
+
+
+def test_non_list_raw_tool_calls_value_is_dropped():
+    for junk in ({"id": "bad", "function": {"name": "x"}}, "bad", 1):
+        message = AIMessage(content="").model_copy(
+            update={"additional_kwargs": {"extra": "kept", "tool_calls": junk}}
+        )
+
+        repaired = repair_tool_history([message])
+
+        assert "tool_calls" not in repaired[0].additional_kwargs
+        assert repaired[0].additional_kwargs["extra"] == "kept"
+
+
+def test_removes_raw_tool_calls_key_when_all_entries_invalid():
+    message = AIMessage(content="").model_copy(
+        update={
+            "additional_kwargs": {
+                "extra": "kept",
+                "tool_calls": [{"id": "x", "function": {"arguments": "{}"}}],
+            },
+        }
+    )
+
+    repaired = repair_tool_history([message, ToolMessage("x", tool_call_id="x")])
+
+    assert "tool_calls" not in repaired[0].additional_kwargs
+    assert repaired[0].additional_kwargs["extra"] == "kept"
+    assert len(repaired) == 1
+
+
+def test_mixed_named_and_unnamed_parsed_calls():
+    message = AIMessage(content="").model_copy(
+        update={
+            "tool_calls": [
+                {"id": "good", "name": "execute", "args": {}},
+                {"id": "bad", "name": "", "args": {}},
+            ],
+        }
+    )
+    messages = [
+        message,
+        ToolMessage("ok", tool_call_id="good"),
+        ToolMessage("junk", tool_call_id="bad"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert [call["id"] for call in repaired[0].tool_calls] == ["good"]
+    assert [m.tool_call_id for m in repaired[1:]] == ["good"]
+
+
+def test_synthesizes_result_for_unanswered_raw_call():
+    message = AIMessage(content="").model_copy(
+        update={
+            "additional_kwargs": {
+                "tool_calls": [
+                    {"id": "raw-1", "function": {"name": "grep", "arguments": "{}"}}
+                ]
+            },
+        }
+    )
+
+    repaired = repair_tool_history([message])
+
+    assert repaired[-1].tool_call_id == "raw-1"
+    assert repaired[-1].name == "grep"
+    assert repaired[-1].status == "error"
+
+
+def test_repair_is_idempotent():
+    messages = [
+        AIMessage(content="").model_copy(
+            update={
+                "tool_calls": [
+                    _tool_call("kept"),
+                    {"id": "bad", "name": "", "args": {}},
+                ],
+                "additional_kwargs": {
+                    "tool_calls": [
+                        {
+                            "id": "raw-1",
+                            "function": {"name": "grep", "arguments": "{}"},
+                        },
+                        {"id": "raw-2", "function": {"arguments": "{}"}},
+                    ]
+                },
+            }
+        ),
+        ToolMessage("done", tool_call_id="kept"),
+        ToolMessage("junk", tool_call_id="bad"),
+    ]
+
+    once = repair_tool_history(messages)
+
+    assert repair_tool_history(once) == once
+
+
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+def test_inject_subagent_includes_tool_history_repair(mock_model):
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    subs = [{"name": "test-agent"}]
+    _inject_subagent_middleware(subs)
+
+    assert any(
+        isinstance(m, ToolHistoryRepairMiddleware) for m in subs[0]["middleware"]
+    )
 
 
 def test_wrap_model_call_repairs_request():
