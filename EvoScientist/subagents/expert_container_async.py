@@ -205,8 +205,19 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
         return []
 
     from ..tools.skills_manager import list_expert_skills
+    from .expert_container import _reserved_subagent_names
 
     port = int(getattr(cfg, "langgraph_dev_port", 6174))
+    # Mirror the sync fold-in's name guard in ``_fold_expert_subagents``:
+    # yaml async sub-agents (``writing-agent``, ``data-analysis-agent``,
+    # ``scheduler``, …) and ``general-purpose`` share the async spec pool
+    # by name, so an expert skill named after any of them would raise
+    # ``ValueError: Duplicate async subagent names`` inside
+    # ``AsyncSubAgentMiddleware.__init__`` and kill CLI startup. The local
+    # ``seen`` set catches the second failure trigger: two workspace-tier
+    # skills that share the same frontmatter ``name`` (workspace listing
+    # uses ``check_seen=False``, so both survive to this point).
+    taken = set(_reserved_subagent_names())
     specs: list[dict[str, Any]] = []
     for skill in list_expert_skills(include_system=True):
         if skill.default_dispatch != "async":
@@ -223,6 +234,14 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
                 skill.name,
             )
             continue
+        if skill.name in taken:
+            _logger.warning(
+                "Expert skill %r collides with an existing async sub-agent "
+                "name; skipping async-dispatch registration.",
+                skill.name,
+            )
+            continue
+        taken.add(skill.name)
         specs.append(
             {
                 "name": skill.name,
