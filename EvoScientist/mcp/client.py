@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from ..runtime import AsyncRuntime, AsyncRuntimeError
+
 logger = logging.getLogger(__name__)
 
 
@@ -838,6 +840,7 @@ def load_mcp_tools(
     config: dict[str, Any] | None = None,
     *,
     on_progress: ProgressCallback | None = None,
+    runtime: AsyncRuntime | None = None,
 ) -> dict[str, list]:
     """Load MCP tools and return them grouped by target agent.
 
@@ -854,6 +857,10 @@ def load_mcp_tools(
             warnings when the caller has already loaded the config.
         on_progress: Optional callback invoked per server with
             ``(event, server_name, detail)``.  See :data:`ProgressCallback`.
+        runtime: Runtime that owns MCP discovery work. When omitted, this
+            function creates one scoped to this call. The returned adapters
+            open a fresh MCP session for each tool call and do not retain the
+            discovery loop.
 
     Returns:
         Dict mapping agent name -> list of LangChain ``BaseTool`` objects.
@@ -865,19 +872,28 @@ def load_mcp_tools(
     if not config:
         return {}
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    if runtime is None:
+        with AsyncRuntime(thread_name="evosci-mcp-runtime") as owned_runtime:
+            return load_mcp_tools(
+                config,
+                on_progress=on_progress,
+                runtime=owned_runtime,
+            )
 
     try:
-        if loop and loop.is_running():
-            # Inside an already-running event loop (e.g. Jupyter) —
-            # nest_asyncio patches the loop so asyncio.run() works.
-            import nest_asyncio
-
-            nest_asyncio.apply()
-        server_tools = asyncio.run(_load_tools(config, on_progress=on_progress))
+        server_tools = runtime.run_sync(
+            lambda: _load_tools(config, on_progress=on_progress)
+        )
+    except AsyncRuntimeError as exc:
+        # A bridge lifecycle/call-site error is not an MCP availability
+        # failure.  In particular, hiding a running-loop violation here makes
+        # callers cache an empty tool set for the rest of the process.
+        if "cannot block a running event loop" in str(exc):
+            raise AsyncRuntimeError(
+                "load_mcp_tools() cannot run inside an async context; use "
+                "`await aload_mcp_tools(config, on_progress=...)` instead"
+            ) from exc
+        raise
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}

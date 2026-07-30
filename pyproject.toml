@@ -1,6 +1,6 @@
 [project]
 name = "EvoScientist"
-version = "0.2.3"
+version = "0.2.4"
 description = "EvoScientist: Towards Self-Evolving AI Scientists for End-to-End Scientific Discovery"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,8 @@ dependencies = [
     "langchain-google-genai>=4.2",
     "langchain-ollama>=1.1",
     "langchain-openrouter>=0.2.5",
+    # 0.11.0+ SSE regressions: teardown noise + mid-turn ReadTimeout
+    "openrouter>=0.10.8,<0.11.0",
     "tavily-python>=0.7",
     "pyyaml>=6.0",
     "rich>=15.0",
@@ -40,7 +42,6 @@ dependencies = [
     "filelock>=3.16",
     "lazy-loader>=0.5",
     "markdownify>=1.2",
-    "nest-asyncio>=1.6",
     "tzlocal>=5.0",
     "langchain-mcp-adapters>=0.2",
     # <8.2.7: 8.2.7 Kitty "report-all-keys" breaks CJK input on iTerm2

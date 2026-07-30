@@ -15,6 +15,7 @@ Test groups:
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -39,6 +40,7 @@ from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.channels.formatter import convert_markdown
 from EvoScientist.channels.middleware import DedupCache, MentionGatingMiddleware
 from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
+from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
@@ -72,6 +74,41 @@ async def _flush_debounce(ch: StubChannel, sender: str) -> None:
 async def _wait_for_async(predicate) -> None:
     while not predicate():
         await asyncio.sleep(0)
+
+
+class TestInboundSyncAdapter:
+    def test_reuses_explicit_runtime(self):
+        channel = StubChannel()
+        channel._inbound_middlewares = []
+        raw = RawIncoming(sender_id="user", chat_id="chat", text="hello")
+
+        with AsyncRuntime(thread_name="test-channel-adapter") as runtime:
+            message = channel._build_inbound(raw, runtime=runtime)
+
+        assert message is not None
+        assert message.content == "hello"
+
+    def test_direct_sync_call_scopes_and_closes_runtime(self):
+        channel = StubChannel()
+        channel._inbound_middlewares = []
+        raw = RawIncoming(sender_id="user", chat_id="chat", text="hello")
+
+        message = channel._build_inbound(raw)
+
+        assert message is not None
+        assert not any(
+            thread.name == "evosci-channel-adapter-runtime" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    async def test_async_caller_must_use_async_api(self):
+        channel = StubChannel()
+        channel._inbound_middlewares = []
+        raw = RawIncoming(sender_id="user", chat_id="chat", text="hello")
+
+        with AsyncRuntime(thread_name="test-channel-adapter") as runtime:
+            with pytest.raises(AsyncRuntimeError, match="running event loop"):
+                channel._build_inbound(raw, runtime=runtime)
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -287,6 +287,76 @@ async def _try_fallbacks(
     _raise_normalized(last_failing_request, last_exc)
 
 
+def _try_fallbacks_sync(
+    request: ModelRequest,
+    invoke: Callable[[ModelRequest], ModelResponse],
+    primary_exc: Exception,
+    events: MiddlewareEventSink,
+) -> ModelResponse:
+    """Synchronous counterpart to :func:`_try_fallbacks`.
+
+    The synchronous middleware path calls a synchronous model handler. Keeping
+    that traversal synchronous avoids manufacturing an event loop solely to
+    share the async implementation.
+    """
+    from ..llm.models import get_chat_model
+
+    events.emit_fallback_notice(
+        f"Primary model failed: {type(primary_exc).__name__}: {primary_exc}",
+        "yellow",
+    )
+    logger.warning(
+        "Primary model failed: %s: %s", type(primary_exc).__name__, primary_exc
+    )
+
+    last_exc = primary_exc
+    last_failing_request = request
+
+    for model_name, provider in get_fallback_chain():
+        events.emit_fallback_notice(
+            f"  -> Falling back to {model_name} ({provider}) due to: "
+            f"{type(last_exc).__name__}: {last_exc}",
+            "yellow",
+        )
+        try:
+            fallback_model = get_chat_model(model=model_name, provider=provider)
+            fb_request = request.override(model=fallback_model)
+            result = invoke(fb_request)
+            events.emit_fallback_notice(
+                f"  Fallback to {model_name} ({provider}) succeeded",
+                "green",
+            )
+            logger.info("Fallback to %s (%s) succeeded", model_name, provider)
+            return result
+        except Exception as fb_exc:
+            reason = _is_non_fallbackable(fb_exc)
+            if reason is not None:
+                events.emit_fallback_notice(
+                    f"  {model_name} hit non-fallbackable error ({reason}) "
+                    f"-- aborting fallback chain",
+                    "red",
+                )
+                _raise_normalized(fb_request, fb_exc)
+            last_exc = fb_exc
+            last_failing_request = fb_request
+            events.emit_fallback_notice(
+                f"  x {model_name} also failed: {type(fb_exc).__name__}: {fb_exc}",
+                "red",
+            )
+            logger.warning(
+                "Fallback %s (provider=%s) failed: %s: %s",
+                model_name,
+                provider,
+                type(fb_exc).__name__,
+                fb_exc,
+            )
+
+    events.emit_fallback_notice(
+        "  All fallbacks exhausted -- re-raising last error", "red"
+    )
+    _raise_normalized(last_failing_request, last_exc)
+
+
 def _raise_normalized(request: ModelRequest, exc: Exception) -> None:
     """Wrap *exc* in a ``ProviderStreamError`` attributed to
     ``request.model`` and raise, so the outer chain sees the failure
@@ -334,6 +404,23 @@ def _guard_and_fallback(
     return _try_fallbacks(request, invoke, primary_exc, events)
 
 
+def _guard_and_fallback_sync(
+    primary_exc: Exception,
+    request: ModelRequest,
+    invoke: Callable[[ModelRequest], ModelResponse],
+    events: MiddlewareEventSink,
+) -> ModelResponse:
+    """Validate and run the native synchronous fallback traversal."""
+    reason = _is_non_fallbackable(primary_exc)
+    if reason is not None:
+        events.emit_fallback_notice(
+            f"Model error ({reason}) -- not eligible for fallback, re-raising",
+            "red",
+        )
+        _raise_normalized(request, primary_exc)
+    return _try_fallbacks_sync(request, invoke, primary_exc, events)
+
+
 class ModelFallbackMiddleware(AgentMiddleware):
     """LangChain AgentMiddleware that retries failed model calls on fallbacks.
 
@@ -363,15 +450,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
         try:
             return handler(request)
         except Exception as exc:
-
-            async def _sync_invoke(r: ModelRequest) -> ModelResponse:
-                return handler(r)
-
-            import asyncio
-
-            return asyncio.run(
-                _guard_and_fallback(exc, request, _sync_invoke, self._events)
-            )
+            return _guard_and_fallback_sync(exc, request, handler, self._events)
 
     async def awrap_model_call(
         self,

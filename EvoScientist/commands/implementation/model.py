@@ -130,6 +130,7 @@ class ModelCommand(Command):
         *,
         save: bool = False,
     ) -> None:
+        import asyncio
         import copy
 
         from ...cli.agent import _load_agent
@@ -139,6 +140,7 @@ class ModelCommand(Command):
             set_active_config,
             set_chat_model_instance,
         )
+        from ...runtime import AsyncRuntime
 
         cfg = _ensure_config()
 
@@ -158,12 +160,19 @@ class ModelCommand(Command):
 
         try:
             new_chat_model = _build_chat_model(temp_cfg)
-            new_agent = _load_agent(
-                workspace_dir=ctx.workspace_dir,
-                checkpointer=ctx.checkpointer,
-                config=temp_cfg,
-                chat_model=new_chat_model,
-                events=events,
+            load_kwargs = {
+                "workspace_dir": ctx.workspace_dir,
+                "checkpointer": ctx.checkpointer,
+                "config": temp_cfg,
+                "chat_model": new_chat_model,
+                "events": events,
+            }
+            async_runtime = getattr(ctx, "async_runtime", None)
+            if isinstance(async_runtime, AsyncRuntime):
+                load_kwargs["runtime"] = async_runtime
+            new_agent = await asyncio.to_thread(
+                _load_agent,
+                **load_kwargs,
             )
         except Exception as e:
             ctx.ui.append_system(f"Failed to switch model: {e}", style="red")

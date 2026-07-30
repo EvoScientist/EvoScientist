@@ -952,7 +952,7 @@ wheels = [
 
 [[package]]
 name = "evoscientist"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents", extra = ["quickjs"] },
@@ -972,7 +972,7 @@ dependencies = [
     { name = "langgraph-sdk" },
     { name = "lazy-loader" },
     { name = "markdownify" },
-    { name = "nest-asyncio" },
+    { name = "openrouter" },
     { name = "prompt-toolkit" },
     { name = "psutil" },
     { name = "python-dotenv" },
@@ -1082,7 +1082,7 @@ requires-dist = [
     { name = "lark-oapi", marker = "extra == 'feishu'", specifier = ">=1.4.0" },
     { name = "lazy-loader", specifier = ">=0.5" },
     { name = "markdownify", specifier = ">=1.2" },
-    { name = "nest-asyncio", specifier = ">=1.6" },
+    { name = "openrouter", specifier = ">=0.10.8,<0.11.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5.0" },
     { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "psutil", specifier = ">=6.0" },
@@ -2693,15 +2693,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nest-asyncio"
-version = "1.6.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/83/f8/51569ac65d696c8ecbee95938f89d4abf00f47d58d48f6fbabfe8f0baefe/nest_asyncio-1.6.0.tar.gz", hash = "sha256:6f172d5449aca15afd6c646851f4e31e02c598d553a667e38cafa997cfec55fe", size = 7418, upload-time = "2024-01-21T14:25:19.227Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a0/c4/c2971a3ba4c6103a3d10c4b0f24f461ddc027f0f09763220cf35ca1401b3/nest_asyncio-1.6.0-py3-none-any.whl", hash = "sha256:87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c", size = 5195, upload-time = "2024-01-21T14:25:17.223Z" },
-]
-
-[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2920,7 +2911,7 @@ wheels = [
 
 [[package]]
 name = "openrouter"
-version = "0.11.44"
+version = "0.10.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpcore" },
@@ -2928,9 +2919,9 @@ dependencies = [
     { name = "jsonpath-python" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/38/66/1c239f07abd22c7eb505e664deb31eee7b9d1451a4f7e7249e60711b42b7/openrouter-0.11.44.tar.gz", hash = "sha256:7a61c42949a96a6c2da2bb7810f7ba99581271c2344deecff34d2bbae9b83157", size = 380246, upload-time = "2026-07-17T20:59:07.669Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/38/4c/1fed3f4cbcf0962d8117b54f1740696c98d0dc2e3d5c34459d46effe8a3b/openrouter-0.10.8.tar.gz", hash = "sha256:ac7f4cea1ec1c2a063b0ad9792a8f64dde68ed053279b6c42bee849a50afc47c", size = 340259, upload-time = "2026-06-28T15:33:38.067Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/08/c4/1572fff0d9169c0aa849ebaa7d492508eb2d4d583b8b5caf9a5a97760123/openrouter-0.11.44-py3-none-any.whl", hash = "sha256:b787f132a00fe058d8772985d5ec25dfa446b2ad00309be03143f8d8f5b5371b", size = 837128, upload-time = "2026-07-17T20:59:06.287Z" },
+    { url = "https://files.pythonhosted.org/packages/15/ae/76fc8ad57f6717e9231fbd7313e5623733d86f1a2149baa458772164f456/openrouter-0.10.8-py3-none-any.whl", hash = "sha256:ff9b3cd2f55a3f905d21f56517344da9f9556ffbd2cb9d31ddc388c4b930aab6", size = 748497, upload-time = "2026-06-28T15:33:36.627Z" },
 ]
 
 [[package]]

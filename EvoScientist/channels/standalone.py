@@ -26,6 +26,13 @@ from .debug import emit_debug_event
 logger = logging.getLogger(__name__)
 
 
+async def _create_standalone_agent():
+    """Construct the synchronous agent without blocking the channel loop."""
+    from ..EvoScientist import create_cli_agent
+
+    return await asyncio.to_thread(create_cli_agent)
+
+
 def _channel_trace_enabled(channel: Channel) -> bool:
     """Check if debug tracing is enabled on the channel."""
     try:
@@ -107,10 +114,12 @@ async def _async_main(
     consumer: InboundConsumer | None = None
     if use_agent:
         logger.info("Loading EvoScientist agent...")
-        from ..EvoScientist import create_cli_agent
         from ..gateway import create_runtime_gateways
 
-        agent = create_cli_agent()
+        # Agent construction performs synchronous MCP discovery through the
+        # owned-runtime bridge.  Keep it off this already-running channel loop
+        # (and avoid blocking channel health/startup work while it loads).
+        agent = await _create_standalone_agent()
         runtime_gateways = create_runtime_gateways()
         logger.info("Agent loaded")
 
@@ -151,7 +160,7 @@ async def _async_main(
         await channel.stop()
         await manager.stop_health()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(
             sig,

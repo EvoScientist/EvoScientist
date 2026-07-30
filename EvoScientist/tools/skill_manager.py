@@ -1,5 +1,6 @@
 """Skill management tool (LangChain @tool wrapper)."""
 
+from pathlib import Path
 from typing import Literal
 
 from langchain_core.tools import tool
@@ -72,15 +73,47 @@ def skill_manager(
                 "a GitHub URL, or a local directory path."
             )
         result = install_skill(source)
-        if result["success"]:
-            return (
-                f"Successfully installed skill: {result['name']}\n"
-                f"Description: {result.get('description', '(none)')}\n"
-                f"Path: {result['path']}\n\n"
+        if not result["success"]:
+            # ``_batch_install_local`` returns ``{"success": False, "batch":
+            # True, "installed": [], "failed": [...]}`` with no top-level
+            # ``error`` key — a bare ``result['error']`` KeyErrors here.
+            if result.get("batch"):
+                failed = result.get("failed") or []
+                if not failed:
+                    return "Failed to install skills: no skills found in source"
+                lines = ["Failed to install skills:"]
+                for f in failed:
+                    lines.append(f"  - {f.get('name', '?')}: {f.get('error', '?')}")
+                return "\n".join(lines)
+            return f"Failed to install skill: {result['error']}"
+
+        # Success path — batch and single-install shapes handled uniformly.
+        # Report ``Path: /skills/<name>``: the sandbox-visible virtual mount
+        # segment (a directory name), not the host filesystem path. Surfacing
+        # ``result['path']`` (e.g. ``/home/.../EvoScientist/skills/<name>``)
+        # invited ``cd <host-path> && …`` chains that fail in the sandbox.
+        entries = result["installed"] if result.get("batch") else [result]
+        blocks = []
+        for entry in entries:
+            mount = Path(entry["path"]).name
+            blocks.append(
+                f"Successfully installed skill: {entry['name']}\n"
+                f"Description: {entry.get('description', '(none)')}\n"
+                f"Path: /skills/{mount}\n\n"
                 f"Read its SKILL.md for full instructions."
             )
-        else:
-            return f"Failed to install skill: {result['error']}"
+        # Batch installs can partially fail — surface each failure rather than
+        # dropping it silently below the success blocks.
+        if result.get("batch"):
+            failed = result.get("failed") or []
+            if failed:
+                fail_lines = ["Partial install — the following skills failed:"]
+                for f in failed:
+                    fail_lines.append(
+                        f"  - {f.get('name', '?')}: {f.get('error', '?')}"
+                    )
+                blocks.append("\n".join(fail_lines))
+        return "\n\n".join(blocks)
 
     elif action == "list":
         skills = list_skills(include_system=include_system)
@@ -161,11 +194,15 @@ def skill_manager(
                 f"Skill not found: {name}. "
                 f"Use action='list' with include_system=True to see all available skills."
             )
+        # ``Path`` reports the sandbox-visible virtual mount segment (the skill's
+        # directory name under ``/skills/``), not the host filesystem path.
+        # Surfacing the host path (e.g. ``/home/.../EvoScientist/skills/<name>``)
+        # invited ``cd <host-path> && …`` chains that fail in the sandbox.
         lines = [
             f"Name: {info.name}",
             f"Description: {info.description}",
             f"Source: {info.source}",
-            f"Path: {info.path}",
+            f"Path: /skills/{info.path.name}",
         ]
         if info.tags:
             lines.append(f"Tags: {', '.join(info.tags)}")

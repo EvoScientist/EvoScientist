@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from .middleware.events import MiddlewareEventSink
+    from .runtime import AsyncRuntime
 
 # =============================================================================
 # Constants
@@ -246,7 +247,11 @@ def _load_mcp_config_once() -> tuple[str, dict]:
     return sig, cfg
 
 
-def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
+def _load_mcp_tools_cached(
+    on_progress=None,
+    *,
+    runtime: "AsyncRuntime | None" = None,
+) -> dict[str, list]:
     """Load MCP tools with config-aware caching.
 
     Args:
@@ -267,7 +272,11 @@ def _load_mcp_tools_cached(on_progress=None) -> dict[str, list]:
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
         return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
 
-    loaded = load_mcp_tools(config=cfg, on_progress=on_progress)
+    loaded = load_mcp_tools(
+        config=cfg,
+        on_progress=on_progress,
+        runtime=runtime,
+    )
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     return {k: list(v) for k, v in loaded.items()}
@@ -309,6 +318,7 @@ def _inject_subagent_middleware(
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
+        ToolHistoryRepairMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
@@ -341,6 +351,8 @@ def _inject_subagent_middleware(
             # them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
             ErrorNormalizationMiddleware(),
+            # Sync subagents replay their own history to strict providers too.
+            ToolHistoryRepairMiddleware(),
             # Subagents share the main agent's model: use the threaded
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
@@ -630,9 +642,14 @@ def _build_base_kwargs(
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
+    # ``async_swap_pending=True`` because ``_maybe_swap_async_subagents``
+    # below re-resolves tools for async subagents against the deployed
+    # graph's own registry (via ``subagents/_factory.py``). A tool missing
+    # from ``tool_registry`` for an async spec logs at DEBUG, not WARNING.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
+        async_swap_pending=True,
     )
     _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
@@ -664,6 +681,7 @@ def load_mcp_and_build_kwargs(
     cfg=None,
     chat_model=None,
     workspace_dir=None,
+    runtime: "AsyncRuntime | None" = None,
 ):
     """Load MCP tools (cached by config) and build agent kwargs.
 
@@ -682,7 +700,10 @@ def load_mcp_and_build_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    mcp_by_agent = _load_mcp_tools_cached(on_progress=on_mcp_progress)
+    mcp_by_agent = _load_mcp_tools_cached(
+        on_progress=on_mcp_progress,
+        runtime=runtime,
+    )
     if not mcp_by_agent:
         return _build_base_kwargs(
             base_backend,
@@ -708,9 +729,12 @@ def load_mcp_and_build_kwargs(
 
     mcp_main = mcp_by_agent.pop("main", [])
 
+    # Same rationale as ``_build_base_kwargs``: async subagents get
+    # re-resolved downstream by the deployed graph's factory registry.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
+        async_swap_pending=True,
     )
     _fold_expert_subagents(subs, registry)
 
@@ -831,6 +855,7 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
+        ToolHistoryRepairMiddleware,
         create_active_team_middleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
@@ -904,6 +929,7 @@ def _get_default_middleware(
         # middlewares) and normalizes them into a non-dataclass
         # envelope wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
+        ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
         # Team-binding cue for the main agent only. Reads
         # `configurable.active_teams: list[str]` and appends a cue biasing
@@ -1057,6 +1083,7 @@ def create_cli_agent(
     *,
     on_mcp_progress=None,
     events: "MiddlewareEventSink | None" = None,
+    runtime: "AsyncRuntime | None" = None,
 ) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
@@ -1083,6 +1110,8 @@ def create_cli_agent(
         chat_model: Optional pre-built chat model.  Only triggers the pure
             path when ``config`` is also explicit; otherwise it is ignored in
             favor of the ``_ensure_chat_model()`` fallback.
+        runtime: Optional application-scoped runtime for synchronous MCP tool
+            discovery. Direct callers get a scoped runtime when omitted.
     """
     import os as _os
 
@@ -1183,6 +1212,7 @@ def create_cli_agent(
         cfg=cfg,
         chat_model=chat_model,
         workspace_dir=workspace_dir,
+        runtime=runtime,
     )
 
     return create_deep_agent(

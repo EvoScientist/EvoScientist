@@ -297,6 +297,14 @@ def _step_provider(
             value="openrouter",
         ),
         Choice(
+            title="Atlas Cloud (aggregator — DeepSeek, Qwen, etc.)",
+            value="atlascloud",
+        ),
+        Choice(
+            title="Requesty (aggregator — OpenAI, Anthropic, Gemini, xAI, etc.)",
+            value="requesty",
+        ),
+        Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
         ),
