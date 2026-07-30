@@ -104,3 +104,35 @@ def append_to_system_message(
     if system_message is None:
         return SystemMessage(content=new_blocks)
     return system_message.model_copy(update={"content": new_blocks})
+
+
+def replace_block_by_sentinel(
+    system_message: SystemMessage | None,
+    sentinel: str,
+    replacement: str,
+) -> SystemMessage | None:
+    """Swap the block containing ``sentinel`` for ``replacement`` text.
+
+    Iterates ``system_message.content_blocks`` and returns a new
+    ``SystemMessage`` whose block-list has the first block containing
+    ``sentinel`` replaced by ``{"type": "text", "text": replacement}``.
+    Other blocks and metadata (``additional_kwargs``, ``id``, ``name``,
+    ``response_metadata``) are preserved via ``model_copy``.
+
+    Returns ``None`` when no block carries the sentinel — the caller
+    decides fallback policy (typically log-and-append rather than
+    hard-fail, so a deepagents base-stack refactor degrades gracefully
+    instead of killing the graph).
+    """
+    if system_message is None:
+        return None
+    blocks = list(system_message.content_blocks)
+    for i, block in enumerate(blocks):
+        if isinstance(block, dict) and sentinel in block.get("text", ""):
+            new_blocks = [
+                *blocks[:i],
+                {"type": "text", "text": replacement},
+                *blocks[i + 1 :],
+            ]
+            return system_message.model_copy(update={"content": new_blocks})
+    return None

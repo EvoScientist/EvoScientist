@@ -38,6 +38,24 @@ from langchain_core.messages import SystemMessage
 
 _logger = logging.getLogger(__name__)
 
+# Sentinel token embedded in ``_FALLBACK_SYSTEM_PROMPT`` so
+# :class:`ExpertSkillLoaderMiddleware` can locate that block inside the
+# base-stack-composed ``system_message`` and swap it for the persona in
+# place — preserving the base-stack sections (todo guidance, ``## `task```,
+# ``## Filesystem Tools``, ``## Skills System``, ``## Async subagents``,
+# ...) that would otherwise be dropped by an ``override(system_message=...)``.
+# Double-underscore ASCII cannot occur incidentally in skill bodies or
+# base-stack prose, so a substring scan is precise. HTML-comment tokens
+# were rejected because pretty-printers can strip them and Claude has
+# been observed to echo them back into prose.
+_PERSONA_SENTINEL = "__EVOEXPERT_PERSONA_SLOT__"
+
+_FALLBACK_SYSTEM_PROMPT = (
+    f"{_PERSONA_SENTINEL}\n\n"
+    "Fallback: the expert loader middleware failed to resolve ``skill_name``. "
+    "Return an error envelope naming the failure and halt."
+)
+
 
 class ExpertContainerState(DeepAgentState):
     """State schema for the async expert container graph.
@@ -159,23 +177,53 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
             )
         return (head + body).rstrip() + runtime_block
 
+    def _compose_system_message(self, request: ModelRequest[Any]) -> SystemMessage:
+        """Return the base-stack ``system_message`` with the persona swapped in.
+
+        Locates the fallback block by ``_PERSONA_SENTINEL`` and replaces its
+        text with the composed persona, preserving every other block
+        (``## `task```, ``## Filesystem Tools``, ``## Skills System``, …).
+        When the sentinel isn't found (e.g. deepagents renamed the
+        ``system_prompt=`` handling), degrade to appending the persona so
+        the base-stack sections stay live and the expert stays operational;
+        surface the drift in logs so it can't rot silently.
+        """
+        from ..middleware.utils import (
+            append_to_system_message,
+            replace_block_by_sentinel,
+        )
+
+        composed = self._compose_prompt(request.state)
+        new_system = replace_block_by_sentinel(
+            request.system_message, _PERSONA_SENTINEL, composed
+        )
+        if new_system is None:
+            _logger.warning(
+                "Expert persona sentinel %r not found in system_message; "
+                "appending persona instead of replacing the fallback block. "
+                "Deepagents' base-stack composition may have changed.",
+                _PERSONA_SENTINEL,
+            )
+            new_system = append_to_system_message(request.system_message, composed)
+        return new_system
+
     def wrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
     ) -> ModelResponse[Any]:
-        composed = self._compose_prompt(request.state)
-        new_system = SystemMessage(content=composed)
-        return handler(request.override(system_message=new_system))
+        return handler(
+            request.override(system_message=self._compose_system_message(request))
+        )
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        composed = self._compose_prompt(request.state)
-        new_system = SystemMessage(content=composed)
-        return await handler(request.override(system_message=new_system))
+        return await handler(
+            request.override(system_message=self._compose_system_message(request))
+        )
 
 
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
@@ -281,13 +329,6 @@ def build_expert_container_async_graph() -> Any:
 
     cfg = get_effective_config()
     apply_config_to_env(cfg)
-
-    _FALLBACK_SYSTEM_PROMPT = (
-        "You are an expert sub-agent. Your specific role is loaded from your "
-        "``skill_name`` at every model call. If you see this fallback prompt "
-        "instead of your persona, the loader middleware failed — return an "
-        "error envelope naming the failure and halt."
-    )
 
     subagents: list[dict[str, Any]] = []
     # The async expert runs as its own graph inside langgraph-dev, so it

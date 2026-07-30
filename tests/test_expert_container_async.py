@@ -13,11 +13,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from langchain_core.messages import SystemMessage
+
 from EvoScientist.subagents.expert_container_async import (
+    _PERSONA_SENTINEL,
     ExpertContainerState,
     ExpertSkillLoaderMiddleware,
 )
 from EvoScientist.tools.skills_manager import SkillInfo
+
+# Two base-stack witness blocks used across the wrap_model_call tests. Their
+# contents mirror the section headers deepagents emits per-turn — regressing
+# the compose logic would drop these from the composed system_message.
+_TASK_WITNESS = "## `task` (subagent spawner)\n\nUse ``task`` to delegate ..."
+_SKILLS_WITNESS = "## Skills System\n\nInstalled skills are mounted under ..."
 
 # =============================================================================
 # _compose_prompt — the load-bearing logic
@@ -205,38 +214,119 @@ class TestExpertContainerState:
 # =============================================================================
 
 
+def _system_message_with_sentinel_and_witnesses() -> SystemMessage:
+    """Base-stack-shaped ``SystemMessage``: the fallback (sentinel-bearing)
+    block, then two witness blocks that represent deepagents' composed
+    sections. This is the exact shape our middleware sees at model-call
+    time when the container graph was built with
+    ``system_prompt=_FALLBACK_SYSTEM_PROMPT`` and the base stack has
+    appended its sections on top."""
+    from EvoScientist.subagents.expert_container_async import _FALLBACK_SYSTEM_PROMPT
+
+    return SystemMessage(
+        content=[
+            {"type": "text", "text": _FALLBACK_SYSTEM_PROMPT},
+            {"type": "text", "text": _TASK_WITNESS},
+            {"type": "text", "text": _SKILLS_WITNESS},
+        ]
+    )
+
+
+def _mock_request(system_message: SystemMessage):
+    """Stub ``ModelRequest`` supporting ``state`` and ``override``. Returns
+    ``(request, seen, handler)`` — ``seen`` is a list the handler pushes the
+    post-override ``system_message`` into for post-call assertions."""
+    seen: list[SystemMessage] = []
+    overridden = SimpleNamespace()
+
+    def override(*, system_message):
+        overridden.system_message = system_message
+        return overridden
+
+    def handler(new_request):
+        seen.append(new_request.system_message)
+        return SimpleNamespace()
+
+    request = SimpleNamespace(
+        state={"skill_name": "literature-review"},
+        system_message=system_message,
+        override=override,
+    )
+    return request, seen, handler
+
+
 class TestWrapModelCall:
-    def test_wrap_replaces_system_message_with_composed_prompt(self):
+    def test_wrap_composes_persona_into_base_stack_system_message(self):
+        """Persona swaps for the sentinel block; base-stack witness blocks
+        stay in place. The whole point of the fix — replacing the whole
+        system_message (the pre-fix behaviour) dropped every base-stack
+        section (measured live: 9,608 → 382 chars) and broke ``task()``
+        for async experts."""
         mw = ExpertSkillLoaderMiddleware()
-        seen = {}
-
-        def handler(new_request):
-            seen["system_prompt"] = new_request.system_message.content
-            return SimpleNamespace()
-
-        # Build a minimal ModelRequest-like object with .state and
-        # .override() returning a new request whose system_message is the
-        # composed prompt. We stub ModelRequest via SimpleNamespace to
-        # avoid pulling in the full langchain construction; wrap_model_call
-        # only calls request.override(system_message=...) and passes the
-        # result to handler.
-        overridden = SimpleNamespace()
-
-        def override(*, system_message):
-            overridden.system_message = system_message
-            return overridden
-
-        request = SimpleNamespace(
-            state={"skill_name": "literature-review"},
-            override=override,
+        request, seen, handler = _mock_request(
+            _system_message_with_sentinel_and_witnesses()
         )
-
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info()],
         ):
             mw.wrap_model_call(request, handler)
 
-        assert overridden.system_message.content.startswith(
-            "You are literature-review strategist."
+        composed = seen[0]
+        block_texts = [b.get("text", "") for b in composed.content_blocks]
+        # Persona landed — role prepend visible.
+        assert any(
+            t.startswith("You are literature-review strategist.") for t in block_texts
+        )
+        # Sentinel gone (block was replaced, not appended).
+        assert not any(_PERSONA_SENTINEL in t for t in block_texts)
+        # Witnesses preserved verbatim — the base-stack sections stay live.
+        assert _TASK_WITNESS in block_texts
+        assert _SKILLS_WITNESS in block_texts
+        # Block count unchanged — replace, not append.
+        assert len(block_texts) == 3
+
+    def test_wrap_appends_persona_when_sentinel_missing(self, caplog):
+        """When the sentinel block isn't found (e.g. deepagents refactors
+        how ``system_prompt=`` reaches ``content_blocks``), the persona is
+        appended instead of silently dropped, and the drift is logged."""
+        import logging
+
+        mw = ExpertSkillLoaderMiddleware()
+        # No sentinel block — only witnesses.
+        request, seen, handler = _mock_request(
+            SystemMessage(
+                content=[
+                    {"type": "text", "text": _TASK_WITNESS},
+                    {"type": "text", "text": _SKILLS_WITNESS},
+                ]
+            )
+        )
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=[_skill_info()],
+            ),
+            caplog.at_level(
+                logging.WARNING,
+                logger="EvoScientist.subagents.expert_container_async",
+            ),
+        ):
+            mw.wrap_model_call(request, handler)
+
+        composed = seen[0]
+        block_texts = [b.get("text", "") for b in composed.content_blocks]
+        # Persona appended as a new block.
+        assert any(
+            t.startswith("You are literature-review strategist.") for t in block_texts
+        )
+        # Witnesses still present.
+        assert _TASK_WITNESS in block_texts
+        assert _SKILLS_WITNESS in block_texts
+        # Original two blocks + persona = 3.
+        assert len(block_texts) == 3
+        # Drift-detected warning surfaced.
+        assert any(
+            _PERSONA_SENTINEL in r.message and "not found" in r.message
+            for r in caplog.records
         )
