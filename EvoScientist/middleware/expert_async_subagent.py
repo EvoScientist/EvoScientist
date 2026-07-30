@@ -1,11 +1,11 @@
-"""Payload-aware AsyncSubAgentMiddleware for the expert-skill dispatch pattern.
+"""Skill-name-injecting AsyncSubAgentMiddleware for expert dispatch.
 
 Upstream ``deepagents.AsyncSubAgentMiddleware`` hardcodes the invocation
 input to ``{"messages": [{"role": "user", "content": description}]}`` — no
 way for ``start_async_task`` to pass per-run state to the target graph. That
-blocks the generic-container async pattern we need for agent-teams v2's
-expert dispatch (one container graph, parameterised by which skill is active
-via ``skill_name`` + ``output_path`` in the initial state).
+blocks the generic-container async pattern we need for agent-teams' expert
+dispatch (one container graph, parameterised by which skill is active via
+``skill_name`` in the initial state).
 
 Multiple community issues on the deepagents tracker target this gap
 (``#2440``, ``#3838``, ``#4668``, ``#606``, ``#2512``) and the maintainers
@@ -16,19 +16,23 @@ predictable timeline; this subclass gives us the mechanism locally.
 Design
 ------
 - Subclass ``AsyncSubAgentMiddleware``; call ``super().__init__()`` for spec
-  validation + default 5-tool build, then swap in a payload-aware start tool
-  in place of upstream's (keeping check / update / cancel / list unchanged).
+  validation + default 5-tool build, then swap in a start tool that injects
+  ``skill_name=subagent_type`` by construction (keeping check / update /
+  cancel / list unchanged).
+- The tool signature matches upstream exactly: ``(description, subagent_type,
+  runtime)``. No LLM-visible ``payload`` field: every value the middleware
+  can derive itself (the skill name) is injected inside the middleware, not
+  entrusted to a channel the model can get wrong. Any run-specific
+  information the model uniquely holds (e.g. the desired ``output_path``)
+  belongs in the description string.
 - Extend the ``AsyncSubAgent`` typed dict with an optional ``is_expert``
-  marker. Expert specs require a non-empty payload; standard specs (existing
-  ``writing-agent`` / ``data-analysis-agent`` / ``scheduler``) reject a
-  non-None payload with a clear tool-result error.
-- Payload keys are merged into ``client.runs.create(input=...)`` so the
-  target graph's state schema can declare them as regular fields
-  (``skill_name``, ``output_path``, ``started_at``, ...).
+  marker so the middleware knows when to add ``skill_name`` to the run
+  input. Standard specs (``writing-agent`` / ``data-analysis-agent`` /
+  ``scheduler``) reach ``client.runs.create`` with the upstream shape.
 
-If deepagents ever lands a payload-passthrough of its own, delete this file
-and rebind ``EvoAsyncSubAgentMiddleware`` → ``AsyncSubAgentMiddleware`` in
-one commit; the state-schema shape on the container graph doesn't change.
+If deepagents ever lands a skill-name-passthrough of its own, delete this
+file and rebind ``EvoAsyncSubAgentMiddleware`` → ``AsyncSubAgentMiddleware``
+in one commit; the state-schema shape on the container graph doesn't change.
 
 Do NOT add ``from __future__ import annotations`` to this module. langchain's
 ``StructuredTool._injected_args_keys`` uses ``inspect.signature(fn)`` (raw
@@ -48,6 +52,7 @@ from deepagents.middleware.async_subagents import (
     AsyncSubAgent,
     AsyncSubAgentMiddleware,
     AsyncTask,
+    StartAsyncTaskSchema,
     _build_cancel_tool,
     _build_check_tool,
     _build_list_tasks_tool,
@@ -59,7 +64,6 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel, Field
 
 _logger = logging.getLogger(__name__)
 
@@ -68,84 +72,57 @@ class ExpertAsyncSubAgent(AsyncSubAgent):
     """AsyncSubAgent spec extended with the expert-dispatch marker.
 
     Same wire fields as upstream ``AsyncSubAgent`` plus an internal
-    ``is_expert`` marker. Expert specs are dispatched with a required
-    payload dict (containing ``skill_name``, ``output_path``, ...); standard
-    specs reject payload.
+    ``is_expert`` marker. Expert specs get ``skill_name`` injected into
+    the run input by construction so the shared container graph knows
+    which persona to load; standard specs reach ``runs.create`` with the
+    upstream shape.
     """
 
     is_expert: NotRequired[bool]
 
 
-class ExpertStartAsyncTaskSchema(BaseModel):
-    """Input schema for the payload-aware ``start_async_task``.
+def _build_run_input(
+    spec: AsyncSubAgent, subagent_type: str, description: str
+) -> dict[str, Any]:
+    """Build the ``input`` dict for ``client.runs.create``.
 
-    Extends upstream's ``StartAsyncTaskSchema`` with an optional ``payload``
-    dict. Presence / absence rules depend on the target subagent's
-    ``is_expert`` marker — enforced at tool-call time.
+    ``skill_name`` is injected by construction for expert specs — never
+    accepted from the LLM, because the value is derivable from
+    ``subagent_type`` and every LLM-authored field is a field the LLM can
+    get wrong (silently overwriting ``messages`` was the pre-fix bug).
+    Standard specs (``writing-agent`` / ``data-analysis-agent`` /
+    ``scheduler``) reach ``runs.create`` with the upstream single-key shape.
     """
+    input_dict: dict[str, Any] = {
+        "messages": [{"role": "user", "content": description}]
+    }
+    if spec.get("is_expert"):
+        input_dict["skill_name"] = subagent_type
+    return input_dict
 
-    description: str = Field(
-        description="A detailed description of the task for the async subagent to perform."
+
+def _build_task_envelope(
+    subagent_type: str, thread_id: str, run_id: str, tool_call_id: str
+) -> Command:
+    """Wrap a successful launch in the ``Command`` shape the router expects."""
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    task: AsyncTask = {
+        "task_id": thread_id,
+        "agent_name": subagent_type,
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "running",
+        "created_at": now,
+        "last_checked_at": now,
+        "last_updated_at": now,
+    }
+    msg = f"Launched async subagent. task_id: {thread_id}"
+    return Command(
+        update={
+            "messages": [ToolMessage(msg, tool_call_id=tool_call_id)],
+            "async_tasks": {thread_id: task},
+        }
     )
-    subagent_type: str = Field(
-        description=(
-            "The type of async subagent to use. Must be one of the available "
-            "types listed in the tool description."
-        )
-    )
-    payload: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Per-invocation state for expert subagents. Required when "
-            "``subagent_type`` refers to an expert (e.g. ``literature-review``); "
-            "must include ``skill_name`` and ``output_path``. Not accepted "
-            "for standard subagents (e.g. ``writing-agent``)."
-        ),
-    )
-
-
-def _payload_validation_error(
-    spec: AsyncSubAgent,
-    subagent_type: str,
-    payload: dict[str, Any] | None,
-) -> str | None:
-    """Return an error string when payload presence doesn't match the spec.
-
-    Rules:
-    - Expert spec (``is_expert=True``): payload MUST be a non-empty dict
-      containing at minimum ``skill_name``. ``output_path`` is checked at
-      the container graph — not required at the tool-call boundary — because
-      some experts may compute the path themselves from ``skill_name`` + user
-      goal in a preflight step.
-    - Standard spec: payload MUST be ``None`` or absent. A non-None payload
-      indicates the caller confused the two subagent shapes; reject rather
-      than silently drop the payload.
-    """
-    is_expert = bool(spec.get("is_expert", False))
-    if is_expert:
-        if not payload:
-            return (
-                f"payload required for expert subagent '{subagent_type}': "
-                "must be a dict including at least `skill_name`"
-            )
-        if not isinstance(payload, dict):
-            return (
-                f"payload for expert subagent '{subagent_type}' must be a dict, "
-                f"got {type(payload).__name__}"
-            )
-        if not payload.get("skill_name"):
-            return (
-                f"payload for expert subagent '{subagent_type}' must include "
-                "non-empty `skill_name`"
-            )
-        return None
-    # Standard subagent — payload must be absent.
-    if payload:
-        return (
-            f"payload not accepted for standard subagent '{subagent_type}'; "
-            "payload is only used by expert subagents"
-        )
-    return None
 
 
 def _build_expert_start_tool(
@@ -153,34 +130,25 @@ def _build_expert_start_tool(
     clients: _ClientCache,
     tool_description: str,
 ) -> StructuredTool:
-    """Build the payload-aware ``start_async_task`` tool.
+    """Build the skill-name-injecting ``start_async_task`` tool.
 
-    Mirrors ``deepagents.middleware.async_subagents._build_start_tool`` line
-    for line, with two additions: (1) accepts ``payload: dict | None``,
-    (2) merges it into the ``client.runs.create(input=...)`` dict so the
-    target graph receives it as initial state.
+    Tool signature is upstream's exact shape (``description``,
+    ``subagent_type``, ``runtime``). For expert specs the middleware
+    injects ``skill_name=subagent_type`` into the run input before
+    dispatch, so the container graph resolves the right persona without
+    the model contributing (or being able to corrupt) that value.
     """
 
     def start_async_task(
         description: str,
         subagent_type: str,
-        payload: dict[str, Any] | None,
         runtime: ToolRuntime,
     ) -> str | Command:
         error = _validate_agent_type(agent_map, subagent_type)
         if error:
             return error
         spec = agent_map[subagent_type]
-        payload_error = _payload_validation_error(spec, subagent_type, payload)
-        if payload_error:
-            return payload_error
-
-        input_dict: dict[str, Any] = {
-            "messages": [{"role": "user", "content": description}]
-        }
-        if payload:
-            input_dict.update(payload)
-
+        input_dict = _build_run_input(spec, subagent_type, description)
         try:
             client = clients.get_sync(subagent_type)
             thread = client.threads.create()
@@ -194,47 +162,20 @@ def _build_expert_start_tool(
                 "Failed to launch async subagent '%s': %s", subagent_type, e
             )
             return f"Failed to launch async subagent '{subagent_type}': {e}"
-
-        task_id = thread["thread_id"]
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        task: AsyncTask = {
-            "task_id": task_id,
-            "agent_name": subagent_type,
-            "thread_id": task_id,
-            "run_id": run["run_id"],
-            "status": "running",
-            "created_at": now,
-            "last_checked_at": now,
-            "last_updated_at": now,
-        }
-        msg = f"Launched async subagent. task_id: {task_id}"
-        return Command(
-            update={
-                "messages": [ToolMessage(msg, tool_call_id=runtime.tool_call_id)],
-                "async_tasks": {task_id: task},
-            }
+        return _build_task_envelope(
+            subagent_type, thread["thread_id"], run["run_id"], runtime.tool_call_id
         )
 
     async def astart_async_task(
         description: str,
         subagent_type: str,
-        payload: dict[str, Any] | None,
         runtime: ToolRuntime,
     ) -> str | Command:
         error = _validate_agent_type(agent_map, subagent_type)
         if error:
             return error
         spec = agent_map[subagent_type]
-        payload_error = _payload_validation_error(spec, subagent_type, payload)
-        if payload_error:
-            return payload_error
-
-        input_dict: dict[str, Any] = {
-            "messages": [{"role": "user", "content": description}]
-        }
-        if payload:
-            input_dict.update(payload)
-
+        input_dict = _build_run_input(spec, subagent_type, description)
         try:
             client = clients.get_async(subagent_type)
             thread = await client.threads.create()
@@ -248,25 +189,8 @@ def _build_expert_start_tool(
                 "Failed to launch async subagent '%s': %s", subagent_type, e
             )
             return f"Failed to launch async subagent '{subagent_type}': {e}"
-
-        task_id = thread["thread_id"]
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        task: AsyncTask = {
-            "task_id": task_id,
-            "agent_name": subagent_type,
-            "thread_id": task_id,
-            "run_id": run["run_id"],
-            "status": "running",
-            "created_at": now,
-            "last_checked_at": now,
-            "last_updated_at": now,
-        }
-        msg = f"Launched async subagent. task_id: {task_id}"
-        return Command(
-            update={
-                "messages": [ToolMessage(msg, tool_call_id=runtime.tool_call_id)],
-                "async_tasks": {task_id: task},
-            }
+        return _build_task_envelope(
+            subagent_type, thread["thread_id"], run["run_id"], runtime.tool_call_id
         )
 
     return StructuredTool.from_function(
@@ -275,23 +199,23 @@ def _build_expert_start_tool(
         coroutine=astart_async_task,
         description=tool_description,
         infer_schema=False,
-        args_schema=ExpertStartAsyncTaskSchema,
+        args_schema=StartAsyncTaskSchema,
     )
 
 
 class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
-    """AsyncSubAgentMiddleware with payload-aware ``start_async_task``.
+    """AsyncSubAgentMiddleware with skill-name-injecting ``start_async_task``.
 
     Composes exactly like upstream — same constructor kwargs, same
-    ``system_prompt`` handling, same ``wrap_model_call`` / ``awrap_model_call``.
-    Only difference: the ``start_async_task`` tool accepts an optional
-    ``payload: dict | None`` that is forwarded into the target graph's
-    initial state, enabling the expert-container dispatch pattern.
+    ``system_prompt`` handling, same ``wrap_model_call`` / ``awrap_model_call``,
+    same tool signature (``description``, ``subagent_type``, ``runtime``).
+    Only difference: for expert specs (``is_expert=True``) the middleware
+    injects ``skill_name=subagent_type`` into ``client.runs.create(input=...)``
+    so the shared container graph resolves the right persona.
 
     Existing async subagents (``writing-agent``, ``data-analysis-agent``,
     ``scheduler``) work unchanged — they are declared without ``is_expert``
-    (or with ``is_expert=False``), and callers that pass no payload get
-    upstream's exact behaviour.
+    and reach ``runs.create`` with the upstream single-key shape.
     """
 
     def __init__(
@@ -317,7 +241,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
 
         # Upstream's __init__ validates spec shape, builds the default 5-tool
         # list, and composes the system_prompt. Delegate to it, then swap in
-        # the payload-aware start tool. This wastes one tool-build cycle
+        # the skill-name-injecting start tool. This wastes one tool-build cycle
         # (~microseconds at construction) but avoids duplicating upstream's
         # validation and system-prompt-composition logic.
         from deepagents.middleware.async_subagents import ASYNC_TASK_SYSTEM_PROMPT

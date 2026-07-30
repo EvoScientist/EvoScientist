@@ -211,9 +211,10 @@ def test_middleware_uses_start_async_task_cue_for_async_dispatch(
     assert "<active_expert>" in text
     assert "start_async_task(" in text
     assert "subagent_type: 'literature-review'" in text
-    assert "payload" in text
-    assert "skill_name: 'literature-review'" in text
-    assert "output_path" in text
+    # Post-X-4: no payload dict. The cue instructs the main agent to embed
+    # the desired output path directly in the description string.
+    assert "payload" not in text
+    assert "output path" in text.lower() or "output_path" in text
     assert "check_async_task" in text
     # Sync cue must NOT be advertised for async experts.
     assert "Consult it via `task(" not in text

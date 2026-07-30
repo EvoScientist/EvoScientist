@@ -60,14 +60,17 @@ _FALLBACK_SYSTEM_PROMPT = (
 class ExpertContainerState(DeepAgentState):
     """State schema for the async expert container graph.
 
-    Adds ``skill_name`` and ``output_path`` as ``NotRequired`` keys so the
-    payload the main agent passes through
-    ``EvoAsyncSubAgentMiddleware.start_async_task`` lands cleanly in the
-    graph's initial state.
+    Adds ``skill_name`` as a ``NotRequired`` key —
+    ``EvoAsyncSubAgentMiddleware`` injects it by construction from
+    ``subagent_type`` so the loader middleware knows which persona to
+    load. ``output_path`` is NOT in state; the main agent embeds the
+    desired artifact path in the task description (natural language) and
+    the expert's SKILL.md contract instructs the LLM to pin it in
+    ``write_todos`` on turn 1 — surviving summarization via langgraph's
+    todo composition.
     """
 
     skill_name: NotRequired[str]
-    output_path: NotRequired[str]
 
 
 class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -97,13 +100,11 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         the LLM's system prompt so it can return a well-formed error
         envelope rather than crash the graph mid-turn.
 
-        Appends a "Runtime context" block that surfaces ``output_path`` (and
-        ``skill_name`` for symmetry) at the tail of the prompt. The SKILL.md
-        body treats these as injected state, but the LLM has no direct state
-        access — only what this middleware writes into the system message.
-        Without the tail block, the model invents a path (observed on
-        2026-07-22: requested ``./artifacts/literature-review/<slug>.md``,
-        got ``/efficient_attention_review.md``).
+        Emits a "Runtime context" tail re-asserting ``skill_name`` on every
+        model call so the expert knows its own persona name after
+        summarization. Any run-specific values the LLM needs (output path,
+        user goal, ...) travel via the initial user message — the middleware
+        does not touch them.
         """
         skill_name = state.get("skill_name")
         if not skill_name:
@@ -142,39 +143,14 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
                 "empty skill."
             )
 
-        output_path = state.get("output_path")
-        # Only wrong-type is a hard error here. Whether ``output_path`` is
-        # REQUIRED for this run is the SKILL.md body's contract to enforce
-        # (see literature-review's Precondition section for an example) —
-        # inline-output or skill-defaulted-path experts must not fail just
-        # because the payload omitted it.
-        if output_path is not None and not isinstance(output_path, str):
-            return (
-                f"ERROR: Expert skill '{skill_name}' received a non-string "
-                f"``output_path`` in state ({type(output_path).__name__}). "
-                "This is a wiring bug in whichever middleware invoked "
-                "``start_async_task``. Return an error envelope naming the "
-                "malformed field and halt."
-            )
-
         # Compose: role prepend (if present) + body + runtime-context tail.
         body = match.body or ""
         head = f"You are {match.role}.\n\n" if match.role else ""
-        runtime_lines = [f"- ``skill_name``: ``{skill_name}``"]
-        if output_path:
-            runtime_lines.append(f"- ``output_path``: ``{output_path}``")
         runtime_block = (
             "\n---\n\n"
             "## Runtime context (injected by the container)\n\n"
-            + "\n".join(runtime_lines)
-            + "\n"
+            f"- ``skill_name``: ``{skill_name}``\n"
         )
-        if output_path:
-            runtime_block += (
-                "\nWrite your final artifact to ``output_path`` verbatim — do "
-                "not rename, relocate, or shorten it. If you cannot honour "
-                "it, return an error envelope explaining why.\n"
-            )
         return (head + body).rstrip() + runtime_block
 
     def _compose_system_message(self, request: ModelRequest[Any]) -> SystemMessage:

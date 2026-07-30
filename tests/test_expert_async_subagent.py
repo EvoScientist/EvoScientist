@@ -1,125 +1,73 @@
-"""Tests for the payload-aware AsyncSubAgentMiddleware subclass."""
+"""Tests for the skill-name-injecting AsyncSubAgentMiddleware subclass."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from EvoScientist.middleware.expert_async_subagent import (
     EvoAsyncSubAgentMiddleware,
-    ExpertStartAsyncTaskSchema,
-    _payload_validation_error,
+    _build_run_input,
 )
 
+
+class _TestPayloadValidationRemoved:
+    """Placeholder — the ``_payload_validation_error`` helper was deleted
+    when ``payload`` was dropped from the tool schema (PR #391 review, X-4).
+    The seven tests that lived here (``TestPayloadValidation``) no longer
+    apply: subagent_type is validated by ``_validate_agent_type``,
+    ``skill_name`` is injected by construction, and no other user-supplied
+    fields reach ``client.runs.create(input=...)``. See
+    ``TestBuildRunInput`` below and ``TestStartToolInvocation`` for the
+    replacement coverage.
+    """
+
+
 # =============================================================================
-# _payload_validation_error — the presence-rules helper
+# _build_run_input — the shared input-dict factory
 # =============================================================================
 
 
-class TestPayloadValidation:
-    """Rules: expert specs require payload with skill_name; standard specs reject payload."""
+class TestBuildRunInput:
+    """``skill_name`` is injected for expert specs, absent for standard specs.
+    The description always lands in ``messages`` verbatim — no LLM-authored
+    key can overwrite it (was the pre-fix bug when ``payload`` was in scope).
+    """
 
-    def test_expert_spec_requires_payload(self):
-        spec = {
-            "name": "e",
-            "description": "d",
-            "graph_id": "expert_container",
-            "is_expert": True,
+    def test_expert_spec_injects_skill_name(self):
+        spec = {"name": "e", "graph_id": "g", "is_expert": True}
+        result = _build_run_input(spec, "literature-review", "write a survey")
+        assert result == {
+            "messages": [{"role": "user", "content": "write a survey"}],
+            "skill_name": "literature-review",
         }
-        assert _payload_validation_error(spec, "e", None) is not None
-        assert "required" in _payload_validation_error(spec, "e", None)
 
-    def test_expert_spec_requires_dict_payload(self):
-        spec = {
-            "name": "e",
-            "description": "d",
-            "graph_id": "expert_container",
-            "is_expert": True,
-        }
-        # `not isinstance(payload, dict)` catches a truthy-but-wrong-type payload
-        # like a non-empty string. An empty string is falsy and hits the earlier
-        # "payload required" branch — same rejection, different message.
-        assert _payload_validation_error(spec, "e", "not a dict") is not None
-        assert "must be a dict" in _payload_validation_error(spec, "e", "not a dict")
-
-    def test_expert_spec_requires_skill_name(self):
-        spec = {
-            "name": "e",
-            "description": "d",
-            "graph_id": "expert_container",
-            "is_expert": True,
-        }
-        assert (
-            _payload_validation_error(spec, "e", {"output_path": "./x.md"}) is not None
-        )
-        assert "skill_name" in _payload_validation_error(
-            spec, "e", {"output_path": "./x.md"}
-        )
-
-    def test_expert_spec_accepts_valid_payload(self):
-        spec = {
-            "name": "e",
-            "description": "d",
-            "graph_id": "expert_container",
-            "is_expert": True,
-        }
-        assert (
-            _payload_validation_error(
-                spec, "e", {"skill_name": "lit-review", "output_path": "./x.md"}
-            )
-            is None
-        )
-
-    def test_standard_spec_accepts_no_payload(self):
-        spec = {"name": "std", "description": "d", "graph_id": "writing_agent"}
-        assert _payload_validation_error(spec, "std", None) is None
-
-    def test_standard_spec_rejects_payload(self):
-        spec = {"name": "std", "description": "d", "graph_id": "writing_agent"}
-        error = _payload_validation_error(spec, "std", {"skill_name": "anything"})
-        assert error is not None
-        assert "not accepted for standard subagent" in error
+    def test_standard_spec_matches_upstream_shape(self):
+        """Standard specs (writing-agent, scheduler, ...) reach ``runs.create``
+        with the upstream single-key shape — no ``skill_name`` injected."""
+        spec = {"name": "writing-agent", "graph_id": "writing_agent"}
+        result = _build_run_input(spec, "writing-agent", "hi")
+        assert result == {"messages": [{"role": "user", "content": "hi"}]}
 
     def test_is_expert_false_treated_as_standard(self):
         """Explicit ``is_expert=False`` matches the default (absent) behaviour."""
-        spec = {
-            "name": "std",
-            "description": "d",
-            "graph_id": "writing_agent",
-            "is_expert": False,
-        }
-        assert _payload_validation_error(spec, "std", None) is None
-        assert _payload_validation_error(spec, "std", {"skill_name": "x"}) is not None
+        spec = {"name": "std", "graph_id": "writing_agent", "is_expert": False}
+        result = _build_run_input(spec, "std", "hi")
+        assert result == {"messages": [{"role": "user", "content": "hi"}]}
 
-
-# =============================================================================
-# ExpertStartAsyncTaskSchema — the tool's input schema
-# =============================================================================
-
-
-class TestExpertStartAsyncTaskSchema:
-    """The tool schema documents ``payload`` as optional so old callers still work."""
-
-    def test_schema_accepts_no_payload(self):
-        parsed = ExpertStartAsyncTaskSchema(description="d", subagent_type="std")
-        assert parsed.payload is None
-
-    def test_schema_accepts_payload(self):
-        parsed = ExpertStartAsyncTaskSchema(
-            description="d",
-            subagent_type="e",
-            payload={"skill_name": "lit-review", "output_path": "./x.md"},
+    def test_description_lands_verbatim(self):
+        """Regression guard against the pre-fix bug where an LLM-authored
+        ``payload`` could overwrite ``messages`` — description now travels
+        through a channel the LLM cannot corrupt."""
+        spec = {"name": "e", "graph_id": "g", "is_expert": True}
+        result = _build_run_input(
+            spec, "e", "write to ./artifacts/e/foo.md a summary of X"
         )
-        assert parsed.payload == {"skill_name": "lit-review", "output_path": "./x.md"}
-
-    def test_schema_field_descriptions_mention_expert_dispatch(self):
-        """LLM-visible schema descriptions must document the payload contract."""
-        fields = ExpertStartAsyncTaskSchema.model_fields
-        assert fields["payload"].default is None
-        # Description should mention when payload is required.
-        assert "expert" in fields["payload"].description.lower()
+        assert result["messages"][0]["content"] == (
+            "write to ./artifacts/e/foo.md a summary of X"
+        )
 
 
 # =============================================================================
@@ -156,11 +104,15 @@ class TestMiddlewareConstruction:
             "list_async_tasks",
         }
 
-    def test_start_tool_schema_is_payload_aware(self):
+    def test_start_tool_schema_matches_upstream(self):
+        """The tool signature returned to upstream's exact shape when
+        ``payload`` was dropped — schema is now ``deepagents``'s
+        ``StartAsyncTaskSchema``."""
+        from deepagents.middleware.async_subagents import StartAsyncTaskSchema
+
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")
-        # Args schema should be OUR schema, not upstream's — payload accepted.
-        assert start.args_schema is ExpertStartAsyncTaskSchema
+        assert start.args_schema is StartAsyncTaskSchema
 
     def test_construction_rejects_empty_subagents(self):
         with pytest.raises(ValueError, match="At least one async subagent"):
@@ -173,64 +125,60 @@ class TestMiddlewareConstruction:
             )
 
 
+def _fake_sync_client():
+    client = MagicMock()
+    client.threads.create.return_value = {"thread_id": "task-abc"}
+    client.runs.create.return_value = {"run_id": "run-xyz"}
+    return client
+
+
+def _fake_async_client():
+    client = MagicMock()
+    client.threads.create = AsyncMock(return_value={"thread_id": "task-abc"})
+    client.runs.create = AsyncMock(return_value={"run_id": "run-xyz"})
+    return client
+
+
 class TestStartToolInvocation:
     """Direct invocation of the start tool's sync function.
 
-    Mocks the LangGraph SDK client so we can assert on the input= merged
-    into runs.create without any real network round-trip.
+    Mocks ``_ClientCache.get_sync`` so we can assert on the ``input`` dict
+    handed to ``runs.create`` without any real network round-trip.
     """
 
-    def _fake_client(self):
-        client = MagicMock()
-        client.threads.create.return_value = {"thread_id": "task-abc"}
-        client.runs.create.return_value = {"run_id": "run-xyz"}
-        return client
-
-    def _invoke(self, mw, **kwargs):
-        """Invoke the start tool's sync function, patching the client cache."""
-        start = next(t for t in mw.tools if t.name == "start_async_task")
-        client = self._fake_client()
-        # Patch the client cache captured in the tool's closure.
-        with patch.object(
-            mw.tools[0]
-            .func.__closure__[0]
-            .cell_contents,  # too deep; use module attr instead
-            "get_sync",
-            return_value=client,
-        ):
-            pass
-        # Simpler: patch at the module level — the tool's closure holds a
-        # reference to a _ClientCache instance whose .get_sync we intercept.
-        return client, start
-
-    def test_start_merges_payload_into_input(self):
+    def test_start_injects_skill_name_for_expert_spec(self):
+        """The middleware sets ``input_dict['skill_name'] = subagent_type``
+        by construction — the shared container graph resolves the right
+        persona without a payload dict crossing the LLM channel."""
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
-        # Build a fake client and patch _ClientCache.get_sync on the module.
-        client = self._fake_client()
+        client = _fake_sync_client()
         with patch(
             "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
             return_value=client,
         ):
             result = start.func(
-                description="write a survey on X",
+                description="write to ./artifacts/literature-review/attn.md a survey on X",
                 subagent_type="literature-review",
-                payload={"skill_name": "literature-review", "output_path": "./x.md"},
                 runtime=SimpleNamespace(tool_call_id="tc1"),
             )
 
-        # runs.create should have been called with input containing both the
-        # user message AND the payload keys.
         client.runs.create.assert_called_once()
         kwargs = client.runs.create.call_args.kwargs
         assert kwargs["assistant_id"] == "expert_container"
         assert kwargs["input"]["messages"] == [
-            {"role": "user", "content": "write a survey on X"}
+            {
+                "role": "user",
+                "content": (
+                    "write to ./artifacts/literature-review/attn.md a survey on X"
+                ),
+            }
         ]
         assert kwargs["input"]["skill_name"] == "literature-review"
-        assert kwargs["input"]["output_path"] == "./x.md"
-        # Return value is a Command that stamps the task into async_tasks state.
+        assert "payload" not in kwargs["input"]
+        assert "output_path" not in kwargs["input"]
+        # Return value stamps the task into async_tasks state.
         assert "async_tasks" in result.update
         assert "task-abc" in result.update["async_tasks"]
 
@@ -246,75 +194,34 @@ class TestStartToolInvocation:
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
-        client = self._fake_client()
+        client = _fake_sync_client()
         fake_cfg = EvoScientistConfig(model="test-model-abc", provider="test-provider")
         with (
             patch(
                 "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
                 return_value=client,
             ),
-            # ``_read_cfg_configurable`` in llm/patches.py imports
-            # ``_ensure_config`` from ``EvoScientist.EvoScientist`` at call
-            # time; patch there so the proxy sees our fake config.
             patch("EvoScientist.EvoScientist._ensure_config", return_value=fake_cfg),
         ):
             start.func(
                 description="w",
                 subagent_type="literature-review",
-                payload={"skill_name": "literature-review", "output_path": "./x.md"},
                 runtime=SimpleNamespace(tool_call_id="tc1"),
             )
 
         kwargs = client.runs.create.call_args.kwargs
-        assert "config" in kwargs, (
-            "runs.create must receive config kwarg for model passthrough"
-        )
+        assert "config" in kwargs
         configurable = kwargs["config"]["configurable"]
         assert configurable["model"] == "test-model-abc"
         assert configurable["model_provider"] == "test-provider"
 
-    def test_start_rejects_expert_without_payload(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
-        start = next(t for t in mw.tools if t.name == "start_async_task")
-
-        with patch(
-            "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync"
-        ) as get_sync:
-            result = start.func(
-                description="anything",
-                subagent_type="literature-review",
-                payload=None,
-                runtime=SimpleNamespace(tool_call_id="tc1"),
-            )
-        # Error surfaced as a string tool-result; client never contacted.
-        assert isinstance(result, str)
-        assert "payload required" in result
-        get_sync.assert_not_called()
-
-    def test_start_rejects_standard_with_payload(self):
+    def test_start_standard_spec_matches_upstream_input_shape(self):
+        """Standard subagents (writing-agent, scheduler, ...) reach
+        ``runs.create`` with the upstream single-key ``messages`` shape."""
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
-        with patch(
-            "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync"
-        ) as get_sync:
-            result = start.func(
-                description="anything",
-                subagent_type="writing-agent",
-                payload={"skill_name": "would-not-make-sense-here"},
-                runtime=SimpleNamespace(tool_call_id="tc1"),
-            )
-        assert isinstance(result, str)
-        assert "not accepted for standard subagent" in result
-        get_sync.assert_not_called()
-
-    def test_start_standard_without_payload_matches_upstream_shape(self):
-        """A standard subagent invoked without payload should pass exactly the
-        upstream input shape — just messages, no extra keys."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
-        start = next(t for t in mw.tools if t.name == "start_async_task")
-
-        client = self._fake_client()
+        client = _fake_sync_client()
         with patch(
             "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
             return_value=client,
@@ -322,7 +229,6 @@ class TestStartToolInvocation:
             start.func(
                 description="hi",
                 subagent_type="writing-agent",
-                payload=None,
                 runtime=SimpleNamespace(tool_call_id="tc1"),
             )
         kwargs = client.runs.create.call_args.kwargs
@@ -335,7 +241,99 @@ class TestStartToolInvocation:
         result = start.func(
             description="hi",
             subagent_type="does-not-exist",
-            payload=None,
+            runtime=SimpleNamespace(tool_call_id="tc1"),
+        )
+        assert isinstance(result, str)
+        assert "Unknown async subagent type" in result
+
+
+class TestAstartToolInvocation:
+    """Mirror ``TestStartToolInvocation`` against ``astart_async_task`` — the
+    coroutine langgraph_api actually runs in production. Pre-fix zero
+    coverage: X-iZhang flagged that a fix applied only to the sync body
+    would leave tests green and production broken."""
+
+    @pytest.mark.asyncio
+    async def test_astart_injects_skill_name_for_expert_spec(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        with patch(
+            "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+            return_value=client,
+        ):
+            result = await start.coroutine(
+                description="write to ./artifacts/literature-review/attn.md a survey on X",
+                subagent_type="literature-review",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        client.runs.create.assert_awaited_once()
+        kwargs = client.runs.create.await_args.kwargs
+        assert kwargs["assistant_id"] == "expert_container"
+        assert kwargs["input"]["skill_name"] == "literature-review"
+        assert kwargs["input"]["messages"][0]["content"].startswith(
+            "write to ./artifacts/literature-review/attn.md"
+        )
+        assert "payload" not in kwargs["input"]
+        assert "async_tasks" in result.update
+        assert "task-abc" in result.update["async_tasks"]
+
+    @pytest.mark.asyncio
+    async def test_astart_injects_cfg_model_into_configurable(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        fake_cfg = EvoScientistConfig(model="test-model-abc", provider="test-provider")
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+                return_value=client,
+            ),
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=fake_cfg),
+        ):
+            await start.coroutine(
+                description="w",
+                subagent_type="literature-review",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        kwargs = client.runs.create.await_args.kwargs
+        assert "config" in kwargs
+        configurable = kwargs["config"]["configurable"]
+        assert configurable["model"] == "test-model-abc"
+        assert configurable["model_provider"] == "test-provider"
+
+    @pytest.mark.asyncio
+    async def test_astart_standard_spec_matches_upstream_input_shape(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        with patch(
+            "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+            return_value=client,
+        ):
+            await start.coroutine(
+                description="hi",
+                subagent_type="writing-agent",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+        kwargs = client.runs.create.await_args.kwargs
+        assert kwargs["input"] == {"messages": [{"role": "user", "content": "hi"}]}
+
+    @pytest.mark.asyncio
+    async def test_astart_unknown_subagent_returns_error(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        result = await start.coroutine(
+            description="hi",
+            subagent_type="does-not-exist",
             runtime=SimpleNamespace(tool_call_id="tc1"),
         )
         assert isinstance(result, str)

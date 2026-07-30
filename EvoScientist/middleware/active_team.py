@@ -63,11 +63,12 @@ _SYNC_CUE = (
 )
 
 _ASYNC_CUE = (
-    "Consult it via `start_async_task(description: '...', "
-    "subagent_type: '{expert}', payload: {{skill_name: '{expert}', "
-    "output_path: './artifacts/{expert}/<slug>.md'}})`. It runs in the "
-    "background and returns a task_id immediately; the result artifact is "
-    "written to ``output_path``. Use ``check_async_task`` to poll status "
+    "Consult it via `start_async_task(description: '<describe the task AND "
+    "embed a concrete output path — e.g. write to "
+    "``./artifacts/{expert}/<slug>.md`` verbatim>', "
+    "subagent_type: '{expert}')`. It runs in the background and returns a "
+    "task_id immediately; the result artifact is written to the path you "
+    "named in the description. Use ``check_async_task`` to poll status "
     "when the user asks. On ``status: 'success'`` the ``result`` field "
     "contains a JSON envelope with ``output_path``, a one-paragraph "
     "``summary``, and a skill-defined ``metadata`` block (fields vary by "
