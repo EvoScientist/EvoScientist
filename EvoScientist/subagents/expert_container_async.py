@@ -282,7 +282,7 @@ def build_expert_container_async_graph() -> Any:
     """Build the async expert container graph.
 
     Called once at langgraph dev startup. The returned graph accepts
-    ``{messages, skill_name, output_path}`` as initial state; the
+    ``{messages, skill_name}`` as initial state; the
     :class:`ExpertSkillLoaderMiddleware` resolves ``skill_name`` on every
     model call and injects the matching SKILL.md body as system prompt.
 
