@@ -642,13 +642,18 @@ def load_mcp_and_build_kwargs(
 # =============================================================================
 
 
-def _get_default_backend(*, guard_dangerous: bool | None = None):
+def _get_default_backend(
+    *, guard_dangerous: bool | None = None, refuse_delete: bool = False
+):
     """Build the default composite backend from current paths.
 
     ``guard_dangerous`` — when ``None`` (default) follows ``cfg.auto_approve``;
     the two research async sub-agent graphs (``writing-agent`` /
     ``data-analysis-agent``) pass ``True`` because their remote thread has no
     approval path at all (see ``subagents/_factory._GUARDED_ASYNC_SUBAGENTS``).
+    ``refuse_delete`` — the same two async graphs pass ``True`` so the recursive
+    ``delete`` FS tool is refused and relayed to the orchestrator for approval,
+    rather than deleting unattended.
     """
     from deepagents.backends import CompositeBackend
 
@@ -675,6 +680,7 @@ def _get_default_backend(*, guard_dangerous: bool | None = None):
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
         guard_dangerous=guard_dangerous,
+        refuse_delete=refuse_delete,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,

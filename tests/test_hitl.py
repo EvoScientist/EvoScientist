@@ -983,8 +983,8 @@ class TestAsyncSubagentGuard:
         assert backend.default._guard_dangerous == _ensure_config().auto_approve
 
     @staticmethod
-    def _factory_guard_for(name: str) -> object:
-        """Run the async factory for ``name`` and capture guard_dangerous."""
+    def _factory_kwargs_for(name: str) -> dict:
+        """Run the async factory for ``name`` and capture the backend kwargs."""
         from unittest.mock import MagicMock, patch
 
         import EvoScientist.EvoScientist as ev
@@ -1012,15 +1012,21 @@ class TestAsyncSubagentGuard:
         ):
             _factory.build_async_subagent_graph(name)
 
-        return captured.get("guard_dangerous")
+        return captured
 
     def test_async_factory_guards_research_agents(self):
-        assert self._factory_guard_for("writing-agent") is True
-        assert self._factory_guard_for("data-analysis-agent") is True
+        # Research async agents keep both the dangerous-command guard AND the
+        # delete refusal on (no interactive approval path → relay to orchestrator).
+        for name in ("writing-agent", "data-analysis-agent"):
+            kw = self._factory_kwargs_for(name)
+            assert kw.get("guard_dangerous") is True
+            assert kw.get("refuse_delete") is True
 
     def test_async_factory_does_not_guard_internal_agents(self):
         # Scheduler and any other internal async graph run unguarded in any mode.
-        assert self._factory_guard_for("scheduler") is False
+        kw = self._factory_kwargs_for("scheduler")
+        assert kw.get("guard_dangerous") is False
+        assert kw.get("refuse_delete") is False
 
 
 class TestOrchestratorRelayGuidance:

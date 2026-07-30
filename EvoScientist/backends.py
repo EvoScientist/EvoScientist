@@ -1437,6 +1437,7 @@ class CustomSandboxBackend(LocalShellBackend):
         inherit_env: bool = True,
         dangerous: bool = False,
         guard_dangerous: bool = False,
+        refuse_delete: bool = False,
     ):
         """
         Initialize custom sandbox backend.
@@ -1457,9 +1458,15 @@ class CustomSandboxBackend(LocalShellBackend):
                 no interactive approval is reachable (unattended auto-approve
                 runs, async sub-agents). Bypassed when ``dangerous=True``.
                 Defaults to False.
+            refuse_delete: Refuse the recursive ``delete`` FS tool outright,
+                relaying an approval request to the orchestrator. Used for async
+                research sub-agents (writing / data-analysis) that have no
+                interactive approval path. Bypassed when ``dangerous=True``.
+                Defaults to False.
         """
         self._dangerous = dangerous
         self._guard_dangerous = guard_dangerous
+        self._refuse_delete = refuse_delete
         if dangerous:
             # Real paths require the legacy (non-virtual) resolution path so the
             # parent backend returns absolute paths as-is.
@@ -1528,6 +1535,24 @@ class CustomSandboxBackend(LocalShellBackend):
                 break
 
         return super()._resolve_path(key)
+
+    _DELETE_APPROVAL_ERROR = (
+        "Delete blocked: needs approval. Report it to the orchestrator, which "
+        "can re-issue it after approval."
+    )
+
+    def delete(self, file_path: str) -> DeleteResult:
+        """Refuse ``delete`` for guarded async sub-agents (no approval path)."""
+        if self._refuse_delete and not self._dangerous:
+            return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
+        return super().delete(file_path)
+
+    async def adelete(self, file_path: str) -> DeleteResult:
+        # Async graphs call adelete, so the guard must cover it too — otherwise
+        # the refusal is bypassed on exactly the async sub-agents it protects.
+        if self._refuse_delete and not self._dangerous:
+            return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
+        return await super().adelete(file_path)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """
