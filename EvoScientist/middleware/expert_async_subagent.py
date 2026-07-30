@@ -243,14 +243,13 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         # list, and composes the system_prompt. Delegate to it, then swap in
         # the skill-name-injecting start tool. This wastes one tool-build cycle
         # (~microseconds at construction) but avoids duplicating upstream's
-        # validation and system-prompt-composition logic.
-        from deepagents.middleware.async_subagents import ASYNC_TASK_SYSTEM_PROMPT
-
+        # validation and system-prompt-composition logic. Pass ``system_prompt``
+        # through unchanged — deepagents 0.7.0 dropped its ``ASYNC_TASK_SYSTEM_PROMPT``
+        # default text; callers that want extra guidance in the async-task
+        # section of the prompt now supply it explicitly.
         super().__init__(
             async_subagents=async_subagents,
-            system_prompt=system_prompt
-            if system_prompt is not None
-            else ASYNC_TASK_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
         )
         agent_map: dict[str, AsyncSubAgent] = {a["name"]: a for a in async_subagents}
         # Wrap the client cache in ``_ClientCacheProxy`` so ``client.runs.create``
