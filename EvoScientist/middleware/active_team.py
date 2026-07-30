@@ -120,23 +120,27 @@ def _read_active_teams() -> list[str]:
 
 
 def _dispatch_by_name() -> dict[str, str]:
-    """Return ``{skill_name: default_dispatch}`` for every installed expert.
+    """Return ``{skill_name: default_dispatch}`` for currently dispatchable experts.
 
     Fresh filesystem read every call so a ``skill_manager install <expert>``
     is visible on the next turn without an agent rebuild. Cheap at current
     scale (a handful of skills, cached bodies).
 
-    On import failure returns an empty dict — the middleware then falls
-    back to the sync cue for every expert, matching pre-async behaviour.
+    Sourced from ``list_dispatchable_experts`` — which filters empty-body
+    experts, name collisions with reserved sub-agents, AND async-declared
+    experts when async dispatch is unavailable (``enable_async_subagents``
+    off or langgraph dev unreachable). Keeps the cue honest: any expert
+    named here can actually be reached by the tool shape the cue advertises.
+
+    On import failure returns an empty dict — the middleware then emits no
+    cue, matching the outside-runnable-context no-op path.
     """
     try:
-        from ..tools.skills_manager import list_expert_skills
+        from ..subagents.expert_container import list_dispatchable_experts
     except Exception:
         return {}
     try:
-        return {
-            s.name: s.default_dispatch for s in list_expert_skills(include_system=True)
-        }
+        return {s.name: s.default_dispatch for s in list_dispatchable_experts()}
     except Exception:
         return {}
 
@@ -154,14 +158,26 @@ class ActiveTeamMiddleware(AgentMiddleware):
     name = "active_team"
 
     def _cue_for(self, experts: list[str]) -> str:
+        """Render the cue over the dispatchable subset of ``experts``.
+
+        Invited experts that aren't currently dispatchable (uninstalled,
+        empty body, name collision, or async-declared while async
+        dispatch is unavailable) are dropped from the cue — pointing the
+        model at a tool shape that will fail is worse than saying nothing.
+        Returns the empty string when nothing survives the filter; caller
+        skips the system-prompt append in that case.
+        """
         dispatch_map = _dispatch_by_name()
+        experts = [e for e in experts if e in dispatch_map]
+        if not experts:
+            return ""
         if len(experts) == 1:
             expert = experts[0]
-            cue = _cue_shape_for(dispatch_map.get(expert, ""), expert)
+            cue = _cue_shape_for(dispatch_map[expert], expert)
             return _TEMPLATE_SINGLE.format(expert=expert, cue=cue)
         experts_str = ", ".join(f"`{e}`" for e in experts)
         per_expert_lines = "\n".join(
-            f"- `{e}`: {_cue_shape_for(dispatch_map.get(e, ''), e)}" for e in experts
+            f"- `{e}`: {_cue_shape_for(dispatch_map[e], e)}" for e in experts
         )
         return (
             _TEMPLATE_MULTI_HEADER.format(experts=experts_str)
@@ -175,12 +191,12 @@ class ActiveTeamMiddleware(AgentMiddleware):
         experts = _read_active_teams()
         if not experts:
             return request
+        cue = self._cue_for(experts)
+        if not cue:
+            return request
         from .utils import append_to_system_message
 
-        new_system = append_to_system_message(
-            request.system_message,
-            self._cue_for(experts),
-        )
+        new_system = append_to_system_message(request.system_message, cue)
         return request.override(system_message=new_system)
 
     def wrap_model_call(

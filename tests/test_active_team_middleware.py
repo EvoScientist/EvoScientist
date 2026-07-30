@@ -134,11 +134,27 @@ def test_middleware_appends_single_expert_cue(mock_get_config):
     assert "base system" in text  # original preserved
 
 
+def _mock_expert(name: str, dispatch: str) -> MagicMock:
+    """Build a MagicMock ``SkillInfo`` with the given dispatch shape.
+
+    ``name`` on ``MagicMock`` must be set via attribute assignment; passing
+    ``name=`` to the constructor names the mock instance itself.
+    """
+    info = MagicMock(default_dispatch=dispatch)
+    info.name = name
+    return info
+
+
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_appends_multi_expert_cue(mock_get_config):
+def test_middleware_appends_multi_expert_cue(mock_get_config, mock_dispatchable):
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm", "literature-review"]},
     }
+    mock_dispatchable.return_value = [
+        _mock_expert("idea-brainstorm", "sync"),
+        _mock_expert("literature-review", "sync"),
+    ]
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
@@ -151,36 +167,43 @@ def test_middleware_appends_multi_expert_cue(mock_get_config):
     assert "base system" in text
 
 
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_appends_cue_for_unknown_expert_names(mock_get_config):
-    """Middleware doesn't validate names against the registry; main decides."""
+def test_middleware_omits_cue_for_undispatchable_names(
+    mock_get_config, mock_dispatchable
+):
+    """Names not in ``list_dispatchable_experts`` are dropped from the cue.
+
+    Covers uninstalled experts, empty-body experts, name collisions, and
+    async-declared experts when async dispatch is unavailable — anything
+    the model would find missing at dispatch time.
+    """
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["nonexistent-expert"]},
     }
+    mock_dispatchable.return_value = []  # nothing dispatchable
+    request = _request()
     middleware = ActiveTeamMiddleware()
-    modified = middleware.modify_request(_request())
-    text = _system_text(modified)
-    assert "`nonexistent-expert`" in text
-    # Unknown name defaults to sync cue.
-    assert "task(" in text
+    modified = middleware.modify_request(request)
+    # No cue appended — modify_request returns the original request untouched.
+    assert modified is request
 
 
-@patch("EvoScientist.tools.skills_manager.list_expert_skills")
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
 def test_middleware_uses_start_async_task_cue_for_async_dispatch(
-    mock_get_config, mock_list_experts
+    mock_get_config, mock_dispatchable
 ):
-    """An expert declared ``default_dispatch: async`` gets the async cue."""
-    from unittest.mock import MagicMock
+    """An expert declared ``default_dispatch: async`` gets the async cue.
 
+    Only reaches the cue when async dispatch is actually registered — the
+    honest-surface filter in ``list_dispatchable_experts`` drops
+    async-declared experts otherwise.
+    """
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["literature-review"]},
     }
-    info = MagicMock(default_dispatch="async")
-    # ``name`` on MagicMock has to be set via attribute assignment; passing
-    # ``name=`` to the constructor names the mock instance itself.
-    info.name = "literature-review"
-    mock_list_experts.return_value = [info]
+    mock_dispatchable.return_value = [_mock_expert("literature-review", "async")]
 
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
@@ -196,18 +219,14 @@ def test_middleware_uses_start_async_task_cue_for_async_dispatch(
     assert "Consult it via `task(" not in text
 
 
-@patch("EvoScientist.tools.skills_manager.list_expert_skills")
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_uses_task_cue_for_sync_dispatch(mock_get_config, mock_list_experts):
+def test_middleware_uses_task_cue_for_sync_dispatch(mock_get_config, mock_dispatchable):
     """Sync-dispatched experts get the ``task()`` cue."""
-    from unittest.mock import MagicMock
-
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm"]},
     }
-    info = MagicMock(default_dispatch="sync")
-    info.name = "idea-brainstorm"
-    mock_list_experts.return_value = [info]
+    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm", "sync")]
 
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
@@ -219,20 +238,17 @@ def test_middleware_uses_task_cue_for_sync_dispatch(mock_get_config, mock_list_e
     assert "output_path" not in text
 
 
-@patch("EvoScientist.tools.skills_manager.list_expert_skills")
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_multi_mixed_dispatch(mock_get_config, mock_list_experts):
+def test_middleware_multi_mixed_dispatch(mock_get_config, mock_dispatchable):
     """When both sync and async experts are active, each gets its own cue."""
-    from unittest.mock import MagicMock
-
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm", "literature-review"]},
     }
-    sync = MagicMock(default_dispatch="sync")
-    sync.name = "idea-brainstorm"
-    async_ = MagicMock(default_dispatch="async")
-    async_.name = "literature-review"
-    mock_list_experts.return_value = [sync, async_]
+    mock_dispatchable.return_value = [
+        _mock_expert("idea-brainstorm", "sync"),
+        _mock_expert("literature-review", "async"),
+    ]
 
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
@@ -242,6 +258,34 @@ def test_middleware_multi_mixed_dispatch(mock_get_config, mock_list_experts):
     assert text.count("start_async_task(") == 1
     assert "`idea-brainstorm`:" in text
     assert "`literature-review`:" in text
+
+
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
+@patch("langgraph.config.get_config")
+def test_middleware_drops_invited_expert_that_is_not_dispatchable(
+    mock_get_config, mock_dispatchable
+):
+    """An async-declared expert stays invited across a config change, but
+    when async dispatch turns unavailable it drops out of
+    ``list_dispatchable_experts``. The cue must not mention it — otherwise
+    the model is told to reach for a tool that either doesn't exist or
+    doesn't list the expert."""
+    mock_get_config.return_value = {
+        "configurable": {
+            "active_teams": ["idea-brainstorm", "literature-review"],
+        },
+    }
+    # literature-review invited but not dispatchable this turn.
+    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm", "sync")]
+
+    middleware = ActiveTeamMiddleware()
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    # Single-cue shape (only one expert survived the filter).
+    assert "<active_expert>" in text
+    assert "`idea-brainstorm`" in text
+    assert "literature-review" not in text
+    assert "start_async_task(" not in text
 
 
 @patch("langgraph.config.get_config", side_effect=RuntimeError("outside context"))

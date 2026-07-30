@@ -166,15 +166,45 @@ def _reserved_subagent_names() -> frozenset[str]:
     return _reserved_subagent_names_cache
 
 
-def list_dispatchable_experts(*, include_system: bool = True) -> list[SkillInfo]:
+def is_async_dispatch_available(cfg: Any | None = None) -> bool:
+    """Return True when async-declared experts can actually be dispatched.
+
+    Both gates must hold: ``enable_async_subagents`` opt-in AND langgraph
+    dev subprocess reachable. Same predicate
+    ``build_expert_async_subagent_specs`` uses at spec-build time, factored
+    out so ``list_dispatchable_experts`` (invite whitelist) and
+    ``ActiveTeamMiddleware`` (system-prompt cue) can honour it without
+    each re-deriving.
+    """
+    if cfg is None:
+        from ..config import get_effective_config
+
+        cfg = get_effective_config()
+    if not getattr(cfg, "enable_async_subagents", False):
+        return False
+    from ..langgraph_dev.manager import is_async_subagents_available
+
+    return is_async_subagents_available()
+
+
+def list_dispatchable_experts(
+    *, include_system: bool = True, cfg: Any | None = None
+) -> list[SkillInfo]:
     """Experts eligible for the ``/expert`` invite whitelist.
 
     Covers **both** sync (``task()``) and async (``start_async_task``)
-    dispatch shapes — an async-declared expert must remain invitable, or
-    the active-team cue that instructs ``start_async_task(...)`` never
-    fires. Do NOT add a ``default_dispatch == "async"`` exclusion here;
-    the sync-specific exclusion lives in ``build_expert_subagent_specs``,
-    which is a different surface.
+    dispatch shapes — an async-declared expert must remain invitable when
+    async dispatch is registered, or the active-team cue that instructs
+    ``start_async_task(...)`` never fires. Do NOT add a ``default_dispatch
+    == "async"`` exclusion here; the sync-specific exclusion lives in
+    ``build_expert_subagent_specs``, which is a different surface.
+
+    Async-declared experts are dropped when async dispatch is NOT
+    registered (``enable_async_subagents=false`` or langgraph dev
+    unreachable). Advertising an expert that resolves to a
+    ``start_async_task`` tool that either doesn't exist or doesn't list
+    the expert is worse than an honest refusal — see reviewer thread on
+    PR #391.
 
     Combines ``list_expert_skills`` with the two filters that
     construction-time paths already apply (empty body via
@@ -192,11 +222,14 @@ def list_dispatchable_experts(*, include_system: bool = True) -> list[SkillInfo]
     from ..tools.skills_manager import list_expert_skills
 
     reserved = _reserved_subagent_names()
+    async_available = is_async_dispatch_available(cfg=cfg)
     dispatchable: list[SkillInfo] = []
     for info in list_expert_skills(include_system=include_system):
         if not _body_of(info).strip():
             continue
         if info.name in reserved:
+            continue
+        if info.default_dispatch == "async" and not async_available:
             continue
         dispatchable.append(info)
     return dispatchable

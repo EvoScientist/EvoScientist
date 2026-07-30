@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from EvoScientist.subagents.expert_container import (
@@ -10,6 +11,8 @@ from EvoScientist.subagents.expert_container import (
     _compose_system_prompt,
     build_expert_subagent_spec,
     build_expert_subagent_specs,
+    is_async_dispatch_available,
+    list_dispatchable_experts,
 )
 from EvoScientist.tools.skills_manager import SkillInfo
 
@@ -543,3 +546,93 @@ Second-person persona body content.
         assert skill_manager in expert["tools"], (
             "skill_manager missing from expert tools on MCP path"
         )
+
+
+# =============================================================================
+# is_async_dispatch_available / list_dispatchable_experts honest surface
+# =============================================================================
+
+
+class TestIsAsyncDispatchAvailable:
+    """The gate ``list_dispatchable_experts`` and ``ActiveTeamMiddleware``
+    both consult to decide whether async-declared experts can be surfaced."""
+
+    def test_false_when_flag_disabled(self):
+        cfg = SimpleNamespace(enable_async_subagents=False)
+        assert is_async_dispatch_available(cfg=cfg) is False
+
+    def test_false_when_dev_unreachable(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        with patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=False,
+        ):
+            assert is_async_dispatch_available(cfg=cfg) is False
+
+    def test_true_when_both_gates_pass(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        with patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ):
+            assert is_async_dispatch_available(cfg=cfg) is True
+
+
+class TestListDispatchableExpertsAsyncFilter:
+    """``list_dispatchable_experts`` drops async-declared experts when async
+    dispatch isn't registered — sync-declared experts pass through, mirroring
+    honest advertising per the reviewer's ask on PR #391."""
+
+    def _skill(self, name: str, dispatch: str) -> SkillInfo:
+        return SkillInfo(
+            name=name,
+            description=f"{name} description",
+            path=Path("/tmp/nope"),
+            source="builtin",
+            type="expert",
+            role=f"{name} role",
+            default_dispatch=dispatch,
+            body="persona body\n",
+        )
+
+    def test_async_expert_dropped_when_flag_disabled(self):
+        cfg = SimpleNamespace(enable_async_subagents=False)
+        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=skills,
+        ):
+            result = list_dispatchable_experts(cfg=cfg)
+        assert [s.name for s in result] == ["idea-brainstorm"]
+
+    def test_async_expert_dropped_when_dev_unreachable(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=False,
+            ),
+        ):
+            result = list_dispatchable_experts(cfg=cfg)
+        assert [s.name for s in result] == ["idea-brainstorm"]
+
+    def test_async_expert_included_when_registered(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+        ):
+            result = list_dispatchable_experts(cfg=cfg)
+        assert {s.name for s in result} == {"idea-brainstorm", "lit"}
