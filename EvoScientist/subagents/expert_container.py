@@ -167,16 +167,23 @@ def _reserved_subagent_names() -> frozenset[str]:
 
 
 def list_dispatchable_experts(*, include_system: bool = True) -> list[SkillInfo]:
-    """Experts that will actually be dispatchable via ``task()``.
+    """Experts eligible for the ``/expert`` invite whitelist.
 
-    Combines ``list_expert_skills`` with the same filters
-    ``build_expert_subagent_specs`` (empty body) and
-    ``_fold_expert_subagents`` (name collision with yaml sub-agents or
-    ``general-purpose``) apply at construction time. Callers surfacing
-    experts to the user (e.g. the ``/expert`` slash command) should use
-    this instead of ``list_expert_skills`` directly, otherwise they can
-    accept a name that will silently misroute or per-turn error at
-    dispatch time.
+    Covers **both** sync (``task()``) and async (``start_async_task``)
+    dispatch shapes — an async-declared expert must remain invitable, or
+    the active-team cue that instructs ``start_async_task(...)`` never
+    fires. Do NOT add a ``default_dispatch == "async"`` exclusion here;
+    the sync-specific exclusion lives in ``build_expert_subagent_specs``,
+    which is a different surface.
+
+    Combines ``list_expert_skills`` with the two filters that
+    construction-time paths already apply (empty body via
+    ``build_expert_subagent_specs``; name collision with yaml sub-agents
+    or ``general-purpose`` via ``_fold_expert_subagents``). Callers
+    surfacing experts to the user (e.g. the ``/expert`` slash command)
+    should use this instead of ``list_expert_skills`` directly, otherwise
+    they can accept a name that will silently misroute or per-turn error
+    at dispatch time.
 
     Read-only filter — construction-time warnings for empty-body /
     colliding experts are emitted by ``build_expert_subagent_specs`` and
