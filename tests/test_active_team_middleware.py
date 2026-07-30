@@ -120,20 +120,6 @@ def test_middleware_no_op_when_active_teams_empty_list(mock_get_config):
     assert modified is request
 
 
-@patch("langgraph.config.get_config")
-def test_middleware_appends_single_expert_cue(mock_get_config):
-    mock_get_config.return_value = {
-        "configurable": {"active_teams": ["idea-brainstorm"]},
-    }
-    middleware = ActiveTeamMiddleware()
-    modified = middleware.modify_request(_request())
-    text = _system_text(modified)
-    assert "<active_expert>" in text
-    assert "`idea-brainstorm`" in text
-    assert "Consult it via `task(" in text
-    assert "base system" in text  # original preserved
-
-
 def _mock_expert(name: str, dispatch: str) -> MagicMock:
     """Build a MagicMock ``SkillInfo`` with the given dispatch shape.
 
@@ -143,6 +129,22 @@ def _mock_expert(name: str, dispatch: str) -> MagicMock:
     info = MagicMock(default_dispatch=dispatch)
     info.name = name
     return info
+
+
+@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
+@patch("langgraph.config.get_config")
+def test_middleware_appends_single_expert_cue(mock_get_config, mock_dispatchable):
+    mock_get_config.return_value = {
+        "configurable": {"active_teams": ["idea-brainstorm"]},
+    }
+    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm", "sync")]
+    middleware = ActiveTeamMiddleware()
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "<active_expert>" in text
+    assert "`idea-brainstorm`" in text
+    assert "Consult it via `task(" in text
+    assert "base system" in text  # original preserved
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
