@@ -286,10 +286,10 @@ def build_expert_container_async_graph() -> Any:
     :class:`ExpertSkillLoaderMiddleware` resolves ``skill_name`` on every
     model call and injects the matching SKILL.md body as system prompt.
 
-    Tool set is intentionally minimal (``think_tool`` + ``skill_manager``)
-    — matches the sync ``expert_container`` factory. Once the per-skill
-    ``allowed-tools`` follow-up ships, the tool list will union with the
-    skill's declared tools.
+    Tool set is intentionally minimal (``think_tool`` only) — matches the
+    sync ``expert_container`` factory. Once the per-skill ``allowed-tools``
+    follow-up ships, the tool list will union with the skill's declared
+    tools.
     """
     from deepagents import create_deep_agent
 
@@ -301,7 +301,7 @@ def build_expert_container_async_graph() -> Any:
         _get_default_middleware,
         _inject_subagent_middleware,
     )
-    from ..tools import skill_manager, think_tool
+    from ..tools import think_tool
 
     cfg = get_effective_config()
     apply_config_to_env(cfg)
@@ -339,7 +339,7 @@ def build_expert_container_async_graph() -> Any:
         name="expert-container-async",
         model=_ensure_chat_model(),
         system_prompt=_FALLBACK_SYSTEM_PROMPT,
-        tools=[think_tool, skill_manager],
+        tools=[think_tool],
         skills=["/skills/"],
         backend=_get_default_backend(),
         middleware=middleware,
