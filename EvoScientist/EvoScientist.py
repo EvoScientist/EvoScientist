@@ -576,7 +576,13 @@ def _route_async_specs_through_evo_middleware(
 
         _patch_deepagents_model_passthrough()
 
-        base_middleware.append(EvoAsyncSubAgentMiddleware(async_subagents=async_specs))
+        # Prepend rather than append so the ``## Async subagents`` prompt
+        # section stays in the stable prefix. Appending pushes it past the
+        # volatile memory tail, invalidating the cached prefix on every
+        # memory change.
+        base_middleware.insert(
+            0, EvoAsyncSubAgentMiddleware(async_subagents=async_specs)
+        )
 
     # Extend AsyncWatcherMiddleware's client cache with expert specs so
     # start_async_task launches for experts spawn a completion watcher —
