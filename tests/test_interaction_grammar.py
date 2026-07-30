@@ -252,6 +252,15 @@ class TestApprovalPromptFormat:
         got = I.format_approval_prompt([{"name": "ask_user", "args": {}}])
         assert "ask_user" in got
 
+    def test_delete_shows_file_path(self):
+        # deepagents 0.7.0's `delete` tool uses `file_path`, not `command`/
+        # `path` — the prompt must still show the target, not just the name.
+        got = I.format_approval_prompt(
+            [{"name": "delete", "args": {"file_path": "/results/run-3"}}]
+        )
+        assert "delete" in got
+        assert "/results/run-3" in got
+
     def test_metadata_no_buttons(self):
         assert I.approval_prompt_metadata({"k": "v"}, with_buttons=False) == {"k": "v"}
 

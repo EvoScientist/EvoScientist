@@ -102,7 +102,10 @@ def format_approval_prompt(
         name = req.get("name", "")
         args = req.get("args", {})
         if isinstance(args, dict):
-            command = args.get("command", args.get("path", ""))
+            # deepagents 0.7.0's `delete` tool uses `file_path`, not
+            # `command`/`path` — without this fallback the prompt shows
+            # only "delete" with no target.
+            command = args.get("command", args.get("path", args.get("file_path", "")))
         else:
             command = ""
         if command:
@@ -217,7 +220,11 @@ def config_auto_approve(action_requests: list[dict]) -> bool:
         return True
 
     try:
-        from ..config.settings import HITL_SHELL_TOOLS, load_config
+        from ..config.settings import (
+            HITL_ALWAYS_PROMPT_TOOLS,
+            HITL_SHELL_TOOLS,
+            load_config,
+        )
 
         cfg = load_config()
     except Exception:
@@ -234,6 +241,8 @@ def config_auto_approve(action_requests: list[dict]) -> bool:
 
     for req in action_requests:
         name = req.get("name", "")
+        if name in HITL_ALWAYS_PROMPT_TOOLS:
+            return False
         if name not in HITL_SHELL_TOOLS:
             continue
         args = req.get("args", {})

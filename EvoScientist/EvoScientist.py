@@ -22,7 +22,11 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    HumanInTheLoopMiddleware,
+    TodoListMiddleware,
+)
 
 from . import paths as _paths_mod
 from .config import (
@@ -51,6 +55,15 @@ if TYPE_CHECKING:
 SUBAGENTS_CONFIG = Path(__file__).parent / "subagents"
 SKILLS_DIR = str(Path(__file__).parent / "skills")
 DEFAULT_SKILL_SOURCES = ("/skills/",)
+
+# Tools requiring human approval on attended agents (deepagents 0.7.0 ships a
+# recursive `delete` FS tool that would otherwise bypass the execute blocklist).
+HITL_INTERRUPT_ON: dict[str, bool] = {
+    "execute": True,
+    "run_in_background": True,
+    "schedule_task": True,
+    "delete": True,
+}
 
 # =============================================================================
 # Lazy state — initialized on first use, not at import time
@@ -359,6 +372,7 @@ def _inject_subagent_middleware(
             create_context_editing_middleware(chat_model),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
+            TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
         ]
         if memory_controls.memory_enabled:
@@ -790,6 +804,9 @@ def _get_default_middleware(
         ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
+        # deepagents 0.7.0 dropped TodoListMiddleware from its defaults;
+        # EXPERIMENT_WORKFLOW planning and the todo UI pipeline require it.
+        TodoListMiddleware(),
         *create_tool_selector_middleware(
             model=tool_selector_model,
             events=events,
@@ -876,15 +893,7 @@ def _get_default_agent():
         # breaks parallel execute calls (multi-pending-interrupt LangGraph
         # error). See PR #202.
         if not cfg.auto_approve:
-            mw.append(
-                HumanInTheLoopMiddleware(
-                    interrupt_on={
-                        "execute": True,
-                        "run_in_background": True,
-                        "schedule_task": True,
-                    }
-                )
-            )
+            mw.append(HumanInTheLoopMiddleware(interrupt_on=dict(HITL_INTERRUPT_ON)))
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(
@@ -1042,15 +1051,7 @@ def create_cli_agent(
     # would propagate it to every subagent, breaking parallel execute calls
     # (multi-pending-interrupt LangGraph error).
     if not cfg.auto_approve:
-        mw.append(
-            HumanInTheLoopMiddleware(
-                interrupt_on={
-                    "execute": True,
-                    "run_in_background": True,
-                    "schedule_task": True,
-                }
-            )
-        )
+        mw.append(HumanInTheLoopMiddleware(interrupt_on=dict(HITL_INTERRUPT_ON)))
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
     kwargs = load_mcp_and_build_kwargs(

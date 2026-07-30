@@ -11,6 +11,7 @@ import pytest
 
 from EvoScientist import backends, paths
 from EvoScientist.backends import (
+    AutoskillProposalSandboxBackend,
     CustomSandboxBackend,
     MemoryFilesystemBackend,
     MergedSkillsBackend,
@@ -957,6 +958,52 @@ class TestMemoryFilesystemBackend:
         assert uploads[0].error is not None
         assert "read-only" in uploads[0].error
         assert not (workspace / "created.txt").exists()
+
+
+# === delete blocking (deepagents 0.7.0 recursive delete tool) ===
+
+
+class TestDeleteBlocked:
+    """deepagents 0.7.0 adds a recursive delete tool; guarded backends must refuse it."""
+
+    def test_readonly_backend_blocks_delete(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x")
+        backend = ReadOnlyFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+        result = backend.delete("/f.txt")
+        assert result.error is not None
+        assert (tmp_path / "f.txt").exists()
+
+    async def test_readonly_backend_blocks_adelete(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x")
+        backend = ReadOnlyFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+        result = await backend.adelete("/f.txt")
+        assert result.error is not None
+        assert (tmp_path / "f.txt").exists()
+
+    def test_memory_backend_blocks_delete_everywhere(self, tmp_path):
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        (profile / "USER_PROFILE.md").write_text("x")
+        backend = MemoryFilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+        result = backend.delete("/profile/USER_PROFILE.md")
+        assert result.error is not None
+        assert (profile / "USER_PROFILE.md").exists()
+
+    def test_autoskill_backend_blocks_delete(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x")
+        backend = AutoskillProposalSandboxBackend(
+            root_dir=str(tmp_path), virtual_mode=True
+        )
+        result = backend.delete("/f.txt")
+        assert result.error is not None
+        assert (tmp_path / "f.txt").exists()
+
+    def test_sandbox_backend_delete_enabled_by_default(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True)
+        result = backend.delete("/f.txt")
+        assert result.error is None
+        assert not (tmp_path / "f.txt").exists()
 
 
 # === CustomSandboxBackend._resolve_path ===
@@ -1918,3 +1965,46 @@ class TestPlatformQuote:
             backends._platform_quote(r"C:\path\%TEMP%\file.py")
             == r"C:\path\%TEMP%\file.py"
         )
+
+
+def test_memory_maintenance_excludes_delete_tool():
+    from EvoScientist.memory.agents._factory import MEMORY_MAINTENANCE_EXCLUDED_TOOLS
+
+    assert "delete" in MEMORY_MAINTENANCE_EXCLUDED_TOOLS
+
+
+def test_autoskill_composite_route_blocks_or_excludes_delete():
+    """Codex finding: /autoskill-proposals/ routes to a plain FilesystemBackend whose
+    delete works; the agent-level tool exclusion is the guard that must cover it."""
+    from EvoScientist.memory.agents.autoskills import _AUTOSKILLS_EXCLUDED_TOOLS
+
+    assert "delete" in _AUTOSKILLS_EXCLUDED_TOOLS
+
+
+def test_autoskill_proposals_route_delete_is_not_backend_blocked(tmp_path):
+    """Documents WHY the tool exclusion above is the enforcement layer: the raw
+    composite backend's /autoskill-proposals/ route has no backend-level delete
+    guard (unlike /memories/ and the default proposal-root sandbox), so a bare
+    `delete("/autoskill-proposals/...")` call still succeeds at the backend level."""
+    from EvoScientist.backends import build_autoskill_agent_backend
+
+    memory_dir = tmp_path / "memories"
+    proposals_dir = tmp_path / "proposals"
+    memory_dir.mkdir()
+    proposals_dir.mkdir()
+    (proposals_dir / "some-skill").mkdir()
+    (proposals_dir / "some-skill" / "SKILL.md").write_text("x", encoding="utf-8")
+
+    backend = build_autoskill_agent_backend(
+        memory_dir=memory_dir, proposals_dir=proposals_dir
+    )
+    result = backend.delete("/autoskill-proposals/some-skill")
+
+    assert result.error is None
+    assert not (proposals_dir / "some-skill").exists()
+
+
+def test_memory_worker_excludes_delete_tool():
+    from EvoScientist.memory.agents.memory_worker import _MEMORY_WORKER_EXCLUDED_TOOLS
+
+    assert "delete" in _MEMORY_WORKER_EXCLUDED_TOOLS

@@ -1185,7 +1185,11 @@ def _resolve_hitl_approval(
         return [{"type": "approve"} for _ in action_requests]
 
     # Config-level auto-approve
-    from ..config.settings import HITL_SHELL_TOOLS, load_config
+    from ..config.settings import (
+        HITL_ALWAYS_PROMPT_TOOLS,
+        HITL_SHELL_TOOLS,
+        load_config,
+    )
 
     cfg = load_config()
     if cfg.auto_approve:
@@ -1202,6 +1206,10 @@ def _resolve_hitl_approval(
     for req in action_requests:
         name = req.get("name", "")
         args = req.get("args", {})
+
+        if name in HITL_ALWAYS_PROMPT_TOOLS:
+            needs_prompt = True
+            break
 
         if name not in HITL_SHELL_TOOLS:
             continue  # Only shell-running tools need manual approval
