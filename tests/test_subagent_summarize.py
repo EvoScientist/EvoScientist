@@ -683,12 +683,5 @@ class TestDelegationPromptSummarize:
         """The upstream TASK_TOOL_DESCRIPTION already instructs the LLM to summarize."""
         from deepagents.middleware.subagents import TASK_TOOL_DESCRIPTION
 
-        assert "not visible to the user" in TASK_TOOL_DESCRIPTION
-        assert "summary of the result" in TASK_TOOL_DESCRIPTION
-
-    def test_framework_task_system_prompt_contains_reconcile_step(self):
-        """The upstream TASK_SYSTEM_PROMPT includes a reconcile/synthesize step."""
-        from deepagents.middleware.subagents import TASK_SYSTEM_PROMPT
-
-        assert "Reconcile" in TASK_SYSTEM_PROMPT
-        assert "synthesize" in TASK_SYSTEM_PROMPT.lower()
+        assert "not shown to the user" in TASK_TOOL_DESCRIPTION
+        assert "relay a summary yourself" in TASK_TOOL_DESCRIPTION

@@ -18,6 +18,7 @@ from ... import paths as _paths
 MEMORY_AGENT_RECURSION_LIMIT = 100
 MEMORY_MAINTENANCE_EXCLUDED_TOOLS = frozenset(
     {
+        "delete",
         "edit_file",
         "execute",
         "task",

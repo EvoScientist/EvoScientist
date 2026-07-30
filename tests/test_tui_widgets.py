@@ -286,6 +286,38 @@ class TestToolCallWidget(unittest.TestCase):
 
 
 @unittest.skipUnless(_has_textual, "textual not installed")
+class TestApprovalWidgetCommandExtraction(unittest.TestCase):
+    """ApprovalWidget's compact-line command extraction.
+
+    ``compose()`` itself needs a mounted App (it opens a Container context
+    manager), so — per the widget's existing style of unit-testing its
+    private helpers directly (see TestToolCallWidget) — these exercise the
+    extraction helper `compose()` calls rather than the full render.
+    """
+
+    def test_extract_command_prefers_command(self):
+        from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
+
+        assert ApprovalWidget._extract_command({"command": "ls", "path": "/x"}) == "ls"
+
+    def test_extract_command_falls_back_to_path(self):
+        from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
+
+        assert ApprovalWidget._extract_command({"path": "/out.txt"}) == "/out.txt"
+
+    def test_extract_command_falls_back_to_file_path(self):
+        # deepagents 0.7.0's `delete` tool uses `file_path`, not `command`/
+        # `path` — without this fallback the approval prompt shows only the
+        # tool name and hides the deletion target.
+        from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
+
+        assert (
+            ApprovalWidget._extract_command({"file_path": "/results/run-3"})
+            == "/results/run-3"
+        )
+
+
+@unittest.skipUnless(_has_textual, "textual not installed")
 class TestSubAgentWidget(unittest.TestCase):
     """SubAgentWidget construction and name display."""
 

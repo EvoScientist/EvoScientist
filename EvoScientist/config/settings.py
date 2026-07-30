@@ -21,9 +21,13 @@ from dotenv import dotenv_values, find_dotenv
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
-# (stream/display.py, channels/consumer.py) — keep aligned with the agent's
+# (stream/display.py, channels/interaction.py) — keep aligned with the agent's
 # `interrupt_on` set in EvoScientist.py.
 HITL_SHELL_TOOLS = ("execute", "run_in_background")
+
+# Armed non-shell destructive tools must always prompt — no allow-list carve-outs
+# (their args carry paths, not commands). Keep aligned with HITL_INTERRUPT_ON.
+HITL_ALWAYS_PROMPT_TOOLS = ("delete",)
 
 
 class MemoryObservationTarget(StrEnum):

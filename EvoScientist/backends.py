@@ -15,6 +15,7 @@ from pathlib import Path
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
     BackendProtocol,
+    DeleteResult,
     EditResult,
     ExecuteResponse,
     FileDownloadResponse,
@@ -904,6 +905,11 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
             for file_path, _ in files
         ]
 
+    def delete(self, file_path: str) -> DeleteResult:
+        return DeleteResult(
+            error="This directory is read-only. Delete operations are not permitted here."
+        )
+
 
 class MemoryFilesystemBackend(FilesystemBackend):
     """Filesystem backend for memory files with structured-write enforcement.
@@ -919,6 +925,10 @@ class MemoryFilesystemBackend(FilesystemBackend):
     _RAW_EDIT_ERROR = (
         "Raw edits under /memories are limited to existing "
         "/memories/profile/... files. Use memory tools for observations."
+    )
+    _RAW_DELETE_ERROR = (
+        "Deletes under /memories are blocked. Manage memory files through "
+        "memory tools instead."
     )
 
     @staticmethod
@@ -945,6 +955,9 @@ class MemoryFilesystemBackend(FilesystemBackend):
             FileUploadResponse(path=file_path, error=self._RAW_WRITE_ERROR)
             for file_path, _ in files
         ]
+
+    def delete(self, file_path: str) -> DeleteResult:
+        return DeleteResult(error=self._RAW_DELETE_ERROR)
 
 
 def build_memory_agent_backend(
@@ -1551,6 +1564,12 @@ class AutoskillProposalSandboxBackend(CustomSandboxBackend):
             FileUploadResponse(path=file_path, error=self._RAW_WRITE_ERROR)
             for file_path, _ in files
         ]
+
+    def delete(self, file_path: str) -> DeleteResult:
+        return DeleteResult(
+            error="Deletes are blocked for AutoSkills. Manage proposal files "
+            "under /autoskill-proposals/ instead."
+        )
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         return super().execute(
