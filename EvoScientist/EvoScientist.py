@@ -549,6 +549,105 @@ def _maybe_swap_async_subagents(
     return out
 
 
+def _route_async_specs_through_evo_middleware(
+    subs: list, base_middleware: list, *, cfg=None
+) -> list:
+    """Move ``AsyncSubAgent`` specs from ``subs`` into ``EvoAsyncSubAgentMiddleware``.
+
+    Deepagents' ``create_deep_agent`` auto-composes the vanilla
+    ``AsyncSubAgentMiddleware`` when it sees ``graph_id``-carrying entries
+    in ``subagents=``. We need our payload-aware subclass to handle those
+    (see ``EvoScientist/middleware/expert_async_subagent.py`` for the
+    upstream-workaround rationale). To prevent the auto-composition and
+    route all async dispatch through our subclass, we strip AsyncSubAgent
+    specs from ``subs`` here and hand them to our middleware.
+
+    Also folds in ``AsyncSubAgent`` specs for installed
+    ``default_dispatch: async`` expert skills — all pointing at the shared
+    ``expert-container-async`` graph, marked ``is_expert=True`` so the
+    middleware requires a payload with ``skill_name``.
+
+    Returns:
+        ``subs`` with ``graph_id``-carrying entries removed. Safe to pass
+        as ``create_deep_agent(subagents=...)`` — the async-auto-compose
+        branch is skipped for empty async lists.
+    """
+    from .middleware.async_watcher import AsyncWatcherMiddleware
+    from .middleware.expert_async_subagent import EvoAsyncSubAgentMiddleware
+    from .subagents.expert_container_async import build_expert_async_subagent_specs
+
+    cfg = cfg if cfg is not None else _ensure_config()
+
+    async_specs = [s for s in subs if "graph_id" in s]
+    sync_subs = [s for s in subs if "graph_id" not in s]
+    expert_specs = build_expert_async_subagent_specs(cfg=cfg)
+    async_specs.extend(expert_specs)
+
+    if async_specs:
+        # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
+        # only when the yaml-async spec list is non-empty. An expert-only setup
+        # (no ``writing-agent`` / ``data-analysis-agent`` / ``scheduler`` in
+        # yaml) would otherwise miss the patch entirely, so we install it here
+        # too. Idempotent — the shared ``_model_passthrough_patched`` flag
+        # guards against double-patching.
+        from .llm.patches import _patch_deepagents_model_passthrough
+
+        _patch_deepagents_model_passthrough()
+
+        # Prepend rather than append so the ``## Async subagents`` prompt
+        # section stays in the stable prefix. Appending pushes it past the
+        # volatile memory tail, invalidating the cached prefix on every
+        # memory change.
+        base_middleware.insert(
+            0, EvoAsyncSubAgentMiddleware(async_subagents=async_specs)
+        )
+
+    # Extend AsyncWatcherMiddleware's client cache with expert specs so
+    # start_async_task launches for experts spawn a completion watcher —
+    # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
+    # expert name, no notification is enqueued, and the main agent never
+    # learns the task finished. ``_maybe_swap_async_subagents`` above only
+    # populates the watcher with YAML-defined async subagents (writing-agent,
+    # data-analysis-agent, scheduler); this hook folds in the experts too.
+    if expert_specs:
+        watcher = next(
+            (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
+            None,
+        )
+        if watcher is not None:
+            # The mutation reaches through two layers of private state:
+            # ``AsyncWatcherMiddleware._clients`` (our own) and
+            # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
+            # renames ``_agents`` or wraps it in an immutable snapshot, the
+            # ``.update(...)`` below silently lands on nothing — expert
+            # completion nudges then stop firing without a diagnostic surface.
+            # Convert that silent-drop into a grep-able error line and bail
+            # out of the extension path; expert dispatches still work, just
+            # without completion notifications until upstream drift is fixed.
+            if not hasattr(watcher._clients, "_agents"):
+                logging.getLogger(__name__).error(
+                    "AsyncWatcherMiddleware._clients has no `_agents` slot — "
+                    "deepagents internal renamed; expert completion "
+                    "notifications will not fire until the extension hook is "
+                    "updated to the new attribute name."
+                )
+                return sync_subs
+            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
+        else:
+            # No YAML async subagents were registered, so ``_maybe_swap`` did
+            # not install the watcher. Install it now so experts still get
+            # completion notifications.
+            from .cli import async_notifier
+
+            base_middleware.append(
+                AsyncWatcherMiddleware(
+                    {s["name"]: s for s in expert_specs},
+                    notifier=async_notifier,
+                )
+            )
+    return sync_subs
+
+
 def _build_base_kwargs(
     base_backend, base_middleware, *, cfg=None, chat_model=None, workspace_dir=None
 ):
@@ -557,12 +656,7 @@ def _build_base_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    # `skill_manager` is registered here in addition to `base_tools` because
-    # expert subagents resolve their default toolset from `tool_registry` (see
-    # `_DEFAULT_EXPERT_TOOLS` in expert_container.py). Without this entry the
-    # tool silently misses from every expert sub-agent — e.g. idea-brainstorm
-    # can't run its `paper-navigator` precondition check.
-    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
+    tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
@@ -582,6 +676,10 @@ def _build_base_kwargs(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
     )
     subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    # Route AsyncSubAgent specs (both standard and expert) through
+    # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
+    # replaces upstream's non-parameterisable one.
+    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
     return {
         "name": "EvoScientist",
         "model": chat_model if chat_model is not None else _ensure_chat_model(),
@@ -634,10 +732,7 @@ def load_mcp_and_build_kwargs(
             workspace_dir=workspace_dir,
         )
 
-    # Match `_build_base_kwargs`: register `skill_manager` in the registry so
-    # expert subagents (which resolve tools via `_DEFAULT_EXPERT_TOOLS` from
-    # `expert_container.py`) actually get it.
-    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
+    tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
@@ -672,6 +767,10 @@ def load_mcp_and_build_kwargs(
     # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
     # since async sub-agents are remote graphs that load their own tools).
     subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    # Mirror the base path: route AsyncSubAgent specs through
+    # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
+    # is the one composed into the main agent.
+    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
 
     return {
         "name": "EvoScientist",

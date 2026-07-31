@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from EvoScientist.subagents.expert_container import (
@@ -10,6 +11,8 @@ from EvoScientist.subagents.expert_container import (
     _compose_system_prompt,
     build_expert_subagent_spec,
     build_expert_subagent_specs,
+    is_async_dispatch_available,
+    list_dispatchable_experts,
 )
 from EvoScientist.tools.skills_manager import SkillInfo
 
@@ -444,102 +447,90 @@ class TestFoldExpertSubagents:
 
 
 # =============================================================================
-# End-to-end wiring — both kwargs builders register experts with skill_manager
+# is_async_dispatch_available / list_dispatchable_experts honest surface
 # =============================================================================
 
 
-class TestExpertWiringInBuildKwargs:
-    """Regression pin on the two-line wiring in both construction paths:
-    (a) ``tool_registry["skill_manager"]`` is populated so
-    ``_DEFAULT_EXPERT_TOOLS`` resolves and (b) ``_fold_expert_subagents`` is
-    invoked with that registry so the expert spec's ``tools`` carry the real
-    callable. Drift on either half silently drops ``skill_manager`` from every
-    expert — the exact regression fix commit ``34586c7`` addressed. A single
-    installed expert exercises both halves in one call."""
+class TestIsAsyncDispatchAvailable:
+    """The gate ``list_dispatchable_experts`` and ``ActiveTeamMiddleware``
+    both consult to decide whether async-declared experts can be surfaced."""
 
-    @staticmethod
-    def _install_one_expert(root: Path) -> Path:
-        skill_dir = root / "expert-a"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: expert-a
-description: A test expert
-type: expert
-role: test expert
----
+    def test_false_when_flag_disabled(self):
+        cfg = SimpleNamespace(enable_async_subagents=False)
+        assert is_async_dispatch_available(cfg=cfg) is False
 
-Second-person persona body content.
-"""
+    def test_false_when_dev_unreachable(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        with patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=False,
+        ):
+            assert is_async_dispatch_available(cfg=cfg) is False
+
+    def test_true_when_both_gates_pass(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        with patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ):
+            assert is_async_dispatch_available(cfg=cfg) is True
+
+
+class TestListDispatchableExpertsAsyncFilter:
+    """``list_dispatchable_experts`` drops async-declared experts when async
+    dispatch isn't registered — sync-declared experts pass through, mirroring
+    honest advertising per the reviewer's ask on PR #391."""
+
+    def _skill(self, name: str, dispatch: str) -> SkillInfo:
+        return SkillInfo(
+            name=name,
+            description=f"{name} description",
+            path=Path("/tmp/nope"),
+            source="builtin",
+            type="expert",
+            role=f"{name} role",
+            default_dispatch=dispatch,
+            body="persona body\n",
         )
-        empty = root / "empty"
-        empty.mkdir(exist_ok=True)
-        return empty
 
-    def test_build_base_kwargs_registers_expert_with_skill_manager(self, tmp_path):
-        from EvoScientist import EvoScientist as evo
-        from EvoScientist.tools import skill_manager
+    def test_async_expert_dropped_when_flag_disabled(self):
+        cfg = SimpleNamespace(enable_async_subagents=False)
+        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=skills,
+        ):
+            result = list_dispatchable_experts(cfg=cfg)
+        assert [s.name for s in result] == ["idea-brainstorm"]
 
-        empty = self._install_one_expert(tmp_path)
-
+    def test_async_expert_dropped_when_dev_unreachable(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty),
-            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty)),
-            patch.object(evo, "_inject_subagent_middleware", lambda subs, **k: None),
-            patch.object(
-                evo,
-                "_maybe_swap_async_subagents",
-                lambda subs, mw, cfg=None: subs,
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=False,
             ),
         ):
-            kwargs = evo._build_base_kwargs(
-                base_backend=None,
-                base_middleware=[],
-                chat_model=object(),
-            )
+            result = list_dispatchable_experts(cfg=cfg)
+        assert [s.name for s in result] == ["idea-brainstorm"]
 
-        expert = next(
-            (s for s in kwargs["subagents"] if s.get("name") == "expert-a"), None
-        )
-        assert expert is not None, "expert-a not folded into subagents"
-        assert skill_manager in expert["tools"], (
-            "skill_manager missing from expert tools — tool_registry wiring drifted"
-        )
-
-    def test_load_mcp_and_build_kwargs_registers_expert_with_skill_manager(
-        self, tmp_path
-    ):
-        from EvoScientist import EvoScientist as evo
-        from EvoScientist.tools import skill_manager
-
-        empty = self._install_one_expert(tmp_path)
-
-        # Non-empty mcp_by_agent forces the MCP branch. Without it,
-        # load_mcp_and_build_kwargs delegates to _build_base_kwargs and we
-        # re-test the first path only.
+    def test_async_expert_included_when_registered(self):
+        cfg = SimpleNamespace(enable_async_subagents=True)
+        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty),
-            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty)),
-            patch.object(evo, "_load_mcp_tools_cached", return_value={"main": []}),
-            patch.object(evo, "_inject_subagent_middleware", lambda subs, **k: None),
-            patch.object(
-                evo,
-                "_maybe_swap_async_subagents",
-                lambda subs, mw, cfg=None: subs,
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
             ),
         ):
-            kwargs = evo.load_mcp_and_build_kwargs(
-                base_backend=None,
-                base_middleware=[],
-                chat_model=object(),
-            )
-
-        expert = next(
-            (s for s in kwargs["subagents"] if s.get("name") == "expert-a"), None
-        )
-        assert expert is not None, "expert-a not folded into subagents (MCP path)"
-        assert skill_manager in expert["tools"], (
-            "skill_manager missing from expert tools on MCP path"
-        )
+            result = list_dispatchable_experts(cfg=cfg)
+        assert {s.name for s in result} == {"idea-brainstorm", "lit"}
