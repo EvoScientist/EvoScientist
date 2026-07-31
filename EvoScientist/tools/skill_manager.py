@@ -194,16 +194,16 @@ def skill_manager(
                 f"Skill not found: {name}. "
                 f"Use action='list' with include_system=True to see all available skills."
             )
-        lines = [
-            f"Name: {info.name}",
-            f"Description: {info.description}",
-            f"Source: {info.source}",
-        ]
         # ``Path`` reports the sandbox-visible virtual mount segment (the skill's
         # directory name under ``/skills/``), not the host filesystem path.
         # Surfacing the host path (e.g. ``/home/.../EvoScientist/skills/<name>``)
         # invited ``cd <host-path> && …`` chains that fail in the sandbox.
-        lines.append(f"Path: /skills/{info.path.name}")
+        lines = [
+            f"Name: {info.name}",
+            f"Description: {info.description}",
+            f"Source: {info.source}",
+            f"Path: /skills/{info.path.name}",
+        ]
         if info.tags:
             lines.append(f"Tags: {', '.join(info.tags)}")
         # Expert-skill surface (agent-teams v1): only shown when the

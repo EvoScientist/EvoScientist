@@ -203,19 +203,30 @@ class ExpertCommand(Command):
 
         dispatchable = {s.name for s in _dispatchable_experts()}
         if target not in dispatchable:
+            from ...subagents.expert_container import is_async_dispatch_available
             from ...tools.skills_manager import list_expert_skills
 
-            installed = {s.name for s in list_expert_skills(include_system=True)}
-            if target in installed:
+            installed = {s.name: s for s in list_expert_skills(include_system=True)}
+            match = installed.get(target)
+            if match is None:
                 ctx.ui.append_system(
-                    f"Expert '{target}' can't be dispatched (empty SKILL.md body "
-                    "or name collision with a built-in sub-agent).",
+                    f"No expert skill named '{target}'. `/experts` lists "
+                    "installed ones.",
+                    style="red",
+                )
+            elif (
+                match.default_dispatch == "async" and not is_async_dispatch_available()
+            ):
+                ctx.ui.append_system(
+                    f"Expert '{target}' declares async dispatch but async "
+                    "dispatch is unavailable (enable_async_subagents is off "
+                    "or langgraph dev is not reachable).",
                     style="red",
                 )
             else:
                 ctx.ui.append_system(
-                    f"No expert skill named '{target}'. `/experts` lists "
-                    "installed ones.",
+                    f"Expert '{target}' can't be dispatched (empty SKILL.md body "
+                    "or name collision with a built-in sub-agent).",
                     style="red",
                 )
             return

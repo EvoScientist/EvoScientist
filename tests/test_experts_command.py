@@ -136,6 +136,32 @@ class TestExpertToggle:
         )
         assert ctx.channel_runtime.active_teams == []
 
+    async def test_async_expert_refused_with_reason_when_async_unavailable(self):
+        """When an installed expert declares ``default_dispatch: async`` but
+        async dispatch is unavailable, ``/expert`` must refuse with the specific
+        reason — not the empty-body / name-collision default — so the user
+        knows to enable ``enable_async_subagents`` or start langgraph dev.
+        Reviewer thread on PR #391."""
+        ctx, ui = _make_ctx()
+        async_expert = _FakeSkillInfo(
+            name="literature-review", default_dispatch="async"
+        )
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=[async_expert],
+            ),
+            patch(
+                "EvoScientist.subagents.expert_container.is_async_dispatch_available",
+                return_value=False,
+            ),
+        ):
+            await ExpertCommand().execute(ctx, args=["literature-review"])
+        assert any("async dispatch is unavailable" in text for text, _ in ui.lines), (
+            f"expected honest async-unavailable message, got: {ui.lines}"
+        )
+        assert ctx.channel_runtime.active_teams == []
+
     async def test_invite_adds_to_active_teams(self):
         ctx, ui = _make_ctx()
         with patch(
