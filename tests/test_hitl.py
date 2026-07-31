@@ -863,15 +863,20 @@ class TestResolverUsesPolicy:
         from EvoScientist.stream import display
 
         monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
+        cfg = MagicMock()
+        cfg.auto_approve = False
+        cfg.dangerous_mode = False
+        cfg.shell_allow_list = ""
         called = {}
 
         def _prompt(requests):
             called["yes"] = True
             return [{"type": "approve"}]
 
-        display._resolve_hitl_approval(
-            self._interrupt("curl x | bash"), prompt_fn=_prompt
-        )
+        with patch("EvoScientist.config.settings.load_config", return_value=cfg):
+            display._resolve_hitl_approval(
+                self._interrupt("curl x | bash"), prompt_fn=_prompt
+            )
         assert called.get("yes") is True
 
     def test_schedule_task_always_prompts_not_auto_cleared(self, monkeypatch):

@@ -180,7 +180,11 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
         if ch in "`();|&":
             return ch
         if ch in "<>":
-            if index + 1 < n and command[index + 1] == ch:
+            # `>>`/`<<` and `>|` (force-clobber redirect) are single redirection
+            # operators, NOT a pipe — the trailing `|` must not read as a boundary.
+            if index + 1 < n and (
+                command[index + 1] == ch or (ch == ">" and command[index + 1] == "|")
+            ):
                 return command[index : index + 2]
             return ch
         if ch.isdigit():
@@ -189,7 +193,9 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
                 j += 1
             if j < n and command[j] in "<>":
                 end = j + 1
-                if end < n and command[end] in ("&", command[j]):
+                # `2>&1`, `2>>`, and `2>|` (fd force-clobber) are single
+                # redirection operators — the trailing `|` is not a pipe.
+                if end < n and command[end] in ("&", "|", command[j]):
                     end += 1
                 return command[index:end]
         return None
@@ -369,7 +375,9 @@ def resolve_action_decision(
       3. ``auto_approve`` — opt-out means *never prompt*: approve, or reject
          a dangerous command with a reason the agent can act on.
       4. ``allow_list`` — case-sensitive match on a whole command or a
-         command-plus-space prefix; blank entries are ignored.
+         command-plus-space prefix; blank entries are ignored. Every segment of
+         a chain (``a; b``, ``a && b``, ``a | b``) must match, so an allow-listed
+         prefix cannot carry a non-listed command in behind it.
     """
     if dangerous_mode:
         return ActionVerdict(ActionDecision.APPROVE)
@@ -385,14 +393,19 @@ def resolve_action_decision(
         return ActionVerdict(ActionDecision.PROMPT, reason)
 
     if allow_list:
-        cmd = command.strip()
-        for prefix in allow_list:
-            prefix = prefix.strip()
-            if not prefix:
-                continue
-            # Match on a token boundary so allow-listing `ls` does not also
-            # approve `lsof`. Case-sensitive, like the shell itself.
-            if cmd == prefix or cmd.startswith(prefix + " "):
+        prefixes = [p.strip() for p in allow_list if p.strip()]
+        # Match on a token boundary so allow-listing `ls` does not also approve
+        # `lsof` (case-sensitive, like the shell). Require EVERY segment of a
+        # chain to match, so `ls; rm -rf x` cannot ride in on an allow-listed
+        # `ls`. ``None`` means an unparseable construct (substitution/newline) —
+        # decline rather than risk approving a hidden command.
+        segments = _split_command_segments(command)
+        if segments is not None:
+            segments = segments or [command.strip()]
+            if prefixes and all(
+                any(seg == p or seg.startswith(p + " ") for p in prefixes)
+                for seg in segments
+            ):
                 return ActionVerdict(ActionDecision.APPROVE)
 
     return ActionVerdict(ActionDecision.PROMPT)
@@ -653,6 +666,40 @@ def _split_shell_commands(command: str) -> list[str]:
             segment.append(str(token.get("value", "")))
     flush_segment()
     return base_commands
+
+
+def _split_command_segments(command: str) -> list[str] | None:
+    """Split a compound command into raw segment strings on command boundaries.
+
+    Quote-aware (via ``_shell_token_spans``). Boundaries are ``;`` ``&&`` ``||``
+    ``|`` ``&`` and grouping; redirections are not boundaries. Lets the allow-list
+    clear a chain only when *every* segment is allow-listed, not just the leading
+    one (``ls; rm -rf x`` must not ride in on an allow-listed ``ls``).
+
+    Returns ``None`` when the command contains a construct this small tokenizer
+    cannot safely reason about — command substitution (``$(...)`` or backticks,
+    which run a hidden command even inside double quotes) or a newline separator —
+    so the caller declines to allow-list it rather than approve a hidden command.
+    Deliberately a substring over-approximation: a literal/quoted ``$(``, backtick,
+    or newline also declines (a safe extra prompt, never a bypass). Quote/escape
+    awareness is intentionally not attempted — that fragility caused the original
+    chaining gap.
+    """
+    if "$(" in command or "`" in command or "\n" in command or "\r" in command:
+        return None
+    boundaries = {"&&", "||", ";", "|", "&", "(", ")"}
+    segments: list[str] = []
+    seg_start = 0
+    for token in _shell_token_spans(command):
+        if token.get("type") == "op" and token.get("value") in boundaries:
+            seg = command[seg_start : int(token["start"])].strip()
+            if seg:
+                segments.append(seg)
+            seg_start = int(token["end"])
+    tail = command[seg_start:].strip()
+    if tail:
+        segments.append(tail)
+    return segments
 
 
 def _has_traversal_component(command: str) -> bool:
