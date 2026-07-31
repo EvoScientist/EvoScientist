@@ -1542,17 +1542,15 @@ class CustomSandboxBackend(LocalShellBackend):
     )
 
     def delete(self, file_path: str) -> DeleteResult:
-        """Refuse ``delete`` for guarded async sub-agents (no approval path)."""
+        """Refuse ``delete`` for guarded async sub-agents (no approval path).
+
+        No ``adelete`` override is needed: the inherited ``BackendProtocol.adelete``
+        runs ``asyncio.to_thread(self.delete, ...)``, so async sub-agents reach
+        this refusal too.
+        """
         if self._refuse_delete and not self._dangerous:
             return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
         return super().delete(file_path)
-
-    async def adelete(self, file_path: str) -> DeleteResult:
-        # Async graphs call adelete, so the guard must cover it too — otherwise
-        # the refusal is bypassed on exactly the async sub-agents it protects.
-        if self._refuse_delete and not self._dangerous:
-            return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
-        return await super().adelete(file_path)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """
