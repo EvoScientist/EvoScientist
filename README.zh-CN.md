@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.5" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 8 月 1 日]** **[v0.2.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.5)** — 主 agent 与同步/异步子 agent 统一 human-in-the-loop 审批；升级 deepagents 0.7.0，内置 prompt 更精简，新增递归 `delete` 工具、与 `execute` 同级审批；新增 Requesty 与 Atlas Cloud 两个 LLM provider；修复无名工具调用、同步子 agent 的中断工具历史，以及 deploy 模式端口传播。
 - **[2026 年 7 月 26 日]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 可在 Anthropic 与 OpenRouter 中选用（含 fast），Google 与 OpenRouter 另新增 Gemini 3.6 Flash 与 3.5 Flash Lite；Kimi K3 打通 Anthropic 协议通道（Kimi For Coding、自定义端点），结构化输出、历史回放、多轮 thinking 均可用；修复中断的工具调用历史、技能安装路径泄漏，以及 OpenRouter SSE 流式回归（固定到 0.11 以下）。
 - **[2026 年 7 月 18 日]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 可在 Moonshot 与 OpenRouter 中选用（1M 上下文）；清理孤儿运行后，异步子代理不再卡在 pending 状态；Telegram 斜杠命令；provider 修复（DeepSeek 原生 SDK、ChatGPT OAuth 下的 GPT-5.x、OpenAI `reasoning_effort`）；tool-selector 流式输出更安静，checkpoint 体积更小。
 - **[2026 年 7 月 11 日]** **[v0.2.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.2)** — onboarding 与 `/model` 新增可选模型：OpenAI 与 OpenRouter 的 GPT-5.6（sol、terra、luna），以及 OpenRouter 上的 Grok 4.5 与腾讯混元 HY3；收紧配置文件权限，并重做了辅助模型的 onboarding OAuth 流程。
