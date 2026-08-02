@@ -59,6 +59,7 @@ class TestModelsRegistry:
             "siliconflow",
             "openrouter",
             "requesty",
+            "orcarouter",
             "zhipu",
             "zhipu-code",
             "volcengine",
@@ -492,6 +493,34 @@ class TestThirdPartyRouting:
         call_kwargs = mock_init.call_args[1]
         assert "cache_control" not in call_kwargs
         assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_orcarouter_routes_through_openai(self, mock_init, monkeypatch):
+        """OrcaRouter provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-orca-123")
+
+        get_chat_model("openai/gpt-4o-mini", provider="orcarouter")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.orcarouter.ai/v1"
+        assert call_kwargs["api_key"] == "sk-orca-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_orcarouter_sends_attribution_headers(self, mock_init, monkeypatch):
+        """OrcaRouter requests should carry HTTP-Referer / X-Title attribution."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ORCAROUTER_API_KEY", "sk-orca-123")
+
+        get_chat_model("anthropic/claude-sonnet-4-6", provider="orcarouter")
+
+        call_kwargs = mock_init.call_args[1]
+        headers = call_kwargs.get("default_headers", {})
+        assert headers.get("HTTP-Referer") == (
+            "https://github.com/EvoScientist/EvoScientist"
+        )
+        assert headers.get("X-Title") == "EvoScientist"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_deepseek_uses_copy_safe_native_model(self, mock_init, monkeypatch):
@@ -3465,6 +3494,78 @@ class TestValidateRequestyKey:
         with patch("httpx.post") as mock_post:
             mock_post.return_value.status_code = status
             is_valid, msg = validate_requesty_key("rq-key")
+
+        assert is_valid is False
+        assert "inconclusive" in msg.lower()
+        assert str(status) in msg
+
+
+# =============================================================================
+# Test validate_orcarouter_key
+# =============================================================================
+
+
+class TestValidateOrcarouterKey:
+    """The OrcaRouter key validator probes the gateway's model catalog.
+
+    OrcaRouter's ``/v1/models`` returns HTTP 200 even without a header (the
+    public catalog) but authenticates the key when one is supplied: a wrong
+    key gets 401, a valid key gets 200. So a ``GET /v1/models`` with the key
+    is a cheap, token-free validity check. All HTTP calls are mocked — no
+    network in unit tests.
+    """
+
+    def test_empty_key_skipped(self):
+        """No key provided is skipped, not an error."""
+        from EvoScientist.config.onboard.validators import validate_orcarouter_key
+
+        is_valid, msg = validate_orcarouter_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    def test_hits_models_endpoint_with_bearer_key(self):
+        """The probe is a GET /v1/models carrying the key as Bearer auth."""
+        from EvoScientist.config.onboard.validators import validate_orcarouter_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            validate_orcarouter_key("sk-orca-key")
+
+        call = mock_get.call_args
+        assert call.args[0] == "https://api.orcarouter.ai/v1/models"
+        assert call.kwargs["headers"]["Authorization"] == "Bearer sk-orca-key"
+
+    def test_catalog_means_valid(self):
+        """200 (model catalog returned) means the key is valid."""
+        from EvoScientist.config.onboard.validators import validate_orcarouter_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            is_valid, msg = validate_orcarouter_key("sk-orca-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_rejected_means_invalid(self, status):
+        """401/403 mean the key was rejected by the auth layer."""
+        from EvoScientist.config.onboard.validators import validate_orcarouter_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_orcarouter_key("bad-key")
+
+        assert is_valid is False
+        assert msg == "Invalid API key"
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_transient_status_is_inconclusive(self, status):
+        """Rate-limit / 5xx leave key validity unknown, not rejected."""
+        from EvoScientist.config.onboard.validators import validate_orcarouter_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_orcarouter_key("sk-orca-key")
 
         assert is_valid is False
         assert "inconclusive" in msg.lower()

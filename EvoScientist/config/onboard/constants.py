@@ -32,6 +32,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
         "openrouter",
         "atlascloud",
         "requesty",
+        "orcarouter",
         "custom-openai",
         "custom-anthropic",
     }

@@ -423,6 +423,50 @@ def validate_requesty_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_orcarouter_key(api_key: str) -> tuple[bool, str]:
+    """Validate an OrcaRouter API key against the gateway's auth layer.
+
+    OrcaRouter is an OpenAI-compatible gateway whose ``/v1/models`` endpoint
+    returns HTTP 200 even for a missing header (the public model catalog),
+    but authenticates the key when one is supplied: a wrong key gets 401,
+    a valid key gets 200. So a ``GET /v1/models`` with the key doubles as a
+    cheap key check without spending tokens on a completion.
+
+    - valid key → 200 (model catalog returned);
+    - invalid key → 401/403 ("Invalid token");
+    - 429 (rate-limit) / 5xx (gateway incident) leave validity unknown, so a
+      transient outage doesn't reject a good key.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import httpx
+
+        resp = httpx.get(
+            "https://api.orcarouter.ai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, "Valid"
+        # Only 401/403 mean the key is actually rejected. 429 (rate-limit)
+        # and 5xx (gateway incident) leave the key validity unknown — surface
+        # the real status so the user doesn't go re-roll a good key during
+        # an outage.
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
 def validate_deepseek_key(api_key: str) -> tuple[bool, str]:
     """Validate a DeepSeek API key by making a test request.
 

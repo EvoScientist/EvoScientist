@@ -388,6 +388,7 @@ export GOOGLE_API_KEY="AI..."       # Gemini  — aistudio.google.com/api-keys
 export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com (China, default) or platform.minimax.io (Global)
 export MINIMAX_BASE_URL="https://api.minimax.io/anthropic"  # only needed for Global keys (default: https://api.minimaxi.com/anthropic)
 export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
+export ORCAROUTER_API_KEY="sk-orca-..."  # OrcaRouter — api.orcarouter.ai
 
 # Web search (optional)
 export TAVILY_API_KEY="tvly-..."    # app.tavily.com

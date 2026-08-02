@@ -26,6 +26,7 @@ from .validators import (
     validate_nvidia_key,
     validate_openai_key,
     validate_openrouter_key,
+    validate_orcarouter_key,
     validate_requesty_key,
     validate_siliconflow_key,
     validate_volcengine_key,
@@ -81,6 +82,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Requesty",
             config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
             validate_requesty_key,
+        ),
+        "orcarouter": (
+            "OrcaRouter",
+            config.orcarouter_api_key or os.environ.get("ORCAROUTER_API_KEY", ""),
+            validate_orcarouter_key,
         ),
         "deepseek": (
             "DeepSeek",
