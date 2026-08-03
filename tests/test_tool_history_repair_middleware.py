@@ -626,9 +626,11 @@ def test_blank_id_repair_does_not_spam_warnings(caplog):
     """Across repeated repair calls (as on every model call within one run),
     blank-id normalization must not re-emit the synthesized/dropped warning.
 
-    The fresh ids assigned by the pre-pass are non-deterministic across calls,
-    so they are pre-added to ``warned`` to keep the warning silent -- otherwise
-    every model call on a thread with a blank id would re-log the repair.
+    Deterministic ids (``_repair_{msg_idx}_v{call_idx}``) make the same blank
+    call get the same id on every repair pass, so the main loop's existing
+    ``warned``-set dedup suppresses the warning from the second call on --
+    matching the behavior of ``test_warning_deduplicates_across_calls`` for
+    non-blank interrupted calls.
     """
     messages = [
         HumanMessage("run"),
@@ -646,7 +648,48 @@ def test_blank_id_repair_does_not_spam_warnings(caplog):
         repair_tool_history(messages, warned=warned)
         second_warnings = len(caplog.records)
 
-    assert first_warnings == 0, (
-        "blank-id repair is silent (normalized before the warning path)"
+    assert first_warnings == 1, (
+        "first call should warn once for the synthesized interrupted result"
     )
-    assert second_warnings == 0
+    assert second_warnings == 1, "second call must not repeat the warning"
+    assert warned == {"_repair_1_v0"}, "deterministic id should be stable across calls"
+
+
+def test_invalid_blank_id_not_pushed_to_pending_slots():
+    """Regression for din0s review on PR #399: an invalid_tool_call's fresh id
+    must NOT be pushed to ``pending_slots``, because invalid calls are never
+    executed -- pushing the slot would let an orphan blank ToolMessage from
+    some other call mis-pair with the invalid call's id."""
+    message = AIMessage(content="").model_copy(
+        update={
+            "invalid_tool_calls": [
+                {"id": "", "name": "broken_call", "args": "{bad", "error": "parse"}
+            ],
+        }
+    )
+    orphan_content = "orphan from somewhere else"
+    messages = [
+        HumanMessage("go"),
+        message,
+        ToolMessage(content=orphan_content, tool_call_id="", name="other"),
+        HumanMessage("stop"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    tool_msgs = [m for m in repaired if isinstance(m, ToolMessage)]
+    # The orphan's content must NOT survive -- it must not have claimed the
+    # invalid call's fresh id and paired its content with broken_call.
+    assert all(orphan_content not in str(m.content) for m in tool_msgs), (
+        "orphan ToolMessage content leaked into a repaired tool result -- "
+        "its blank id was mis-paired with the invalid call's fresh id"
+    )
+    # The invalid call's fresh id is still synthesized as interrupted by the
+    # main loop (invalid calls with non-blank ids are added to pending), but
+    # that's the existing main-loop behavior and uses the interrupted-result
+    # string, never the orphan's content.
+    invalid_id = "_repair_1_i0"
+    synth = [m for m in tool_msgs if m.tool_call_id == invalid_id]
+    assert len(synth) == 1, "the invalid call should get a synthesized result"
+    assert synth[0].status == "error"
+    assert synth[0].name == "broken_call"
