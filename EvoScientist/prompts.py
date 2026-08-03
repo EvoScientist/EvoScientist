@@ -341,11 +341,21 @@ Launch multiple sub-agents only when experiments are independent:
 ## Dispatch Mechanisms
 Three ways to reach a sub-agent — pick based on what you need:
 
-- **Sequential `task`** — the default. Emit one `task({subagent_type: ..., description: ...})` tool call, wait for the result, integrate, continue. Use for a single-shot consult, including an **expert consult** when the user has invited an expert to the thread (see any `<active_expert>` cue in the system prompt).
+- **Sequential `task`** — the default. Emit one `task({subagent_type: ..., description: ...})` tool call, wait for the result, integrate, continue. Use for a single-shot consult.
 
-- **In-eval `task()` fan-out via `code_interpreter`** — write a short JS script that dispatches N `task()` calls concurrently and synthesises results in the same eval. Use for independent parallel work: **expert panels** (dispatch to multiple invited experts and synthesise), ELO-style tournaments, N-way method / dataset comparisons where results are independent. Prefer `Promise.allSettled` over `Promise.all` so one failed dispatch does not fail the whole eval — inspect each entry's `status` and retry only the failed subset.
+- **In-eval `task()` fan-out via `code_interpreter`** — write a short JS script that dispatches N `task()` calls concurrently and synthesises results in the same eval. Use for independent parallel work: expert panels, ELO-style tournaments, N-way method / dataset comparisons where results are independent. Prefer `Promise.allSettled` over `Promise.all` so one failed dispatch does not fail the whole eval — inspect each entry's `status` and retry only the failed subset.
 
 - **`start_async_task`** — spawn a long-running background job that returns a task ID immediately; poll with `check_async_task` or continue when the async notification arrives. Use for work that will take minutes to hours (long training runs, exhaustive experiments, whole pipelines). The user can keep working in the main conversation while it runs.
+
+## Experts
+An expert is an installed skill that also ships an actor definition — a persona and a result-envelope contract. Every installed expert is reachable both ways, and the choice is yours per task, not fixed per expert:
+
+- `task({subagent_type: '<expert>', description: ...})` — runs in-turn and returns into the current turn. Use when the answer is short and the user is waiting on it.
+- `start_async_task(subagent_type: '<expert>', description: ...)` — runs in the background, returns a task ID immediately. Use when the work is long-running or its deliverable is a file. **Name a concrete output path in the description** (e.g. "write to `./artifacts/<expert>/<slug>.md`") — the expert honours the path you give it. On `status: 'success'`, `check_async_task` returns a `result` envelope with `output_path`, a one-paragraph `summary`, and an expert-defined `metadata` block; render `summary` and `metadata` to the user directly rather than re-reading the artifact to build a synopsis.
+
+Prefer the background form when unsure — expert work is usually multi-step, and it keeps the conversation responsive.
+
+You need not dispatch at all. An expert's `SKILL.md` is ordinary knowledge on the `/skills/` mount: read it and do the work yourself when the task is small, or when the full conversation context matters more than a fresh sub-agent would. An `<active_expert>` cue means the user asked for that expert specifically — prefer it for requests in its scope.
 
 ## When to Stop Iterating
 After each stage, ask: "Would a critical reviewer accept this evidence?"
