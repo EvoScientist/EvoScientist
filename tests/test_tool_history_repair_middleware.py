@@ -466,6 +466,111 @@ def test_drops_orphan_blank_tool_message():
     assert not any(isinstance(m, ToolMessage) for m in repaired)
 
 
+def test_pending_slots_scoped_per_exchange_not_global_fifo():
+    """Regression for CodeRabbit review on PR #399: an interrupted blank call
+    in an earlier exchange must not leak its fresh id into a later exchange's
+    blank ToolMessage via the FIFO queue.
+
+    Sequence:
+        AIMessage1(blank A) -- interrupted, no ToolMessage
+        HumanMessage         -- boundary closes the queue
+        AIMessage2(blank B)
+        ToolMessage(blank)   -- must pair with B, not A
+
+    Before the fix, the FIFO queue still held A's id at the top, so the
+    ToolMessage was mis-tagged with A's id; the main loop then dropped the
+    real B result as an orphan and synthesized a fake interrupted result
+    for B.
+    """
+    messages = [
+        HumanMessage("turn 1"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "", "name": "interrupted_call", "args": {}}],
+        ),
+        HumanMessage("turn 2"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "", "name": "real_call", "args": {}}],
+        ),
+        ToolMessage(content="real result", tool_call_id="", name="real_call"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    ai_msgs = [m for m in repaired if isinstance(m, AIMessage)]
+    tool_msgs = [m for m in repaired if isinstance(m, ToolMessage)]
+
+    # Two ToolMessages expected: one synthesized (interrupted_call, error)
+    # and one preserved (real_call, with its real content).
+    assert len(tool_msgs) == 2
+    real_results = [m for m in tool_msgs if m.content == "real result"]
+    synthesized = [m for m in tool_msgs if m.status == "error"]
+    assert len(real_results) == 1, "the real tool result must be preserved"
+    assert len(synthesized) == 1, "the interrupted call must be synthesized"
+
+    # Pairing integrity: each AIMessage's id has exactly one matching ToolMessage.
+    real_result = real_results[0]
+    owning_ai = next(
+        (
+            ai
+            for ai in ai_msgs
+            if any(c["id"] == real_result.tool_call_id for c in ai.tool_calls)
+        ),
+        None,
+    )
+    assert owning_ai is not None, "real result must match the second AIMessage's call"
+    assert any(c["name"] == "real_call" for c in owning_ai.tool_calls), (
+        "the real result must be paired with real_call, not interrupted_call"
+    )
+
+
+def test_normalizes_blank_id_in_invalid_tool_calls_only():
+    """Regression for CodeRabbit review on PR #399: a message with blank id
+    in ``invalid_tool_calls`` only (no valid ``tool_calls``) must also be
+    repaired.
+
+    langchain-openai's serializer puts ``tool_calls + invalid_tool_calls`` on
+    the wire (it does NOT skip invalid calls), so a blank id on an invalid
+    call reaches the provider just as readily. Before the fix the pre-pass
+    skipped this case entirely because ``any_changed`` was only set inside
+    the valid-call loop.
+    """
+    from langchain_openai.chat_models.base import _convert_message_to_dict
+
+    message = AIMessage(content="").model_copy(
+        update={
+            "invalid_tool_calls": [
+                {"id": "", "name": "broken_call", "args": "{bad", "error": "parse"}
+            ],
+            "additional_kwargs": {
+                "tool_calls": [
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "broken_call", "arguments": "{bad"},
+                    }
+                ]
+            },
+        }
+    )
+    messages = [HumanMessage("hi"), message, HumanMessage("again")]
+
+    repaired = repair_tool_history(messages)
+
+    ai_msg = next(m for m in repaired if isinstance(m, AIMessage))
+    new_id = ai_msg.invalid_tool_calls[0]["id"]
+    assert isinstance(new_id, str)
+    assert new_id, "invalid_tool_call id must be non-blank after repair"
+
+    # Wire payload must not contain any blank id.
+    payload = _convert_message_to_dict(ai_msg)
+    wire_ids = [tc.get("id") for tc in payload.get("tool_calls", [])]
+    blanks = [i for i in wire_ids if not isinstance(i, str) or not i.strip()]
+    assert not blanks, f"blank tool_call_id reached the wire: {blanks!r}"
+    assert new_id in wire_ids, "fresh id must be the one on the wire"
+
+
 def test_blank_id_repair_yields_provider_serializable_payload():
     """End-to-end: the repaired history, when serialized by langchain-openai,
     must not put any blank tool_call_id on the wire."""
