@@ -962,7 +962,6 @@ def _write_expert_skill(
     byline: str = "Test persona",
     capability_tags: list[str] | None = None,
     avatar_hint: str = "star",
-    default_dispatch: str = "sync",
     include_description: bool = True,
 ) -> Path:
     """Write an expert SKILL.md under parent/<name>/ and return the skill dir."""
@@ -978,7 +977,6 @@ role: {role}
 byline: {byline}
 capability_tags: {tags_str}
 avatar_hint: {avatar_hint}
-default_dispatch: {default_dispatch}
 ---
 
 # {name}
@@ -1000,7 +998,6 @@ class TestParseSkillMdExpertFields:
         assert result.byline == ""
         assert result.capability_tags == []
         assert result.avatar_hint == ""
-        assert result.default_dispatch == ""
 
     def test_expert_fields_extracted(self, tmp_path):
         skill_dir = _write_expert_skill(
@@ -1010,7 +1007,6 @@ class TestParseSkillMdExpertFields:
             byline="A Byline",
             capability_tags=["tag-1", "tag-2"],
             avatar_hint="atom",
-            default_dispatch="panel",
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
@@ -1018,7 +1014,6 @@ class TestParseSkillMdExpertFields:
         assert result.byline == "A Byline"
         assert result.capability_tags == ["tag-1", "tag-2"]
         assert result.avatar_hint == "atom"
-        assert result.default_dispatch == "panel"
 
     def test_body_populated_from_skill_md(self, tmp_path):
         """`SkillInfo.body` carries the post-frontmatter content so the expert
@@ -1063,14 +1058,20 @@ role: This should be ignored
             for r in caplog.records
         )
 
-    def test_valid_async_default_dispatch(self, tmp_path):
-        """``default_dispatch: async`` is a recognized value (agent-teams v2 dispatch mode)."""
+    def test_default_dispatch_frontmatter_is_not_read(self, tmp_path):
+        """A skill cannot pin its own dispatch shape.
+
+        ``default_dispatch`` used to partition experts into two disjoint
+        registries, which is how an installed expert could end up reachable
+        by nothing. Nothing consumes the field now — the orchestrator picks
+        a reach per task — so it must not reappear on ``SkillInfo``.
+        """
         skill_dir = tmp_path / "async-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             """---
 name: async-skill
-description: uses async dispatch
+description: declares a dispatch shape the runtime ignores
 type: expert
 role: Some role
 default_dispatch: async
@@ -1080,39 +1081,8 @@ default_dispatch: async
 """
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.default_dispatch == "async"
-
-    def test_invalid_default_dispatch_falls_back_to_empty(self, tmp_path, caplog):
-        skill_dir = tmp_path / "bad-dispatch"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: bad-dispatch
-description: Has a bad default_dispatch
-type: expert
-role: Some role
-default_dispatch: asynchronous
----
-
-# Body
-"""
-        )
-        import logging
-
-        with caplog.at_level(
-            logging.WARNING, logger="EvoScientist.tools.skills_manager"
-        ):
-            result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
-        assert result.default_dispatch == ""  # rejected, not passed through
-        # A typo like ``asynchronous`` is silently indistinguishable from
-        # unset without the warning; the log line must name the offending
-        # value so authors can see why their expert didn't register async.
-        assert any(
-            "unrecognized default_dispatch" in rec.message
-            and "asynchronous" in rec.message
-            for rec in caplog.records
-        )
+        assert not hasattr(result, "default_dispatch")
 
     def test_capability_tags_accepts_comma_string(self, tmp_path):
         """capability_tags falls back to comma-separated string parsing (like `tags`)."""
@@ -1216,18 +1186,8 @@ class TestAgentsMdExpertContract:
         assert result.type == "expert"
         assert result.expert_source == "agents_md"
         assert result.agents_body.startswith("## Persona")
-        # SKILL.md stays pure knowledge and is still cached for load_skill.
+        # SKILL.md stays pure knowledge and is still cached for in-turn use.
         assert "The portable workflow." in result.body
-
-    def test_presence_declares_async_dispatch(self, tmp_path):
-        """AGENTS.md carries no dispatch field — presence declares async.
-
-        Every downstream registry keys off ``default_dispatch``, so resolving
-        it here is what routes an AGENTS.md expert to ``start_async_task``
-        without any of those call sites learning about the new contract.
-        """
-        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
-        assert _parse_skill_md(skill_dir / "SKILL.md").default_dispatch == "async"
 
     def test_no_actor_frontmatter_needed(self, tmp_path):
         """The decoration fields the contract removed stay empty, not invented."""
@@ -1317,7 +1277,6 @@ metadata:
         ):
             result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.expert_source == "agents_md"
-        assert result.default_dispatch == "async"  # not the frontmatter's `sync`
         assert any(
             "is ignored and should be removed" in r.message and "migrating" in r.message
             for r in caplog.records
@@ -1438,7 +1397,6 @@ class TestSkillManagerToolExpertSurface:
                 byline="Ideation persona",
                 capability_tags=["Iteration", "ELO"],
                 avatar_hint="lightbulb",
-                default_dispatch="sync",
             ),
             SkillInfo(
                 name="util-b",
@@ -1541,7 +1499,8 @@ class TestSkillManagerToolExpertSurface:
         assert "Byline: Ideation persona" in out
         assert "Capability tags: Iteration, ELO" in out
         assert "Avatar hint: lightbulb" in out
-        assert "Default dispatch: sync" in out
+        # No dispatch line: an expert does not pin its own reach.
+        assert "Default dispatch" not in out
 
     def test_info_omits_expert_block_for_utility_skills(self):
         from EvoScientist.tools.skill_manager import skill_manager

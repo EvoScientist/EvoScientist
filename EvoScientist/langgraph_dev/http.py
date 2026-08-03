@@ -93,7 +93,7 @@ async def get_teams(_request: Request) -> JSONResponse:
     fields.
 
     Backend implementation details (SKILL.md body / system prompt, role
-    line, default_dispatch, tool list, source tier, filesystem path,
+    line, tool list, source tier, filesystem path,
     tags) are intentionally NOT projected. The gallery only needs
     identity + descriptor fields to render the card; anything richer
     belongs in a dedicated info endpoint.

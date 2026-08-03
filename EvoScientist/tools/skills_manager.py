@@ -118,7 +118,6 @@ class SkillInfo:
     byline: str = ""  # WebUI gallery byline
     capability_tags: list[str] = field(default_factory=list)  # WebUI chips
     avatar_hint: str = ""  # WebUI icon hint
-    default_dispatch: str = ""  # "sync" | "panel" | "async" (expert skills only)
     # SKILL.md body (post-frontmatter). Populated by ``_parse_skill_md`` so
     # the expert-container factory doesn't have to re-read the file on every
     # main-agent construction. Empty for skills built by hand or when the
@@ -404,6 +403,10 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     and set none of those fields; their gallery cards carry name and
     description only.
 
+    ``default_dispatch`` is read from neither contract. Every expert is
+    reachable both in-turn and in the background, and the orchestrator picks
+    per task — a skill does not declare one dispatch shape for all time.
+
     When both are present, AGENTS.md wins on every axis (prompt source,
     dispatch) and the frontmatter actor fields are reported as ignored — a
     skill mid-migration must not behave as a blend of the two contracts.
@@ -457,7 +460,6 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             path=parent,
             source=source,
             type="expert" if declares_actor else "utility",
-            default_dispatch="async" if declares_actor else "",
             expert_source="agents_md" if declares_actor else "",
             agents_body=agents_body or "",
         )
@@ -472,7 +474,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         byline: str = "",
         capability_tags: list[str] | None = None,
         avatar_hint: str = "",
-        default_dispatch: str = "",
+        legacy_dispatch: str = "",
         body: str = "",
     ) -> SkillInfo:
         # AGENTS.md presence overrides whatever the frontmatter says about
@@ -485,7 +487,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
                 or byline
                 or capability_tags
                 or avatar_hint
-                or default_dispatch
+                or legacy_dispatch
             ):
                 _warn_once(
                     f"{parent}:mixed",
@@ -498,9 +500,6 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
                     _AGENTS_FILENAME,
                 )
             type_ = "expert"
-            # Presence is the declaration and async is the dispatch it
-            # declares; there is no dispatch field in AGENTS.md to read.
-            default_dispatch = "async"
             expert_source = "agents_md"
         elif type_ == "expert":
             _warn_once(
@@ -527,7 +526,6 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             byline=byline,
             capability_tags=capability_tags or [],
             avatar_hint=avatar_hint,
-            default_dispatch=default_dispatch,
             body=body,
             expert_source=expert_source,
             agents_body=agents_body or "",
@@ -565,21 +563,12 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         byline = frontmatter.get("byline") or ""
         capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
         avatar_hint = frontmatter.get("avatar_hint") or ""
-        raw_dispatch = frontmatter.get("default_dispatch")
-        default_dispatch = (
-            raw_dispatch if raw_dispatch in ("sync", "panel", "async") else ""
-        )
-        # Mirror the ``raw_type`` handling above. A typo like
-        # ``default_dispatch: asnyc`` would otherwise be indistinguishable
-        # from an unset field and would register the skill under sync
-        # dispatch — the opposite of the author's intent.
-        if raw_dispatch is not None and raw_dispatch != default_dispatch:
-            _logger.warning(
-                "Skill %r: unrecognized default_dispatch %r in frontmatter; "
-                "treating as unset (skill will register under sync dispatch).",
-                frontmatter.get("name") or parent.name,
-                raw_dispatch,
-            )
+        # ``default_dispatch`` is no longer read: an expert is reachable both
+        # in-turn and in the background, and the orchestrator picks per task
+        # rather than the skill declaring one shape for all time. Still
+        # detected here so the mixed-contract warning can name it among the
+        # legacy actor fields an AGENTS.md skill should drop.
+        legacy_dispatch = str(frontmatter.get("default_dispatch") or "")
         # ``.get("name", parent.name)`` only defaults on missing key; a
         # present-but-empty ``name:`` yields None, which would flow into
         # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``
@@ -593,7 +582,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             byline=str(byline),
             capability_tags=capability_tags,
             avatar_hint=str(avatar_hint),
-            default_dispatch=default_dispatch,
+            legacy_dispatch=legacy_dispatch,
             body=body,
         )
     except yaml.YAMLError as exc:

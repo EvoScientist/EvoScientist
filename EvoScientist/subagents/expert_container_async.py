@@ -218,12 +218,12 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
 
 
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
-    """Build ``AsyncSubAgent``-shaped specs for every async-dispatched expert.
+    """Build ``AsyncSubAgent``-shaped specs for every installed expert skill.
 
-    Covers experts declaring themselves via a sibling ``AGENTS.md`` (which
-    resolves to ``default_dispatch: async`` — presence is the declaration and
-    async is the dispatch it declares) plus legacy skills that set
-    ``default_dispatch: async`` in SKILL.md frontmatter.
+    Every expert gets a background reach here, and
+    ``build_expert_subagent_specs`` independently gives every expert an
+    in-turn reach. Nothing classifies a skill into one or the other — the
+    orchestrator chooses per task.
 
     Each spec is a dict pointing at the shared ``expert-container-async`` graph
     with ``is_expert=True``. The main agent's
@@ -264,8 +264,6 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     taken = set(_reserved_subagent_names())
     specs: list[dict[str, Any]] = []
     for skill in list_expert_skills(include_system=True):
-        if skill.default_dispatch != "async":
-            continue
         # Same empty-body skip the sync fold-in enforces in
         # ``expert_container.py::build_expert_subagent_specs``. Advertising
         # a body-less expert in ``start_async_task``'s tool schema, then

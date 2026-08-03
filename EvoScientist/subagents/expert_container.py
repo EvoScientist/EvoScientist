@@ -199,70 +199,36 @@ def _reserved_subagent_names() -> frozenset[str]:
     return _reserved_subagent_names_cache
 
 
-def is_async_dispatch_available(cfg: Any | None = None) -> bool:
-    """Return True when async-declared experts can actually be dispatched.
-
-    Both gates must hold: ``enable_async_subagents`` opt-in AND langgraph
-    dev subprocess reachable. Same predicate
-    ``build_expert_async_subagent_specs`` uses at spec-build time, factored
-    out so ``list_dispatchable_experts`` (invite whitelist) and
-    ``ActiveTeamMiddleware`` (system-prompt cue) can honour it without
-    each re-deriving.
-    """
-    if cfg is None:
-        from ..config import get_effective_config
-
-        cfg = get_effective_config()
-    if not getattr(cfg, "enable_async_subagents", False):
-        return False
-    from ..langgraph_dev.manager import is_async_subagents_available
-
-    return is_async_subagents_available()
-
-
 def list_dispatchable_experts(
     *, include_system: bool = True, cfg: Any | None = None
 ) -> list[SkillInfo]:
-    """Experts eligible for the ``/expert`` invite whitelist.
+    """Experts the orchestrator can actually reach.
 
-    Covers **both** sync (``task()``) and async (``start_async_task``)
-    dispatch shapes — an async-declared expert must remain invitable when
-    async dispatch is registered, or the active-team cue that instructs
-    ``start_async_task(...)`` never fires. Do NOT add a ``default_dispatch
-    == "async"`` exclusion here; the sync-specific exclusion lives in
-    ``build_expert_subagent_specs``, which is a different surface.
+    Every installed expert is reachable, so this applies only the two
+    filters that would otherwise register a broken entry: an empty actor
+    definition (nothing to prompt with) and a name collision with a yaml
+    sub-agent or ``general-purpose`` (which would shadow the built-in).
 
-    Async-declared experts are dropped when async dispatch is NOT
-    registered (``enable_async_subagents=false`` or langgraph dev
-    unreachable). Advertising an expert that resolves to a
-    ``start_async_task`` tool that either doesn't exist or doesn't list
-    the expert is worse than an honest refusal — see reviewer thread on
-    PR #391.
+    Deliberately does NOT filter on async availability. An expert whose
+    background reach is unavailable is still reachable in-turn via
+    ``task()``, so dropping it here would hide a working expert — the
+    failure mode that made installed experts vanish whenever langgraph
+    dev was unhealthy.
 
-    Combines ``list_expert_skills`` with the two filters that
-    construction-time paths already apply (empty body via
-    ``build_expert_subagent_specs``; name collision with yaml sub-agents
-    or ``general-purpose`` via ``_fold_expert_subagents``). Callers
-    surfacing experts to the user (e.g. the ``/expert`` slash command)
-    should use this instead of ``list_expert_skills`` directly, otherwise
-    they can accept a name that will silently misroute or per-turn error
-    at dispatch time.
-
-    Read-only filter — construction-time warnings for empty-body /
-    colliding experts are emitted by ``build_expert_subagent_specs`` and
+    ``cfg`` is accepted and ignored; kept so callers that thread config
+    through don't have to special-case this one. Read-only filter —
+    construction-time warnings for empty-body / colliding experts are
+    emitted by ``build_expert_subagent_specs`` and
     ``_fold_expert_subagents`` respectively, so nothing is logged here.
     """
     from ..tools.skills_manager import list_expert_skills
 
     reserved = _reserved_subagent_names()
-    async_available = is_async_dispatch_available(cfg=cfg)
     dispatchable: list[SkillInfo] = []
     for info in list_expert_skills(include_system=include_system):
         if not expert_prompt_body(info).strip():
             continue
         if info.name in reserved:
-            continue
-        if info.default_dispatch == "async" and not async_available:
             continue
         dispatchable.append(info)
     return dispatchable
@@ -273,34 +239,33 @@ def build_expert_subagent_specs(
     *,
     include_system: bool = True,
 ) -> list[dict[str, Any]]:
-    """Build spec dicts for every installed sync-dispatched expert skill.
+    """Build the in-turn (``task``) spec for every installed expert skill.
 
     Thin wrapper over ``list_expert_skills()`` + ``build_expert_subagent_spec``.
     Called by the main-agent construction path (``_build_base_kwargs``) to
     fold experts into the ``subagents=[...]`` list.
 
-    Skips (with a warning) any expert whose SKILL.md body is empty — a
+    Every expert gets a spec here, and ``build_expert_async_subagent_specs``
+    independently gives every expert a background spec. The same name in
+    both is intentional and safe: the two land on different tools
+    (``task`` vs ``start_async_task``) with separate schemas, and
+    deepagents' duplicate-name check is scoped to the async list alone.
+    Two reaches, one expert — the orchestrator picks per task.
+
+    Skips (with a warning) any expert whose actor definition is empty — a
     personaless expert advertised in the ``task`` tool schema would let the
     orchestrator dispatch to a blank system prompt, a worse failure mode
     than the expert being absent.
-
-    Experts declared with ``default_dispatch: async`` are excluded — those
-    are folded via ``build_expert_async_subagent_specs`` in
-    ``expert_container_async.py`` and reached through
-    ``EvoAsyncSubAgentMiddleware.start_async_task`` instead of the sync
-    ``task`` tool. A skill that appears in both lists would produce two
-    competing tool schemas for the same subagent name.
     """
     from ..tools.skills_manager import list_expert_skills
 
     specs: list[dict[str, Any]] = []
     for info in list_expert_skills(include_system=include_system):
-        if info.default_dispatch == "async":
-            continue
         if not expert_prompt_body(info).strip():
             _logger.warning(
-                "Expert skill %r: SKILL.md body is empty; skipping registration.",
+                "Expert skill %r: %s body is empty; skipping registration.",
                 info.name,
+                "AGENTS.md" if info.expert_source == "agents_md" else "SKILL.md",
             )
             continue
         specs.append(build_expert_subagent_spec(info, tool_registry=tool_registry))

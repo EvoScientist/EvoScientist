@@ -411,9 +411,10 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
     """Append expert-skill sub-agent specs to ``subs``, guarding names.
 
     Each installed expert skill becomes an in-process sub-agent entry so
-    the main agent's ``task`` tool (and the QuickJS ``task()`` global for
-    panel mode) can dispatch to it by name. Async-graph deploy of experts
-    is v2 territory — they live purely in the sync in-process registry.
+    the main agent's ``task`` tool (and the QuickJS ``task()`` global) can
+    dispatch to it in-turn by name. The same experts independently get a
+    background reach via ``build_expert_async_subagent_specs``; the two
+    reaches land on separate tool schemas, so sharing the name is safe.
 
     Skips (with a warning) any expert whose ``name`` collides with a
     subagent already in ``subs`` or with ``general-purpose``. The reserved
@@ -558,7 +559,7 @@ def _route_async_specs_through_evo_middleware(
     specs from ``subs`` here and hand them to our middleware.
 
     Also folds in ``AsyncSubAgent`` specs for installed
-    ``default_dispatch: async`` expert skills — all pointing at the shared
+    installed expert skills — all pointing at the shared
     ``expert-container-async`` graph, marked ``is_expert=True`` so the
     middleware requires a payload with ``skill_name``.
 
