@@ -49,8 +49,9 @@ def deploy(
     host: str | None = typer.Option(
         None,
         "--host",
-        help="Interface to bind (default: config.langgraph_dev_host = 127.0.0.1). "
-        "Use 0.0.0.0 to accept remote connections — no auth, trusted networks only",
+        help="Interface to bind (default: config.langgraph_dev_host = 0.0.0.0, "
+        "i.e. reachable from other machines — no auth, so pass 127.0.0.1 on "
+        "untrusted networks)",
     ),
     tunnel: bool = typer.Option(
         False,

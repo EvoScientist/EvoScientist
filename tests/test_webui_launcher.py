@@ -23,7 +23,7 @@ def _make_config(
     *,
     default_workdir: str = "",
     langgraph_dev_port: int = 6174,
-    langgraph_dev_host: str = "127.0.0.1",
+    langgraph_dev_host: str = "0.0.0.0",
     webui_port: int = 4716,
     webui_host: str = "0.0.0.0",
 ):
@@ -214,28 +214,46 @@ def test_backend_host_reaches_start_langgraph_dev(monkeypatch):
     assert captured["backend_host"] == "0.0.0.0"
 
 
-def test_backend_defaults_to_loopback(monkeypatch):
+def test_backend_defaults_to_all_interfaces(monkeypatch):
     config = _make_config()
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["backend_host"] == "0.0.0.0"
+
+
+def test_backend_loopback_opt_out(monkeypatch):
+    config = _make_config(langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
     assert captured["backend_host"] == "127.0.0.1"
 
 
-def test_no_public_bind_warning_for_default_config(monkeypatch):
-    """webui_host=0.0.0.0 is the shipped default. Warning on it would fire on
-    every launch and train users to ignore the banner — only the backend
-    (unauthenticated, shell-capable) earns one."""
-    config = _make_config()
+def test_public_bind_warning_when_backend_exposed(monkeypatch):
+    """Fires on the shipped default, by design: the backend is an
+    unauthenticated API whose agent can run shell, so users should be told
+    every time it is reachable off-box — not only when they opt in."""
+    config = _make_config(langgraph_dev_host="0.0.0.0")
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert any("PUBLIC BIND" in line for line in captured["printed"])
+
+
+def test_no_public_bind_warning_when_backend_on_loopback(monkeypatch):
+    """The warning must be silenceable, or it degrades into background noise
+    that users learn to skip past."""
+    config = _make_config(langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
     assert not any("PUBLIC BIND" in line for line in captured["printed"])
 
 
-def test_public_bind_warning_when_backend_exposed(monkeypatch):
-    config = _make_config(langgraph_dev_host="0.0.0.0")
+def test_webui_host_alone_does_not_trigger_warning(monkeypatch):
+    """Only the backend earns a banner. The front-end serves the app shell and
+    holds no credentials, so warning on it would double the noise."""
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
-    assert any("PUBLIC BIND" in line for line in captured["printed"])
+    assert not any("PUBLIC BIND" in line for line in captured["printed"])
 
 
 def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatch):

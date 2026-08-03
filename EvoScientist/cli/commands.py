@@ -2130,6 +2130,13 @@ def _main_callback(
         "--ui",
         help="UI backend: tui (default), cli, or webui.",
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="WebUI mode only: interface both servers bind to (default: "
+        "config.webui_host / config.langgraph_dev_host = 0.0.0.0). Pass "
+        "127.0.0.1 to keep them local-only.",
+    ),
     output_format: str | None = typer.Option(
         None,
         "--output-format",
@@ -2190,6 +2197,12 @@ def _main_callback(
         cli_overrides["show_thinking"] = False
     if ui:
         cli_overrides["ui_backend"] = ui
+    if host is not None and host.strip():
+        # One flag drives both servers: in WebUI mode they are two halves of
+        # one surface, and binding them to different interfaces has no use case
+        # that `EvoSci config set` can't express more explicitly.
+        cli_overrides["webui_host"] = host.strip()
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if effective_auto_mode:

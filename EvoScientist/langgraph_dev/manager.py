@@ -116,10 +116,12 @@ _LOCK = threading.RLock()
 # corresponding url= field on AsyncSubAgent specs.
 _DEFAULT_PORT = 6174
 
-# Default bind interface. Loopback because the langgraph dev server is the
-# unauthenticated agent API — see ``config.langgraph_dev_host`` for the knob
-# that widens it.
-_DEFAULT_HOST = "127.0.0.1"
+# Default bind interface — all interfaces, matching
+# ``config.langgraph_dev_host`` so there is a single story about where this
+# server listens. SECURITY: the langgraph dev server is the unauthenticated
+# agent API; ``config.langgraph_dev_host = "127.0.0.1"`` takes it back to
+# loopback, and every launcher warns while it is exposed.
+_DEFAULT_HOST = "0.0.0.0"
 
 # Wildcard bind addresses: the server listens on every interface, but you
 # cannot meaningfully *connect* to them (0.0.0.0 is routed to loopback on
@@ -611,9 +613,9 @@ def start_langgraph_dev(
             (``CustomSandboxBackend`` derives its workspace root from cwd via
             ``paths.WORKSPACE_ROOT``). Defaults to ``Path.cwd()``.
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
-        host: Network interface to bind. Defaults to loopback. SECURITY:
-            ``0.0.0.0`` exposes an unauthenticated API whose agent can run
-            shell commands — only widen on trusted networks.
+        host: Network interface to bind. Defaults to all interfaces. SECURITY:
+            this exposes an unauthenticated API whose agent can run shell
+            commands — pass ``127.0.0.1`` on untrusted networks.
         file_persistence: When True (default), langgraph dev writes its full
             ``.langgraph_api/`` cache so async-task / Store / scheduler state
             survives subprocess restarts. Set False to suppress periodic

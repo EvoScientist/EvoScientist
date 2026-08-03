@@ -25,7 +25,7 @@ def _make_config(
     *,
     default_workdir: str = "",
     langgraph_dev_port: int = 6174,
-    langgraph_dev_host: str = "127.0.0.1",
+    langgraph_dev_host: str = "0.0.0.0",
     anthropic_auth_mode: str = "api_key",
     openai_auth_mode: str = "api_key",
     log_level: str = "warning",
@@ -322,9 +322,9 @@ def test_deploy_port_defaults_to_config(monkeypatch, tmp_path):
 
 def test_deploy_host_cli_arg_beats_config(monkeypatch, tmp_path):
     config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="127.0.0.1")
-    captured = _run_deploy_once(monkeypatch, config, host="0.0.0.0")
+    captured = _run_deploy_once(monkeypatch, config, host="192.168.1.5")
 
-    assert captured["host_passed"] == "0.0.0.0"
+    assert captured["host_passed"] == "192.168.1.5"
 
 
 def test_deploy_host_defaults_to_config(monkeypatch, tmp_path):
@@ -336,21 +336,30 @@ def test_deploy_host_defaults_to_config(monkeypatch, tmp_path):
     assert captured["host_passed"] == "192.168.1.5"
 
 
-def test_deploy_host_defaults_to_loopback_without_config(monkeypatch, tmp_path):
-    """A config object missing the field entirely (older config.yaml) must not
-    silently widen the bind — it falls back to loopback."""
+def test_deploy_host_falls_back_when_config_lacks_field(monkeypatch, tmp_path):
+    """A config object missing the field entirely still resolves to the
+    module default rather than passing None down to socket.bind()."""
     config = _make_config(default_workdir=str(tmp_path))
     del config.langgraph_dev_host
     captured = _run_deploy_once(monkeypatch, config)
 
-    assert captured["host_passed"] == "127.0.0.1"
+    assert captured["host_passed"] == "0.0.0.0"
 
 
 def test_deploy_host_whitespace_collapses_to_default(monkeypatch, tmp_path):
     """``--host "  "`` would reach socket.bind() as an empty string and raise
-    an opaque gaierror; it must degrade to the loopback default instead."""
+    an opaque gaierror; it must degrade to the default instead."""
     config = _make_config(default_workdir=str(tmp_path))
     captured = _run_deploy_once(monkeypatch, config, host="   ")
+
+    assert captured["host_passed"] == "0.0.0.0"
+
+
+def test_deploy_host_loopback_opt_out(monkeypatch, tmp_path):
+    """The security escape hatch: ``--host 127.0.0.1`` must actually narrow
+    the bind even though the config default is wide."""
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="0.0.0.0")
+    captured = _run_deploy_once(monkeypatch, config, host="127.0.0.1")
 
     assert captured["host_passed"] == "127.0.0.1"
 

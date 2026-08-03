@@ -41,19 +41,24 @@ def _invoke_main(monkeypatch, argv):
 
     def _fake_config(overrides):
         cfg = EvoScientistConfig()
+        calls["overrides"] = dict(overrides or {})
+        # Apply every override the real merge would, so tests can assert on
+        # flags (like --host) that reach the config rather than the callback.
+        for key, value in (overrides or {}).items():
+            setattr(cfg, key, value)
         # Mirror the real --ui override; default to webui for this test.
         cfg.ui_backend = overrides.get("ui_backend") or "webui"
         return cfg
+
+    def _fake_run_webui(config, **_kw):
+        calls["dispatch"] = "webui"
+        calls["webui_config"] = config
 
     monkeypatch.setattr(cfg_mod, "get_effective_config", _fake_config)
     monkeypatch.setattr(cfg_mod, "apply_config_to_env", lambda cfg: None)
     monkeypatch.setattr(cmds, "ensure_dirs", lambda: None)
     monkeypatch.setattr(cmds, "_ensure_async_subagent_server", lambda *a, **k: None)
-    monkeypatch.setattr(
-        webui_mod,
-        "run_webui",
-        lambda *a, **k: calls.__setitem__("dispatch", "webui"),
-    )
+    monkeypatch.setattr(webui_mod, "run_webui", _fake_run_webui)
     monkeypatch.setattr(
         interactive_mod,
         "cmd_interactive",
@@ -77,6 +82,48 @@ def test_main_callback_resume_falls_back_to_cli(monkeypatch):
     calls, result = _invoke_main(monkeypatch, ["--resume", "abc123"])
     assert result.exit_code == 0
     assert calls.get("dispatch") == ("cli", "cli")
+
+
+# =============================================================================
+# --host override
+# =============================================================================
+
+
+def test_host_flag_drives_both_servers(monkeypatch):
+    """One flag, both halves. In WebUI mode the front-end and backend are two
+    halves of one surface, so `--host` has to move them together — widening
+    only one leaves the UI loading but unable to reach the agent."""
+    calls, result = _invoke_main(monkeypatch, ["--host", "127.0.0.1"])
+
+    assert result.exit_code == 0
+    cfg = calls["webui_config"]
+    assert cfg.webui_host == "127.0.0.1"
+    assert cfg.langgraph_dev_host == "127.0.0.1"
+
+
+def test_host_flag_is_stripped(monkeypatch):
+    calls, result = _invoke_main(monkeypatch, ["--host", "  192.168.1.5  "])
+
+    assert result.exit_code == 0
+    assert calls["webui_config"].langgraph_dev_host == "192.168.1.5"
+
+
+def test_blank_host_flag_leaves_config_defaults(monkeypatch):
+    """An all-whitespace value must not write an unusable empty host into the
+    override dict, where it would beat the config file."""
+    calls, result = _invoke_main(monkeypatch, ["--host", "   "])
+
+    assert result.exit_code == 0
+    assert "langgraph_dev_host" not in calls["overrides"]
+    assert calls["webui_config"].langgraph_dev_host == "0.0.0.0"
+
+
+def test_no_host_flag_leaves_config_defaults(monkeypatch):
+    calls, result = _invoke_main(monkeypatch, [])
+
+    assert result.exit_code == 0
+    assert "webui_host" not in calls["overrides"]
+    assert calls["webui_config"].webui_host == "0.0.0.0"
 
 
 def test_background_agent_server_starts_even_when_async_subagents_disabled(

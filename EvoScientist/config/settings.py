@@ -213,14 +213,19 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
-    # Network interface the langgraph dev subprocess binds to. Stays on loopback
-    # by default because this server IS the agent API: no authentication, and
-    # the deployed agent can run shell commands. Set "0.0.0.0" to reach it from
-    # another machine (LAN / remote browser) — trusted networks only. Callers
-    # that *connect* (health probes, async sub-agent self-dispatch) map a
-    # wildcard bind back to loopback via manager._probe_host, so widening this
-    # never redirects internal traffic off-box.
-    langgraph_dev_host: str = "127.0.0.1"
+    # Network interface the langgraph dev subprocess binds to. Defaults to all
+    # interfaces so the WebUI (which talks to this server FROM THE BROWSER) and
+    # external SDK clients work from another machine without extra setup.
+    #
+    # SECURITY: this server is the agent API — no authentication, and the
+    # deployed agent can run shell commands. On an untrusted network set
+    # "127.0.0.1" to take it back to loopback; every launcher prints a red
+    # PUBLIC BIND banner while it is exposed.
+    #
+    # Callers that *connect* (health probes, async sub-agent self-dispatch) map
+    # a wildcard bind back to loopback via manager._probe_host, so this never
+    # redirects internal traffic off-box.
+    langgraph_dev_host: str = "0.0.0.0"
 
     # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
     # used only when ui_backend == "webui". 4716 is 6174 reversed — a memorable
@@ -228,12 +233,9 @@ class EvoScientistConfig:
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
 
-    # Network interface the WebUI front-end binds to. Unlike the backend above,
-    # this defaults to "0.0.0.0" so the browser UI is reachable from another
-    # machine out of the box — it serves the app shell only and holds no
-    # credentials (see deploy/webui.py:_scrubbed_env). Note the UI talks to the
-    # backend from the BROWSER, not server-side, so remote use also needs
-    # langgraph_dev_host widened. Set "127.0.0.1" to keep it local-only.
+    # Network interface the WebUI front-end binds to. Also all interfaces by
+    # default; it serves the app shell only and holds no credentials (see
+    # deploy/webui.py:_scrubbed_env). Set "127.0.0.1" to keep it local-only.
     webui_host: str = "0.0.0.0"
 
     # --- Scheduled tasks (cron) ---
@@ -508,11 +510,9 @@ class EvoScientistConfig:
 
         # Bind hosts reach socket.bind() / the langgraph CLI verbatim, where a
         # stray-whitespace or empty value surfaces as an opaque gaierror at
-        # startup. Normalize to the field's own default instead — the two
-        # defaults differ deliberately (loopback backend, exposed front-end),
-        # so this cannot be a single shared fallback.
+        # startup. Normalize to the field's own default instead.
         for _host_field, _host_default in (
-            ("langgraph_dev_host", "127.0.0.1"),
+            ("langgraph_dev_host", "0.0.0.0"),
             ("webui_host", "0.0.0.0"),
         ):
             _host = getattr(self, _host_field, _host_default)
